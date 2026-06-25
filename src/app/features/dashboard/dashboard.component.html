@@ -80,6 +80,22 @@
       }
     </section>
 
+    <!-- Problem of the Day -->
+    @if (dailyProblem(); as p) {
+      <a class="card dash__challenge" [routerLink]="['/logic', p.id]">
+        <div class="dash__daily-head">
+          <span class="dash__badge dash__badge--info"><app-icon name="target" [size]="14" /> Problem of the day</span>
+          <app-difficulty-badge [level]="p.difficulty" />
+        </div>
+        <h3 class="dash__daily-q">{{ p.title }}</h3>
+        <div class="dash__daily-meta">
+          <span class="chip">{{ p.category }}</span>
+          <span class="dash__daily-src">{{ logicStats().attempted }} attempted &middot; {{ logicStats().avgPercent }}% avg</span>
+        </div>
+        <span class="btn btn--sm">Solve it <app-icon name="arrow-right" [size]="15" /></span>
+      </a>
+    }
+
     <!-- Category progress -->
     <section class="card dash__cats">
       <h3 class="dash__card-title"><app-icon name="layers" [size]="17" /> Topic completion</h3>

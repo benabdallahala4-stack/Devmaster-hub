@@ -5,7 +5,8 @@ import { ProgressService } from '../../core/services/progress.service';
 import { RecentService } from '../../core/services/recent.service';
 import { InterviewService } from '../../core/services/interview.service';
 import { ChallengeService } from '../../core/services/challenge.service';
-import { Challenge, InterviewQuestion, TopicMeta } from '../../core/models/content.model';
+import { LogicService } from '../../core/services/logic.service';
+import { Challenge, InterviewQuestion, LogicProblem, TopicMeta } from '../../core/models/content.model';
 import { IconComponent } from '../../shared/components/icon.component';
 import { ProgressRingComponent } from '../../shared/components/progress-ring.component';
 import { DifficultyBadgeComponent } from '../../shared/components/difficulty-badge.component';
@@ -26,6 +27,7 @@ export class DashboardComponent implements OnInit {
   private readonly recent = inject(RecentService);
   private readonly interview = inject(InterviewService);
   private readonly challengeSvc = inject(ChallengeService);
+  private readonly logicSvc = inject(LogicService);
 
   readonly answerRevealed = signal(false);
 
@@ -67,9 +69,16 @@ export class DashboardComponent implements OnInit {
     return list.length ? list[(DAY + 3) % list.length] : null;
   });
 
+  readonly logicStats = this.progress.logicStats;
+  readonly dailyProblem = computed<LogicProblem | null>(() => {
+    const list = this.logicSvc.problems();
+    return list.length ? list[(DAY + 5) % list.length] : null;
+  });
+
   ngOnInit(): void {
     this.content.loadCatalog().subscribe(() => this.interview.ensureLoaded());
     this.challengeSvc.load().subscribe();
+    this.logicSvc.load().subscribe();
   }
 
   greeting(): string {
