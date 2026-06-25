@@ -89,12 +89,12 @@ export class ProgressService {
   }
 
   scoreLogic(id: string, checkedIds: string[], score: number, max: number): void {
-    const cur = this._logic()[id];
-    this.upsertLogic(id, {
-      best: Math.max(cur?.best ?? 0, score),
-      max,
-      attempts: (cur?.attempts ?? 0) + 1,
-      checkedCriteria: checkedIds,
+    this._logic.update(map => {
+      const cur: LogicEntry = map[id] ?? { best: 0, max: 0, attempts: 0, savedSolution: '', checkedCriteria: [] };
+      return {
+        ...map,
+        [id]: { ...cur, best: Math.max(cur.best, score), max, attempts: cur.attempts + 1, checkedCriteria: checkedIds },
+      };
     });
   }
 
@@ -116,10 +116,11 @@ export class ProgressService {
   private restore(): void {
     try {
       const raw = localStorage.getItem(KEY);
-      if (!raw) return;
-      const state = JSON.parse(raw) as ProgressState;
-      this._completed.set(new Set(state.completedTopics ?? []));
-      this._solved.set(new Set(state.solvedChallenges ?? []));
+      if (raw) {
+        const state = JSON.parse(raw) as ProgressState;
+        this._completed.set(new Set(state.completedTopics ?? []));
+        this._solved.set(new Set(state.solvedChallenges ?? []));
+      }
     } catch { /* ignore */ }
     try {
       const rawLogic = localStorage.getItem(LOGIC_KEY);
