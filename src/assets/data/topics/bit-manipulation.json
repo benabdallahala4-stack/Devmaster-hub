@@ -1,0 +1,474 @@
+{
+  "id": "bit-manipulation",
+  "title": "Bit Manipulation",
+  "category": "Computer Science",
+  "subcategory": "Fundamentals",
+  "difficulty": "mid",
+  "tags": ["bit-manipulation", "binary", "twos-complement", "xor", "bitmask", "algorithms"],
+  "description": "A practical, interview-focused tour of binary representation, two's complement, the bitwise operators, the canonical bit tricks (set/clear/toggle, popcount, power-of-two, lowest set bit, XOR swaps), bitmask subsets, overflow, and the classic problems that hinge on them.",
+  "estReadMinutes": 29,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Bit manipulation is the art of operating directly on the binary representation of integers. At interview level it shows up in two guises: micro-optimizations (replace a modulo or multiply with a shift) and as the key insight that turns an O(n) or O(2^n) problem into something elegant - finding a unique element with XOR, enumerating subsets with a bitmask, or checking a power of two in one operation."
+        },
+        {
+          "type": "list",
+          "items": [
+            "A bit is a single binary digit (0 or 1); a byte is 8 bits; a 32-bit int holds bits at positions 0 (least significant) through 31 (most significant).",
+            "The bitwise operators are AND (&), OR (|), XOR (^), NOT (~), left shift (<<), and right shift (>>).",
+            "Most tricks reduce to building a mask (often 1 << k) and combining it with &, |, ^, or ~.",
+            "Signed integers use two's complement, which is why ~x == -x - 1 and why arithmetic right shift preserves the sign."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Throughout, examples assume fixed-width two's-complement integers (like Java int / C int32). Python integers are arbitrary precision, so a few tricks (notably ~ and counting leading bits) behave differently - call-outs flag these."
+        }
+      ]
+    },
+    {
+      "id": "why",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Bit manipulation is tested because it reveals whether a candidate understands how data is actually represented, not just how to call library functions. The payoff is concrete: bitmasks compress a set of up to 32 (or 64) booleans into a single integer that fits in a register, making set operations O(1); XOR gives constant-space solutions to problems that naively need a hash set; and shifts replace expensive division on hot paths."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Space: a bitmask packs N booleans into one machine word - used in dynamic programming over subsets (Travelling Salesman, assignment problems), permission/feature flags, and Bloom filters.",
+            "Speed: x << k is x * 2^k; x >> k is floor(x / 2^k) for non-negative x; x & (n-1) is x % n when n is a power of two. These are single-cycle on the CPU.",
+            "Elegance: XOR's self-inverse property (a ^ a == 0) collapses whole classes of 'find the odd one out' problems to a single accumulator.",
+            "Foundations: understanding two's complement, sign extension, and overflow prevents real production bugs (Integer.MIN_VALUE has no positive counterpart; abs(MIN_VALUE) is still negative)."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The most common interview trap is overflow. Adding two large ints, negating Integer.MIN_VALUE, or computing (low + high) for a midpoint can all overflow silently. The fix - (low + (high - low) / 2) for midpoints - is itself a frequently asked question."
+        }
+      ]
+    },
+    {
+      "id": "binary-twos-complement",
+      "heading": "Binary and Two's Complement",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "An unsigned n-bit number is the sum of bit_i * 2^i. Signed integers use two's complement: the most significant bit has weight -2^(n-1) instead of +2^(n-1). So for an 8-bit byte, 1000 0000 is -128, and 1111 1111 is -1. To negate a value you invert all bits and add one: -x == (~x) + 1. This is why a single representation of zero exists (no separate -0) and why addition/subtraction hardware is identical for signed and unsigned."
+        },
+        {
+          "type": "table",
+          "headers": ["8-bit pattern", "Unsigned", "Two's complement (signed)"],
+          "rows": [
+            ["0000 0000", "0", "0"],
+            ["0000 0001", "1", "1"],
+            ["0111 1111", "127", "127"],
+            ["1000 0000", "128", "-128"],
+            ["1111 1111", "255", "-1"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Two key identities follow directly: ~x == -x - 1 (since -x == ~x + 1), and the asymmetry of the range. A 32-bit int spans -2^31 (-2147483648) to 2^31 - 1 (2147483647): there is one more negative number than positive, so -Integer.MIN_VALUE overflows back to Integer.MIN_VALUE."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// Two's complement identities (Java, 32-bit int)\nint x = 5;\nSystem.out.println(~x);        // -6   because ~x == -x - 1\nSystem.out.println(-x);        // -5   == ~x + 1\nSystem.out.println(Integer.MIN_VALUE);      // -2147483648\nSystem.out.println(-Integer.MIN_VALUE);     // -2147483648 (overflow!)\nSystem.out.println(Math.abs(Integer.MIN_VALUE)); // still -2147483648\n\n// Arithmetic vs logical right shift\nint neg = -8;                  // 1111...11111000\nSystem.out.println(neg >> 1);  // -4  : >> is ARITHMETIC, copies the sign bit\nSystem.out.println(neg >>> 1); // 2147483644 : >>> is LOGICAL, fills with 0"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Java has both >> (arithmetic, sign-preserving) and >>> (logical, zero-filling). C/C++ only has >>, and right-shifting a negative signed value is implementation-defined - use unsigned types when you need a logical shift. Mixing these up corrupts the sign on negative inputs."
+        }
+      ]
+    },
+    {
+      "id": "operators",
+      "heading": "The Bitwise Operators",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "table",
+          "headers": ["Operator", "Name", "Rule", "Example (4-bit)"],
+          "rows": [
+            ["&", "AND", "1 only if both bits are 1", "1100 & 1010 = 1000"],
+            ["|", "OR", "1 if either bit is 1", "1100 | 1010 = 1110"],
+            ["^", "XOR", "1 if bits differ", "1100 ^ 1010 = 0110"],
+            ["~", "NOT", "flips every bit", "~1100 = 0011 (4-bit)"],
+            ["<<", "left shift", "shift left, fill with 0 (x * 2^k)", "0011 << 1 = 0110"],
+            [">>", "right shift", "shift right (x / 2^k)", "0110 >> 1 = 0011"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "XOR deserves special attention because most clever tricks rely on its three properties: it is its own inverse (a ^ a == 0), it has identity zero (a ^ 0 == a), and it is commutative and associative (so order does not matter). Together these mean that XOR-ing a list of numbers cancels every value that appears an even number of times, leaving only the values that appear an odd number of times."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// XOR algebra - the engine behind most tricks\nint a = 0b1011, b = 0b0110;\nSystem.out.println(Integer.toBinaryString(a ^ b)); // 1101\n\nint v = 42;\nSystem.out.println(v ^ v);   // 0    self-inverse\nSystem.out.println(v ^ 0);   // 42   identity\nSystem.out.println((v ^ b) ^ b); // 42  applying b twice cancels"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Operator precedence is a classic bug source: in C/C++/Java, & | ^ have LOWER precedence than == and !=. So `x & 1 == 0` parses as `x & (1 == 0)` == `x & false`. Always parenthesize: `(x & 1) == 0`."
+        }
+      ]
+    },
+    {
+      "id": "single-bit-ops",
+      "heading": "Manipulating a Single Bit",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Almost every single-bit operation is built from the mask 1 << k, which has a 1 only at position k. Combine it with the right operator: AND with the mask to read, OR to set, AND with the inverted mask to clear, and XOR to toggle."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// All operations on bit at position k (0 = least significant)\nint getBit(int x, int k)    { return (x >> k) & 1; }          // read: 0 or 1\nint setBit(int x, int k)    { return x | (1 << k); }          // force to 1\nint clearBit(int x, int k)  { return x & ~(1 << k); }         // force to 0\nint toggleBit(int x, int k) { return x ^ (1 << k); }          // flip\nboolean isSet(int x, int k) { return (x & (1 << k)) != 0; }   // test\n\n// Update bit k to an arbitrary value v (0 or 1) branch-free\nint updateBit(int x, int k, int v) {\n    int mask = 1 << k;\n    return (x & ~mask) | ((v << k) & mask);  // clear then set if v==1\n}"
+        },
+        {
+          "type": "heading",
+          "text": "The lowest set bit and clearing it"
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// x & (-x) isolates the lowest set bit (rightmost 1)\n// Works because -x == ~x + 1 flips everything above the lowest 1\nint lowestSetBit(int x) { return x & (-x); }   // 0b10110 -> 0b00010\n\n// x & (x - 1) clears the lowest set bit\n// Subtracting 1 turns the lowest 1 into 0 and all bits below it into 1\nint dropLowestSetBit(int x) { return x & (x - 1); }  // 0b10110 -> 0b10100\n\n// Therefore: x is a power of two iff it has exactly one set bit\nboolean isPowerOfTwo(int x) { return x > 0 && (x & (x - 1)) == 0; }"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "x & (x - 1) == 0 tests for 'at most one bit set'. You must also require x > 0 for a true power-of-two test, because 0 also passes (0 has no set bits) and negative numbers in two's complement can pass spuriously."
+        }
+      ]
+    },
+    {
+      "id": "popcount-example",
+      "heading": "Example: Counting Set Bits (Popcount)",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Counting the number of 1-bits (the population count, or Hamming weight) is a fundamental building block. The naive loop checks all 32 bits; Brian Kernighan's trick loops only once per set bit by repeatedly clearing the lowest set bit; and most languages expose a hardware popcount intrinsic that compiles to a single instruction."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// 1) Naive: always 32 iterations\nint countNaive(int x) {\n    int count = 0;\n    for (int i = 0; i < 32; i++) {\n        count += (x >> i) & 1;\n    }\n    return count;\n}\n\n// 2) Brian Kernighan: iterates once PER SET BIT (faster when sparse)\nint countKernighan(int x) {\n    int count = 0;\n    while (x != 0) {\n        x &= (x - 1);   // clear lowest set bit\n        count++;\n    }\n    return count;\n}\n\n// 3) Hardware intrinsic - compiles to a POPCNT instruction\nint countBuiltin(int x) {\n    return Integer.bitCount(x);   // C++: __builtin_popcount; Python: bin(x).count('1')\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "The Kernighan version runs in O(number of set bits) rather than O(width), which matters when most bits are zero. In an interview, mention Integer.bitCount / __builtin_popcount as the production answer, then derive Kernighan's trick to show you understand why x & (x - 1) clears the lowest set bit."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Hamming distance between two integers is Integer.bitCount(a ^ b): XOR marks the differing bit positions, popcount counts them. This composition of two one-liners is a frequent follow-up."
+        }
+      ]
+    },
+    {
+      "id": "bitmasks",
+      "heading": "Bitmasks: Sets in an Integer",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A bitmask treats an integer as a set: bit i present means element i is in the set. With this encoding, set operations become single bitwise instructions, which is what makes subset-DP (e.g. Travelling Salesman in O(2^n * n^2)) feasible. For n elements there are exactly 2^n subsets, enumerated by counting an integer from 0 to (1 << n) - 1."
+        },
+        {
+          "type": "table",
+          "headers": ["Set operation", "Bitmask expression"],
+          "rows": [
+            ["Union (A or B)", "a | b"],
+            ["Intersection (A and B)", "a & b"],
+            ["Difference (A minus B)", "a & ~b"],
+            ["Add element i", "a | (1 << i)"],
+            ["Remove element i", "a & ~(1 << i)"],
+            ["Contains element i", "(a & (1 << i)) != 0"],
+            ["Full set of n elements", "(1 << n) - 1"],
+            ["Cardinality |A|", "Integer.bitCount(a)"]
+          ]
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// Enumerate ALL subsets of {0..n-1} via bitmask\nvoid allSubsets(int n) {\n    for (int mask = 0; mask < (1 << n); mask++) {\n        List<Integer> subset = new ArrayList<>();\n        for (int i = 0; i < n; i++) {\n            if ((mask & (1 << i)) != 0) subset.add(i);\n        }\n        // process subset\n    }\n}\n\n// Iterate only the SUBMASKS of a given mask (classic SOS / subset-sum DP)\nvoid submasks(int mask) {\n    for (int sub = mask; sub > 0; sub = (sub - 1) & mask) {\n        // 'sub' ranges over every non-empty subset of 'mask'\n    }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The submask iteration `sub = (sub - 1) & mask` is a beautiful trick: subtracting 1 borrows through the zero bits, and ANDing with mask snaps back to only the bits that are part of the original set, visiting every submask exactly once in O(number of submasks)."
+        }
+      ]
+    },
+    {
+      "id": "mistakes",
+      "heading": "Common Mistakes",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Forgetting operator precedence: `x & 1 == 0` is `x & (1 == 0)`. Always parenthesize `(x & 1) == 0`.",
+            "Using >> instead of >>> on a negative number in Java when you wanted a logical (zero-fill) shift - the sign bit propagates and you get a huge negative or positive value.",
+            "Shifting by >= the type width is undefined behavior in C/C++ and in Java is taken modulo the width (1 << 32 == 1, not 0). Never shift by the full bit-width.",
+            "1 << 31 overflows a 32-bit signed int into Integer.MIN_VALUE; to set the top bit safely or build large masks, use 1L << k (long) or unsigned types.",
+            "Testing power of two with only (x & (x - 1)) == 0 and forgetting x > 0, so 0 (and negatives) falsely pass.",
+            "Negating Integer.MIN_VALUE or calling Math.abs on it - both return Integer.MIN_VALUE because there is no positive counterpart in two's complement.",
+            "Assuming ~ behaves the same in Python: Python ints are arbitrary precision, so ~5 == -6 still holds but masking to a fixed width requires an explicit `& 0xFFFFFFFF`."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Production incident pattern: a feature-flag system stored 40 flags in an int. Flag 31 used `flags | (1 << 31)`, which set the sign bit and made subsequent comparisons treat the value as negative, silently disabling flags 0-30 in a `flags > 0` guard. Switching to a 64-bit long mask and `1L << k` fixed it."
+        }
+      ]
+    },
+    {
+      "id": "bestpractices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Prefer the standard-library popcount (Integer.bitCount, __builtin_popcount, popcount in Rust/C++20) over hand-rolled loops - it maps to a single CPU instruction.",
+            "Always parenthesize bitwise expressions; the precedence rules are surprising and the parentheses document intent.",
+            "Use long (1L << k) the moment you might touch bit 31 or beyond, to avoid signed overflow on a 32-bit int.",
+            "Replace x % n with x & (n - 1) ONLY when n is a known power of two; otherwise the result is wrong for non-powers and for negative x in some languages.",
+            "Use x & (-x) to isolate and x & (x - 1) to clear the lowest set bit - these are the two most reusable idioms; memorize why they work via two's complement.",
+            "Encode small sets (<= 32 or <= 64 elements) as bitmasks for O(1) union/intersection and compact DP state; document which bit means which element.",
+            "Compute a midpoint as low + (high - low) / 2, never (low + high) / 2, to avoid overflow in binary search."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Goal", "Idiom"],
+          "rows": [
+            ["Is bit k set?", "(x >> k) & 1"],
+            ["Set / clear / toggle bit k", "x | (1<<k)  /  x & ~(1<<k)  /  x ^ (1<<k)"],
+            ["Lowest set bit / clear it", "x & -x  /  x & (x-1)"],
+            ["Power of two?", "x > 0 && (x & (x-1)) == 0"],
+            ["Count set bits", "Integer.bitCount(x)"],
+            ["Swap without temp", "a ^= b; b ^= a; a ^= b;"],
+            ["x % 2^n (x >= 0)", "x & ((1<<n) - 1)"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "note-xor-swap",
+      "heading": "Note: The XOR Swap and When Not to Use It",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The XOR swap exchanges two integers without a temporary: a ^= b; b ^= a; a ^= b;. It works because XOR is self-inverse: after the first line a holds a^b; after the second, b holds (a^b)^b == a; after the third, a holds (a^b)^a == b. It is a fun demonstration of XOR algebra but is NOT recommended in real code."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// Works for distinct storage locations only\nint a = 3, b = 5;\na ^= b;   // a = 3 ^ 5\nb ^= a;   // b = 5 ^ (3 ^ 5) = 3\na ^= b;   // a = (3 ^ 5) ^ 3 = 5\n// a == 5, b == 3\n\n// DANGER: if a and b ALIAS the same location, this zeroes it!\n// swap(arr[i], arr[i]) with XOR sets arr[i] to 0."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Avoid the XOR swap in production: it fails when both operands alias the same memory (it zeroes the value), it defeats compiler/CPU register-renaming optimizations, and a plain temporary variable is clearer and usually faster. Know it for interviews, do not ship it."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "twos-complement-wheel",
+      "title": "Two's Complement Number Wheel (4-bit)",
+      "type": "ascii",
+      "content": "4-bit two's complement: the top bit has weight -8\n\n   0000 = 0     1000 = -8\n   0001 = 1     1001 = -7\n   0010 = 2     1010 = -6\n   0011 = 3     1011 = -5\n   0100 = 4     1100 = -4\n   0101 = 5     1101 = -3\n   0110 = 6     1110 = -2\n   0111 = 7     1111 = -1\n\n  negate(x) = ~x + 1   |   ~x = -x - 1\n  range: -8 .. +7  (one more negative than positive)"
+    },
+    {
+      "id": "lowest-set-bit-flow",
+      "title": "How x & (x-1) Clears the Lowest Set Bit",
+      "type": "mermaid",
+      "content": "flowchart TD\n    A[\"x = 1011 0100\"] --> B[\"x - 1 = 1011 0011\"]\n    B --> C[\"subtract 1 flips the lowest 1\\nand all zeros below it to ones\"]\n    A --> D[\"x & (x-1)\"]\n    B --> D\n    D --> E[\"1011 0000  (lowest set bit cleared)\"]"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-twos-complement",
+      "question": "What is two's complement and why does ~x equal -x - 1?",
+      "answer": "Two's complement is the standard encoding for signed integers in which the most significant bit carries a negative weight of -2^(n-1) instead of +2^(n-1). Negation is defined as inverting all bits and adding one: -x == ~x + 1. Rearranging that identity gives ~x == -x - 1 directly. The scheme has a single representation of zero (no negative zero), makes addition/subtraction hardware identical for signed and unsigned operands, and produces an asymmetric range (e.g. a 32-bit int spans -2^31 to 2^31 - 1, one more negative value than positive), which is why -Integer.MIN_VALUE overflows back to itself.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["twos-complement", "binary"],
+      "followUps": ["Why is there no separate -0 in two's complement?", "What does abs(Integer.MIN_VALUE) return and why?"]
+    },
+    {
+      "id": "q-power-of-two",
+      "question": "How do you check if an integer is a power of two in O(1)?",
+      "answer": "A positive integer is a power of two if and only if it has exactly one set bit. The expression x & (x - 1) clears the lowest set bit, so for a power of two the result is 0. The full test is `x > 0 && (x & (x - 1)) == 0`. The `x > 0` guard is essential: 0 also yields (0 & -1) == 0 but is not a power of two, and negative numbers can pass spuriously in two's complement. This runs in constant time with two operations, versus an O(log x) loop dividing by two.",
+      "difficulty": "junior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["bit-tricks", "power-of-two"],
+      "followUps": ["How would you round up to the next power of two?", "Why does x & (x-1) clear the lowest set bit?"]
+    },
+    {
+      "id": "q-lowest-set-bit",
+      "question": "Explain why x & (-x) isolates the lowest set bit.",
+      "answer": "In two's complement, -x == ~x + 1. Inverting x flips every bit; adding one carries up through the trailing zeros of ~x (which were the trailing ones of... actually the trailing zeros above the lowest set bit of x). The net effect is that -x has the same lowest set bit as x, zeros below it, and the complement of x's bits above it. ANDing x with -x therefore keeps only the single lowest set bit and zeros everything else. For example x = 0b10110 gives -x = 0b...01010, and x & -x = 0b00010. This is the foundation of Fenwick (binary indexed) trees, which use i & -i to walk index ranges.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["bit-tricks", "lowest-set-bit"],
+      "followUps": ["How is this used in a Fenwick tree?", "How do you clear (rather than isolate) the lowest set bit?"]
+    },
+    {
+      "id": "q-popcount",
+      "question": "How does Brian Kernighan's algorithm count set bits, and how does its complexity compare to the naive loop?",
+      "answer": "Kernighan's algorithm repeatedly executes x &= (x - 1), which clears the lowest set bit each iteration, counting the iterations. It runs in O(number of set bits) rather than O(bit width), so for sparse integers it is much faster than the naive loop that checks all 32 (or 64) positions. In production you would call a hardware intrinsic instead - Integer.bitCount in Java, __builtin_popcount in GCC/Clang, std::popcount in C++20 - which compiles to a single POPCNT instruction. Kernighan's trick is the right thing to derive in an interview to demonstrate understanding of why x & (x-1) clears the lowest set bit.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["popcount", "kernighan"],
+      "followUps": ["How would you compute the Hamming distance between two integers?", "What instruction does Integer.bitCount compile to?"]
+    },
+    {
+      "id": "q-single-number",
+      "question": "Given an array where every element appears twice except one, how do you find the single element in O(n) time and O(1) space?",
+      "answer": "XOR all the elements together. XOR is commutative, associative, self-inverse (a ^ a == 0) and has identity zero (a ^ 0 == a). Every value that appears twice cancels to zero, leaving only the value that appears once. The accumulator uses constant space and a single pass. Code: `int r = 0; for (int v : nums) r ^= v; return r;`. This beats the hash-set approach (O(n) extra space) and the sort-then-scan approach (O(n log n) time).",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["xor", "single-number"],
+      "followUps": ["What if every element appears three times except one?", "What if exactly two elements appear once?"]
+    },
+    {
+      "id": "q-subsets-bitmask",
+      "question": "How do you enumerate all subsets of an n-element set using bitmasks?",
+      "answer": "Each of the 2^n subsets corresponds to an n-bit integer mask in the range [0, 2^n). Loop `for (int mask = 0; mask < (1 << n); mask++)`, and for each mask include element i whenever bit i is set: `(mask & (1 << i)) != 0`. This gives every subset exactly once in O(2^n * n) total work. The technique underlies subset-sum and bitmask dynamic programming (e.g. Travelling Salesman in O(2^n * n^2)). To iterate only over the submasks of a fixed mask, use `for (int s = mask; s > 0; s = (s - 1) & mask)`.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["bitmask", "subsets"],
+      "followUps": ["How does the submask iteration (s-1) & mask work?", "How is a bitmask used as DP state in TSP?"]
+    },
+    {
+      "id": "q-swap-no-temp",
+      "question": "How do you swap two integers without a temporary variable, and why shouldn't you?",
+      "answer": "The XOR swap: a ^= b; b ^= a; a ^= b;. It works because XOR is self-inverse, so the three steps leave a holding the original b and b holding the original a. However it should not be used in production: it breaks when both operands alias the same memory location (it zeroes the value), it inhibits compiler optimizations and register renaming, and it is less readable than a temporary. Modern compilers turn a temp-variable swap into an efficient register exchange anyway. Addition/subtraction swaps (a = a + b; b = a - b; a = a - b) are worse - they can overflow.",
+      "difficulty": "junior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["xor", "swap"],
+      "followUps": ["What exactly goes wrong when a and b alias?", "Why might the arithmetic swap overflow?"]
+    },
+    {
+      "id": "q-mod-power-of-two",
+      "question": "Why does x & (n - 1) compute x % n when n is a power of two, and when does it fail?",
+      "answer": "If n == 2^k, then n - 1 is a mask of the low k bits (all ones). The remainder of dividing by 2^k is exactly the low k bits of x, which x & (n - 1) extracts. It is a single-cycle operation versus a relatively expensive division. It fails in two cases: (1) when n is not a power of two, the mask does not correspond to a remainder; and (2) for negative x in languages where % returns a sign-following remainder, the bitwise version yields the non-negative least residue instead. For example in Java, -1 % 4 == -1, but -1 & 3 == 3.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["modulo", "bit-tricks"],
+      "followUps": ["How would a compiler optimize x % 7?", "What is the least non-negative residue?"]
+    },
+    {
+      "id": "q-tricky-shift-overflow",
+      "question": "Tricky: In Java, what does `1 << 32` evaluate to, and what does `1 << 35` evaluate to?",
+      "answer": "Both surprise people. Java's shift operators on an int take the shift amount modulo 32 (the operand width). So `1 << 32` is `1 << (32 % 32)` == `1 << 0` == 1, NOT 0. And `1 << 35` is `1 << (35 % 32)` == `1 << 3` == 8. For long operands the modulus is 64. In C and C++, shifting by an amount greater than or equal to the type width is undefined behavior, so the same expression could produce anything or crash. The lesson: never shift by an amount >= the bit width, and use 1L for long shifts so you do not wrap at 32.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["shift", "overflow", "gotcha"],
+      "followUps": ["What is the C/C++ behavior for an over-wide shift?", "How do you build a 64-bit mask safely?"]
+    },
+    {
+      "id": "q-tricky-single-number-iii",
+      "question": "Tricky: An array has exactly two elements that appear once; all others appear twice. Find both in O(n) time and O(1) space.",
+      "answer": "First XOR everything to get xorAll == a ^ b, where a and b are the two singletons. Since a != b, xorAll has at least one set bit; pick any one, conventionally the lowest: `int diff = xorAll & (-xorAll)`. This bit differs between a and b. Partition the array into two groups by whether each number has that bit set, and XOR each group independently. The duplicates fall in matched pairs into the same group and cancel, so one group yields a and the other yields b. The whole thing is two linear passes and a couple of integers of state. The key insight is using a distinguishing bit (isolated via x & -x) to separate the two unknowns.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["xor", "single-number", "gotcha"],
+      "followUps": ["Why is any set bit of xorAll guaranteed to differ between a and b?", "How does this generalize to elements appearing three times?"]
+    },
+    {
+      "id": "q-tricky-abs-min-value",
+      "question": "Tricky: A teammate guards against negative input with `if (Math.abs(x) > LIMIT)`. Why can this guard be bypassed?",
+      "answer": "Because Math.abs(Integer.MIN_VALUE) returns Integer.MIN_VALUE (-2147483648), a negative number. In two's complement the range is asymmetric: there is no positive counterpart to MIN_VALUE, so negating it overflows back to itself, and abs is defined as negation for negatives. Thus abs(MIN_VALUE) is negative, and `abs(x) > LIMIT` is false for x == MIN_VALUE, letting it slip through a guard meant to catch large-magnitude values. The robust fix is to compare against the boundary explicitly (x < -LIMIT || x > LIMIT) or to use a wider type (long) before taking abs. Java's Math.absExact throws on overflow precisely to surface this bug.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["overflow", "twos-complement", "gotcha"],
+      "followUps": ["What does Math.absExact do differently?", "How does this relate to the binary-search midpoint overflow?"]
+    },
+    {
+      "id": "q-arithmetic-vs-logical-shift",
+      "question": "What is the difference between an arithmetic and a logical right shift, and how does Java expose both?",
+      "answer": "An arithmetic right shift (Java >>) copies the sign bit into the vacated high positions, preserving the sign and effectively doing floor division by a power of two for negative numbers. A logical right shift (Java >>>) always fills the vacated bits with zero, treating the value as unsigned. For example, with x = -8 (0xFFFFFFF8), x >> 1 == -4 but x >>> 1 == 2147483644. C and C++ have only >>; for signed types right-shift behavior on negatives was implementation-defined historically (arithmetic on virtually all real compilers, and standardized as arithmetic in C++20), so you use unsigned types when you specifically want a logical shift.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["shift", "twos-complement"],
+      "followUps": ["When would you deliberately want a logical shift on a signed value?", "Does Python distinguish the two?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-single-number-xor",
+      "title": "Single Number via XOR",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "prompt": "Given a non-empty array of integers nums where every element appears exactly twice except for one element which appears exactly once, return that single element. You must solve it in O(n) time and O(1) extra space (no hash set, no sorting).",
+      "hints": [
+        "Think about an operation that is its own inverse: applying it twice cancels out.",
+        "XOR satisfies a ^ a == 0 and a ^ 0 == a, and is commutative and associative.",
+        "Fold the whole array with XOR; every paired value cancels to 0, leaving the unique one."
+      ],
+      "solutionCode": "public int singleNumber(int[] nums) {\n    int result = 0;\n    for (int v : nums) {\n        result ^= v;   // pairs cancel (a ^ a == 0); identity is 0\n    }\n    return result;\n}",
+      "solutionLanguage": "java",
+      "explanation": "XOR is commutative and associative, so we can reorder the fold freely; it is self-inverse (a ^ a == 0) and has identity 0 (a ^ 0 == a). XOR-ing every element means each value that appears twice contributes a ^ a == 0 and disappears, leaving only the value that appears once XOR-ed with 0, i.e. itself. The loop is a single pass (O(n) time) using one accumulator (O(1) space), beating the hash-set solution on space and the sort solution on time. This is the canonical demonstration of why XOR's algebraic properties make it the tool of choice for 'find the odd one out' problems.",
+      "relatedTopic": "bit-manipulation"
+    },
+    {
+      "id": "ch-count-bits-dp",
+      "title": "Counting Bits 0..n (DP + Lowest Set Bit)",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "prompt": "Given an integer n, return an array ans of length n + 1 where ans[i] is the number of 1-bits in the binary representation of i, for every i from 0 to n. Aim for O(n) total time rather than O(n log n).",
+      "hints": [
+        "You can reuse previously computed answers - this is a dynamic-programming relation.",
+        "Note that i & (i - 1) removes the lowest set bit, producing a smaller, already-solved subproblem.",
+        "So popcount(i) == popcount(i & (i - 1)) + 1."
+      ],
+      "solutionCode": "public int[] countBits(int n) {\n    int[] ans = new int[n + 1];\n    for (int i = 1; i <= n; i++) {\n        // i & (i - 1) clears the lowest set bit -> a smaller, already-computed index\n        ans[i] = ans[i & (i - 1)] + 1;\n    }\n    return ans;  // ans[0] stays 0\n}",
+      "solutionLanguage": "java",
+      "explanation": "The relation popcount(i) = popcount(i & (i - 1)) + 1 holds because i & (i - 1) clears exactly one set bit (the lowest), so i has exactly one more 1-bit than the smaller value i & (i - 1). Since i & (i - 1) < i, its answer is already filled in by the time we reach i, giving an O(1) transition and O(n) total time - better than calling a per-number popcount, which would be O(n log n) overall. An alternative relation, ans[i] = ans[i >> 1] + (i & 1), is equally valid: it builds i from i/2 plus its lowest bit. Both are clean DP formulations that exploit a structural bit identity.",
+      "relatedTopic": "bit-manipulation"
+    }
+  ],
+  "references": [
+    {"label": "Hacker's Delight (Henry S. Warren) - the canonical bit-twiddling reference", "url": "https://en.wikipedia.org/wiki/Hacker%27s_Delight"},
+    {"label": "Bit Twiddling Hacks (Sean Eron Anderson, Stanford)", "url": "https://graphics.stanford.edu/~seander/bithacks.html"},
+    {"label": "Two's complement (Wikipedia)", "url": "https://en.wikipedia.org/wiki/Two%27s_complement"},
+    {"label": "Java Language Specification - Shift Operators (15.19)", "url": "https://docs.oracle.com/javase/specs/jls/se17/html/jls-15.html#jls-15.19"}
+  ]
+}

@@ -1,0 +1,491 @@
+{
+  "id": "nosql-mongodb",
+  "title": "NoSQL & MongoDB",
+  "category": "Computer Science",
+  "subcategory": "Data",
+  "difficulty": "senior",
+  "tags": ["nosql", "mongodb", "cap-theorem", "sharding", "data-modeling", "aggregation"],
+  "description": "A senior-level treatment of NoSQL and MongoDB: the four NoSQL families, the CAP and PACELC tradeoffs, MongoDB's document model, embedding vs referencing, indexing, the aggregation pipeline, replica sets and sharding, read/write concerns and consistency, schema-design patterns, and the cases where NoSQL is the wrong choice.",
+  "estReadMinutes": 31,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "NoSQL ('not only SQL') is an umbrella for databases that relax one or more of the relational model's constraints - fixed schema, normalization, joins, and single-node ACID - in exchange for horizontal scalability, flexible schemas, or a data model that fits the workload more naturally. There is no single NoSQL database; there are four broad families, each optimized for a different access pattern. MongoDB is the dominant document store and the usual reference point in interviews."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Document stores (MongoDB, Couchbase): self-describing JSON/BSON documents; great for hierarchical, evolving data.",
+            "Key-value stores (Redis, DynamoDB, Riak): a giant distributed hash map; the fastest and simplest model for lookups by key.",
+            "Wide-column stores (Cassandra, HBase, Bigtable): rows with dynamic, sparse columns grouped into families; built for massive write throughput and time-series.",
+            "Graph databases (Neo4j, Neptune): nodes and edges as first-class citizens; ideal for relationship-heavy traversal queries (social graphs, recommendations)."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "NoSQL is not 'newer and therefore better than SQL'. It is a set of different tradeoffs. Picking the right store starts from the access pattern (how you read and write), not from a preference for documents over tables."
+        }
+      ]
+    },
+    {
+      "id": "why",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Data-store choice is one of the highest-leverage architecture decisions: it shapes scalability limits, consistency guarantees, query flexibility, and operational burden, and it is expensive to reverse. Understanding NoSQL tradeoffs lets you justify why a shopping cart belongs in DynamoDB, a product catalog in MongoDB, a social graph in Neo4j, and financial ledgers in PostgreSQL - and why forcing all of them into one store creates pain."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Scale: NoSQL stores are designed to scale horizontally (add nodes) via sharding, whereas relational databases traditionally scale vertically and are harder to partition.",
+            "Consistency tradeoffs: distributed stores must trade consistency for availability under partitions (CAP) and latency in normal operation (PACELC); knowing where a store sits prevents correctness surprises.",
+            "Modeling for access: document modeling (embedding vs referencing) is driven by query patterns, not normal forms - the wrong choice causes unbounded documents or N+1 fan-out.",
+            "Cost and ops: schema flexibility speeds early development, but lack of joins and constraints pushes integrity into application code, which is a real long-term cost."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The classic anti-pattern is reaching for NoSQL by default 'for scale' on a workload that is highly relational, transactional, and modest in size. You then reimplement joins and transactions badly in application code. Choose the model that matches the data and access pattern, not the hype."
+        }
+      ]
+    },
+    {
+      "id": "nosql-families",
+      "heading": "The Four NoSQL Families",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "table",
+          "headers": ["Type", "Model", "Best for", "Examples"],
+          "rows": [
+            ["Document", "Self-describing JSON/BSON docs keyed by _id", "Hierarchical, evolving entities; content, catalogs", "MongoDB, Couchbase"],
+            ["Key-value", "Opaque value per unique key", "Caching, sessions, simple high-throughput lookups", "Redis, DynamoDB, Riak"],
+            ["Wide-column", "Rows with dynamic column families; partitioned by key", "Huge write volume, time-series, event logs", "Cassandra, HBase, Bigtable"],
+            ["Graph", "Nodes + edges with properties", "Deep relationship traversal, recommendations, fraud", "Neo4j, Amazon Neptune"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The families differ mainly in how they let you query. Key-value stores are blazingly fast but can only fetch by key - any other access requires a secondary structure you maintain. Document stores let you query inside the document by any field and index those fields. Wide-column stores optimize for writes and range scans within a partition but require you to design tables per query. Graph databases make multi-hop relationship queries (friends-of-friends) cheap, which are pathological joins in a relational database."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A practical heuristic: if your queries are 'give me X by its key', use key-value. If they are 'give me this rich object and its sub-parts', use a document store. If they are 'how are these entities connected', use a graph. If they are 'append enormous volumes and scan ranges', use wide-column."
+        }
+      ]
+    },
+    {
+      "id": "cap-pacelc",
+      "heading": "CAP and PACELC Tradeoffs",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The CAP theorem (Brewer) states that a distributed data store can provide at most two of three guarantees simultaneously: Consistency (every read sees the most recent write, i.e. linearizability), Availability (every request gets a non-error response), and Partition tolerance (the system keeps working despite dropped messages between nodes). Because network partitions are a fact of life in any real distributed system, partition tolerance is non-negotiable - so the genuine choice during a partition is between C and A."
+        },
+        {
+          "type": "list",
+          "items": [
+            "CP (consistency over availability): during a partition, refuse or block requests that cannot be served consistently. MongoDB (with majority concerns) and HBase lean CP - a minority partition stops accepting writes rather than diverge.",
+            "AP (availability over consistency): keep serving on both sides of a partition and reconcile later (eventual consistency, conflict resolution). Cassandra and DynamoDB lean AP - always answer, accept temporary divergence.",
+            "CA is not achievable in a system that must tolerate partitions; a single-node database is 'CA' only in the trivial sense that it has no network to partition."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "CAP only describes behavior DURING a partition, which is rare. PACELC (Abadi) extends it: if there is a Partition, choose between Availability and Consistency (the CAP case); Else (normal operation), choose between Latency and Consistency. This captures the everyday tradeoff CAP ignores - even with no partition, strong consistency costs latency (you must coordinate across replicas), so systems pick a normal-case stance too. Cassandra is PA/EL (availability under partition, low latency otherwise); a strongly consistent store is PC/EC (consistency in both regimes, paying latency)."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "A common interview trap: claiming a system 'gives up partition tolerance to be CA'. In practice partitions WILL happen, so every real distributed store is partition-tolerant; the meaningful question is whether it sacrifices consistency or availability when one occurs, and (via PACELC) what it trades in the normal, no-partition case."
+        }
+      ]
+    },
+    {
+      "id": "document-model",
+      "heading": "The MongoDB Document Model",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "MongoDB stores data as BSON documents (binary JSON) grouped into collections, which are grouped into databases. A document is a set of field/value pairs with a mandatory _id primary key (an ObjectId by default - a 12-byte, roughly time-ordered, globally unique value). Documents are schemaless at the database level: two documents in a collection can have different fields, and nesting (sub-documents and arrays) is first-class, letting one document represent a whole aggregate (an order with its line items) that would span several relational tables."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// One document can hold a whole aggregate (order + items + shipping)\n{\n  _id: ObjectId(\"66...\"),\n  customerId: ObjectId(\"55...\"),     // reference to another collection\n  status: \"shipped\",\n  total: 4299,                       // cents\n  items: [                           // embedded array of sub-documents\n    { sku: \"PLQ-PRO\", qty: 1, price: 3000 },\n    { sku: \"NFC-CARD\", qty: 2, price: 649 }\n  ],\n  shipping: {                        // embedded sub-document\n    address: \"12 Rue de Paris\",\n    carrier: \"DHL\"\n  },\n  createdAt: ISODate(\"2026-06-25T10:00:00Z\")\n}\n\n// Query inside the document and into arrays:\ndb.orders.find({ status: \"shipped\", \"items.sku\": \"PLQ-PRO\" })\ndb.orders.updateOne({ _id: id }, { $set: { status: \"delivered\" } })"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Schemaless does not mean structure-free. Production MongoDB deployments enforce shape with JSON Schema validation rules on the collection, so the flexibility is opt-in per field rather than a free-for-all. 'Flexible schema', not 'no schema', is the accurate description."
+        }
+      ]
+    },
+    {
+      "id": "embedding-vs-referencing",
+      "heading": "Embedding vs Referencing",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The central modeling decision in MongoDB is whether to embed related data inside a document or reference it by storing an id and reading it separately. There is no relational normalization rule to follow; you model for the query pattern. Embed when the related data is owned by the parent, read together, and bounded in size. Reference when the data is shared, large, or grows without bound, or when it must be updated independently."
+        },
+        {
+          "type": "table",
+          "headers": ["Embed when...", "Reference when..."],
+          "rows": [
+            ["Read together with the parent in one query", "Accessed independently or shared by many parents"],
+            ["1-to-few, bounded growth (order line items)", "1-to-many/unbounded (a user's millions of events)"],
+            ["Data is owned by and lives/dies with the parent", "Data has its own lifecycle and identity"],
+            ["Atomic update of parent + children matters", "Frequent independent updates of the child"],
+            ["Avoids extra round trips / $lookup", "Avoids document bloat and the 16 MB limit"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The hard constraints that force the decision: a single BSON document is capped at 16 MB, so any unbounded array (comments on a viral post, events for a busy user) must be referenced, not embedded - otherwise the document grows until it fails to update. References are resolved either with a second query or with the $lookup aggregation stage (a left outer join), which is more expensive than an embedded read. The skill is recognizing the cardinality and growth profile: 1-to-few embeds, 1-to-many references, and 1-to-squillions always references (often with the parent referencing the child via the child holding the parent id)."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The most common modeling bug is embedding an unbounded array. A 'post' document that embeds every comment works in the demo and then hits the 16 MB cap (or O(n) update cost) in production. Unbounded relationships must be referenced - store comments in their own collection keyed by postId."
+        }
+      ]
+    },
+    {
+      "id": "aggregation-example",
+      "heading": "Example: The Aggregation Pipeline",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The aggregation pipeline is MongoDB's data-processing framework: documents flow through a sequence of stages, each transforming the stream. It is the rough equivalent of SQL's SELECT ... GROUP BY ... HAVING ... ORDER BY, but as a composable list of stages. Common stages are $match (filter, like WHERE), $group (aggregate, like GROUP BY), $sort, $project (reshape/select fields), $lookup (join), $unwind (flatten an array into one document per element), and $limit."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Total revenue per customer for shipped orders in 2026, top 5 spenders\ndb.orders.aggregate([\n  // 1) filter early - $match before $group shrinks the stream and can use an index\n  { $match: {\n      status: \"shipped\",\n      createdAt: { $gte: ISODate(\"2026-01-01\"), $lt: ISODate(\"2027-01-01\") }\n  }},\n  // 2) group by customer, summing totals and counting orders\n  { $group: {\n      _id: \"$customerId\",\n      revenue: { $sum: \"$total\" },\n      orders:  { $sum: 1 }\n  }},\n  // 3) sort by revenue descending\n  { $sort: { revenue: -1 } },\n  // 4) keep the top 5\n  { $limit: 5 },\n  // 5) join customer details (left outer join on the customers collection)\n  { $lookup: {\n      from: \"customers\", localField: \"_id\",\n      foreignField: \"_id\", as: \"customer\"\n  }},\n  // 6) reshape the output\n  { $project: {\n      _id: 0, customerId: \"$_id\", revenue: 1, orders: 1,\n      name: { $arrayElemAt: [\"$customer.name\", 0] }\n  }}\n])"
+        },
+        {
+          "type": "paragraph",
+          "text": "Stage order is a performance decision, not just a logical one. Putting $match (and $sort) as early as possible lets the query planner use indexes and shrink the document stream before expensive stages like $group and $lookup run on it - the same 'filter before you aggregate' principle as pushing a SQL WHERE clause down. Running $match after $group would force the engine to aggregate every document first and then discard most of the result, which is far slower."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Use explain() to verify a pipeline uses an index for its leading $match and respects index-covered $sort. A pipeline whose first stage is a collection scan over millions of documents is the aggregation equivalent of a missing SQL index - it will not scale."
+        }
+      ]
+    },
+    {
+      "id": "indexes",
+      "heading": "Indexes",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Like any database, MongoDB needs indexes to answer queries without scanning the whole collection. Indexes are B-tree structures on one or more fields. Without a matching index, a query is a COLLSCAN (collection scan) reading every document - fine for thousands of documents, fatal for millions. The same rules as relational indexing apply, plus a few document-specific kinds."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Single-field and compound indexes follow the Equality-Sort-Range (ESR) rule: order compound-index fields as equality predicates, then sort fields, then range predicates, to serve filter + sort from the index.",
+            "A compound index also supports queries on its prefix (an index on {a,b,c} serves {a} and {a,b}) - so order fields by selectivity and query shape.",
+            "Multikey indexes automatically index each element of an array field, enabling queries like {\"items.sku\": x}.",
+            "Specialized indexes: text (full-text), geospatial (2dsphere), hashed (for sharding), TTL (auto-expire documents after a time), and partial/sparse (index only some documents).",
+            "A covered query is served entirely from the index without touching the documents - the fastest case; it requires the index to contain every field the query reads."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Indexes are not free: every index must be updated on each write and consumes RAM (MongoDB performs best when the working-set indexes fit in memory). Over-indexing slows writes and wastes memory; under-indexing causes collection scans. Use explain() and index-usage stats to keep only the indexes your real queries use."
+        }
+      ]
+    },
+    {
+      "id": "replication-sharding",
+      "heading": "Replica Sets, Sharding, and Consistency",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "MongoDB achieves high availability with replica sets: a group of nodes holding the same data, with one primary that accepts all writes and secondaries that replicate the primary's operation log (oplog). If the primary fails, the remaining nodes hold an election (Raft-like) and a secondary is promoted - this automatic failover is what makes the cluster resilient. Reads default to the primary (strong) but can be directed to secondaries (eventually consistent, lower load)."
+        },
+        {
+          "type": "paragraph",
+          "text": "Horizontal scale comes from sharding: the data in a collection is partitioned across multiple shards (each itself a replica set) by a shard key. A query router (mongos) directs each operation to the relevant shard(s), and config servers store the cluster metadata and chunk-to-shard mapping. The shard key is the single most important sharding decision: it must have high cardinality, low frequency (no value dominates), and match the query pattern, or you get hotspots - a monotonically increasing key (like a timestamp or default ObjectId) routes all new writes to one shard, defeating the purpose. Hashed shard keys spread writes evenly but break range queries."
+        },
+        {
+          "type": "paragraph",
+          "text": "Consistency and durability are tuned per operation with write and read concerns. Write concern w controls how many nodes must acknowledge a write before it returns: w:1 (primary only - fast, can be lost on failover), w:\"majority\" (a majority of voting nodes - durable across a primary failure). Read concern controls what a read sees: \"local\" (whatever the queried node has, may be rolled back), \"majority\" (only data acknowledged by a majority, will not be rolled back), and \"linearizable\" (sees all prior majority writes - strongest, slowest). Combining w:\"majority\" writes with majority/linearizable reads gives strong consistency at the cost of latency - the PACELC tradeoff made concrete."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "w:1 writes can be silently lost: if the primary acknowledges a write but crashes before replicating it, the new primary never saw it and rolls it back. For any data you cannot afford to lose, use w:\"majority\" - it guarantees the write survives a single-node failure at the cost of waiting for replication."
+        }
+      ]
+    },
+    {
+      "id": "mistakes",
+      "heading": "Common Mistakes",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Embedding an unbounded array (comments, events, logs) inside a parent document until it hits the 16 MB BSON limit or O(n) update cost - reference it instead.",
+            "Choosing a monotonically increasing shard key (timestamp, default ObjectId), which funnels all new writes to one shard and creates a hot spot.",
+            "Assuming NoSQL means 'no schema' and skipping validation, then discovering inconsistent field shapes that break queries and aggregations.",
+            "Using w:1 (or unacknowledged) writes for important data and losing writes on a primary failover; durability needs w:\"majority\".",
+            "Running aggregations or queries without supporting indexes, causing full collection scans that pass in dev and melt in production.",
+            "Treating multi-document operations as transactional by default - single-document writes are atomic, but spanning documents requires explicit multi-document transactions (which are costly).",
+            "Reimplementing relational joins in application code with N+1 round trips instead of modeling for the access pattern (embedding) or using $lookup deliberately."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Production incident pattern: a notifications collection sharded on a creation-time-based key. All inserts targeted the single shard owning the latest time range, so write throughput was capped at one shard's capacity while the others sat idle. Switching to a hashed or compound (userId + time) shard key spread the load."
+        }
+      ]
+    },
+    {
+      "id": "bestpractices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Model for your queries: embed bounded, co-accessed data; reference shared, independent, or unbounded data. Let access patterns - not normal forms - drive the schema.",
+            "Enforce structure with JSON Schema validation even though the database is schema-flexible, to keep field shapes consistent.",
+            "Index for your real query and sort patterns using the Equality-Sort-Range ordering, and verify with explain(); prune unused indexes.",
+            "Pick a shard key with high cardinality, even distribution, and alignment to your queries; avoid monotonically increasing keys to prevent hotspots.",
+            "Use w:\"majority\" for durable writes and majority/linearizable read concern where you need strong consistency; relax only where you can tolerate loss/staleness.",
+            "Filter early in aggregation pipelines ($match/$sort first) so stages can use indexes and operate on a small stream.",
+            "Use multi-document transactions only when genuinely needed; prefer modeling the atomic unit as a single document so single-document atomicity suffices."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Decision", "Default guidance"],
+          "rows": [
+            ["1-to-few, read together", "Embed"],
+            ["1-to-many / unbounded", "Reference (child holds parent id)"],
+            ["Need durability", "w:\"majority\""],
+            ["Need strong reads", "readConcern majority/linearizable"],
+            ["Pick a shard key", "High cardinality, even, query-aligned"],
+            ["Speed up a slow query", "Add index (ESR), confirm with explain()"],
+            ["Cross-document atomicity", "Single-doc model first, else transaction"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "note-when-not-nosql",
+      "heading": "Note: When NOT to Use NoSQL",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "NoSQL is the wrong default for workloads that are inherently relational and transactional. If your data has many many-to-many relationships queried in varied, unpredictable ways; if you need multi-row ACID transactions across entities (transferring money, double-entry accounting); if strong referential integrity and constraints must be enforced by the database; or if ad-hoc analytical queries and joins are central - a mature relational database (PostgreSQL) will serve you better and with less application-side complexity. Modern Postgres also offers JSONB for the occasional flexible field, often removing the only reason teams reached for a document store."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Financial/ledger systems: need serializable multi-row transactions and constraints - use a relational database.",
+            "Highly relational, exploratory analytics: arbitrary joins and aggregations are SQL's home turf.",
+            "Small-to-medium datasets with complex integrity rules: the 'scale' benefit of NoSQL does not apply, and you lose constraints and joins for nothing.",
+            "When the team will end up emulating joins/transactions in application code: that is a signal the relational model fit the problem all along."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Polyglot persistence is usually the mature answer: use the right store per workload - Postgres for transactional core data, Redis for caching/sessions, MongoDB for flexible content, a search engine for full-text, a graph DB for relationships - rather than forcing one database to do everything."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "sharded-cluster",
+      "title": "MongoDB Sharded Cluster Topology",
+      "type": "mermaid",
+      "content": "flowchart TD\n    App[Application] --> M[mongos\\nquery router]\n    M --> CS[(Config servers\\ncluster metadata)]\n    M --> S1\n    M --> S2\n    M --> S3\n    subgraph S1[Shard 1 - replica set]\n      P1[Primary] --> SEC1a[Secondary]\n      P1 --> SEC1b[Secondary]\n    end\n    subgraph S2[Shard 2 - replica set]\n      P2[Primary] --> SEC2a[Secondary]\n      P2 --> SEC2b[Secondary]\n    end\n    subgraph S3[Shard 3 - replica set]\n      P3[Primary] --> SEC3a[Secondary]\n      P3 --> SEC3b[Secondary]\n    end"
+    },
+    {
+      "id": "cap-triangle",
+      "title": "CAP: Pick Two (Partition Tolerance Is Mandatory)",
+      "type": "ascii",
+      "content": "                 Consistency (C)\n                      /\\\n                     /  \\\n            CP      /    \\     CA\n     (MongoDB,     /      \\   (single node only -\n      HBase)      /        \\   not partition tolerant)\n                 /          \\\n                /            \\\n  Availability (A) ---------- Partition tolerance (P)\n                       AP\n                (Cassandra, DynamoDB)\n\n  Real distributed systems MUST tolerate partitions (P),\n  so the live choice during a partition is C vs A.\n  PACELC adds: Else (no partition) choose Latency vs Consistency."
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-nosql-types",
+      "question": "What are the four main types of NoSQL databases and when do you use each?",
+      "answer": "Document stores (MongoDB, Couchbase) hold self-describing JSON/BSON documents and suit hierarchical, evolving entities you read as a whole, like catalogs or content. Key-value stores (Redis, DynamoDB) map a unique key to an opaque value and are the fastest, simplest model for caching, sessions, and lookups by key. Wide-column stores (Cassandra, HBase, Bigtable) organize rows into dynamic, sparse column families partitioned by key, optimized for massive write throughput and time-series/event data with range scans within a partition. Graph databases (Neo4j, Neptune) treat nodes and edges as first-class, making multi-hop relationship traversals (social graphs, recommendations, fraud rings) cheap where they would be pathological joins in SQL. The choice follows the access pattern: by-key lookups, whole-object reads, relationship traversal, or high-volume append-and-scan.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["nosql", "data-modeling"],
+      "followUps": ["Why are graph traversals expensive in a relational database?", "What query limitation do pure key-value stores have?"]
+    },
+    {
+      "id": "q-cap-theorem",
+      "question": "Explain the CAP theorem and why 'CA' systems do not really exist in distributed databases.",
+      "answer": "CAP says a distributed store can simultaneously guarantee at most two of Consistency (every read sees the latest write / linearizability), Availability (every request gets a non-error response), and Partition tolerance (the system keeps operating despite dropped messages between nodes). In any real network, partitions can and do happen, so partition tolerance is mandatory - you cannot opt out of the network failing. That means the genuine choice is made only during a partition, between C and A: a CP system (MongoDB with majority concerns, HBase) refuses or blocks requests it cannot serve consistently, while an AP system (Cassandra, DynamoDB) keeps answering on both sides and reconciles later. 'CA' would mean giving up partition tolerance, which is only possible for a single-node system that has no network to partition - hence CA is not a meaningful option for a distributed database.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["cap-theorem", "consistency"],
+      "followUps": ["Is MongoDB CP or AP, and under what configuration?", "How does PACELC extend CAP?"]
+    },
+    {
+      "id": "q-pacelc",
+      "question": "What does PACELC add to the CAP theorem?",
+      "answer": "PACELC (Abadi) addresses CAP's blind spot: CAP only describes behavior during a partition, which is rare, and says nothing about the common case. PACELC states: if there is a Partition (P), the system trades between Availability and Consistency (A or C) - the CAP scenario; Else (E), in normal partition-free operation, it trades between Latency and Consistency (L or C). The insight is that even with no partition, strong consistency has a cost: to guarantee a read sees the latest write you must coordinate across replicas, adding latency. So systems also pick a normal-case stance. Cassandra is PA/EL (favor availability under partition, low latency otherwise, i.e. eventual consistency). A strongly consistent store is PC/EC (consistency in both regimes, paying coordination latency). PACELC thus gives a fuller, four-way classification of a store's consistency-versus-performance philosophy.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["pacelc", "cap-theorem", "consistency"],
+      "followUps": ["Classify MongoDB and Cassandra in PACELC terms.", "Why does strong consistency cost latency even without a partition?"]
+    },
+    {
+      "id": "q-embed-vs-reference",
+      "question": "How do you decide between embedding and referencing in MongoDB?",
+      "answer": "Model for the query pattern, not normalization. Embed when the related data is owned by the parent, read together in the same query, bounded in size, and benefits from atomic update with the parent - for example an order's line items. Reference (store an id and read separately or via $lookup) when the data is shared by many parents, has its own lifecycle and identity, is updated independently, or grows without bound. The hard constraint is the 16 MB BSON document limit: any unbounded relationship (comments on a viral post, a busy user's events) MUST be referenced, because embedding it makes the document grow until updates become O(n) or it exceeds the cap. The cardinality heuristic: 1-to-few embed, 1-to-many reference, 1-to-millions always reference (typically the child stores the parent id).",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["mongodb", "data-modeling", "embedding"],
+      "followUps": ["What is the document size limit and why does it matter here?", "How does $lookup compare in cost to an embedded read?"]
+    },
+    {
+      "id": "q-aggregation-pipeline",
+      "question": "What is the MongoDB aggregation pipeline and why does stage order matter?",
+      "answer": "The aggregation pipeline processes documents through an ordered sequence of stages, each transforming the stream - roughly SQL's SELECT/WHERE/GROUP BY/HAVING/ORDER BY expressed as composable steps. Key stages: $match (filter), $group (aggregate), $sort, $project (reshape), $lookup (left outer join), $unwind (explode an array), and $limit. Stage order is a performance decision: placing $match and $sort as early as possible lets the planner use indexes and shrink the document stream before costly stages like $group and $lookup run, exactly like pushing a SQL WHERE predicate down. Filtering after grouping forces the engine to aggregate everything and then throw most of it away, which is far slower. You confirm a pipeline is index-efficient with explain(), checking that the leading $match uses an index rather than a collection scan.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["mongodb", "aggregation"],
+      "followUps": ["Which stages can use an index?", "What does $unwind do to array fields?"]
+    },
+    {
+      "id": "q-write-concern",
+      "question": "What are write and read concerns in MongoDB, and what does w:\"majority\" guarantee?",
+      "answer": "Write concern (w) controls how many replica-set members must acknowledge a write before it returns. w:1 means only the primary acknowledged - fast, but if the primary crashes before replicating, the write can be rolled back and lost. w:\"majority\" means a majority of voting members acknowledged, which guarantees the write survives a single-node failure (the new primary elected after a failover will have it). Read concern controls what a read may observe: \"local\" returns whatever the node has (may later roll back), \"majority\" returns only data acknowledged by a majority (durable, won't roll back), and \"linearizable\" returns the result reflecting all prior majority-acknowledged writes (strongest, highest latency). Combining w:\"majority\" writes with majority or linearizable reads yields strong consistency, paying the replication/coordination latency - the concrete PACELC tradeoff.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["mongodb", "consistency", "durability"],
+      "followUps": ["How can a w:1 write be lost?", "When is readConcern linearizable worth the latency?"]
+    },
+    {
+      "id": "q-sharding",
+      "question": "How does sharding work in MongoDB and what makes a good shard key?",
+      "answer": "Sharding partitions a collection's data across multiple shards (each shard is itself a replica set for HA) so the cluster scales horizontally. A query router (mongos) routes operations to the relevant shard(s) using a shard key, and config servers store the chunk-to-shard mapping. The shard key is the critical decision: it should have high cardinality (many distinct values), low frequency/even distribution (no single value dominates), and align with common query predicates so queries are targeted to one shard rather than broadcast (scatter-gather) to all. A poor key - especially a monotonically increasing one like a timestamp or default ObjectId - sends every new write to the single shard owning the highest range, creating a write hotspot. A hashed shard key spreads writes evenly but loses efficient range queries; a compound key (e.g. userId + time) can balance distribution with query locality.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["mongodb", "sharding", "scalability"],
+      "followUps": ["Why does a monotonically increasing shard key cause a hotspot?", "What is a scatter-gather query and when does it happen?"]
+    },
+    {
+      "id": "q-when-not-nosql",
+      "question": "When should you NOT use NoSQL, and reach for a relational database instead?",
+      "answer": "Avoid NoSQL when the data and access pattern are inherently relational and transactional. Specifically: when you need multi-row ACID transactions across entities (money transfers, double-entry ledgers); when many-to-many relationships are queried in varied, unpredictable ways that demand flexible joins; when the database must enforce referential integrity and constraints rather than pushing them into application code; or when ad-hoc analytical queries and aggregations over normalized data are central. In these cases a mature relational database like PostgreSQL provides ACID, joins, constraints, and a powerful query optimizer with far less application complexity - and its JSONB type covers occasional schema-flexible fields, removing a common reason teams chose a document store. A telltale sign you picked wrong is ending up emulating joins or transactions in application code; that means the relational model fit the problem all along. The mature pattern is polyglot persistence - the right store per workload.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["nosql", "tradeoffs", "relational"],
+      "followUps": ["What does PostgreSQL JSONB give you that a document store does?", "What is polyglot persistence?"]
+    },
+    {
+      "id": "q-tricky-eventual-consistency",
+      "question": "Tricky: An AP store returns a stale value right after you wrote a new one, yet the team insists 'the database is consistent'. Reconcile this.",
+      "answer": "They are using two different meanings of 'consistent'. In CAP, Consistency means linearizability - every read reflects the latest acknowledged write across the whole system - and an AP store deliberately gives this up to stay available, so reading a stale value immediately after a write is expected behavior under EVENTUAL consistency: replicas converge over time, but a read can land on a replica that has not yet seen your write. However, that same store is 'consistent' in the ACID sense only loosely, and may offer stronger session guarantees like read-your-own-writes if you pin to the same node or use a quorum. The subtle point is that 'consistency' in CAP (a global, real-time ordering property) is a completely different concept from 'consistency' in ACID (the database moves between valid states honoring constraints). Many systems are ACID-locally-consistent yet CAP-eventually-consistent. To actually see your write, you must request a stronger guarantee - quorum/majority reads, or read-your-writes session consistency - and accept the added latency, exactly the PACELC EL-vs-EC tradeoff.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["consistency", "cap-theorem", "gotcha"],
+      "followUps": ["What is read-your-own-writes consistency and how is it achieved?", "How do quorum reads (R + W > N) restore strong reads?"]
+    },
+    {
+      "id": "q-tricky-shard-key-hotspot",
+      "question": "Tricky: After sharding a high-write collection, total write throughput did not improve at all - it is stuck at one shard's capacity. What is the most likely cause?",
+      "answer": "The shard key is almost certainly monotonically increasing - a timestamp, an auto-incrementing counter, or the default ObjectId (whose leading bytes are time-based). With range-based sharding, all new inserts fall into the single chunk holding the highest key range, which lives on one shard, so every write hammers that one shard while the others sit idle: a write hotspot. Sharding only scales writes if they are spread across shards, so a key that always grows defeats the entire purpose. Fixes: use a hashed shard key (hashes the value so inserts distribute evenly across shards - at the cost of efficient range queries), or design a compound key that leads with a high-cardinality, well-distributed field aligned to your queries (e.g. userId, then time), so different users' writes land on different shards. The general principle: a good shard key has high cardinality, even frequency, and is NOT monotonic.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["mongodb", "sharding", "gotcha"],
+      "followUps": ["What does a hashed shard key cost you?", "How would a compound (userId, timestamp) key help?"]
+    },
+    {
+      "id": "q-tricky-16mb-embed",
+      "question": "Tricky: A 'blog post' document embeds an array of comments and works perfectly in testing, but in production some updates start failing or becoming extremely slow. Diagnose it.",
+      "answer": "This is the classic unbounded-array anti-pattern. Comments grow without bound, so on popular posts the embedded comments array balloons. Two things go wrong. First, MongoDB caps a single BSON document at 16 MB; a viral post's comments eventually exceed that and any update to the document is rejected outright. Second, well before the hard cap, updating or growing a large document is expensive: MongoDB may have to rewrite/relocate the whole document and update every index entry, so push operations become O(document size), and high-traffic posts contend on that one large document. The fix is to reference, not embed: store comments in their own collection keyed by postId (the child holds the parent id), query them with pagination, and optionally keep a small denormalized count or the most recent few comments on the post for fast display (the 'subset' or 'computed' pattern). The lesson: embed bounded 1-to-few data, but any relationship that can grow without limit must be referenced.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["mongodb", "data-modeling", "gotcha"],
+      "followUps": ["What is the subset pattern for showing recent comments fast?", "Why does growing a large document update every index?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-model-ecommerce",
+      "title": "Model an E-Commerce Schema for MongoDB",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "prompt": "Design MongoDB collections for an e-commerce system with users, products, orders, and product reviews. Decide what to embed vs reference and justify each choice against the access patterns: orders are read whole with their line items; a product can have unbounded reviews; users place many orders over time. Provide example documents and the key indexes.",
+      "hints": [
+        "Embed the order's line items (bounded, read together, owned by the order).",
+        "Reference reviews in their own collection (unbounded growth would blow the 16 MB limit).",
+        "Reference users from orders by userId; index the fields you filter and sort on."
+      ],
+      "solutionCode": "// users collection - referenced by orders/reviews via _id\n{ _id: ObjectId(\"u1\"), email: \"a@b.com\", name: \"Alice\", createdAt: ISODate(...) }\n\n// products collection - product facts + a small denormalized rating summary\n{ _id: ObjectId(\"p1\"), sku: \"PLQ-PRO\", name: \"Plaque Pro\",\n  price: 3000, ratingAvg: 4.6, ratingCount: 128 }   // summary, not the reviews themselves\n\n// orders collection - EMBED line items (bounded, read together, atomic with the order)\n{ _id: ObjectId(\"o1\"),\n  userId: ObjectId(\"u1\"),          // REFERENCE the user (own lifecycle)\n  status: \"shipped\",\n  total: 4299,\n  items: [                          // embedded: 1-to-few, owned by the order\n    { productId: ObjectId(\"p1\"), sku: \"PLQ-PRO\", qty: 1, price: 3000 },\n    { productId: ObjectId(\"p2\"), sku: \"NFC-CARD\", qty: 2, price: 649 }\n  ],\n  createdAt: ISODate(\"2026-06-25T10:00:00Z\") }\n\n// reviews collection - REFERENCE (unbounded per product => separate collection)\n{ _id: ObjectId(\"r1\"), productId: ObjectId(\"p1\"), userId: ObjectId(\"u1\"),\n  rating: 5, body: \"Great quality\", createdAt: ISODate(...) }\n\n// Indexes that match the access patterns:\ndb.users.createIndex({ email: 1 }, { unique: true });        // login lookup\ndb.orders.createIndex({ userId: 1, createdAt: -1 });          // a user's orders, newest first\ndb.orders.createIndex({ status: 1, createdAt: -1 });          // ops dashboards\ndb.reviews.createIndex({ productId: 1, createdAt: -1 });      // paginate a product's reviews\ndb.products.createIndex({ sku: 1 }, { unique: true });",
+      "solutionLanguage": "javascript",
+      "explanation": "Each modeling choice is driven by the access pattern and growth profile. Order line items are EMBEDDED because they are bounded (a handful per order), always read and written together with the order, owned by the order, and benefit from single-document atomicity (the whole order updates atomically). The user is REFERENCED from the order by userId, not embedded, because a user has an independent lifecycle and is shared across many orders - embedding would duplicate user data and require fan-out updates on a name change. Reviews are REFERENCED in their own collection keyed by productId because reviews per product are UNBOUNDED; embedding them in the product would risk the 16 MB document limit and make every product update rewrite a huge array. To keep product pages fast we denormalize a small ratingAvg/ratingCount summary onto the product (the computed pattern), updated when reviews change, so listing a product needs no aggregation over the reviews collection. The indexes map directly to queries: unique email for login, {userId, createdAt:-1} for a user's order history newest-first (a compound index serving filter + sort), {status, createdAt:-1} for operational dashboards, and {productId, createdAt:-1} to paginate a product's reviews. This is the canonical embed-bounded / reference-unbounded discipline plus query-driven indexing.",
+      "relatedTopic": "nosql-mongodb"
+    },
+    {
+      "id": "ch-aggregation-revenue",
+      "title": "Aggregation Pipeline: Monthly Revenue Report",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "prompt": "Write a MongoDB aggregation pipeline over an 'orders' collection that produces, for the year 2026, the total revenue and order count per month, sorted chronologically. Only completed orders (status 'shipped' or 'delivered') count. Optimize for index use by filtering first, and explain the stage ordering.",
+      "hints": [
+        "Put $match first so it can use an index on status/createdAt and shrink the stream.",
+        "Group by the month extracted from createdAt using a date operator like $month (or $dateToString).",
+        "Sum 'total' for revenue and count documents, then $sort by month."
+      ],
+      "solutionCode": "db.orders.aggregate([\n  // 1) $match FIRST: filter by status + date range so an index on\n  //    { status: 1, createdAt: 1 } can serve it before any grouping.\n  { $match: {\n      status: { $in: [\"shipped\", \"delivered\"] },\n      createdAt: { $gte: ISODate(\"2026-01-01\"), $lt: ISODate(\"2027-01-01\") }\n  }},\n  // 2) group by calendar month; sum revenue and count orders\n  { $group: {\n      _id: { month: { $month: \"$createdAt\" } },\n      revenue: { $sum: \"$total\" },\n      orders:  { $sum: 1 }\n  }},\n  // 3) sort chronologically by month\n  { $sort: { \"_id.month\": 1 } },\n  // 4) reshape into a clean output shape\n  { $project: {\n      _id: 0,\n      month: \"$_id.month\",\n      revenue: 1,\n      orders: 1,\n      avgOrderValue: { $round: [ { $divide: [\"$revenue\", \"$orders\"] }, 0 ] }\n  }}\n]);\n\n// Supporting index so stage 1 is an index scan, not a COLLSCAN:\ndb.orders.createIndex({ status: 1, createdAt: 1 });",
+      "solutionLanguage": "javascript",
+      "explanation": "The pipeline mirrors SQL's WHERE -> GROUP BY -> ORDER BY -> SELECT but as ordered stages, and the ordering is chosen for performance, not just logic. $match runs FIRST so the compound index { status: 1, createdAt: 1 } can satisfy both the equality-style status predicate ($in) and the createdAt range, dramatically shrinking the document stream before the expensive $group - this is the same 'push the filter down' optimization as a SQL predicate using an index. $group then aggregates only the surviving documents, using $month to bucket by calendar month, $sum: '$total' for revenue and $sum: 1 to count orders. $sort orders the (now small) grouped result chronologically, and $project reshapes the output and computes a derived average order value with $divide and $round. Had we placed $match after $group, the engine would have grouped every order in the collection and then discarded non-matching ones - forcing a full scan and far more work. The createIndex on { status, createdAt } is what makes the leading $match an index scan rather than a COLLSCAN; you would confirm this with .explain('executionStats').",
+      "relatedTopic": "nosql-mongodb"
+    }
+  ],
+  "references": [
+    {"label": "MongoDB Manual - Data Modeling", "url": "https://www.mongodb.com/docs/manual/data-modeling/"},
+    {"label": "MongoDB Manual - Aggregation Pipeline", "url": "https://www.mongodb.com/docs/manual/core/aggregation-pipeline/"},
+    {"label": "MongoDB Manual - Sharding", "url": "https://www.mongodb.com/docs/manual/sharding/"},
+    {"label": "Daniel Abadi - Consistency Tradeoffs in Modern Distributed Systems (PACELC)", "url": "https://www.cs.umd.edu/~abadi/papers/abadi-pacelc.pdf"},
+    {"label": "Eric Brewer - CAP Twelve Years Later", "url": "https://www.infoq.com/articles/cap-twelve-years-later-how-the-rules-have-changed/"}
+  ]
+}

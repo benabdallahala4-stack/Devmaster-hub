@@ -1,0 +1,546 @@
+{
+  "id": "operating-systems",
+  "title": "Operating Systems",
+  "category": "Computer Science",
+  "subcategory": "Systems",
+  "difficulty": "senior",
+  "tags": ["operating-systems", "concurrency", "virtual-memory", "scheduling", "deadlock", "synchronization"],
+  "description": "A senior-level walk through the core OS concepts interviewers probe: processes vs threads, context switching, scheduling, virtual memory and paging with the TLB, the memory hierarchy, concurrency primitives, the four deadlock conditions, user vs kernel mode and syscalls, I/O, and file-system basics.",
+  "estReadMinutes": 31,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "An operating system is the software layer that multiplexes finite hardware - CPU, memory, devices - among many programs while protecting them from one another. It provides three core abstractions: the process (a virtualized CPU plus an isolated address space), virtual memory (a private, contiguous-looking view of RAM backed by paging), and the file (a persistent, named byte stream). Understanding how these are implemented separates engineers who can reason about performance and concurrency bugs from those who cannot."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Virtualize the CPU: time-share one or many cores across processes and threads via the scheduler and context switches.",
+            "Virtualize memory: give each process a private virtual address space mapped to physical frames through page tables and the TLB.",
+            "Provide concurrency primitives: mutexes, semaphores, and condition variables so threads can coordinate safely.",
+            "Mediate I/O and persistence: device drivers, the I/O subsystem, and file systems turn raw hardware into files and sockets.",
+            "Enforce protection: the user/kernel mode boundary and the system-call interface keep untrusted code from touching hardware directly."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A useful mental model: the OS is an event-driven program whose 'events' are interrupts (timer, device), traps (system calls), and faults (page fault, division by zero). Almost everything the kernel does is a response to one of these three."
+        }
+      ]
+    },
+    {
+      "id": "why",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "OS knowledge is load-bearing for everyday engineering decisions. Whether to use threads or processes, why a service stalls under load, how a memory leak interacts with the page cache, why a lock causes a priority inversion, or how a context switch costs you tens of microseconds - these are OS questions. Cloud cost and latency are often dominated by syscall overhead, context-switch storms, and cache/TLB misses that only make sense once you understand the underlying machinery."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Performance: context switches, system calls, and TLB/cache misses each cost hundreds to thousands of cycles; knowing this guides batching, thread-pool sizing, and zero-copy I/O.",
+            "Concurrency correctness: race conditions, deadlocks, and priority inversion are OS-level phenomena; the fixes (lock ordering, condition variables, priority inheritance) come from OS theory.",
+            "Resource isolation: containers (cgroups + namespaces) and VMs are built on OS primitives; debugging an OOM-kill or a CPU-throttled pod requires understanding scheduling and memory accounting.",
+            "Reliability: understanding fsync, the page cache, and write-back caching is the difference between a database that survives a power loss and one that silently corrupts data."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "A frequent senior interview signal: can you reason about WHY an operation is slow, in cycles? A function call is ~1 ns, a main-memory access ~100 ns, a context switch ~1-5 us, and a disk seek ~10 ms. Orders of magnitude, not exact numbers, are what matter."
+        }
+      ]
+    },
+    {
+      "id": "process-vs-thread",
+      "heading": "Processes vs Threads and Context Switching",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A process is an instance of a running program: it owns a private virtual address space, file descriptors, and at least one thread of execution. A thread is the unit the scheduler dispatches; threads within a process share the address space (heap, globals, code) but each has its own stack, registers, and program counter. The shared address space is exactly why threads are cheap to communicate but dangerous - one thread can corrupt another's data, which is the root of every data race."
+        },
+        {
+          "type": "table",
+          "headers": ["Aspect", "Process", "Thread"],
+          "rows": [
+            ["Address space", "Private, isolated", "Shared within the process"],
+            ["Creation cost", "High (clone + page tables)", "Low (just a stack + TCB)"],
+            ["Communication", "IPC: pipes, sockets, shared memory", "Shared variables (needs sync)"],
+            ["Crash isolation", "One crash does not kill siblings", "A segfault can take down the process"],
+            ["Context-switch cost", "Higher (TLB flush, page-table swap)", "Lower (same address space)"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "A context switch saves the current thread's CPU register state into its kernel control block and restores another's. Switching between threads of the SAME process is cheaper than switching between processes, because a process switch also changes the page-table base register (CR3 on x86), which typically flushes the TLB - so the new process starts with cold address translations and pays a burst of TLB misses. This indirect cost often dwarfs the direct register save/restore."
+        },
+        {
+          "type": "code",
+          "language": "c",
+          "code": "// fork() creates a new PROCESS (copy-on-write address space)\npid_t pid = fork();\nif (pid == 0) {\n    // child: separate address space; writes are NOT seen by parent\n    execlp(\"ls\", \"ls\", NULL);  // replace image with a new program\n} else {\n    waitpid(pid, NULL, 0);     // parent waits for child to finish\n}\n\n// pthread_create starts a THREAD sharing this address space\nvoid* worker(void* arg) {\n    shared_counter++;          // RACE: shared with other threads\n    return NULL;\n}\npthread_t t;\npthread_create(&t, NULL, worker, NULL);\npthread_join(t, NULL);"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "fork() uses copy-on-write: the child's pages are shared read-only with the parent and only physically copied when one side writes. This makes fork cheap until the first write, and is why a fork() in a process with a huge heap can still be fast."
+        }
+      ]
+    },
+    {
+      "id": "scheduling",
+      "heading": "CPU Scheduling",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The scheduler decides which ready thread runs next on each core. Preemptive schedulers use a timer interrupt to forcibly reclaim the CPU, guaranteeing fairness and responsiveness; cooperative schedulers rely on threads yielding voluntarily. The goals - throughput, low latency, fairness, and meeting deadlines - conflict, so different algorithms make different trade-offs."
+        },
+        {
+          "type": "table",
+          "headers": ["Algorithm", "Idea", "Strength", "Weakness"],
+          "rows": [
+            ["FCFS", "Run in arrival order", "Simple, no starvation", "Convoy effect; bad avg wait"],
+            ["SJF / SRTF", "Shortest job (remaining) first", "Optimal average wait", "Starves long jobs; needs burst prediction"],
+            ["Round Robin", "Fixed time quantum, rotate", "Fair, responsive", "Quantum tuning; context-switch overhead"],
+            ["Priority", "Highest priority first", "Honors importance", "Starvation; priority inversion"],
+            ["MLFQ", "Multi-level queues, demote CPU hogs", "Approximates SJF without knowing burst", "Complex; gameable"],
+            ["CFS (Linux)", "Fair share by virtual runtime", "Proportional fairness", "Not for hard real-time"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Linux's default Completely Fair Scheduler (CFS) tracks each task's virtual runtime (vruntime) and always runs the task with the smallest vruntime, scaled by its nice weight, using a red-black tree ordered by vruntime. This gives proportional fairness without fixed time slices. Real-time scheduling classes (SCHED_FIFO, SCHED_RR) sit above CFS for latency-critical work."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Priority scheduling causes priority inversion: a high-priority thread blocks on a lock held by a low-priority thread that is itself preempted by a medium-priority thread. The fix is priority inheritance - temporarily boost the lock holder to the waiter's priority. This famously caused the 1997 Mars Pathfinder system resets."
+        }
+      ]
+    },
+    {
+      "id": "virtual-memory",
+      "heading": "Virtual Memory, Paging, and the TLB",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Virtual memory gives every process the illusion of a large, private, contiguous address space. The MMU translates virtual addresses to physical addresses in fixed-size units called pages (commonly 4 KiB). A virtual address splits into a page number (index into the page table) and an offset. Page tables are hierarchical (e.g. 4 levels on x86-64) to avoid storing an entry for every page. A page-table entry holds the physical frame number plus permission and status bits (present, dirty, accessed, read/write/execute)."
+        },
+        {
+          "type": "paragraph",
+          "text": "Because a full page-table walk would touch multiple memory levels on every access, the MMU caches recent translations in the Translation Lookaside Buffer (TLB), a small, fast, fully-associative cache of virtual-to-physical mappings. A TLB hit translates in ~1 cycle; a TLB miss triggers a page-table walk costing tens to hundreds of cycles (or a fault, handled by the OS, if the page is not present). Switching processes usually flushes the TLB, which is why process context switches are expensive."
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "Virtual address (x86-64, 4 KiB pages, 4-level):\n\n  63        48 47    39 38    30 29    21 20    12 11        0\n  +-----------+--------+--------+--------+--------+-----------+\n  | sign-ext  | PML4   | PDPT   | PD     | PT     |  offset   |\n  +-----------+--------+--------+--------+--------+-----------+\n        |        |        |        |        |          |\n        |        |        |        |        |          +--> byte within page\n        |        +--------+--------+--------+--> 4 levels of page-table indices\n\nTranslation: walk PML4 -> PDPT -> PD -> PT to get the physical frame,\nthen concatenate the 12-bit offset. The TLB caches the final\n(virtual page -> physical frame) result to skip this walk."
+        },
+        {
+          "type": "paragraph",
+          "text": "When a process accesses a page that is valid but not resident in RAM (swapped out, or never loaded - demand paging), the MMU raises a page fault. The OS's fault handler finds or allocates a frame, possibly evicting another page (using an approximation of LRU such as the clock/second-chance algorithm), loads the data, updates the page table, and resumes the faulting instruction. Excessive faulting where the working set exceeds RAM is called thrashing - the system spends most of its time paging rather than computing."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Thrashing is a cliff, not a slope: as the combined working set crosses physical memory, page-fault rate explodes and throughput collapses. The OS response is working-set management or, on Linux, the OOM killer. Application-level fix: reduce resident set, add RAM, or shard the workload."
+        }
+      ]
+    },
+    {
+      "id": "memory-hierarchy",
+      "heading": "The Memory Hierarchy",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Memory is organized as a hierarchy trading capacity for speed: registers, L1/L2/L3 caches, main memory (DRAM), and persistent storage (SSD/disk). Each level is roughly an order of magnitude slower and larger than the one above. Caches exploit locality - temporal (reuse the same data soon) and spatial (use nearby data soon) - and move data in fixed-size cache lines (typically 64 bytes). Writing cache-friendly code (sequential access, struct-of-arrays, avoiding false sharing) often matters more than algorithmic constant factors."
+        },
+        {
+          "type": "table",
+          "headers": ["Level", "Typical latency", "Typical size", "Notes"],
+          "rows": [
+            ["Register", "< 1 ns (sub-cycle)", "~KB", "Compiler-managed"],
+            ["L1 cache", "~1 ns (~4 cycles)", "32-64 KB", "Per core, split I/D"],
+            ["L2 cache", "~4 ns", "256 KB-1 MB", "Per core"],
+            ["L3 cache", "~10-20 ns", "8-64 MB", "Shared across cores"],
+            ["Main memory (DRAM)", "~100 ns", "GBs", "TLB miss adds to this"],
+            ["SSD", "~50-150 us", "TBs", "NVMe lowers further"],
+            ["Spinning disk", "~10 ms", "TBs", "Dominated by seek"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "False sharing is a subtle cache bug: two threads write to different variables that happen to live on the SAME 64-byte cache line, so the line ping-pongs between cores' caches. Padding the variables to separate lines (or @Contended in Java) can give multi-x speedups in hot concurrent code."
+        }
+      ]
+    },
+    {
+      "id": "concurrency-example",
+      "heading": "Example: Synchronization Primitives in Action",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Threads coordinate with three primitives. A mutex provides mutual exclusion: at most one thread holds it, protecting a critical section. A semaphore is a counter with atomic wait (decrement, block if zero) and signal (increment); a binary semaphore acts like a lock, while a counting semaphore limits N concurrent users of a resource. A condition variable lets a thread sleep until a predicate becomes true, always used with a mutex to avoid lost wakeups."
+        },
+        {
+          "type": "code",
+          "language": "c",
+          "code": "// Bounded buffer (producer/consumer) with a mutex + two condition variables\n#define N 16\nint buf[N], count = 0, head = 0, tail = 0;\npthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;\npthread_cond_t not_full  = PTHREAD_COND_INITIALIZER;\npthread_cond_t not_empty = PTHREAD_COND_INITIALIZER;\n\nvoid produce(int item) {\n    pthread_mutex_lock(&m);\n    while (count == N)                          // WHILE, not if: guard against spurious wakeups\n        pthread_cond_wait(&not_full, &m);       // atomically unlocks m and sleeps\n    buf[tail] = item; tail = (tail + 1) % N; count++;\n    pthread_cond_signal(&not_empty);            // wake a waiting consumer\n    pthread_mutex_unlock(&m);\n}\n\nint consume(void) {\n    pthread_mutex_lock(&m);\n    while (count == 0)\n        pthread_cond_wait(&not_empty, &m);\n    int item = buf[head]; head = (head + 1) % N; count--;\n    pthread_cond_signal(&not_full);\n    pthread_mutex_unlock(&m);\n    return item;\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Two details are non-negotiable. First, pthread_cond_wait must be called in a while loop, not an if, because of spurious wakeups (the thread may wake without the predicate being true) and because another thread may have invalidated the condition before this one acquires the lock. Second, cond_wait atomically releases the mutex and sleeps, then re-acquires it on wakeup - this atomicity is what prevents the lost-wakeup race."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Rule of thumb: a mutex protects data, a condition variable signals an event, and a semaphore counts a resource. Reaching for the wrong one (e.g. using a raw flag instead of a condition variable) is how lost-wakeup and busy-wait bugs creep in."
+        }
+      ]
+    },
+    {
+      "id": "deadlock",
+      "heading": "Deadlock: The Four Conditions",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A deadlock is a state where a set of threads are each blocked waiting for a resource held by another in the set, so none can proceed. Coffman's four conditions must ALL hold simultaneously for a deadlock to be possible; break any one and deadlock becomes impossible."
+        },
+        {
+          "type": "list",
+          "items": [
+            "1. Mutual exclusion: at least one resource is held in a non-shareable mode (only one holder at a time).",
+            "2. Hold and wait: a thread holding at least one resource is waiting to acquire additional resources held by others.",
+            "3. No preemption: a resource can only be released voluntarily by the thread holding it; it cannot be forcibly taken.",
+            "4. Circular wait: there exists a cycle of threads T1 -> T2 -> ... -> Tn -> T1 where each is waiting for a resource the next holds."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Prevention attacks a condition: impose a global lock ordering (always acquire locks in a fixed total order) to break circular wait - the single most practical technique. Require all resources up front to break hold-and-wait. Allow preemption/rollback (common in databases) to break no-preemption. Avoidance (the Banker's algorithm) keeps the system in a 'safe' state by granting only requests that leave a feasible completion order. Detection-and-recovery lets deadlocks happen, finds cycles in the wait-for graph, and aborts a victim."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// Deadlock: two threads acquire two locks in OPPOSITE orders -> circular wait\n// Thread A: lock(L1); lock(L2);   Thread B: lock(L2); lock(L1);\n\n// Prevention by GLOBAL LOCK ORDERING: always lock lower id first\nvoid transfer(Account a, Account b, long amount) {\n    Account first  = a.id < b.id ? a : b;   // canonical order breaks circular wait\n    Account second = a.id < b.id ? b : a;\n    synchronized (first) {\n        synchronized (second) {\n            a.balance -= amount;\n            b.balance += amount;\n        }\n    }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Livelock is the cousin of deadlock: threads are not blocked but keep responding to each other and make no progress (two people stepping aside in a hallway in sync). Starvation is yet another: a thread is perpetually denied a resource it needs. All three are liveness failures, distinct from safety failures like races."
+        }
+      ]
+    },
+    {
+      "id": "syscalls-modes",
+      "heading": "User Mode, Kernel Mode, and System Calls",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The CPU runs in (at least) two privilege levels: user mode (restricted - cannot execute privileged instructions or touch hardware directly) and kernel mode (full hardware access). Application code runs in user mode; to request a privileged service (open a file, send on a socket, allocate memory) it performs a system call, which traps into the kernel via a special instruction (syscall on x86-64), switching to kernel mode at a fixed, vetted entry point. The kernel validates arguments, performs the operation, and returns to user mode."
+        },
+        {
+          "type": "paragraph",
+          "text": "This boundary is the heart of OS protection: untrusted user code can never directly manipulate page tables, devices, or other processes' memory - it can only ask the kernel through the narrow, audited syscall interface. The trade-off is cost: a syscall involves a mode switch, register save/restore, and often a TLB or cache disturbance, so high-performance systems batch syscalls (io_uring, sendmmsg) or avoid them (user-space networking, vDSO for gettimeofday)."
+        },
+        {
+          "type": "code",
+          "language": "c",
+          "code": "// A 'simple' read() crosses the protection boundary:\nssize_t n = read(fd, buf, 4096);\n//  user mode: arrange args (fd, buf, len), execute the syscall instruction\n//  -> TRAP: CPU switches to kernel mode at the syscall entry handler\n//  kernel: validate fd & buffer, copy data from the page cache / device\n//  -> return value placed in a register, switch back to user mode\n// Each crossing costs hundreds of cycles even when no I/O actually happens."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Interrupts (asynchronous, from devices/timer), traps/syscalls (synchronous, intentional), and faults (synchronous, from an instruction - e.g. page fault) all enter the kernel through the trap mechanism but for different reasons. Distinguishing them is a common interview question."
+        }
+      ]
+    },
+    {
+      "id": "io-filesystems",
+      "heading": "I/O and File Systems",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "I/O can be blocking (the thread sleeps until data is ready), non-blocking (returns immediately, poll later), or asynchronous (kernel notifies on completion). The OS multiplexes readiness with select/poll/epoll (Linux) or kqueue (BSD); completion-based models like io_uring and Windows IOCP report when the operation has finished, not just when it could start. Choosing the model drives a server's concurrency architecture (thread-per-connection vs event loop)."
+        },
+        {
+          "type": "paragraph",
+          "text": "A file system maps human-friendly names to bytes on a block device. Classic Unix design uses inodes: each file has an inode storing metadata (size, permissions, timestamps, link count) and pointers to its data blocks (direct, plus single/double/triple indirect blocks for large files). Directories are just files mapping names to inode numbers, which is why hard links are multiple names for one inode and why deletion decrements a link count rather than immediately freeing data."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Page cache: the OS caches file data in RAM, so reads hit memory and writes are buffered (write-back) for speed - durability requires an explicit fsync.",
+            "Journaling: ext4/NTFS write metadata (and optionally data) to a journal first, so a crash mid-write can be replayed or rolled back instead of corrupting the file system.",
+            "Inodes vs data: running out of inodes can make a disk 'full' even with free space (many tiny files); df -i shows inode usage.",
+            "fsync vs write: write() only puts data in the page cache; only fsync()/fdatasync() forces it to stable storage - the crux of database durability and the famous 'lost data on power loss' class of bugs."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "A write() that 'succeeds' does NOT mean data is on disk - it may sit in the page cache for seconds. Databases and message queues call fsync (and fight with write-back caches and lying drives) to guarantee durability. This is why a naive 'echo > file' can lose data on power loss."
+        }
+      ]
+    },
+    {
+      "id": "mistakes",
+      "heading": "Common Mistakes",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Using an `if` instead of a `while` around condition-variable waits - spurious wakeups and recheck races then let a thread proceed when the predicate is false.",
+            "Assuming threads are always cheaper/better than processes - shared mutable state means every thread is a potential data race, and one segfault kills the whole process.",
+            "Conflating concurrency (structure: multiple tasks in progress) with parallelism (execution: multiple tasks literally running at once); a single core gives concurrency but not parallelism.",
+            "Ignoring lock ordering, then debugging intermittent deadlocks in production; the fix (a global acquisition order) should be a design rule, not an afterthought.",
+            "Treating write() as durable - forgetting fsync and losing committed data on power loss or crash.",
+            "Busy-waiting (spinning) on a condition that takes milliseconds, burning a core, instead of blocking on a condition variable or semaphore.",
+            "Forgetting that a process context switch flushes the TLB, so blaming application code for latency that is actually translation cold-start."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Classic concurrency incident: a global counter incremented without a lock (count++ is read-modify-write, not atomic) undercounts under load. The bug is invisible single-threaded and in light testing, then loses ~0.1% of events at scale. Use an atomic or a mutex; never assume a ++ is one instruction."
+        }
+      ]
+    },
+    {
+      "id": "bestpractices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Protect shared mutable state with the smallest possible critical section under a mutex (or use immutable/atomic data to avoid locks entirely).",
+            "Always wait on condition variables inside a while loop checking the predicate; signal/broadcast while holding the associated mutex.",
+            "Establish and document a global lock-acquisition order to make circular-wait deadlocks structurally impossible.",
+            "Prefer thread pools and async I/O (epoll/io_uring) over thread-per-request to bound context-switch overhead under high concurrency.",
+            "Batch system calls and use vectored/zero-copy I/O (readv/writev, sendfile, splice) to amortize the user/kernel crossing cost.",
+            "Call fsync/fdatasync where durability matters, and understand your storage stack's write-back behavior before trusting a successful write().",
+            "Design data structures for locality (sequential access, avoid pointer chasing and false sharing) - cache and TLB behavior often dominate big-O constants."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Problem", "Primitive / technique"],
+          "rows": [
+            ["Mutual exclusion over data", "Mutex / spinlock"],
+            ["Limit N concurrent users", "Counting semaphore"],
+            ["Wait for an event/predicate", "Condition variable + mutex"],
+            ["Prevent deadlock", "Global lock ordering"],
+            ["Avoid priority inversion", "Priority inheritance"],
+            ["Scale many connections", "epoll / io_uring + thread pool"],
+            ["Guarantee durability", "fsync / fdatasync"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "note-concurrency-parallelism",
+      "heading": "Note: Concurrency vs Parallelism",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Concurrency is a property of program structure - multiple independent tasks that may be in progress at overlapping times - while parallelism is a property of execution - multiple tasks physically running at the same instant on multiple cores. A single-core machine can be highly concurrent (the scheduler interleaves tasks) but not parallel. Conversely, an embarrassingly parallel numeric kernel may have no concurrency complexity (no shared state) yet run on 64 cores. Conflating them leads to wrong conclusions about whether adding cores will help (Amdahl's law) or whether you have a synchronization problem."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Amdahl's law: if a fraction s of the work is serial, the maximum speedup with infinite cores is 1/s. A program that is 10% serial can never exceed a 10x speedup, no matter how many cores you add - which is why reducing the serial/locked section often beats adding hardware."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "process-states",
+      "title": "Process / Thread State Machine",
+      "type": "mermaid",
+      "content": "stateDiagram-v2\n    [*] --> New\n    New --> Ready: admitted\n    Ready --> Running: scheduler dispatch\n    Running --> Ready: timer interrupt / preempt\n    Running --> Waiting: I/O or event wait (blocks)\n    Waiting --> Ready: I/O done / event signaled\n    Running --> Terminated: exit\n    Terminated --> [*]"
+    },
+    {
+      "id": "address-translation",
+      "title": "Virtual-to-Physical Translation with the TLB",
+      "type": "mermaid",
+      "content": "flowchart TD\n    VA[\"Virtual address\\n(page no + offset)\"] --> TLB{TLB hit?}\n    TLB -- hit --> PA[\"Physical address\\n(frame + offset)\"]\n    TLB -- miss --> PTW[\"Page-table walk\\n(multi-level)\"]\n    PTW --> PRESENT{Page present?}\n    PRESENT -- yes --> FILL[\"Fill TLB\"] --> PA\n    PRESENT -- no --> FAULT[\"Page fault -> OS handler\\nload page / evict victim\"]\n    FAULT --> FILL"
+    },
+    {
+      "id": "deadlock-cycle",
+      "title": "Circular Wait: Wait-For Graph with a Cycle",
+      "type": "ascii",
+      "content": "  Thread A ---- waits for ----> Lock 2 (held by B)\n     ^                              |\n     | holds                        | held by\n     |                              v\n  Lock 1 <---- waits for ------ Thread B\n\n  Cycle  A -> L2 -> B -> L1 -> A  ==> deadlock (all 4 Coffman conditions hold).\n  Break it: enforce a global order so both lock L1 before L2."
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-process-vs-thread",
+      "question": "What is the difference between a process and a thread, and what are the cost implications?",
+      "answer": "A process is a running program with its own isolated virtual address space, file descriptors, and resources; a thread is a unit of execution within a process. Threads of the same process share the address space (heap, globals, code) but have private stacks, registers, and program counters. Consequences: threads communicate cheaply through shared memory but require synchronization and can corrupt each other (one segfault crashes the whole process), whereas processes are isolated (a crash does not affect siblings) and communicate via IPC. Threads are cheaper to create and to context-switch between, because a process switch also reloads the page-table base register and typically flushes the TLB, giving the new process cold address translations.",
+      "difficulty": "junior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["process", "thread"],
+      "followUps": ["What is copy-on-write in fork()?", "Why is a thread context switch cheaper than a process one?"]
+    },
+    {
+      "id": "q-context-switch",
+      "question": "What happens during a context switch, and why is switching processes more expensive than switching threads?",
+      "answer": "A context switch saves the running thread's CPU register state (general registers, program counter, stack pointer, status flags) into its kernel control block and restores another thread's saved state. For threads in the same process the address space is unchanged, so it is just register save/restore plus scheduler bookkeeping. Switching to a different process additionally swaps the page-table base register (CR3 on x86), which usually flushes the TLB; the incoming process then suffers a burst of TLB misses (and often cache misses) as translations and data are reloaded cold. That indirect translation/cache cost typically dominates the direct register cost, making process switches noticeably more expensive.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["context-switch", "tlb"],
+      "followUps": ["What is an ASID and how does it reduce TLB flushes?", "Roughly how many cycles does a context switch cost?"]
+    },
+    {
+      "id": "q-virtual-memory-tlb",
+      "question": "How does virtual memory translation work, and what role does the TLB play?",
+      "answer": "Each process has a virtual address space divided into fixed-size pages. A virtual address splits into a page number and an offset; the MMU uses the page number to index a (usually multi-level) page table whose entry gives the physical frame number plus permission and status bits, then concatenates the offset to form the physical address. Walking a multi-level page table on every access would be slow, so the MMU caches recent virtual-page-to-physical-frame mappings in the TLB, a small fast associative cache. A TLB hit translates in about one cycle; a miss triggers a page-table walk (tens to hundreds of cycles) or, if the page is not present, a page fault handled by the OS. Process switches commonly flush the TLB, which is a major source of context-switch cost.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["virtual-memory", "tlb", "paging"],
+      "followUps": ["What is a page fault and how is it handled?", "How do huge pages reduce TLB pressure?"]
+    },
+    {
+      "id": "q-deadlock-conditions",
+      "question": "What are the four Coffman conditions for deadlock, and how does prevention work?",
+      "answer": "All four must hold simultaneously: (1) mutual exclusion - a resource is held non-shareably; (2) hold and wait - a thread holds resources while requesting more; (3) no preemption - resources are only released voluntarily; and (4) circular wait - a cycle of threads each waiting on a resource the next holds. Prevention breaks one condition: impose a global lock ordering to eliminate circular wait (the most practical method); acquire all resources at once to break hold-and-wait; allow preemption/rollback (common in DB transaction managers) to break no-preemption; mutual exclusion is usually intrinsic and hard to remove. Avoidance (Banker's algorithm) instead grants only requests that keep the system in a safe state, and detection-and-recovery finds cycles in a wait-for graph and aborts a victim.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["deadlock", "coffman"],
+      "followUps": ["How does the Banker's algorithm define a safe state?", "What is the difference between deadlock prevention and avoidance?"]
+    },
+    {
+      "id": "q-mutex-semaphore-condvar",
+      "question": "Compare a mutex, a semaphore, and a condition variable. When do you use each?",
+      "answer": "A mutex enforces mutual exclusion - exactly one thread holds it - and typically has an ownership concept (only the locker unlocks); use it to protect a critical section over shared data. A semaphore is a counter with atomic wait (decrement, block at zero) and signal (increment); a binary semaphore can act like a lock, and a counting semaphore limits N concurrent users of a pool of resources - it has no ownership and can be signaled by a different thread. A condition variable lets a thread block until a predicate becomes true and is always paired with a mutex; cond_wait atomically releases the mutex and sleeps, re-acquiring on wakeup, which prevents lost wakeups. Rule of thumb: mutex protects data, semaphore counts a resource, condition variable signals an event.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["synchronization", "mutex", "semaphore"],
+      "followUps": ["Why must cond_wait be in a while loop?", "Can a semaphore be released by a thread that did not acquire it?"]
+    },
+    {
+      "id": "q-syscall-modes",
+      "question": "Explain user mode vs kernel mode and what happens during a system call.",
+      "answer": "The CPU runs at different privilege levels. User mode is restricted: it cannot execute privileged instructions, change page tables, or access devices directly. Kernel mode has full hardware access. Application code runs in user mode and requests privileged services through system calls. A syscall executes a special trap instruction that switches the CPU to kernel mode at a fixed, vetted entry point; the kernel validates the arguments, performs the operation, and returns control to user mode with a result. This boundary is the core protection mechanism - user code can only affect the system through the narrow, audited syscall interface - but each crossing costs hundreds of cycles (mode switch, register save/restore, cache/TLB effects), which is why high-performance code batches or avoids syscalls.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["syscall", "kernel-mode"],
+      "followUps": ["How do interrupts, traps, and faults differ?", "What is the vDSO and why does it exist?"]
+    },
+    {
+      "id": "q-scheduling-algorithms",
+      "question": "Compare round-robin, shortest-job-first, and priority scheduling.",
+      "answer": "Round-robin gives each ready thread a fixed time quantum in rotation; it is fair and responsive but its performance depends on quantum size (too small means context-switch overhead, too large degrades toward FCFS). Shortest-Job-First runs the thread with the smallest CPU burst next, which provably minimizes average waiting time, but it can starve long jobs and requires predicting burst length (usually via exponential averaging of past bursts). Priority scheduling runs the highest-priority ready thread; it honors importance but risks starvation of low-priority work and priority inversion, mitigated by aging (gradually raising waiting threads' priority) and priority inheritance. Real systems like Linux CFS approximate fair, near-SJF behavior using virtual runtime rather than any single one of these.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["scheduling"],
+      "followUps": ["How does Linux CFS use virtual runtime?", "What is the convoy effect in FCFS?"]
+    },
+    {
+      "id": "q-page-fault",
+      "question": "What is a page fault and what are the kinds?",
+      "answer": "A page fault is a trap raised by the MMU when a process accesses a virtual page whose page-table entry is not currently valid/present. A minor (soft) fault means the page is in memory but not yet mapped in this process's page table (e.g. shared library already cached, or copy-on-write) - cheap to resolve. A major (hard) fault means the data must be fetched from disk/swap, costing milliseconds. An invalid fault (segmentation fault) means the access is genuinely illegal - the OS sends SIGSEGV. On a valid fault the handler allocates/locates a frame, possibly evicting a victim page via an LRU approximation like the clock algorithm, loads the data, updates the page table and TLB, and restarts the faulting instruction. A storm of major faults because the working set exceeds RAM is thrashing.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["page-fault", "virtual-memory"],
+      "followUps": ["How does copy-on-write turn a write into a minor fault?", "What is thrashing and how does the OS respond?"]
+    },
+    {
+      "id": "q-tricky-priority-inversion",
+      "question": "Tricky: A high-priority thread is ready but the system makes no progress while a medium-priority thread runs freely. No deadlock exists. What is happening and how do you fix it?",
+      "answer": "This is priority inversion. A low-priority thread holds a lock that the high-priority thread needs. A medium-priority thread, which does not need the lock, preempts the low-priority holder (because it outranks it), so the holder never runs to release the lock, and therefore the high-priority thread stays blocked - effectively the medium thread is starving the high one through an intermediary. It is not a deadlock because there is no circular wait; the resource just is not being released. The standard fix is priority inheritance: while the low-priority thread holds a lock that a higher-priority thread is waiting on, it temporarily inherits that higher priority, so the medium thread can no longer preempt it; once it releases the lock its priority drops back. This is the exact bug that caused the 1997 Mars Pathfinder repeated resets.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["priority-inversion", "scheduling", "gotcha"],
+      "followUps": ["How does priority ceiling differ from priority inheritance?", "Why is this not classified as a deadlock?"]
+    },
+    {
+      "id": "q-tricky-fsync-durability",
+      "question": "Tricky: Your service writes a record with write(), the call returns success, then the machine loses power and the record is gone. The disk was not full and there was no error. What went wrong?",
+      "answer": "write() does not guarantee durability - it only copies the data into the kernel page cache and returns. The kernel flushes dirty pages to the device lazily (write-back), often seconds later. A power loss before that flush loses the buffered data even though write() reported success. To guarantee the data is on stable storage you must call fsync() (or fdatasync() for just the data) after writing, and for a newly created file you must also fsync the containing directory so the directory entry is durable. Even then, drives with their own volatile write caches can lie unless write barriers / FUA are honored. This is exactly why databases and message queues carefully fsync their write-ahead logs, and why 'the write succeeded' is not the same as 'the data is safe'.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["filesystem", "fsync", "durability", "gotcha"],
+      "followUps": ["Why must you also fsync the parent directory?", "What is a write-ahead log and how does it use fsync?"]
+    },
+    {
+      "id": "q-tricky-spurious-wakeup",
+      "question": "Tricky: A reviewer changed `while (queue.isEmpty()) cond.wait();` to `if (queue.isEmpty()) cond.wait();` to 'simplify' it. Why is this a bug?",
+      "answer": "Two reasons make the while loop mandatory. First, spurious wakeups: pthread_cond_wait / Object.wait may return without any signal, so after waking the thread must re-check the predicate - with an if it proceeds assuming the queue is non-empty when it may still be empty, dereferencing/dequeuing nothing. Second, the stolen-wakeup / recheck race: between the signal and this thread re-acquiring the mutex, another consumer may have already taken the item, so the predicate that was true at signal time is false again by the time this thread runs. Both are correctly handled only by re-testing the predicate in a loop. The fix is to always wait inside `while (!predicate)`. This is one of the most common concurrency review catches.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["synchronization", "condition-variable", "gotcha"],
+      "followUps": ["What is a lost wakeup and how does cond_wait's atomic unlock prevent it?", "When is signal vs broadcast appropriate?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-bounded-buffer",
+      "title": "Implement a Thread-Safe Bounded Buffer",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "prompt": "Implement a fixed-capacity, thread-safe blocking queue (bounded buffer). put(item) must block when the buffer is full and take() must block when it is empty. Multiple producers and consumers may call concurrently. Use a single lock and condition signaling; avoid busy-waiting and lost wakeups.",
+      "hints": [
+        "Use one ReentrantLock and TWO conditions: notFull and notEmpty.",
+        "Always wait inside a while loop that re-checks the capacity/emptiness predicate.",
+        "Signal the opposite condition after each successful put/take, and release the lock in a finally block."
+      ],
+      "solutionCode": "import java.util.concurrent.locks.*;\n\npublic class BoundedBuffer<T> {\n    private final Object[] buf;\n    private int count = 0, head = 0, tail = 0;\n    private final ReentrantLock lock = new ReentrantLock();\n    private final Condition notFull  = lock.newCondition();\n    private final Condition notEmpty = lock.newCondition();\n\n    public BoundedBuffer(int capacity) { this.buf = new Object[capacity]; }\n\n    public void put(T item) throws InterruptedException {\n        lock.lock();\n        try {\n            while (count == buf.length)      // while, not if: guard recheck + spurious wakeups\n                notFull.await();             // atomically releases lock and sleeps\n            buf[tail] = item;\n            tail = (tail + 1) % buf.length;\n            count++;\n            notEmpty.signal();               // a consumer may now proceed\n        } finally {\n            lock.unlock();\n        }\n    }\n\n    @SuppressWarnings(\"unchecked\")\n    public T take() throws InterruptedException {\n        lock.lock();\n        try {\n            while (count == 0)\n                notEmpty.await();\n            T item = (T) buf[head];\n            buf[head] = null;                // help GC\n            head = (head + 1) % buf.length;\n            count--;\n            notFull.signal();                // a producer may now proceed\n            return item;\n        } finally {\n            lock.unlock();\n        }\n    }\n}",
+      "solutionLanguage": "java",
+      "explanation": "The buffer is a circular array guarded by one lock so that count/head/tail are always mutated atomically. Two conditions let producers and consumers wait on distinct events: producers await notFull, consumers await notEmpty. await() atomically releases the lock and sleeps, then re-acquires it on wakeup, which prevents the lost-wakeup race. Each predicate is checked inside a while loop, not an if, to handle spurious wakeups and the case where another thread changed the state between the signal and this thread re-acquiring the lock. After every successful operation we signal the opposite condition (a put enables a take and vice versa), and the lock is released in a finally block so an exception cannot leave it held. This is the canonical producer/consumer solution and demonstrates correct use of mutex + condition variables.",
+      "relatedTopic": "operating-systems"
+    },
+    {
+      "id": "ch-deadlock-free-transfer",
+      "title": "Deadlock-Free Account Transfer",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "prompt": "You have a banking service where transfer(from, to, amount) must lock both accounts to move money atomically. A naive implementation that locks `from` then `to` deadlocks when two transfers run in opposite directions (A->B and B->A) concurrently. Make the transfer deadlock-free without serializing all transfers behind a single global lock.",
+      "hints": [
+        "The deadlock is a circular wait; break that Coffman condition.",
+        "Impose a total order on lock acquisition using a stable, unique account id.",
+        "Always lock the lower-id account first, regardless of transfer direction; handle from == to."
+      ],
+      "solutionCode": "public class Bank {\n    static class Account {\n        final long id;\n        final Object lock = new Object();\n        long balance;\n        Account(long id, long balance) { this.id = id; this.balance = balance; }\n    }\n\n    public void transfer(Account from, Account to, long amount) {\n        if (from.id == to.id) return;                 // nothing to do; avoid self-deadlock\n\n        // Global lock ordering by id breaks the circular-wait condition.\n        Account first  = from.id < to.id ? from : to;\n        Account second = from.id < to.id ? to   : from;\n\n        synchronized (first.lock) {\n            synchronized (second.lock) {\n                if (from.balance < amount)\n                    throw new IllegalStateException(\"insufficient funds\");\n                from.balance -= amount;\n                to.balance   += amount;\n            }\n        }\n    }\n}",
+      "solutionLanguage": "java",
+      "explanation": "The deadlock arises purely from circular wait: transfer(A,B) grabs A then waits on B while transfer(B,A) grabs B then waits on A. We eliminate that Coffman condition by imposing a global total order on lock acquisition - always lock the account with the smaller id first - so two concurrent transfers between the same pair always request the locks in the same order and can never form a cycle. This is far better than a single global bank lock, which would serialize every unrelated transfer and destroy throughput; here transfers over disjoint account pairs proceed in parallel. The id == to.id guard avoids trying to lock the same monitor twice (harmless with reentrant locks but a correctness no-op) and makes intent explicit. If ids were not unique/stable you would fall back to System.identityHashCode with a tie-breaker lock to preserve a consistent order.",
+      "relatedTopic": "operating-systems"
+    }
+  ],
+  "references": [
+    {"label": "Operating Systems: Three Easy Pieces (Arpaci-Dusseau) - free online textbook", "url": "https://pages.cs.wisc.edu/~remzi/OSTEP/"},
+    {"label": "Coffman conditions / deadlock (Wikipedia)", "url": "https://en.wikipedia.org/wiki/Deadlock"},
+    {"label": "Linux CFS scheduler design", "url": "https://www.kernel.org/doc/html/latest/scheduler/sched-design-CFS.html"},
+    {"label": "What every programmer should know about memory (Ulrich Drepper)", "url": "https://www.akkadia.org/drepper/cpumemory.pdf"}
+  ]
+}
