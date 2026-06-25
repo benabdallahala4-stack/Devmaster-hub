@@ -35,6 +35,15 @@ export const routes: Routes = [
         loadComponent: () => import('./features/challenges/challenge-detail.component').then(m => m.ChallengeDetailComponent),
       },
       {
+        path: 'logic',
+        title: 'Logic & Problem Solving · DevMaster Hub',
+        loadComponent: () => import('./features/logic/logic-list.component').then(m => m.LogicListComponent),
+      },
+      {
+        path: 'logic/:id',
+        loadComponent: () => import('./features/logic/logic-detail.component').then(m => m.LogicDetailComponent),
+      },
+      {
         path: 'progress',
         title: 'Progress · DevMaster Hub',
         loadComponent: () => import('./features/progress/progress.component').then(m => m.ProgressComponent),
