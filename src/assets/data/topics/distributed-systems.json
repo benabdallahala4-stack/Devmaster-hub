@@ -1,0 +1,575 @@
+{
+  "id": "distributed-systems",
+  "title": "Distributed Systems",
+  "category": "Architecture",
+  "subcategory": "Distributed",
+  "difficulty": "senior",
+  "tags": ["distributed-systems", "consensus", "cap", "consistency", "replication", "fault-tolerance"],
+  "description": "A senior-level tour of the hard parts of distributed systems: CAP and PACELC, consistency models, consensus (Raft/Paxos), replication and partitioning, logical time, failure detection, idempotency, the FLP and two-generals impossibility results, and distributed transactions (2PC vs saga).",
+  "estReadMinutes": 32,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A distributed system is a collection of independent nodes that cooperate over an unreliable network and appear to clients as a single coherent system. The defining difficulty is not concurrency per se but partial failure: a node can crash, a message can be lost, delayed, duplicated or reordered, and a clock can drift — and a node cannot reliably distinguish a slow peer from a dead one. Almost every interesting result in the field is a consequence of that single fact."
+        },
+        {
+          "type": "paragraph",
+          "text": "L. Peter Deutsch's 'eight fallacies of distributed computing' name the assumptions juniors make and seniors design against: the network is reliable, latency is zero, bandwidth is infinite, the network is secure, topology does not change, there is one administrator, transport cost is zero, and the network is homogeneous. Every one of them is false in production."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Mental model: in a distributed system you reason about what every honest node could possibly observe given that messages arrive at arbitrary times (or never). A protocol is correct only if it holds for the worst interleaving the asynchronous network can produce, not the happy path you tested."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Once a system spans more than one machine — for scale, availability, or geography — you inherit the entire body of distributed-systems theory whether you acknowledge it or not. The cost of ignoring it is paid in lost writes, duplicated charges, split-brain clusters, and outages that no single stack trace explains because the bug lives in the interaction between nodes."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Availability vs correctness: a network partition forces an explicit choice between serving stale/unavailable data and risking divergent state — there is no third option that gives you both.",
+            "Money and safety: idempotency and exactly-once semantics decide whether a retried payment charges the customer once or twice.",
+            "Operability: failure detection tuning (timeouts, heartbeats) is the difference between fast failover and a flapping cluster that fails over under load and makes the outage worse.",
+            "Cost of consensus: every strongly-consistent write pays a quorum round trip, so knowing where you need linearizability and where eventual consistency suffices is a core architecture skill."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The expensive failures are the ones that only appear during a partition or a leader change — exactly the conditions that are hard to reproduce in a test environment. This is why understanding the theory matters: it tells you which invariants can break before you ship."
+        }
+      ]
+    },
+    {
+      "id": "cap-pacelc",
+      "heading": "CAP and PACELC",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The CAP theorem (Brewer, proven by Gilbert and Lynch) states that a system which may suffer a network Partition cannot simultaneously guarantee both Consistency (here meaning linearizability — every read sees the latest acknowledged write) and Availability (every non-failing node answers every request). When a partition occurs you must give up one. CAP is widely misquoted as 'pick two of three'; the precise statement is: during a partition, choose between C and A. When there is no partition you can have both."
+        },
+        {
+          "type": "list",
+          "items": [
+            "CP systems (e.g. ZooKeeper, etcd, a leader-based RDBMS with synchronous replication): during a partition the minority side stops serving to preserve consistency. You lose availability on that side.",
+            "AP systems (e.g. Dynamo-style stores, Cassandra with low consistency levels): every side keeps serving and reconciles later, so reads may be stale or conflicting, but the system stays up.",
+            "CA is not a partition-tolerance choice — a single-node database is 'CA' only because it does not partition. Any multi-node system over a real network must tolerate partitions."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "PACELC (Abadi) extends CAP to cover the common case: if there is a Partition, trade between Availability and Consistency (the CAP case); Else (normal operation) trade between Latency and Consistency. This captures the real-world tension that even with no partition, stronger consistency costs more round trips and therefore more latency. Cassandra is PA/EL (favours availability and latency); a strict-quorum store like a CP database is PC/EC."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The 'C' in CAP is linearizability, NOT the ACID 'C' (a transaction preserving invariants). They are unrelated despite the shared letter. Mixing them up is a classic interview trip-wire."
+        }
+      ]
+    },
+    {
+      "id": "consistency-models",
+      "heading": "Consistency Models",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A consistency model is a contract about what values a read may return given the history of writes. Stronger models are easier to program against and more expensive to provide; weaker models are cheaper and more available but push reconciliation onto the application. The key models, from strongest to weakest:"
+        },
+        {
+          "type": "table",
+          "headers": ["Model", "Guarantee", "Cost"],
+          "rows": [
+            ["Linearizability", "There is a single global order of operations consistent with real time; every read returns the most recent completed write. A single-register 'as if one copy' illusion.", "Highest — needs consensus/quorum on the critical path."],
+            ["Sequential consistency", "All nodes see operations in the same total order, and each process's operations appear in program order, but that order need not respect real-time (wall-clock) ordering across processes.", "High."],
+            ["Causal consistency", "Operations causally related (via happens-before) are seen in the same order by everyone; concurrent operations may be seen in different orders.", "Moderate — trackable with vector clocks, available under partition."],
+            ["Eventual consistency", "If writes stop, all replicas eventually converge to the same value. No ordering guarantee in the meantime; reads may be stale.", "Lowest."]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Linearizability (a recency guarantee on single objects) is NOT the same as serializability (a multi-object transaction isolation level meaning the result equals some serial schedule). Serializability says nothing about real-time recency; linearizability says nothing about multi-object transactions. 'Strict serializability' is the combination of both."
+        },
+        {
+          "type": "paragraph",
+          "text": "Causal consistency is the strongest model that remains available during a partition (Mahajan et al.). It is the sweet spot for many collaborative and social systems: if you reply to a comment, everyone sees the original before the reply, but two unrelated posts can appear in any order. Session guarantees (read-your-writes, monotonic reads, monotonic writes, writes-follow-reads) are practical, client-centric relaxations often layered on top of an eventually-consistent store."
+        }
+      ]
+    },
+    {
+      "id": "consensus",
+      "heading": "Consensus: Raft, Paxos, Quorums, Leader Election",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Consensus is the problem of getting a set of nodes to agree on a single value (or an ordered log of values) despite failures. It underpins leader election, replicated state machines, distributed locks, and configuration stores. Paxos (Lamport) is the foundational algorithm; Raft (Ongaro and Ousterhout) is an equivalent designed for understandability and is what most modern systems (etcd, Consul, CockroachDB) actually implement."
+        },
+        {
+          "type": "heading",
+          "text": "Quorums and the majority math"
+        },
+        {
+          "type": "paragraph",
+          "text": "Consensus protocols make progress using majority quorums. With N nodes a majority is floor(N/2)+1. Any two majorities of the same cluster must overlap in at least one node, which is what prevents two conflicting decisions. A cluster of N=5 tolerates F=2 failures (since 5-2=3 is still a majority); N=3 tolerates 1. Crucially you size for F crash failures with N = 2F+1. Even-sized clusters give no extra fault tolerance — N=4 still only tolerates 1 failure, so odd sizes are preferred. (Byzantine consensus needs N = 3F+1.)"
+        },
+        {
+          "type": "heading",
+          "text": "Raft in brief"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Roles: every node is a follower, candidate, or leader. Time is divided into monotonically increasing terms, each with at most one leader.",
+            "Leader election: a follower that hears no heartbeat within a randomized election timeout becomes a candidate, increments the term, votes for itself, and requests votes. A candidate wins only with votes from a majority. Randomized timeouts make split votes rare and self-correcting.",
+            "Log replication: clients talk to the leader; it appends the command to its log and replicates via AppendEntries. An entry is committed once stored on a majority, after which the leader applies it to the state machine and tells followers.",
+            "Safety: a node grants its vote only to a candidate whose log is at least as up-to-date as its own, guaranteeing a new leader already holds all committed entries — committed entries are never lost or overwritten."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Consensus needs a majority to be reachable. In a partition, the side WITHOUT a majority cannot elect a leader or commit writes — it goes read-only or unavailable. This is precisely why a consensus-based store is CP: it sacrifices availability on the minority side to never diverge."
+        }
+      ]
+    },
+    {
+      "id": "time-ordering",
+      "heading": "Time, Ordering, and Logical Clocks",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "You cannot trust physical clocks across machines: NTP-synced wall clocks drift and can jump backwards, so comparing two timestamps from two hosts tells you almost nothing about causal order. Distributed systems use logical clocks to capture the happens-before relation (Lamport's →) instead."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Lamport timestamps: each process keeps a counter; increment on every event, and on receiving a message set counter = max(local, received) + 1. If A → B then L(A) < L(B). But the converse fails: L(A) < L(B) does NOT imply A happened before B — they may be concurrent. Lamport clocks give a consistent total order but cannot detect concurrency.",
+            "Vector clocks: each process keeps a vector of counters, one per process. On a local event it increments its own slot; on receive it takes the element-wise max then increments its own. Comparing vectors detects causality precisely: A → B iff VC(A) < VC(B) element-wise; if neither dominates, the events are concurrent (a conflict). The cost is O(number of nodes) space per timestamp.",
+            "Hybrid Logical Clocks (HLC) and Google TrueTime: combine physical time with a logical component (HLC) or bound clock uncertainty with GPS/atomic clocks and a commit-wait (TrueTime, used by Spanner) to provide externally-consistent timestamps."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "Vector clock example (3 processes P1,P2,P3)\nP1 local event:        [1,0,0]\nP1 sends msg m -------> P2 receives m\nP2 had [0,1,0]; on receive: max([0,1,0],[1,0,0]) then bump own slot\n  => [1,2,0]\nCompare [1,0,0] vs [1,2,0]: first <= second elementwise and not equal\n  => the P1 event happened-before the P2 event (causal)\nCompare [2,0,0] vs [0,0,3]: neither dominates => CONCURRENT (conflict)"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Using a wall-clock timestamp as a tie-breaker for last-write-wins (as Cassandra does by default) can silently drop writes when clocks are skewed: a write made later in real time but stamped with an earlier clock loses. Prefer logical clocks or CRDTs when correctness depends on which write was actually last."
+        }
+      ]
+    },
+    {
+      "id": "replication-partitioning",
+      "heading": "Replication and Partitioning",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Replication keeps copies of the same data on multiple nodes for fault tolerance and read scaling; partitioning (sharding) splits data across nodes so each holds a subset, for write/storage scaling. Real systems combine both: data is partitioned, and each partition is replicated."
+        },
+        {
+          "type": "heading",
+          "text": "Replication strategies"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Single-leader (primary/replica): all writes go to one leader and replicate to followers. Simple and linearizable for reads from the leader; synchronous replication is durable but slow, asynchronous is fast but can lose the tail of writes on failover.",
+            "Multi-leader: multiple nodes accept writes (e.g. one per region), replicating to each other. Lower write latency and partition tolerance, but concurrent writes to the same key create conflicts that need resolution (LWW, app merge, or CRDTs).",
+            "Leaderless (Dynamo-style): clients write to several replicas and read from several. With N replicas, requiring W write acks and R read responses, choosing W + R > N guarantees a read quorum overlaps a write quorum, giving strong-ish consistency; W + R <= N favours availability and latency over freshness."
+          ]
+        },
+        {
+          "type": "heading",
+          "text": "Partitioning strategies"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Range partitioning: contiguous key ranges per shard. Great for range scans, but sequential keys (timestamps, auto-increment IDs) create a hot shard.",
+            "Hash partitioning: hash the key to spread load evenly. Kills hotspots but destroys range-scan locality.",
+            "Consistent hashing: maps both nodes and keys onto a ring so adding/removing a node only remaps ~1/N of keys, not the whole keyspace. Virtual nodes smooth out skew."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The replication factor and quorum sizes are a tunable knob, not a fixed property. Dynamo-style stores let you choose consistency per request (e.g. Cassandra's ONE vs QUORUM vs ALL), trading latency and availability against staleness on a query-by-query basis."
+        }
+      ]
+    },
+    {
+      "id": "failure-impossibility",
+      "heading": "Failure Detection and Impossibility Results",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Because a node cannot tell a crashed peer from a slow one, failure detection is fundamentally a guess parameterised by timeouts. A failure detector trades completeness (every crash is eventually suspected) against accuracy (no live node is wrongly suspected). Heartbeats with adaptive timeouts (e.g. the phi-accrual detector) and gossip protocols (SWIM) are the common implementations."
+        },
+        {
+          "type": "list",
+          "items": [
+            "FLP impossibility (Fischer, Lynch, Paterson, 1985): in a fully asynchronous system, no deterministic protocol can guarantee consensus if even a single node may crash, because a crashed node is indistinguishable from an infinitely slow one. Real systems sidestep FLP by adding partial-synchrony assumptions (eventual bounds on delays) and randomized timeouts — which is exactly what Raft's election timeout does. It does not violate FLP; it gives up the guarantee of termination in the pathological asynchronous case.",
+            "Two Generals Problem: two parties communicating over a lossy channel can never become certain they have agreed, because the last acknowledgement might be lost and neither side can ever know the message arrived. This is why exactly-once delivery over an unreliable network is impossible in the strict sense — you can only get at-least-once or at-most-once.",
+            "CAP (covered above) is itself an impossibility result: linearizability and total availability cannot coexist under partition."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Aggressive failure-detection timeouts cause false positives: under a latency spike the cluster wrongly declares the leader dead, triggers an election, and the resulting churn makes the overload worse. Tune timeouts to the tail latency you actually see, and prefer adaptive detectors over fixed thresholds."
+        }
+      ]
+    },
+    {
+      "id": "idempotency-exactly-once",
+      "heading": "Idempotency and the Exactly-Once Illusion",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Because the network can lose acknowledgements (Two Generals), a sender that does not get an ack cannot know whether the operation happened. It must retry, which means receivers see duplicates. The only safe delivery semantics are at-most-once (fire and forget, may lose work) and at-least-once (retry until acked, may duplicate). 'Exactly-once delivery' is impossible — but exactly-once *processing* (effect) is achievable by making operations idempotent."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Idempotency key: the client generates a unique key per logical operation and the server records it; a retry with the same key returns the original result instead of re-executing. This is how Stripe makes a retried charge safe.",
+            "Deduplication window: the receiver tracks recently-seen message IDs (e.g. in Kafka's idempotent producer, or an inbox table) and discards duplicates.",
+            "Effectively-once via transactional outbox: write the business change and the 'message sent' record in one local transaction, so a crash cannot produce a state change without its event or vice versa."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- Idempotent payment using a unique idempotency key\nBEGIN;\nINSERT INTO payments (idempotency_key, account_id, amount_cents, status)\nVALUES ('idem_a1b2c3', 42, 999, 'charged')\nON CONFLICT (idempotency_key) DO NOTHING;   -- duplicate retry is a no-op\n-- Only proceed to actually move money if THIS statement inserted a row.\nCOMMIT;"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Design rule of thumb: assume every message will be delivered at least once and possibly out of order. Make consumers idempotent and order-tolerant, and 'exactly once' becomes an emergent property of the effect rather than a delivery guarantee you (cannot) buy."
+        }
+      ]
+    },
+    {
+      "id": "distributed-transactions",
+      "heading": "Distributed Transactions: 2PC vs Saga",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "When a single logical operation must update state owned by multiple services or databases, you cannot rely on a single local ACID transaction. The two dominant patterns are two-phase commit (synchronous, strong atomicity) and the saga (asynchronous, eventual consistency with compensations)."
+        },
+        {
+          "type": "heading",
+          "text": "Two-Phase Commit (2PC)"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Phase 1 (prepare): a coordinator asks every participant to prepare; each does the work, writes it durably, locks resources, and votes yes/no.",
+            "Phase 2 (commit/abort): if all voted yes the coordinator tells everyone to commit; otherwise everyone aborts.",
+            "Fatal weakness — blocking: if the coordinator crashes after participants voted yes but before sending the decision, participants are stuck holding locks indefinitely, unsure whether to commit or abort. 2PC is a blocking protocol and a single point of failure; it also does not survive coordinator+participant failures gracefully. Three-phase commit reduces but does not eliminate blocking."
+          ]
+        },
+        {
+          "type": "heading",
+          "text": "Saga"
+        },
+        {
+          "type": "paragraph",
+          "text": "A saga models a long-running transaction as a sequence of local transactions, each with a compensating action that semantically undoes it. If step 3 fails, you run the compensations for steps 2 and 1 in reverse. There is no global lock and no coordinator holding everyone hostage, so sagas scale and stay available — at the price of only eventual consistency and the need to design idempotent steps and compensations. Sagas can be orchestrated (a central coordinator issues commands) or choreographed (services react to each other's events)."
+        },
+        {
+          "type": "table",
+          "headers": ["Aspect", "2PC", "Saga"],
+          "rows": [
+            ["Atomicity", "All-or-nothing (true atomic commit)", "Eventual; intermediate states are visible"],
+            ["Isolation", "Provided (locks held during prepare)", "Not isolated — needs semantic locks / commutative ops"],
+            ["Availability", "Low — blocks on coordinator failure", "High — no global blocking"],
+            ["Failure handling", "Abort and release", "Run compensating transactions"],
+            ["Best for", "Few participants, low latency, strong needs", "Many services, long-running, high availability"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Sagas lack isolation: a customer can observe a partially-completed saga (e.g. inventory reserved but payment not yet taken). You must design for this with semantic locks, re-reading state, or commutative updates — you cannot assume the all-or-nothing visibility 2PC gives you."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Quoting CAP as 'pick two of three' and treating CA as a real design choice. The correct framing: under a partition, pick C or A; otherwise you can have both. CA just means 'single node, never partitions.'",
+            "Conflating linearizability with serializability, or the CAP 'C' with the ACID 'C'. They are different guarantees that happen to share a letter.",
+            "Trusting wall-clock timestamps to order events across machines, then using last-write-wins — silently losing writes under clock skew.",
+            "Believing a message broker gives 'exactly-once delivery.' It cannot. You get at-least-once plus idempotent consumers, which yields exactly-once *effect*.",
+            "Running an even-sized consensus cluster (4 or 6 nodes) thinking it tolerates more failures — it tolerates the same as N-1 odd and just costs more and risks split votes.",
+            "Using 2PC across microservices for everything, then discovering the coordinator becomes a global availability bottleneck and lock holder under failure.",
+            "Setting failure-detection timeouts too aggressively, causing false-positive failovers and flapping under load — the cure becoming the outage."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Real incident shape: an async-replica RDBMS fails over during a network blip, the new primary is missing the last few unreplicated writes, and the app — having been told those writes committed — now serves a state that 'lost' confirmed orders. The root cause is choosing availability (fast async failover) while the application assumed consistency (durability of acked writes)."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Make consistency a per-operation decision: use linearizable reads/writes only where correctness demands it (balances, locks, leader metadata) and eventual/causal consistency where staleness is tolerable (feeds, counters, caches).",
+            "Design every cross-service or retried operation to be idempotent with a client-supplied idempotency key; assume at-least-once delivery everywhere.",
+            "Use logical clocks (vector clocks) or CRDTs to resolve concurrent updates instead of wall-clock last-write-wins.",
+            "Prefer sagas over 2PC for cross-service workflows; reserve 2PC (or better, a single-database transaction) for tightly-coupled, low-latency, few-participant cases.",
+            "Size consensus clusters as N = 2F+1 with odd N; understand that the minority side of a partition will (correctly) become unavailable.",
+            "Tune failure detection to observed tail latency and prefer adaptive/accrual detectors; add jitter to timeouts and back-offs to avoid synchronized retry storms.",
+            "Use the transactional outbox pattern to atomically persist state changes and the events that announce them."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Need", "Reach for", "Accept"],
+          "rows": [
+            ["Strong single-object recency", "Consensus / quorum (Raft, etcd)", "Higher latency, CP under partition"],
+            ["High availability under partition", "Dynamo-style / multi-leader, CRDTs", "Eventual consistency, conflict handling"],
+            ["Cross-service atomic-ish workflow", "Saga + compensations", "Visible intermediate states"],
+            ["Safe retries", "Idempotency keys / dedup", "Extra storage for keys"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "note-summary",
+      "heading": "The Unifying Theme",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Nearly every distributed-systems decision reduces to one trade: how much do you pay (in latency, availability, and complexity) to make many machines behave like one? CAP/PACELC name the price under and outside partitions; consistency models let you buy exactly as much agreement as you need; consensus is the machinery that sells you linearizability at the cost of a quorum round trip and minority unavailability; logical clocks and idempotency are how you stay correct when you decide NOT to pay for global agreement."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Interview heuristic: when asked 'how would you make X consistent/available/scalable,' first state which consistency model the use case actually needs, then derive replication, partitioning, and failure handling from that — not the other way around."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "raft-states",
+      "title": "Raft Node State Transitions",
+      "type": "mermaid",
+      "content": "stateDiagram-v2\n    [*] --> Follower\n    Follower --> Candidate: election timeout, no heartbeat\n    Candidate --> Leader: wins majority of votes\n    Candidate --> Follower: discovers current leader or higher term\n    Candidate --> Candidate: split vote, new election\n    Leader --> Follower: discovers higher term"
+    },
+    {
+      "id": "cap-decision",
+      "title": "CAP: The Choice Forced by a Partition",
+      "type": "mermaid",
+      "content": "flowchart TD\n    A[Client request during network partition] --> B{Can this side reach a majority?}\n    B -->|Yes - majority side| C[Serve consistent reads/writes]\n    B -->|No - minority side| D{CP or AP system?}\n    D -->|CP| E[Refuse / go read-only<br/>preserve consistency]\n    D -->|AP| F[Serve anyway<br/>risk stale/divergent data]"
+    },
+    {
+      "id": "saga-flow",
+      "title": "Saga with Compensation on Failure",
+      "type": "ascii",
+      "content": "Order Saga (orchestrated)\n\n  T1 CreateOrder --> T2 ReservePayment --> T3 ReserveStock --> T4 Ship\n      |                   |                    X (fails)\n      |                   |                    |\n      v                   v                    v\n  C1 CancelOrder <-- C2 RefundPayment <-- (compensate in reverse)\n\nForward path commits each local Tx; on failure, run compensations\nC2 then C1 to semantically undo the committed steps."
+    }
+  ],
+  "questions": [
+    {
+      "id": "ds-q-cap-precise",
+      "question": "State the CAP theorem precisely and explain why 'pick two of three' is a misleading summary.",
+      "answer": "CAP states that in the presence of a network partition, a distributed system cannot simultaneously provide both linearizable consistency and full availability — it must sacrifice one. 'Pick two of three' is misleading because partition tolerance is not optional for any system running over a real network: partitions WILL happen, so P is a given. The real choice is only between C and A, and only during a partition. When the network is healthy a well-built system delivers both C and A. The 'CA' corner is essentially a single-node system that simply never partitions, which is why it is not a meaningful distributed-design option.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["cap", "availability", "consistency"],
+      "followUps": ["What does PACELC add to CAP?", "Give an example of a CP store and an AP store."]
+    },
+    {
+      "id": "ds-q-pacelc",
+      "question": "What does PACELC capture that CAP does not?",
+      "answer": "PACELC says: if there is a Partition (P), trade Availability vs Consistency (A/C) — the CAP case; Else (E), in normal operation, trade Latency vs Consistency (L/C). CAP only describes behaviour during a partition and is silent about the steady state. PACELC's contribution is the 'else' branch: even with no partition, providing stronger consistency requires more replica coordination and therefore more latency. So a system is classified on two axes, e.g. Cassandra is PA/EL (chooses availability under partition and low latency otherwise), while a strict-quorum CP database is PC/EC.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["pacelc", "latency", "consistency"],
+      "followUps": ["Why does stronger consistency cost latency even with no partition?"]
+    },
+    {
+      "id": "ds-q-quorum-math",
+      "question": "How many nodes do you need to tolerate F crash failures in a consensus cluster, and why are even-sized clusters discouraged?",
+      "answer": "You need N = 2F + 1 nodes to tolerate F crash failures, because consensus requires a majority quorum (floor(N/2)+1) to make progress and any two majorities must overlap. So N=3 tolerates 1 failure, N=5 tolerates 2. Even sizes are discouraged because they buy no extra tolerance: N=4 still tolerates only 1 failure (you need 3 for majority), so it costs an extra node for nothing and increases the chance of split votes and the cost of every quorum. Odd N is therefore the standard. (Byzantine fault tolerance instead needs N = 3F + 1.)",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["consensus", "quorum", "raft"],
+      "followUps": ["What is the quorum size for N=5?", "How does this change for Byzantine faults?"]
+    },
+    {
+      "id": "ds-q-raft-election",
+      "question": "Walk through Raft leader election and explain how it avoids electing a leader that is missing committed data.",
+      "answer": "When a follower receives no heartbeat within a randomized election timeout it becomes a candidate, increments the term, votes for itself, and sends RequestVote RPCs. A candidate becomes leader only if it collects votes from a majority. Randomized timeouts make simultaneous candidacies (split votes) rare and self-healing. The safety mechanism is the voting restriction: a node grants its vote only if the candidate's log is at least as up-to-date as its own (compared by last log term, then index). Because a committed entry is stored on a majority, and any winning candidate also needs a majority, the two majorities overlap on at least one node that has the committed entry — so the candidate's log must include it. This guarantees a new leader never lacks a committed entry, and committed entries are never overwritten.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["raft", "leader-election", "consensus"],
+      "followUps": ["What is a term in Raft?", "How does Raft commit an entry?"]
+    },
+    {
+      "id": "ds-q-vector-clocks",
+      "question": "What can vector clocks detect that Lamport timestamps cannot, and at what cost?",
+      "answer": "Vector clocks can detect concurrency — i.e. determine whether two events are causally ordered or concurrent. With Lamport timestamps, A → B implies L(A) < L(B), but the converse fails: L(A) < L(B) does not tell you whether A caused B or they were concurrent, because Lamport clocks impose a total order that hides concurrency. Vector clocks keep one counter per process; A → B iff VC(A) is element-wise <= VC(B) and not equal, and if neither vector dominates the other the events are concurrent (a conflict to be resolved). The cost is O(N) space per timestamp where N is the number of processes, plus the bookkeeping to add/retire entries as membership changes.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["vector-clocks", "lamport", "causality"],
+      "followUps": ["When would you use Lamport clocks despite this limitation?", "What are HLCs?"]
+    },
+    {
+      "id": "ds-q-2pc-vs-saga",
+      "question": "Compare 2PC and saga for a cross-service transaction. When would you choose each?",
+      "answer": "2PC gives true atomicity and isolation by having a coordinator drive a prepare phase (participants vote and lock) then a commit/abort phase, but it is a blocking protocol: if the coordinator crashes after votes are cast, participants are stuck holding locks, and the coordinator is a single point of failure — so availability and scalability suffer. A saga instead chains local transactions, each with a compensating action, and undoes completed steps in reverse on failure. Sagas have no global lock or coordinator hostage, so they stay available and scale, but they provide only eventual consistency and no isolation (intermediate states are visible), requiring idempotent steps and semantic compensation. Choose 2PC (or ideally a single local transaction) for few participants, low latency, and hard atomicity needs; choose sagas for many services, long-running workflows, and high-availability requirements.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["2pc", "saga", "transactions"],
+      "followUps": ["How do you handle the lack of isolation in a saga?", "Orchestration vs choreography for sagas?"]
+    },
+    {
+      "id": "ds-q-failure-detection",
+      "question": "Why is perfect failure detection impossible in an asynchronous network, and how do real systems cope?",
+      "answer": "In an asynchronous network there is no bound on message delay, so a node that has not responded could be crashed or merely slow — the two are indistinguishable. Any detector must therefore guess via timeouts, trading completeness (eventually suspecting every real crash) against accuracy (not wrongly suspecting live nodes). Real systems cope by assuming partial synchrony (delays are eventually bounded), using heartbeats with adaptive timeouts (phi-accrual detectors that adjust to observed latency distributions), gossip-based membership (SWIM), and randomized timeouts to avoid correlated false positives. They accept occasional false suspicions and design the higher-level protocol (e.g. Raft) to remain safe even when a healthy node is wrongly suspected.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["failure-detection", "flp", "heartbeats"],
+      "followUps": ["What is the phi-accrual failure detector?", "How does aggressive timeout tuning backfire?"]
+    },
+    {
+      "id": "ds-q-tricky-linearizable-serializable",
+      "question": "Tricky: Is a database that is 'serializable' necessarily linearizable, and vice versa?",
+      "answer": "No — they are independent guarantees. Serializability is a transaction isolation property: the result of executing concurrent multi-object transactions equals SOME serial order of them. It says nothing about real-time recency, so a serializable system may order a transaction that started later before one that started earlier, and a read could legitimately miss a write that already committed in wall-clock time. Linearizability is a single-object recency guarantee: every operation appears to take effect atomically at some point between its invocation and response, consistent with real time — but it says nothing about multi-object transactions. The combination of both — multi-object transactions ordered consistently with real time — is called strict serializability (or 'external consistency'), which is the strongest model and what systems like Spanner provide. So you can have one without the other, and CAP's 'C' is specifically linearizability.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["linearizability", "serializability", "gotcha"],
+      "followUps": ["What is strict serializability?", "Which does CAP's C refer to?"]
+    },
+    {
+      "id": "ds-q-tricky-exactly-once",
+      "question": "Tricky: A vendor claims their queue provides 'exactly-once delivery.' Why is that impossible, and what do they actually mean?",
+      "answer": "Exactly-once DELIVERY is impossible because of the Two Generals Problem: over a lossy channel the sender can never be certain its message (or the receiver's ack) arrived. If an ack is lost the sender must either retry (risking a duplicate — at-least-once) or give up (risking loss — at-most-once); it can never guarantee precisely one delivery. What vendors actually provide is exactly-once PROCESSING (effect): at-least-once delivery combined with deduplication and idempotent state updates, often scoped to operations within their own system (e.g. Kafka's idempotent producer plus transactional writes to Kafka topics). The instant an effect crosses into an external system that does not participate in that transaction (a third-party payment API), you are back to at-least-once and must enforce idempotency yourself with an idempotency key. So 'exactly-once' is a property of the effect under careful design, not a delivery guarantee you can buy.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["exactly-once", "idempotency", "two-generals", "gotcha"],
+      "followUps": ["How does an idempotency key make retries safe?", "What is the transactional outbox pattern?"]
+    },
+    {
+      "id": "ds-q-tricky-flp-raft",
+      "question": "Tricky: FLP says consensus is impossible with one faulty node in an asynchronous system. Raft achieves consensus and tolerates failures. Does Raft violate FLP?",
+      "answer": "No, Raft does not violate FLP. FLP proves that no DETERMINISTIC algorithm can guarantee BOTH safety and TERMINATION (liveness) in a FULLY asynchronous model where even one node may crash, precisely because a crashed node is indistinguishable from an infinitely slow one and the adversary can forever delay the deciding message. Raft never sacrifices safety, but it does give up the guarantee of termination in the pathological asynchronous case: under a partial-synchrony assumption (delays are eventually bounded) plus RANDOMIZED election timeouts, it terminates with probability 1 and in practice almost always quickly. If the network were truly, adversarially asynchronous forever, Raft could keep having split votes and never elect a leader — which is exactly the liveness gap FLP predicts. So Raft circumvents FLP by weakening the model (partial synchrony) and using randomization, not by breaking the theorem.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["flp", "raft", "consensus", "gotcha"],
+      "followUps": ["What is partial synchrony?", "How do randomized timeouts help liveness?"]
+    },
+    {
+      "id": "ds-q-quorum-overlap",
+      "question": "In a leaderless Dynamo-style store with N replicas, why does W + R > N matter?",
+      "answer": "With N replicas, requiring W acknowledgements on a write and R responses on a read, the condition W + R > N guarantees that the set of replicas a read contacts overlaps with the set the latest write reached by at least one replica (by the pigeonhole principle). That overlapping replica holds the newest value, so a strict-quorum read can return it (after reconciling versions), giving a strong-ish consistency guarantee. If W + R <= N the read and write quorums may be disjoint, so a read can entirely miss the latest write and return stale data — the system then favours availability and latency over freshness. Tuning W and R (e.g. W=N, R=1 for read-heavy, or W=R=quorum for balanced) lets you slide along the consistency/availability spectrum per workload.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["quorum", "replication", "dynamo"],
+      "followUps": ["What does W=ALL, R=ONE optimize for?", "Why is quorum read alone not full linearizability?"]
+    },
+    {
+      "id": "ds-q-causal-consistency",
+      "question": "Why is causal consistency often called the strongest model achievable under a network partition?",
+      "answer": "Causal consistency guarantees that operations related by happens-before are observed in that order by every node, while concurrent operations may be seen in different orders. Crucially, it does not require nodes to coordinate synchronously to agree on a single global order — causality can be tracked locally with metadata (vector clocks / dependency lists) and replicated asynchronously. That means each side of a partition can keep accepting reads and writes and still preserve causal order, reconciling later. Stronger models like linearizability require a node to confirm it has the latest value before responding, which needs cross-partition coordination and therefore cannot be available during a partition. So causal consistency sits at the boundary: it is the strongest model proven to remain available under partition (per Mahajan, Alvisi, Dahlin), making it the natural target for collaborative and social systems that want meaningful ordering without sacrificing availability.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["causal-consistency", "partition", "availability"],
+      "followUps": ["What metadata is needed to enforce causal order?", "What are session guarantees?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ds-ch-vector-clock",
+      "title": "Implement a Vector Clock with Causality Comparison",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "prompt": "Implement a vector clock for a fixed set of node IDs supporting three operations: tick() to record a local event, update(other) to merge a received clock (element-wise max then bump own slot), and compare(a, b) returning 'before', 'after', 'concurrent', or 'equal'. Then demonstrate that two unrelated writes are detected as concurrent while a reply that depends on a message is detected as causally after it.",
+      "hints": [
+        "Represent the clock as a map from nodeId to integer counter.",
+        "On receive: for every node take max(local, received), THEN increment the receiver's own slot.",
+        "A is before B iff every component of A is <= the matching component of B and at least one is strictly less; if neither A<=B nor B<=A they are concurrent."
+      ],
+      "solutionCode": "class VectorClock {\n  constructor(nodeId, nodeIds) {\n    this.nodeId = nodeId;\n    this.v = Object.fromEntries(nodeIds.map(n => [n, 0]));\n  }\n  // Local event on this node.\n  tick() { this.v[this.nodeId] += 1; return this; }\n  // Merge a received clock, then advance our own slot.\n  update(other) {\n    for (const n of Object.keys(this.v)) {\n      this.v[n] = Math.max(this.v[n], other.v[n] ?? 0);\n    }\n    this.v[this.nodeId] += 1;\n    return this;\n  }\n  clone() {\n    const c = new VectorClock(this.nodeId, Object.keys(this.v));\n    c.v = { ...this.v };\n    return c;\n  }\n}\n\n// Returns 'before' | 'after' | 'concurrent' | 'equal'\nfunction compare(a, b) {\n  const keys = new Set([...Object.keys(a.v), ...Object.keys(b.v)]);\n  let aLeq = true, bLeq = true, equal = true;\n  for (const k of keys) {\n    const av = a.v[k] ?? 0, bv = b.v[k] ?? 0;\n    if (av > bv) aLeq = false;\n    if (bv > av) bLeq = false;\n    if (av !== bv) equal = false;\n  }\n  if (equal) return 'equal';\n  if (aLeq) return 'before';   // a <= b, not equal\n  if (bLeq) return 'after';    // b <= a, not equal\n  return 'concurrent';         // neither dominates\n}\n\n// --- Demonstration ---\nconst nodes = ['P1', 'P2', 'P3'];\n\n// Causal chain: P1 writes msg, P2 receives and replies.\nconst p1 = new VectorClock('P1', nodes).tick();      // {P1:1,P2:0,P3:0}\nconst msg = p1.clone();                               // message carries p1's clock\nconst p2 = new VectorClock('P2', nodes).update(msg);  // {P1:1,P2:1,P3:0}\nconsole.log(compare(msg, p2)); // 'before' -> reply causally after the message\n\n// Concurrent writes: P1 and P3 act independently, never communicating.\nconst w1 = new VectorClock('P1', nodes).tick().tick(); // {P1:2,P2:0,P3:0}\nconst w3 = new VectorClock('P3', nodes).tick().tick().tick(); // {P1:0,P2:0,P3:3}\nconsole.log(compare(w1, w3)); // 'concurrent' -> conflict to be resolved",
+      "solutionLanguage": "javascript",
+      "explanation": "The vector clock keeps one counter per node. tick() advances only the local node's counter for a local event. update() merges a received clock by taking the element-wise maximum (absorbing everything the sender had seen) and then incrementing the receiver's own slot to mark the receive event — this is what encodes happens-before. compare() implements the partial order: A is 'before' B when every component of A is <= B's and they differ (A causally precedes B); symmetrically for 'after'; if neither vector dominates the other, the events are 'concurrent', i.e. a genuine conflict that an application must resolve (last-write-wins, merge, or CRDT). The demonstration shows the two cases that matter: a reply built via update() on a received message compares as 'before' relative to that message's clock (causal), whereas two independent write chains on P1 and P3 compare as 'concurrent' because neither saw the other. This is exactly the property Lamport timestamps cannot provide, at the cost of O(N) space per timestamp.",
+      "relatedTopic": "time-ordering"
+    },
+    {
+      "id": "ds-ch-saga-design",
+      "title": "Design an Orchestrated Saga for Order Fulfillment",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "prompt": "Design an orchestrated saga for placing an order that spans three services: Payment (charge the card), Inventory (reserve stock), and Shipping (create a shipment). Specify the forward steps, the compensating action for each, and how you keep every step and compensation idempotent and safe to retry. Show the orchestrator logic as pseudocode that rolls back correctly if Shipping fails.",
+      "hints": [
+        "Each forward step is a local transaction in its own service; pair it with a compensating transaction that semantically undoes it.",
+        "Carry a unique sagaId / idempotency key into every command so retries do not double-charge or double-reserve.",
+        "On failure at step k, run compensations for the already-completed steps k-1 .. 1 in reverse order; compensations must also be idempotent because they can be retried."
+      ],
+      "solutionCode": "// Orchestrated saga: a central coordinator drives the steps and compensations.\n// Every command carries sagaId as an idempotency key; services dedupe on it.\n\nconst steps = [\n  {\n    name: 'payment',\n    forward:  (ctx) => payment.charge({ idemKey: ctx.sagaId, amount: ctx.amount, card: ctx.card }),\n    compensate:(ctx) => payment.refund({ idemKey: ctx.sagaId + ':refund' }),\n  },\n  {\n    name: 'inventory',\n    forward:  (ctx) => inventory.reserve({ idemKey: ctx.sagaId, sku: ctx.sku, qty: ctx.qty }),\n    compensate:(ctx) => inventory.release({ idemKey: ctx.sagaId + ':release' }),\n  },\n  {\n    name: 'shipping',\n    forward:  (ctx) => shipping.createShipment({ idemKey: ctx.sagaId, address: ctx.address }),\n    compensate:(ctx) => shipping.cancelShipment({ idemKey: ctx.sagaId + ':cancel' }),\n  },\n];\n\nasync function runSaga(ctx) {\n  const completed = [];\n  try {\n    for (const step of steps) {\n      // Forward step is idempotent: a retry with the same sagaId is a no-op server-side.\n      await withRetry(() => step.forward(ctx));\n      completed.push(step);\n      await sagaLog.markCompleted(ctx.sagaId, step.name); // durable progress for crash recovery\n    }\n    return { status: 'COMPLETED' };\n  } catch (err) {\n    // Failure: compensate the already-completed steps in REVERSE order.\n    for (const step of completed.reverse()) {\n      // Compensations are idempotent and retried until they succeed.\n      await withRetry(() => step.compensate(ctx));\n      await sagaLog.markCompensated(ctx.sagaId, step.name);\n    }\n    return { status: 'ROLLED_BACK', failedAt: err.step ?? 'unknown' };\n  }\n}\n\n// Simple bounded retry with backoff; relies on idempotency for safety.\nasync function withRetry(fn, attempts = 5) {\n  let delay = 100;\n  for (let i = 0; i < attempts; i++) {\n    try { return await fn(); }\n    catch (e) {\n      if (i === attempts - 1) throw e;\n      await new Promise(r => setTimeout(r, delay));\n      delay *= 2; // exponential backoff; add jitter in production\n    }\n  }\n}\n\n// Example: if shipping.createShipment throws, runSaga compensates\n// inventory.release then payment.refund, in that order.",
+      "solutionLanguage": "javascript",
+      "explanation": "The saga decomposes a cross-service transaction into three local transactions, each paired with a compensating action that semantically undoes it (refund undoes charge, release undoes reserve, cancel undoes shipment). The orchestrator runs the forward steps in sequence, recording durable progress in a saga log so it can resume after its own crash. If any step fails — here, shipping — it walks the completed steps in REVERSE and runs their compensations: inventory.release then payment.refund. Idempotency is the linchpin: every forward command and every compensation carries a unique key derived from the sagaId, so the at-least-once retries (driven by withRetry's exponential backoff) never double-charge, double-reserve, or double-refund — the receiving service deduplicates on the key. Note the deliberate trade-off the saga accepts versus 2PC: there is no global lock, so a customer could briefly observe a charged-but-not-yet-shipped state (no isolation), and consistency is only eventual once compensations complete. That is the price for staying available and avoiding a blocking coordinator. In production you would also add jitter to the backoff, a dead-letter path for compensations that exhaust retries, and a timeout that triggers rollback if a step hangs.",
+      "relatedTopic": "distributed-transactions"
+    }
+  ],
+  "references": [
+    {"label": "Gilbert & Lynch - Brewer's Conjecture and the Feasibility of CAP", "url": "https://users.ece.cmu.edu/~adrian/731-sp04/readings/GL-cap.pdf"},
+    {"label": "Abadi - Consistency Tradeoffs in Modern Distributed Database Design (PACELC)", "url": "https://www.cs.umd.edu/~abadi/papers/abadi-pacelc.pdf"},
+    {"label": "Ongaro & Ousterhout - In Search of an Understandable Consensus Algorithm (Raft)", "url": "https://raft.github.io/raft.pdf"},
+    {"label": "Lamport - Time, Clocks, and the Ordering of Events in a Distributed System", "url": "https://lamport.azurewebsites.net/pubs/time-clocks.pdf"},
+    {"label": "Fischer, Lynch, Paterson - Impossibility of Distributed Consensus with One Faulty Process (FLP)", "url": "https://groups.csail.mit.edu/tds/papers/Lynch/jacm85.pdf"},
+    {"label": "DeCandia et al. - Dynamo: Amazon's Highly Available Key-value Store", "url": "https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf"},
+    {"label": "Martin Fowler - Saga pattern / Microservices", "url": "https://microservices.io/patterns/data/saga.html"}
+  ]
+}
