@@ -30,7 +30,7 @@ interface QuickAction { label: string; icon: string; path: string; }
           <div class="cp__body">
             @if (search.query().trim()) {
               @if (results().length || logicResults().length) {
-                <div class="cp__group-label">Topics</div>
+                @if (results().length) { <div class="cp__group-label">Topics</div> }
                 @for (r of results(); track r.topic.id; let i = $index) {
                   <button class="cp__item" [class.is-active]="i === active()"
                           (mouseenter)="active.set(i)" (click)="go(['/topics', r.topic.id])">
