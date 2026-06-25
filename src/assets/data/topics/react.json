@@ -200,7 +200,7 @@
         {
           "type": "code",
           "language": "tsx",
-          "code": "function Search() {\n  const [query, setQuery] = useState('');\n  const [isPending, startTransition] = useTransition();\n\n  function onChange(e: React.ChangeEvent<HTMLInputElement>) {\n    const next = e.target.value;\n    setQuery(next);                 // urgent: keep the input responsive\n    startTransition(() => {        // non-urgent: the heavy results render\n      setSearchTerm(next);          // can be interrupted by more typing\n    });\n  }\n\n  return (\n    <>\n      <input value={query} onChange={onChange} />\n      {isPending && <Spinner />}\n      <Suspense fallback={<Skeleton />}>\n        <Results term={searchTerm} />\n      </Suspense>\n    </>\n  );\n}"
+          "code": "function Search() {\n  const [query, setQuery] = useState('');\n  const [isPending, startTransition] = useTransition();\n\n  function onChange(e: React.ChangeEvent<HTMLInputElement>) {\n    const next = e.target.value;\n    setQuery(next);                 // urgent: keep the input responsive\n    startTransition(() => {        // non-urgent: the heavy results render\n      setQuery(next);               // can be interrupted by more typing\n    });\n  }\n\n  return (\n    <>\n      <input value={query} onChange={onChange} />\n      {isPending && <Spinner />}\n      <Suspense fallback={<Skeleton />}>\n        <Results term={query} />\n      </Suspense>\n    </>\n  );\n}"
         },
         {
           "type": "paragraph",

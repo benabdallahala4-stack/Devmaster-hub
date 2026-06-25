@@ -65,7 +65,7 @@
       "blocks": [
         {
           "type": "paragraph",
-          "text": "The event loop is libuv's mechanism for orchestrating asynchronous work on a single thread. Each iteration ('tick') passes through ordered phases: timers (due setTimeout/setInterval callbacks), pending callbacks (some deferred system callbacks), poll (retrieve new I/O events and run their callbacks - where the loop spends most of its time and may block waiting for I/O), check (setImmediate callbacks), and close (close-event callbacks like socket 'close'). Between phases - and importantly after each individual callback - Node drains the process.nextTick queue and then the microtask (promise) queue."
+          "text": "The event loop is libuv's mechanism for orchestrating asynchronous work on a single thread. Each iteration ('tick') passes through ordered phases: timers (due setTimeout/setInterval callbacks), pending callbacks (some deferred system callbacks), poll (retrieve new I/O events and run their callbacks - where the loop spends most of its time and may block waiting for I/O), check (setImmediate callbacks), and close (close-event callbacks like socket 'close'). In Node v11+, the `process.nextTick` queue and then the microtask (Promise) queue are drained after each individual callback completes, in every phase — not only between phases (which was the pre-v11 behavior)."
         },
         {
           "type": "code",
@@ -319,7 +319,7 @@
       "id": "event-loop-phases",
       "title": "libuv Event Loop Phases (one tick)",
       "type": "mermaid",
-      "content": "flowchart TD\n    T[timers: due setTimeout/setInterval] --> P[pending callbacks]\n    P --> I[idle/prepare: internal]\n    I --> Poll[poll: retrieve I/O events, run their callbacks]\n    Poll --> Check[check: setImmediate callbacks]\n    Check --> Close[close callbacks: socket close, etc.]\n    Close --> T\n    Poll -. between every callback .-> M[drain nextTick queue, then microtasks]\n    Check -. between every callback .-> M"
+      "content": "flowchart TD\n    T[timers: due setTimeout/setInterval] --> P[pending callbacks]\n    P --> I[idle/prepare: internal]\n    I --> Poll[poll: retrieve I/O events, run their callbacks]\n    Poll --> Check[check: setImmediate callbacks]\n    Check --> Close[close callbacks: socket close, etc.]\n    Close --> T\n    T -. after every callback in every phase .-> M[drain nextTick queue, then microtasks]\n    Poll -. after every callback in every phase .-> M\n    Check -. after every callback in every phase .-> M"
     },
     {
       "id": "backpressure-flow",
