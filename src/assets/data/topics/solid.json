@@ -1,0 +1,530 @@
+{
+  "id": "solid",
+  "title": "SOLID Principles",
+  "category": "Architecture",
+  "subcategory": "Design Principles",
+  "difficulty": "senior",
+  "tags": ["solid", "oop", "design-principles", "java", "maintainability", "clean-architecture"],
+  "description": "A staff-level deep dive into the five SOLID principles with bad-to-good Java refactors, the design forces behind each one, and the trade-offs that matter in production systems.",
+  "estReadMinutes": 28,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "SOLID is an acronym for five object-oriented design principles popularized by Robert C. Martin (Uncle Bob). They are not laws or metrics; they are heuristics that push a codebase toward low coupling and high cohesion so that change stays cheap as a system grows."
+        },
+        {
+          "type": "list",
+          "items": [
+            "S - Single Responsibility Principle (SRP): a class should have one reason to change.",
+            "O - Open/Closed Principle (OCP): software entities should be open for extension but closed for modification.",
+            "L - Liskov Substitution Principle (LSP): subtypes must be substitutable for their base types without breaking correctness.",
+            "I - Interface Segregation Principle (ISP): clients should not be forced to depend on methods they do not use.",
+            "D - Dependency Inversion Principle (DIP): high-level modules and low-level modules should both depend on abstractions."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "SOLID is a means, not an end. The goal is a codebase where a localized requirement change touches a localized set of files. If applying a principle increases that blast radius, you have misapplied it."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The cost of software is dominated by maintenance, not initial construction. SOLID directly attacks the two properties that make maintenance expensive: rigidity (a small change forces a cascade of edits) and fragility (a change breaks things in unrelated places). When responsibilities are separated and dependencies point at abstractions, you can swap a payment provider, add a notification channel, or replace a persistence layer without a high-risk rewrite."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Testability: classes that depend on abstractions are trivial to mock, so you get fast unit tests instead of slow integration-only suites.",
+            "Parallel work: well-segregated modules let multiple engineers ship without stepping on each other or producing merge conflicts in a god class.",
+            "Blast radius: SRP and OCP keep a feature flag, a tax rule, or a provider swap inside one or two files.",
+            "Onboarding: a new hire can read one cohesive class and understand it, instead of a 2000-line UserService that does everything."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Over-applying SOLID produces its own pathology: a fog of tiny one-method classes and interfaces with a single implementation. Senior engineers apply these principles where change is actually likely, not uniformly."
+        }
+      ]
+    },
+    {
+      "id": "srp",
+      "heading": "Single Responsibility Principle (SRP)",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "SRP is the most misquoted principle. It does NOT mean 'a class should do only one thing.' It means a class should have one reason to change, where a reason to change maps to a single actor or stakeholder. Uncle Bob's refined definition: gather together the things that change for the same reasons; separate things that change for different reasons."
+        },
+        {
+          "type": "heading",
+          "text": "Bad: a UserService doing persistence, email, and payment"
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "public class UserService {\n    private final Connection connection;\n\n    public UserService(Connection connection) {\n        this.connection = connection;\n    }\n\n    public void register(String email, String password, String card) throws Exception {\n        // Responsibility 1: persistence (changes when the DBA changes schema)\n        PreparedStatement ps = connection.prepareStatement(\n            \"INSERT INTO users(email, password) VALUES (?, ?)\");\n        ps.setString(1, email);\n        ps.setString(2, hash(password));\n        ps.executeUpdate();\n\n        // Responsibility 2: email (changes when marketing edits the template)\n        Transport.send(new MimeMessage(Session.getDefaultInstance(new Properties())) {{\n            setText(\"Welcome \" + email + \"! Thanks for signing up.\");\n        }});\n\n        // Responsibility 3: payment (changes when finance switches PSP)\n        StripeClient stripe = new StripeClient(\"sk_live_...\");\n        stripe.charge(card, 999);\n    }\n\n    private String hash(String s) { return Integer.toHexString(s.hashCode()); }\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "This class has at least three reasons to change controlled by three different actors: a DBA, marketing, and finance. A template tweak risks the payment path; a schema migration risks email. The class is impossible to unit-test without a live database, SMTP server, and Stripe key."
+        },
+        {
+          "type": "heading",
+          "text": "Good: split by reason to change, orchestrate at the edge"
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "public class UserRepository {\n    private final Connection connection;\n    public UserRepository(Connection connection) { this.connection = connection; }\n    public void save(User user) throws SQLException {\n        PreparedStatement ps = connection.prepareStatement(\n            \"INSERT INTO users(email, password_hash) VALUES (?, ?)\");\n        ps.setString(1, user.email());\n        ps.setString(2, user.passwordHash());\n        ps.executeUpdate();\n    }\n}\n\npublic class WelcomeMailer {\n    private final EmailGateway gateway;\n    public WelcomeMailer(EmailGateway gateway) { this.gateway = gateway; }\n    public void sendWelcome(String email) {\n        gateway.send(email, \"Welcome\", \"Thanks for signing up!\");\n    }\n}\n\n// High-level orchestration: the use case, not the I/O details.\npublic class RegisterUser {\n    private final UserRepository repository;\n    private final WelcomeMailer mailer;\n    private final PaymentProcessor payments;\n\n    public RegisterUser(UserRepository repository, WelcomeMailer mailer, PaymentProcessor payments) {\n        this.repository = repository;\n        this.mailer = mailer;\n        this.payments = payments;\n    }\n\n    public void handle(RegistrationRequest req) throws SQLException {\n        User user = User.create(req.email(), req.password());\n        repository.save(user);\n        payments.charge(req.paymentToken(), 999);\n        mailer.sendWelcome(user.email());\n    }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Notice that RegisterUser still 'does several things' in sequence. That is fine - it has exactly one reason to change: the registration workflow itself. Orchestration is a legitimate single responsibility."
+        }
+      ]
+    },
+    {
+      "id": "ocp",
+      "heading": "Open/Closed Principle (OCP)",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A module is open for extension but closed for modification when you can add new behavior by adding new code rather than editing existing, tested code. In practice OCP is achieved through polymorphism: depend on an abstraction, and let new implementations plug in. The classic smell is a growing switch or if/else chain on a type code."
+        },
+        {
+          "type": "heading",
+          "text": "Bad: adding a provider means editing a switch"
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "public class PaymentService {\n    public void pay(String provider, long amountCents, String token) {\n        switch (provider) {\n            case \"stripe\":\n                new StripeClient().charge(token, amountCents);\n                break;\n            case \"paypal\":\n                new PayPalClient().execute(token, amountCents);\n                break;\n            // Adding Adyen forces a modification here AND re-testing the whole class.\n            default:\n                throw new IllegalArgumentException(\"Unknown provider: \" + provider);\n        }\n    }\n}"
+        },
+        {
+          "type": "heading",
+          "text": "Good: strategy + registry, closed for modification"
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "public interface PaymentProvider {\n    String name();\n    PaymentResult charge(long amountCents, String token);\n}\n\npublic class StripeProvider implements PaymentProvider {\n    public String name() { return \"stripe\"; }\n    public PaymentResult charge(long amount, String token) {\n        return new StripeClient().charge(token, amount);\n    }\n}\n\npublic class AdyenProvider implements PaymentProvider {  // NEW code, zero edits elsewhere\n    public String name() { return \"adyen\"; }\n    public PaymentResult charge(long amount, String token) {\n        return new AdyenClient().authorise(token, amount);\n    }\n}\n\npublic class PaymentService {\n    private final Map<String, PaymentProvider> providers;\n    public PaymentService(List<PaymentProvider> available) {\n        this.providers = available.stream()\n            .collect(Collectors.toMap(PaymentProvider::name, p -> p));\n    }\n    public PaymentResult pay(String providerName, long amountCents, String token) {\n        PaymentProvider provider = providers.get(providerName);\n        if (provider == null) throw new IllegalArgumentException(\"Unknown provider: \" + providerName);\n        return provider.charge(amountCents, token);\n    }\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "With Spring, the constructor injects List<PaymentProvider> automatically and every new @Component implementation registers itself. Adding Adyen is a brand-new file plus a one-line bean - PaymentService is never touched, so its tests never re-run with risk."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "OCP is a prediction, not a guarantee. You make code closed against the axes of change you expect (new providers) and accept that an unexpected axis (a new return-type contract) will still require modification. Do not pre-abstract every axis - that is speculative generality."
+        }
+      ]
+    },
+    {
+      "id": "lsp",
+      "heading": "Liskov Substitution Principle (LSP)",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Barbara Liskov's rule: if S is a subtype of T, objects of type T may be replaced with objects of type S without altering the correctness of the program. Subtypes must honor the base type's contract - they may weaken preconditions and strengthen postconditions, but never the reverse, and must preserve invariants. The Rectangle/Square problem is the canonical violation."
+        },
+        {
+          "type": "heading",
+          "text": "Bad: Square is-a Rectangle breaks substitutability"
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "public class Rectangle {\n    protected int width, height;\n    public void setWidth(int w) { this.width = w; }\n    public void setHeight(int h) { this.height = h; }\n    public int area() { return width * height; }\n}\n\npublic class Square extends Rectangle {\n    @Override public void setWidth(int w)  { this.width = w; this.height = w; }\n    @Override public void setHeight(int h) { this.width = h; this.height = h; }\n}\n\n// Client code that is correct for Rectangle...\npublic int resizeAndMeasure(Rectangle r) {\n    r.setWidth(5);\n    r.setHeight(4);\n    return r.area();  // expects 20\n}\n// resizeAndMeasure(new Square()) returns 16, not 20. Substitution broke the caller."
+        },
+        {
+          "type": "paragraph",
+          "text": "The caller relied on an implicit postcondition of Rectangle: setting width does not change height. Square violates it. The bug is not in Square or in the client in isolation - it is in the claim that Square is-a Rectangle. In behavioral terms it is not."
+        },
+        {
+          "type": "heading",
+          "text": "Good: model the real relationship - immutable shapes"
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "public interface Shape {\n    int area();\n}\n\npublic final class Rectangle implements Shape {\n    private final int width, height;\n    public Rectangle(int width, int height) { this.width = width; this.height = height; }\n    public Rectangle withWidth(int w) { return new Rectangle(w, height); }\n    public Rectangle withHeight(int h) { return new Rectangle(width, h); }\n    public int area() { return width * height; }\n}\n\npublic final class Square implements Shape {\n    private final int side;\n    public Square(int side) { this.side = side; }\n    public Square withSide(int s) { return new Square(s); }\n    public int area() { return side * side; }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Common LSP violations beyond Rectangle/Square: a subclass that throws UnsupportedOperationException for an inherited method (e.g. an immutable list overriding add), a subtype that narrows the accepted input range, or one that returns null where the base never does. Each silently breaks a caller written against the base contract."
+        }
+      ]
+    },
+    {
+      "id": "isp",
+      "heading": "Interface Segregation Principle (ISP)",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Clients should not be forced to depend on methods they do not use. Fat interfaces couple unrelated clients: a change forced by one consumer recompiles and re-deploys every implementer, even those that ignore the changed method. Split fat interfaces into cohesive role interfaces that each represent how one client uses the object."
+        },
+        {
+          "type": "heading",
+          "text": "Bad: a fat Worker interface"
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "public interface Worker {\n    void work();\n    void eat();\n    void sleep();\n}\n\n// A robot is a Worker too, but it does not eat or sleep.\npublic class RobotWorker implements Worker {\n    public void work() { /* assemble parts */ }\n    public void eat()   { throw new UnsupportedOperationException(); }  // LSP smell too!\n    public void sleep() { throw new UnsupportedOperationException(); }\n}"
+        },
+        {
+          "type": "heading",
+          "text": "Good: role interfaces"
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "public interface Workable { void work(); }\npublic interface Feedable  { void eat(); }\npublic interface Restable  { void sleep(); }\n\npublic class HumanWorker implements Workable, Feedable, Restable {\n    public void work()  { /* ... */ }\n    public void eat()   { /* ... */ }\n    public void sleep() { /* ... */ }\n}\n\npublic class RobotWorker implements Workable {  // depends only on what it can do\n    public void work() { /* ... */ }\n}\n\n// Scheduler depends on the narrow role it actually needs.\npublic class Shift {\n    public void run(Workable w) { w.work(); }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "ISP is client-driven: define the interface from the consumer's point of view (the role it needs), not from the provider's full capability set. Repository<Read> and Repository<Write> split is a classic example - read replicas and CQRS read models only need the query role."
+        }
+      ]
+    },
+    {
+      "id": "dip",
+      "heading": "Dependency Inversion Principle (DIP)",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "High-level modules should not depend on low-level modules; both should depend on abstractions. And abstractions should not depend on details; details should depend on abstractions. The 'inversion' is that the abstraction is owned by the high-level policy layer, and the low-level detail (database, HTTP client) implements it - reversing the traditional top-down compile-time dependency."
+        },
+        {
+          "type": "heading",
+          "text": "Bad: high-level policy depends on a concrete detail"
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "public class OrderProcessor {\n    private final MySqlOrderDao dao = new MySqlOrderDao();   // concrete, hard-wired\n    private final SmtpEmailSender email = new SmtpEmailSender();\n\n    public void place(Order order) {\n        dao.insert(order);            // cannot test without MySQL\n        email.send(order.customerEmail(), \"Order confirmed\");\n    }\n}"
+        },
+        {
+          "type": "heading",
+          "text": "Good: depend on abstractions, inject the implementation"
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// Abstractions owned by the high-level (domain) layer.\npublic interface OrderRepository { void save(Order order); }\npublic interface NotificationSender { void notify(String to, String message); }\n\npublic class OrderProcessor {\n    private final OrderRepository repository;\n    private final NotificationSender notifier;\n\n    public OrderProcessor(OrderRepository repository, NotificationSender notifier) {\n        this.repository = repository;   // injected abstraction\n        this.notifier = notifier;\n    }\n\n    public void place(Order order) {\n        repository.save(order);\n        notifier.notify(order.customerEmail(), \"Order confirmed\");\n    }\n}\n\n// Low-level details implement the domain's abstractions.\npublic class JpaOrderRepository implements OrderRepository {\n    public void save(Order order) { /* JPA persistence */ }\n}\npublic class SmtpNotificationSender implements NotificationSender {\n    public void notify(String to, String msg) { /* SMTP */ }\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Now OrderProcessor is a pure unit: in tests you inject an in-memory fake repository and a recording notifier. In production a DI container wires JpaOrderRepository and SmtpNotificationSender. The compile-time dependency arrow points from the detail to the abstraction, inverting the naive design."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "DIP is not 'new is evil' or 'wrap everything in an interface.' Inject across architectural seams (I/O, third-party SDKs, things you want to fake in tests). Value objects and pure domain logic do not need an interface - injecting a String formatter you will never replace is just ceremony."
+        }
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: A Checkout Refactor",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Scenario: an e-commerce team ran a single CheckoutService that computed tax inline with a country switch, charged Stripe directly, and wrote orders with raw JDBC. During a Black Friday incident, a tax-rule change for a new EU country (adding a case to the switch) was deployed and accidentally altered the rounding for an existing country, double-charging a subset of customers. Root cause: one class, many reasons to change, no isolation."
+        },
+        {
+          "type": "heading",
+          "text": "The OCP + DIP fix that contained the blast radius"
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "public interface TaxRule {\n    boolean appliesTo(String countryCode);\n    Money taxFor(Money subtotal);\n}\n\npublic class TaxCalculator {\n    private final List<TaxRule> rules;\n    public TaxCalculator(List<TaxRule> rules) { this.rules = rules; }\n    public Money tax(String country, Money subtotal) {\n        return rules.stream()\n            .filter(r -> r.appliesTo(country))\n            .findFirst()\n            .map(r -> r.taxFor(subtotal))\n            .orElse(Money.ZERO);\n    }\n}\n\n// CheckoutService now orchestrates abstractions only.\npublic class CheckoutService {\n    private final TaxCalculator tax;\n    private final PaymentProvider payment;\n    private final OrderRepository orders;\n\n    public CheckoutService(TaxCalculator tax, PaymentProvider payment, OrderRepository orders) {\n        this.tax = tax; this.payment = payment; this.orders = orders;\n    }\n\n    public Receipt checkout(Cart cart) {\n        Money total = cart.subtotal().plus(tax.tax(cart.country(), cart.subtotal()));\n        PaymentResult result = payment.charge(total.cents(), cart.paymentToken());\n        orders.save(Order.from(cart, total, result));\n        return Receipt.of(result, total);\n    }\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Outcome: adding a country is now a new GermanyTaxRule class with its own unit tests - it cannot touch FranceTaxRule's rounding, because they are different files behind the same abstraction. The double-charge class of incident became structurally impossible. Mean time to add a tax jurisdiction dropped from a multi-file PR to a single new file plus a bean registration."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The measurable win of SOLID is not 'cleaner code' in the abstract - it is that a category of change (new tax rule, new provider) maps to adding code rather than editing tested code, which is exactly what shrinks incident blast radius."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Reading SRP as 'do one thing': teams split classes by verb (a SaveUserCommand, a ValidateUserCommand) instead of by reason to change, producing an explosion of anemic classes that all change together anyway.",
+            "OCP cargo-culting: introducing a strategy interface with exactly one implementation 'in case' - speculative generality that adds indirection with no payoff and makes navigation harder.",
+            "LSP violation via UnsupportedOperationException: a read-only collection that extends a mutable interface and throws on add(). Callers written against the base type fail at runtime in production, not at compile time.",
+            "ISP ignored: a 30-method Repository interface forces an in-memory test double and a read-replica adapter to implement (or stub) methods they never call, and any interface change recompiles every implementer.",
+            "DIP misapplied as 'interface everything': wrapping pure value objects and never-swapped helpers in interfaces, hurting readability and inflating the class count with zero testability gain.",
+            "Mocking concretes instead of inverting: depending on a concrete DAO and then using a bytecode mocking framework to fake it in tests - the test passes but the design is still rigid."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Incident pattern: a fat Notification interface gained an addSlackChannel() method. Every implementer (email, SMS, push) had to be edited to satisfy the compiler, and a copy-paste bug in the SMS implementer's no-op silently dropped 2FA codes for 40 minutes. ISP would have kept Slack as its own role interface."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Apply SOLID reactively at the point of change: when a class gains its second reason to change, split it - do not pre-split on day one.",
+            "Identify the actor behind each method to test SRP. If two methods serve two different stakeholders, that is two responsibilities.",
+            "Reach for OCP when you see a switch/if-chain on a type that grows with the business (providers, tax rules, file formats). Otherwise leave the switch.",
+            "Validate LSP with a single test suite written against the base type and run against every subtype. If a subtype needs different tests, it is not substitutable.",
+            "Design interfaces from the consumer's role, keeping them small (often 1-3 methods). Prefer many narrow interfaces over one wide one.",
+            "Inject dependencies through the constructor, not via field injection or service locators, so dependencies are explicit and the object is always valid once constructed.",
+            "Let a DI container do the wiring at the composition root (main / Spring config), keeping new of concrete classes out of business logic."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Principle", "Smell it fixes", "Primary mechanism"],
+          "rows": [
+            ["SRP", "God class, many reasons to change", "Split by actor / reason"],
+            ["OCP", "Growing switch on a type code", "Polymorphism / strategy"],
+            ["LSP", "instanceof checks, overrides that throw", "Behavioral subtyping / composition"],
+            ["ISP", "Fat interface, stubbed unused methods", "Role interfaces"],
+            ["DIP", "Hard-wired new of I/O classes", "Abstractions + constructor injection"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "note-relationships",
+      "heading": "How the Principles Reinforce Each Other",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The five principles are not independent. DIP supplies the abstractions that OCP extends. ISP keeps those abstractions small so LSP is easier to honor (a small contract is easier to fully satisfy). SRP decides where the seams go in the first place. In practice you rarely apply one in isolation - a good refactor of the UserService above simultaneously satisfies SRP, DIP, and OCP."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A useful mental order during design review: SRP first (where are the seams?), then DIP/ISP (what abstractions cross them?), then OCP and LSP (does extension and substitution hold across those abstractions?)."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "dip-dependency-flow",
+      "title": "DIP: Dependency Inversion Around the Domain",
+      "type": "mermaid",
+      "content": "flowchart TD\n    subgraph Domain[High-level policy]\n        OP[OrderProcessor]\n        IR[OrderRepository interface]\n        IN[NotificationSender interface]\n    end\n    subgraph Infra[Low-level details]\n        JPA[JpaOrderRepository]\n        SMTP[SmtpNotificationSender]\n    end\n    OP --> IR\n    OP --> IN\n    JPA -.implements.-> IR\n    SMTP -.implements.-> IN"
+    },
+    {
+      "id": "ocp-strategy-flow",
+      "title": "OCP: Adding a Provider Without Modifying PaymentService",
+      "type": "mermaid",
+      "content": "flowchart LR\n    PS[PaymentService] --> PP[PaymentProvider interface]\n    PP --> ST[StripeProvider]\n    PP --> PY[PayPalProvider]\n    PP --> AD[AdyenProvider NEW]"
+    },
+    {
+      "id": "srp-layers",
+      "title": "SRP: Orchestration vs Single-Responsibility Collaborators",
+      "type": "ascii",
+      "content": "+---------------------------------------------------+\n|              RegisterUser (use case)              |\n|   one reason to change: the registration flow     |\n+----------+-------------------+--------------------+\n           |                   |                    |\n           v                   v                    v\n+------------------+ +------------------+ +------------------+\n|  UserRepository  | |  WelcomeMailer   | | PaymentProcessor |\n|  (DBA changes)   | | (marketing)      | | (finance/PSP)    |\n+------------------+ +------------------+ +------------------+"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-srp-definition",
+      "question": "What does the Single Responsibility Principle actually mean, and why is 'a class should do one thing' a poor restatement of it?",
+      "answer": "SRP states that a class should have exactly one reason to change, where a 'reason to change' is tied to a single actor or stakeholder. 'Do one thing' is misleading because a perfectly valid class can perform many steps (e.g. an orchestrator that saves, charges, and emails) and still have a single reason to change - the workflow itself. Conversely, a class that 'does one thing' technically can still serve two actors (e.g. a Report class with both formatting logic owned by the UI team and calculation logic owned by accounting), which is an SRP violation despite sounding singular. The correct lens is cohesion of change: group code that changes together for the same reason, separate code that changes for different reasons.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["srp", "cohesion"],
+      "followUps": ["How do you identify the 'actor' behind a method?", "Can two classes share a reason to change?"]
+    },
+    {
+      "id": "q-ocp-mechanism",
+      "question": "How do you make a payment module open for extension but closed for modification when adding a new provider?",
+      "answer": "Define a PaymentProvider abstraction (interface) with a charge method, and have each provider implement it (StripeProvider, PayPalProvider). The PaymentService depends on a collection or registry of PaymentProvider and dispatches by name or capability. Adding Adyen is a brand-new class plus a bean registration; PaymentService is never edited, so its existing tests carry no regression risk. The mechanism is runtime polymorphism replacing a compile-time switch. With Spring you inject List<PaymentProvider> and every @Component self-registers.",
+      "difficulty": "junior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["ocp", "strategy"],
+      "followUps": ["When is a switch statement acceptable instead?", "How does a DI container support OCP?"]
+    },
+    {
+      "id": "q-lsp-rectangle",
+      "question": "Explain the Rectangle/Square LSP violation and the correct fix.",
+      "answer": "If Square extends Rectangle and overrides setWidth/setHeight to keep all sides equal, a client written against Rectangle that calls setWidth(5) then setHeight(4) and expects area 20 will get 16 for a Square. The subtype violated an implicit postcondition of the base (setting width does not change height), so substitution breaks caller correctness. The relationship 'Square is-a Rectangle' is true in geometry but false behaviorally for mutable shapes. The fix is to not use inheritance here: model both as immutable implementations of a Shape interface exposing area(), or use composition. Immutability removes the offending setters entirely, so there is no contradictory postcondition to violate.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["lsp", "inheritance"],
+      "followUps": ["Would the violation disappear if both were immutable? Why?", "How does LSP relate to design-by-contract pre/postconditions?"]
+    },
+    {
+      "id": "q-isp-fat-interface",
+      "question": "What problem does Interface Segregation solve, and how do you split a fat interface?",
+      "answer": "ISP prevents clients from depending on methods they do not use. A fat interface couples unrelated consumers: adding a method forces every implementer to change (or stub), and any implementer that cannot meaningfully provide a method ends up throwing UnsupportedOperationException, which also breaks LSP. You split by client role: identify how each consumer uses the object and carve a narrow interface for that role (Workable, Feedable, Restable instead of Worker). Implementers compose the roles they actually fulfill, and consumers depend only on the narrow role they need.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["isp", "interfaces"],
+      "followUps": ["How does ISP interact with LSP?", "Is one method per interface ever too granular?"]
+    },
+    {
+      "id": "q-dip-inversion",
+      "question": "What is being 'inverted' in the Dependency Inversion Principle?",
+      "answer": "The direction of the source-code (compile-time) dependency. In a naive layered design, the high-level policy depends on the low-level detail (OrderProcessor imports MySqlOrderDao), so the policy is coupled to infrastructure. DIP inverts this: the high-level layer defines and owns the abstraction (OrderRepository), and the low-level detail implements it (JpaOrderRepository implements OrderRepository). Now both depend on the abstraction, and the compile-time arrow points from the detail up to the policy's interface - the opposite of the runtime call flow. This decouples policy from detail and makes the policy testable with fakes.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["dip", "dependency-injection"],
+      "followUps": ["Where should the interface live - domain or infra package?", "How is DIP different from dependency injection?"]
+    },
+    {
+      "id": "q-dip-vs-di",
+      "question": "What is the difference between Dependency Inversion and Dependency Injection?",
+      "answer": "Dependency Inversion is a design principle about the direction of dependencies: high-level and low-level code both depend on abstractions owned by the high-level layer. Dependency Injection is a technique for supplying a dependency to an object from the outside (via constructor, setter, or a container) rather than the object creating it itself. You can do DI without DIP (inject a concrete class, no abstraction) and you can honor DIP without a DI framework (manually pass an interface implementation in main). They are complementary: DIP defines what should depend on what; DI is one common mechanism for wiring those abstractions to implementations at the composition root.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["dip", "dependency-injection"],
+      "followUps": ["What is a composition root?", "Can a service locator satisfy DIP?"]
+    },
+    {
+      "id": "q-diagnose-1",
+      "question": "Which SOLID principle does this violate? `class ReportGenerator { String toHtml(Report r){...} double computeRevenue(Report r){...} }` where the HTML is owned by the frontend team and the revenue math by finance.",
+      "answer": "SRP. The class has two reasons to change controlled by two different actors: presentation changes requested by the frontend team and revenue-calculation changes requested by finance. Even though both methods sound related to 'reports,' they serve different stakeholders, so a finance rule change risks the HTML and vice versa. The fix is to separate the revenue calculation (domain) from the HTML rendering (presentation) into two classes.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["srp", "diagnosis"],
+      "followUps": ["What if both methods were tiny one-liners - still a violation?"]
+    },
+    {
+      "id": "q-diagnose-2",
+      "question": "Which SOLID principle does this violate? `class ImmutableList extends ArrayList { public boolean add(E e){ throw new UnsupportedOperationException(); } }`.",
+      "answer": "LSP (and indirectly ISP). ImmutableList claims to be an ArrayList - a mutable List - but it strengthens the precondition of add() to 'never call this,' which the base contract does not allow. Any code written against List that calls add() will compile fine and then throw at runtime when handed an ImmutableList, so the subtype is not substitutable for its base. The root cause is that the mutable List interface is too fat for an immutable type; a read-only role interface (ISP) would let an immutable collection avoid inheriting add() at all.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["lsp", "isp", "diagnosis"],
+      "followUps": ["How does the JDK handle this for Collections.unmodifiableList?"]
+    },
+    {
+      "id": "q-tricky-srp-reasons",
+      "question": "Tricky: Two methods in a class each 'do one thing' and are clearly related to orders. Your teammate says the class therefore satisfies SRP. Are they necessarily right?",
+      "answer": "No - 'does one thing' and 'related to orders' are not the SRP test. SRP is about reasons to change, i.e. actors. Consider OrderService with calculateDiscount() (owned by the marketing/pricing team) and persist() (owned by the platform/DBA team). Both are 'about orders' and each 'does one thing,' yet the class has two distinct reasons to change driven by two actors, so it violates SRP. The subtle gotcha is that semantic relatedness (same noun) is not the same as change-relatedness (same actor/reason). You must ask 'who requests changes to this method?' If the answer differs across methods, they belong in different classes regardless of how cohesive the topic sounds.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["srp", "gotcha"],
+      "followUps": ["Could two classes legitimately share an actor and thus a reason to change?", "How does Conway's Law connect actors to module boundaries?"]
+    },
+    {
+      "id": "q-tricky-ocp-overuse",
+      "question": "Tricky: A reviewer demands you wrap every class behind an interface 'to follow OCP and DIP.' Why might a staff engineer push back?",
+      "answer": "Because OCP and DIP are predictions about likely axes of change, not blanket mandates. Adding an interface with exactly one implementation that will never be swapped is speculative generality: it adds an indirection layer, makes navigation and debugging harder, and yields no testability or extensibility benefit. The cost of an abstraction is paid continuously (more files, harder to follow control flow), while the benefit only materializes if a second implementation or a fake-in-test is actually needed. The senior move is to invert dependencies across real seams - I/O, third-party SDKs, things you fake in tests, things the business grows (providers, tax rules) - and to leave pure value objects, stable internal helpers, and never-swapped collaborators as concrete classes. YAGNI governs where you apply OCP/DIP.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["ocp", "dip", "yagni", "gotcha"],
+      "followUps": ["What signals tell you a seam is worth an abstraction?", "How do you refactor toward an interface later without churn?"]
+    },
+    {
+      "id": "q-tricky-lsp-collections",
+      "question": "Tricky: Covariant arrays in Java let you write `Object[] a = new String[1]; a[0] = 42;` which compiles but throws ArrayStoreException at runtime. Which principle does this language feature violate, and what is the deeper lesson?",
+      "answer": "It violates LSP at the language level. Java arrays are covariant (String[] is treated as a subtype of Object[]), which implies a String[] is substitutable everywhere an Object[] is expected. But the write operation a[0] = 42 is valid for a true Object[] and invalid for a String[], so the substitution is not behaviorally sound - the JVM must insert a runtime check (ArrayStoreException) to patch the hole. Generics fixed this by being invariant by default (List<String> is NOT a List<Object>), trading some flexibility for compile-time soundness, and offering explicit variance via wildcards (? extends / ? super) following the Producer-Extends-Consumer-Super rule. The deeper lesson: LSP and variance are the same idea - a type is only substitutable for another if every operation the base permits is safely permitted on the subtype, which is why mutable containers cannot be safely covariant.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["lsp", "variance", "generics", "gotcha"],
+      "followUps": ["Why are read-only producers safely covariant?", "How do ? extends and ? super map to LSP?"]
+    },
+    {
+      "id": "q-tricky-dip-proxy",
+      "question": "Tricky: You inject an interface, but a self-invocation (this.method()) bypasses your Spring @Transactional or @Cacheable behavior. Why, and how does it relate to depending on abstractions?",
+      "answer": "Spring's @Transactional and @Cacheable are typically implemented with a proxy that wraps your bean. Callers go through the proxy because they hold the injected abstraction (the proxy implements the interface). But an internal self-call this.someMethod() uses the raw target reference, not the proxy, so the cross-cutting advice never runs - the transaction or cache is silently skipped. The connection to DIP: the behavior only applies when you actually go through the injected abstraction. The moment code reaches the concrete this directly, you have bypassed the seam where the proxy lives. Fixes: extract the advised method into a separate injected bean (so the call crosses a proxy boundary), self-inject the proxy, or switch to AspectJ load-time weaving which advises the bytecode itself rather than using a proxy.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["dip", "spring", "proxy", "gotcha"],
+      "followUps": ["Why does AspectJ weaving avoid the self-invocation problem?", "How would you detect this bug in code review?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-refactor-ocp",
+      "title": "Refactor a Discount Switch to Satisfy OCP",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "prompt": "You are given a PriceCalculator whose applyDiscount method is a growing switch over customer tier (STANDARD, PREMIUM, VIP). Every new tier forces an edit to this tested class. Refactor it so that adding a new tier (e.g. PLATINUM) requires adding code only, never modifying PriceCalculator. Keep behavior identical: STANDARD = 0%, PREMIUM = 10%, VIP = 20%.",
+      "hints": [
+        "Replace the switch with polymorphism: an abstraction per tier.",
+        "PriceCalculator should depend on a lookup of DiscountPolicy keyed by tier, injected via the constructor.",
+        "Adding PLATINUM should be a new class plus one registry entry, with PriceCalculator untouched."
+      ],
+      "solutionCode": "import java.math.BigDecimal;\nimport java.util.Map;\n\nenum Tier { STANDARD, PREMIUM, VIP }\n\ninterface DiscountPolicy {\n    Tier tier();\n    BigDecimal discountedPrice(BigDecimal base);\n}\n\nclass StandardDiscount implements DiscountPolicy {\n    public Tier tier() { return Tier.STANDARD; }\n    public BigDecimal discountedPrice(BigDecimal base) { return base; }\n}\n\nclass PremiumDiscount implements DiscountPolicy {\n    public Tier tier() { return Tier.PREMIUM; }\n    public BigDecimal discountedPrice(BigDecimal base) {\n        return base.multiply(new BigDecimal(\"0.90\"));\n    }\n}\n\nclass VipDiscount implements DiscountPolicy {\n    public Tier tier() { return Tier.VIP; }\n    public BigDecimal discountedPrice(BigDecimal base) {\n        return base.multiply(new BigDecimal(\"0.80\"));\n    }\n}\n\n// NEW tier = NEW class, PriceCalculator is never modified.\nclass PlatinumDiscount implements DiscountPolicy {\n    public Tier tier() { return Tier.valueOf(\"VIP\"); } // example placeholder if enum extended\n    public BigDecimal discountedPrice(BigDecimal base) {\n        return base.multiply(new BigDecimal(\"0.70\"));\n    }\n}\n\nclass PriceCalculator {\n    private final Map<Tier, DiscountPolicy> policies;\n    PriceCalculator(java.util.List<DiscountPolicy> available) {\n        this.policies = available.stream()\n            .collect(java.util.stream.Collectors.toMap(DiscountPolicy::tier, p -> p));\n    }\n    BigDecimal finalPrice(Tier tier, BigDecimal base) {\n        DiscountPolicy policy = policies.get(tier);\n        if (policy == null) throw new IllegalArgumentException(\"No policy for tier \" + tier);\n        return policy.discountedPrice(base);\n    }\n}",
+      "solutionLanguage": "java",
+      "explanation": "The switch is replaced by a DiscountPolicy abstraction, one implementation per tier. PriceCalculator depends only on a Map<Tier, DiscountPolicy> built from an injected list, so it never references a concrete tier. This satisfies OCP because a new pricing tier is a brand-new DiscountPolicy class registered into the list (in Spring, just a new @Component) - PriceCalculator is closed for modification and its tests do not re-run with regression risk. It simultaneously satisfies DIP (the calculator depends on the abstraction, not concrete discount math) and SRP (each tier's rounding/percentage lives in its own class, so changing the VIP rate cannot affect the PREMIUM rate). In a real codebase you would extend the Tier enum or use a String key so PLATINUM is fully additive; the placeholder in PlatinumDiscount illustrates the pattern without changing the enum here.",
+      "relatedTopic": "ocp"
+    },
+    {
+      "id": "ch-dip-testable",
+      "title": "Invert Dependencies to Make a Service Unit-Testable",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "prompt": "A NotificationService directly instantiates a concrete SmtpClient (network) and a concrete SystemClock, making it impossible to unit-test without sending real email and depending on wall-clock time. Refactor it to depend on abstractions injected via the constructor, then write a unit test that verifies a quiet-hours rule (no email sent between 22:00 and 07:00) using fakes - no network, no real clock.",
+      "hints": [
+        "Introduce an EmailGateway interface and a Clock abstraction; inject both.",
+        "NotificationService should contain only the policy (quiet-hours decision), delegating I/O to the gateway.",
+        "In the test, supply a fake clock fixed at 23:00 and a recording fake gateway, and assert nothing was sent."
+      ],
+      "solutionCode": "import java.time.*;\n\ninterface EmailGateway {\n    void send(String to, String subject, String body);\n}\n\nclass NotificationService {\n    private final EmailGateway gateway;\n    private final Clock clock;            // java.time.Clock is itself an injectable abstraction\n\n    NotificationService(EmailGateway gateway, Clock clock) {\n        this.gateway = gateway;\n        this.clock = clock;\n    }\n\n    boolean notify(String to, String subject, String body) {\n        int hour = LocalTime.now(clock).getHour();\n        if (hour >= 22 || hour < 7) {\n            return false;                // quiet hours: suppress\n        }\n        gateway.send(to, subject, body);\n        return true;\n    }\n}\n\n// ---- Unit test (JUnit 5) ----\nimport org.junit.jupiter.api.Test;\nimport static org.junit.jupiter.api.Assertions.*;\nimport java.util.*;\n\nclass NotificationServiceTest {\n\n    static class RecordingGateway implements EmailGateway {\n        final List<String> sent = new ArrayList<>();\n        public void send(String to, String s, String b) { sent.add(to); }\n    }\n\n    private Clock fixedAt(int hour) {\n        Instant instant = LocalDate.of(2026, 6, 25)\n            .atTime(hour, 0).toInstant(ZoneOffset.UTC);\n        return Clock.fixed(instant, ZoneOffset.UTC);\n    }\n\n    @Test\n    void suppressesDuringQuietHours() {\n        RecordingGateway gateway = new RecordingGateway();\n        NotificationService service = new NotificationService(gateway, fixedAt(23));\n        boolean sent = service.notify(\"a@b.com\", \"Hi\", \"body\");\n        assertFalse(sent);\n        assertTrue(gateway.sent.isEmpty());\n    }\n\n    @Test\n    void sendsDuringDaytime() {\n        RecordingGateway gateway = new RecordingGateway();\n        NotificationService service = new NotificationService(gateway, fixedAt(10));\n        boolean sent = service.notify(\"a@b.com\", \"Hi\", \"body\");\n        assertTrue(sent);\n        assertEquals(List.of(\"a@b.com\"), gateway.sent);\n    }\n}",
+      "solutionLanguage": "java",
+      "explanation": "The refactor applies DIP on two seams: the network (EmailGateway interface implemented in production by an SMTP adapter) and time (java.time.Clock, which is the JDK's own injectable abstraction over the system clock). NotificationService now contains only policy - the quiet-hours decision - and delegates all I/O. Because both collaborators are injected, the unit test substitutes a RecordingGateway (a fake that records calls instead of sending) and a Clock.fixed at a deterministic hour. The test runs in microseconds, touches no network, and is not flaky at midnight. This also demonstrates SRP (policy separated from delivery) and the testability payoff that is the whole point of DIP: depending on abstractions is what makes fast, deterministic unit tests possible. Note we used a hand-rolled fake rather than a mocking framework to keep the test reading as behavior, not implementation detail.",
+      "relatedTopic": "dip"
+    }
+  ],
+  "references": [
+    {"label": "Robert C. Martin - The Principles of OOD", "url": "http://butunclebob.com/ArticleS.UncleBob.PrinciplesOfOod"},
+    {"label": "Clean Architecture (Robert C. Martin)", "url": "https://www.oreilly.com/library/view/clean-architecture-a/9780134494272/"},
+    {"label": "Barbara Liskov - Data Abstraction and Hierarchy", "url": "https://dl.acm.org/doi/10.1145/62139.62141"},
+    {"label": "Martin Fowler - Inversion of Control Containers and the Dependency Injection pattern", "url": "https://martinfowler.com/articles/injection.html"},
+    {"label": "Java Generics and Variance (Oracle Tutorial)", "url": "https://docs.oracle.com/javase/tutorial/java/generics/subtyping.html"}
+  ]
+}

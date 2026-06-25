@@ -1,0 +1,66 @@
+<div class="page st">
+  <header class="page__head">
+    <span class="page__eyebrow"><app-icon name="settings" [size]="15" /> Preferences</span>
+    <h1 class="page__title">Settings</h1>
+    <p class="page__subtitle">Personalize your DevMaster Hub experience. Everything is stored locally on your device.</p>
+  </header>
+
+  <section class="card st__card">
+    <div class="st__row">
+      <div class="st__label">
+        <h3>Appearance</h3>
+        <p class="muted">Switch between light and dark themes.</p>
+      </div>
+      <div class="st__theme-toggle">
+        <button [class.is-active]="theme.theme() === 'light'" (click)="theme.set('light')">
+          <app-icon name="sun" [size]="17" /> Light
+        </button>
+        <button [class.is-active]="theme.theme() === 'dark'" (click)="theme.set('dark')">
+          <app-icon name="moon" [size]="17" /> Dark
+        </button>
+      </div>
+    </div>
+
+    <div class="st__row">
+      <div class="st__label">
+        <h3>Text size</h3>
+        <p class="muted">Scale the interface font ({{ theme.fontScale() }}%).</p>
+      </div>
+      <div class="st__slider">
+        <span class="st__slider-min">A</span>
+        <input type="range" min="90" max="115" step="5" [value]="theme.fontScale()" (input)="onFontScale($event)" />
+        <span class="st__slider-max">A</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="card st__card">
+    <div class="st__row">
+      <div class="st__label">
+        <h3>Recently viewed</h3>
+        <p class="muted">Clear the list of topics shown on your dashboard.</p>
+      </div>
+      <button class="btn" (click)="clearRecent()">Clear history</button>
+    </div>
+    <div class="st__row">
+      <div class="st__label">
+        <h3>Reset progress</h3>
+        <p class="muted">Remove all completed topics, solved challenges and interview history.</p>
+      </div>
+      <button class="btn st__danger" (click)="resetProgress()"><app-icon name="refresh" [size]="16" /> Reset</button>
+    </div>
+  </section>
+
+  <section class="card st__about">
+    <app-logo [size]="40" />
+    <p class="muted">
+      <strong>DevMaster Hub</strong> — a premium offline-first platform to master software engineering
+      and ace senior technical interviews. Built with Angular {{ '18' }}, signals and a whole lot of senior-level content.
+    </p>
+    <div class="st__about-meta">
+      <span class="chip"><app-icon name="bolt" [size]="13" /> Offline-ready</span>
+      <span class="chip"><app-icon name="check" [size]="13" /> 100% local</span>
+      <span class="chip">v1.0.0</span>
+    </div>
+  </section>
+</div>

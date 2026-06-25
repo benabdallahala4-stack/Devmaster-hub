@@ -1,0 +1,392 @@
+{
+  "id": "java-concurrency",
+  "title": "Java Concurrency",
+  "category": "Computer Science",
+  "subcategory": "Concurrency",
+  "difficulty": "senior",
+  "tags": ["java", "concurrency", "jmm", "threads", "executors", "locks", "virtual-threads"],
+  "description": "A staff-level tour of Java concurrency from the Java Memory Model and happens-before to atomics, executors, CompletableFuture, and Project Loom virtual threads.",
+  "estReadMinutes": 30,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {"type": "paragraph", "text": "Java concurrency is the art of getting multiple threads to make forward progress on shared state without corrupting it, deadlocking, or silently producing stale reads. Unlike single-threaded code where the program order you write is the order that executes, concurrent Java code runs against a formal contract — the Java Memory Model (JMM) — that grants the JIT, the CPU, and the cache hierarchy enormous freedom to reorder and cache operations. Correctness comes from establishing happens-before edges, not from intuition about 'what the code looks like it does'."},
+        {"type": "paragraph", "text": "This topic walks the full stack: raw threads and the JMM, the low-level primitives (volatile, synchronized, locks, atomics/CAS), the high-level machinery most production code should actually use (ExecutorService, CompletableFuture, the java.util.concurrent collections), the failure modes (deadlock, livelock, starvation, the classic HashMap infinite loop), and finally Project Loom virtual threads, which change how we think about thread-per-request scaling."},
+        {"type": "callout", "variant": "info", "text": "Mental model: a thread does not read shared memory directly. It reads through a window that the JMM defines. volatile, synchronized, locks, and atomics are how you control what that window is allowed to show."}
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {"type": "paragraph", "text": "Concurrency bugs are the most expensive class of production defect because they are non-deterministic, environment-sensitive, and frequently invisible in tests. A race that fires once per ten million requests will pass CI a thousand times and then corrupt a customer's balance at 3am under peak load on a 64-core box with a more aggressive memory model than your laptop."},
+        {"type": "list", "items": [
+          "Throughput and latency: thread pool sizing, lock contention, and false sharing directly determine how many requests per second a service sustains.",
+          "Correctness under load: visibility bugs only manifest when cores actually run threads in parallel — they hide on a developer's single-socket machine.",
+          "Cost: virtual threads let a single JVM hold a million blocked connections, collapsing the need for reactive frameworks in many I/O-bound services.",
+          "Interview signal: how a candidate reasons about happens-before, CAS, and thread pool sizing separates people who have shipped concurrent systems from people who have only read about them."
+        ]},
+        {"type": "callout", "variant": "warning", "text": "A test that passes 100% of the time tells you nothing about a data race. Absence of a failure is not a proof of correctness in concurrent code — only a proof of the right happens-before edges is."}
+      ]
+    },
+    {
+      "id": "jmm-happens-before",
+      "heading": "The Java Memory Model and Happens-Before",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "The JMM (JSR-133, baked into the language since Java 5) defines when a write by one thread is guaranteed to be visible to a read by another thread. It does this through the happens-before relation: if action A happens-before action B, then the effects of A are visible to B and A is ordered before B. If there is no happens-before edge between a write and a read of the same non-final field, you have a data race and the read may observe any legal value — typically a stale one, possibly forever."},
+        {"type": "heading", "text": "The core happens-before rules"},
+        {"type": "list", "items": [
+          "Program order: within a single thread, each action happens-before every later action in program order.",
+          "Monitor lock: an unlock on a monitor happens-before every subsequent lock on that same monitor.",
+          "Volatile: a write to a volatile field happens-before every subsequent read of that same field.",
+          "Thread start: a call to Thread.start() happens-before every action in the started thread.",
+          "Thread join: every action in a thread happens-before another thread returns from join() on it.",
+          "Transitivity: if A happens-before B and B happens-before C, then A happens-before C."
+        ]},
+        {"type": "paragraph", "text": "The transitivity rule is what makes volatile and locks powerful. A volatile write does not just publish that one field — because of program order plus transitivity, it publishes everything the writing thread did before the volatile write to any thread that subsequently reads the volatile field. This is the foundation of safe publication."},
+        {"type": "code", "language": "java", "code": "class Holder {\n    private int x = 0;            // plain field\n    private volatile boolean ready = false; // volatile flag\n\n    void publisher() {\n        x = 42;                  // (1) plain write\n        ready = true;            // (2) volatile write\n    }\n\n    int consumer() {\n        if (ready) {             // (3) volatile read\n            return x;            // (4) guaranteed to see 42, not 0\n        }\n        return -1;\n    }\n}\n// (1) happens-before (2) by program order;\n// (2) happens-before (3) by the volatile rule when (3) reads true;\n// (3) happens-before (4) by program order; therefore (1) hb (4)."},
+        {"type": "callout", "variant": "danger", "text": "Without the volatile keyword on ready, consumer() could see ready==true while still reading x==0, or could loop forever on ready never becoming true because the JIT hoisted the read out of the loop. A non-volatile read of a flag in a spin loop is a classic infinite-loop bug."}
+      ]
+    },
+    {
+      "id": "volatile-vs-synchronized",
+      "heading": "volatile vs synchronized vs Locks",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "These three give you different guarantees. volatile gives visibility and ordering for a single variable but no atomicity for compound operations. synchronized and explicit locks give mutual exclusion (atomicity) plus visibility for everything done inside the critical section."},
+        {"type": "table", "headers": ["Property", "volatile", "synchronized / ReentrantLock"],
+          "rows": [
+            ["Visibility", "Yes, for that one field", "Yes, for all state in the section"],
+            ["Atomicity of compound ops", "No (count++ still races)", "Yes"],
+            ["Mutual exclusion", "No", "Yes"],
+            ["Blocking", "Never blocks", "Blocks contending threads"],
+            ["Reentrancy", "N/A", "Yes (both are reentrant)"],
+            ["Cost when uncontended", "Near-zero, a memory barrier", "Cheap (biased/thin lock), but more than volatile"]
+          ]},
+        {"type": "paragraph", "text": "The canonical trap: volatile int count; count++ is read-modify-write — three operations — so two threads can both read 5, both write 6, and you lose an increment. volatile fixes visibility, never atomicity. Use AtomicInteger or a lock for counters."},
+        {"type": "heading", "text": "ReentrantLock vs synchronized"},
+        {"type": "paragraph", "text": "synchronized is simpler and now well-optimized by the JIT, and since Java 21 it no longer pins virtual threads in most cases. Reach for ReentrantLock when you need a capability synchronized lacks: tryLock with a timeout, interruptible lock acquisition, fairness, or multiple condition variables on one lock."},
+        {"type": "code", "language": "java", "code": "private final ReentrantLock lock = new ReentrantLock();\n\nboolean transfer(Account to, long amount, Duration timeout)\n        throws InterruptedException {\n    if (lock.tryLock(timeout.toMillis(), TimeUnit.MILLISECONDS)) {\n        try {\n            // critical section: guaranteed visibility + exclusion\n            balance -= amount;\n            to.deposit(amount);\n            return true;\n        } finally {\n            lock.unlock(); // ALWAYS unlock in finally\n        }\n    }\n    return false; // gave up rather than block forever -> avoids deadlock\n}"},
+        {"type": "callout", "variant": "warning", "text": "ReentrantReadWriteLock allows many concurrent readers or one writer. It only helps when reads massively outnumber writes AND read sections are non-trivial; under write-heavy or short-read workloads its bookkeeping overhead loses to a plain lock or StampedLock optimistic reads."}
+      ]
+    },
+    {
+      "id": "atomics-cas",
+      "heading": "Atomics and Compare-And-Swap",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "The java.util.concurrent.atomic classes (AtomicInteger, AtomicLong, AtomicReference, LongAdder) provide lock-free, thread-safe single-variable operations built on a CPU compare-and-swap (CAS) instruction. CAS atomically does: if the current value equals an expected value, set it to a new value and report success; otherwise report failure without changing anything."},
+        {"type": "code", "language": "java", "code": "AtomicInteger seq = new AtomicInteger();\n\n// getAndIncrement is implemented as a CAS retry loop:\nint next() {\n    int prev, nextVal;\n    do {\n        prev = seq.get();\n        nextVal = prev + 1;\n    } while (!seq.compareAndSet(prev, nextVal)); // retry on contention\n    return nextVal;\n}\n\n// Lock-free max update via updateAndGet:\nAtomicReference<BigDecimal> high = new AtomicReference<>(BigDecimal.ZERO);\nvoid record(BigDecimal price) {\n    high.updateAndGet(cur -> price.max(cur));\n}"},
+        {"type": "paragraph", "text": "CAS is optimistic: it assumes no contention, tries, and retries if another thread won the race. Under low contention it is far faster than a lock because it never blocks or context-switches. Under very high contention the retry loop can spin and waste CPU — that is exactly the case LongAdder is designed for, striping the counter across cells to reduce contention and summing on demand."},
+        {"type": "callout", "variant": "info", "text": "The ABA problem: CAS only checks the value, not whether it changed and changed back. If a value goes A -> B -> A, CAS sees A and succeeds, missing the intermediate mutation. AtomicStampedReference adds a version stamp to detect ABA, which matters for lock-free stacks and pools."}
+      ]
+    },
+    {
+      "id": "executors-pools",
+      "heading": "ExecutorService and Thread Pool Sizing",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "You almost never create raw Threads in production. ExecutorService decouples task submission from execution policy: you hand it Runnables/Callables and configure how many threads run them, how tasks queue, and what happens when the queue is full. ThreadPoolExecutor is the workhorse; Executors factory methods are convenient but several are footguns."},
+        {"type": "code", "language": "java", "code": "// Prefer constructing ThreadPoolExecutor explicitly so the queue is BOUNDED.\nThreadPoolExecutor pool = new ThreadPoolExecutor(\n    8,                              // core threads\n    8,                              // max threads\n    60L, TimeUnit.SECONDS,          // idle keep-alive\n    new ArrayBlockingQueue<>(1000), // BOUNDED queue -> backpressure\n    new ThreadFactoryBuilder().setNameFormat(\"order-%d\").build(),\n    new ThreadPoolExecutor.CallerRunsPolicy() // shed load to caller\n);"},
+        {"type": "heading", "text": "Sizing the pool"},
+        {"type": "list", "items": [
+          "CPU-bound work: threads about equal to available cores (Runtime.getRuntime().availableProcessors()), maybe +1 to cover the occasional page fault. More threads just add context-switch overhead.",
+          "I/O-bound work (with platform threads): use Little's Law. threads = targetThroughput * latency. A more practical form: cores * targetUtilization * (1 + waitTime/computeTime). If each task spends 90ms waiting and 10ms computing on 8 cores at 100% target, that is 8 * 1 * (1 + 9) = 80 threads.",
+          "Always bound the queue. An unbounded queue (Executors.newFixedThreadPool's default LinkedBlockingQueue) turns a downstream slowdown into an OutOfMemoryError as work piles up.",
+          "Name your threads via a ThreadFactory — anonymous 'pool-3-thread-7' names make production thread dumps useless."
+        ]},
+        {"type": "callout", "variant": "danger", "text": "Executors.newCachedThreadPool() has a SynchronousQueue and unbounded max threads. Under a burst it will spawn a thread per task with no ceiling, and a flood of slow tasks can create tens of thousands of threads and exhaust memory or native thread limits. Never use it for untrusted or unbounded load."}
+      ]
+    },
+    {
+      "id": "completablefuture",
+      "heading": "CompletableFuture and Async Composition",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "CompletableFuture lets you compose asynchronous pipelines without blocking threads at each step. You declare the dependency graph — do A, then B with A's result, combine with C, recover on failure — and the framework schedules each stage when its inputs are ready."},
+        {"type": "code", "language": "java", "code": "CompletableFuture<Order> pipeline =\n    fetchUser(userId)                              // CF<User>\n        .thenCompose(user -> fetchCart(user.id())) // flat-map, returns CF<Cart>\n        .thenCombine(fetchInventory(sku),          // join a parallel CF\n                     (cart, inv) -> priceOrder(cart, inv))\n        .orTimeout(2, TimeUnit.SECONDS)            // fail if too slow\n        .exceptionally(ex -> Order.failed(ex));    // recover\n\n// Run blocking work on a dedicated pool, NOT the common ForkJoinPool:\nCompletableFuture<byte[]> img =\n    CompletableFuture.supplyAsync(() -> readBlob(key), ioPool);"},
+        {"type": "callout", "variant": "warning", "text": "supplyAsync/thenApplyAsync without an explicit Executor run on the shared ForkJoinPool.commonPool(), which is sized to cores-1 and is meant for short CPU-bound tasks. Putting blocking I/O there starves the whole JVM (and parallel streams). Always pass your own bounded executor for blocking work."},
+        {"type": "paragraph", "text": "Mind which thread a stage runs on. The non-Async variants (thenApply vs thenApplyAsync) may run in the thread that completed the previous stage — sometimes the calling thread, sometimes a pool thread. If a stage does meaningful work, be explicit about its executor."}
+      ]
+    },
+    {
+      "id": "concurrent-collections",
+      "heading": "ConcurrentHashMap and the java.util.concurrent Collections",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "ConcurrentHashMap (CHM) is a hash map engineered for concurrent access. Reads are mostly lock-free; writes lock only the individual bin (bucket) being modified, so unrelated keys never contend. Its per-operation methods are atomic, but compound operations on it are not — unless you use the atomic compound methods it provides."},
+        {"type": "code", "language": "java", "code": "ConcurrentHashMap<String, AtomicInteger> counts = new ConcurrentHashMap<>();\n\n// BROKEN: check-then-act race, two threads can both pass the null check\nif (!counts.containsKey(key)) {\n    counts.put(key, new AtomicInteger()); // lost update possible\n}\ncounts.get(key).incrementAndGet();\n\n// CORRECT: atomic compound operations\ncounts.computeIfAbsent(key, k -> new AtomicInteger()).incrementAndGet();\n// or for a simple counter, merge:\nConcurrentHashMap<String, Long> simple = new ConcurrentHashMap<>();\nsimple.merge(key, 1L, Long::sum); // atomic read-modify-write"},
+        {"type": "list", "items": [
+          "CHM forbids null keys and null values — partly so get()==null unambiguously means 'absent' under concurrency.",
+          "Iterators are weakly consistent: they never throw ConcurrentModificationException and reflect some, not necessarily all, concurrent updates.",
+          "size() is an estimate under concurrent mutation; do not build invariants on it.",
+          "Use CopyOnWriteArrayList for read-mostly listener lists, ConcurrentLinkedQueue for unbounded lock-free queues, and ArrayBlockingQueue/LinkedBlockingQueue for producer-consumer with backpressure."
+        ]},
+        {"type": "callout", "variant": "danger", "text": "Never share a plain java.util.HashMap across threads without external synchronization. Under concurrent resize on Java 7 the bucket linked-list could form a cycle and a later get() would spin forever at 100% CPU. Java 8 changed resize to avoid the cycle, but concurrent use still corrupts the map and loses entries — it is undefined behavior."}
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: A Stuck Payment Worker Pool",
+      "kind": "example",
+      "blocks": [
+        {"type": "paragraph", "text": "Incident: a payments service exposed a /charge endpoint. Each request submitted a task to a fixed pool of 16 threads that called a downstream bank API. One afternoon the bank's latency jumped from 50ms to 8s. Within ninety seconds the service stopped responding entirely — health checks timed out, and the pod was OOM-killed. The CPU was near idle the whole time."},
+        {"type": "heading", "text": "Root cause"},
+        {"type": "paragraph", "text": "The pool was built with Executors.newFixedThreadPool(16), whose backing queue is an unbounded LinkedBlockingQueue. All 16 threads were blocked on the slow bank call. Incoming requests could not run, so they queued — without limit. Memory climbed as millions of queued Runnables (each capturing a request context) accumulated until the JVM died. There was no backpressure: the system happily accepted work it could never finish."},
+        {"type": "code", "language": "java", "code": "// BEFORE (the bug): unbounded queue, no timeout, no backpressure\nExecutorService pool = Executors.newFixedThreadPool(16);\npool.submit(() -> bankClient.charge(req)); // bankClient had no timeout\n\n// AFTER: bounded queue + caller-runs backpressure + client timeout\nThreadPoolExecutor pool = new ThreadPoolExecutor(\n    16, 16, 60, TimeUnit.SECONDS,\n    new ArrayBlockingQueue<>(200),                 // backpressure ceiling\n    new ThreadPoolExecutor.CallerRunsPolicy());    // reject -> caller slows\n\nbankClient = bankClient.withTimeout(Duration.ofSeconds(2)); // bound blocking\n\nFuture<Receipt> f = pool.submit(() -> bankClient.charge(req));\ntry {\n    return f.get(3, TimeUnit.SECONDS);   // bound the wait at the boundary too\n} catch (TimeoutException e) {\n    f.cancel(true);\n    return Receipt.pending(req);          // fail fast, do not pile up\n}"},
+        {"type": "callout", "variant": "success", "text": "The fix had three independent layers: a bounded queue (memory cannot run away), a rejection policy (fast failure / backpressure), and timeouts on the blocking call (threads recycle instead of being held forever). Any one alone is insufficient — defense in depth is the lesson. A later migration to virtual threads removed the pool-size ceiling entirely, but bounded admission control stayed."}
+      ]
+    },
+    {
+      "id": "virtual-threads",
+      "heading": "Virtual Threads (Project Loom)",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Virtual threads, final in Java 21 (JEP 444), are lightweight threads scheduled by the JVM on a small pool of carrier (platform) threads. When a virtual thread blocks on I/O, the JVM unmounts it from its carrier and parks it cheaply, freeing the carrier to run another virtual thread. You can have millions of them. The programming model is the same blocking, imperative code — but it scales like async without the callback/reactive complexity."},
+        {"type": "code", "language": "java", "code": "// One virtual thread per task. The executor creates a new VT per submission.\ntry (var executor = Executors.newVirtualThreadPerTaskExecutor()) {\n    List<Future<String>> results = urls.stream()\n        .map(url -> executor.submit(() -> blockingFetch(url))) // blocking is fine\n        .toList();\n    for (var f : results) System.out.println(f.get());\n} // close() waits for all tasks; AutoCloseable"},
+        {"type": "list", "items": [
+          "Do NOT pool virtual threads. They are cheap and disposable; use newVirtualThreadPerTaskExecutor, not a fixed pool. Pooling them defeats the point and re-introduces a ceiling.",
+          "Pinning: a virtual thread that blocks inside a synchronized block or a native call cannot unmount and pins its carrier. Pre-Java 24 this could starve the carrier pool. Prefer ReentrantLock over synchronized around blocking calls on hot paths, though Java 24 largely removes synchronized pinning.",
+          "Thread-locals still work but heavy thread-local usage at million-thread scale costs memory; consider ScopedValue (JEP 446+) for inheritable per-request context.",
+          "Virtual threads do not speed up CPU-bound work — they help I/O-bound, thread-per-request workloads where threads spend most of their time blocked."
+        ]},
+        {"type": "callout", "variant": "info", "text": "Virtual threads make the old 'thread-per-request is too expensive' argument obsolete for I/O-bound servers. A service that needed reactive code to handle 50k concurrent connections can often go back to straightforward blocking code on virtual threads and get the same scalability with far better debuggability."}
+      ]
+    },
+    {
+      "id": "deadlock-livelock-starvation",
+      "heading": "Common Mistakes: Deadlock, Livelock, Starvation",
+      "kind": "mistake",
+      "blocks": [
+        {"type": "paragraph", "text": "These are the classic liveness failures. Each has a different signature and a different fix."},
+        {"type": "table", "headers": ["Failure", "Symptom", "Cause", "Fix"],
+          "rows": [
+            ["Deadlock", "Threads blocked forever, CPU idle", "Cyclic lock acquisition (A waits for B's lock while holding A's)", "Global lock ordering, or tryLock with timeout + backoff"],
+            ["Livelock", "CPU busy, no progress", "Threads keep reacting to each other and retrying (e.g. both back off and retry in lockstep)", "Randomized backoff, bounded retries"],
+            ["Starvation", "Some threads never run", "Unfair scheduling, a greedy thread holds a lock, priority inversion", "Fair locks, bounded critical sections, avoid priority hacks"]
+          ]},
+        {"type": "code", "language": "java", "code": "// DEADLOCK: two threads acquire locks in opposite order\nvoid transfer(Account a, Account b, long amt) {\n    synchronized (a) {            // T1: locks acct1\n        synchronized (b) {        // T2 (calling transfer(b,a)) locks acct2 first\n            a.debit(amt); b.credit(amt); // -> classic AB-BA deadlock\n        }\n    }\n}\n\n// FIX: impose a global order via identity hash / a stable id\nvoid safeTransfer(Account a, Account b, long amt) {\n    Account first  = a.id() < b.id() ? a : b;\n    Account second = a.id() < b.id() ? b : a;\n    synchronized (first) {\n        synchronized (second) { a.debit(amt); b.credit(amt); }\n    }\n}"},
+        {"type": "callout", "variant": "warning", "text": "Detect deadlocks in production with a thread dump (jstack or kill -3): the JVM explicitly prints 'Found one Java-level deadlock' with the cycle. ThreadMXBean.findDeadlockedThreads() lets you alert on it programmatically from a watchdog."}
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {"type": "list", "items": [
+          "Prefer immutability and confinement. The cheapest way to be thread-safe is to not share mutable state. Use immutable value objects (records) and pass copies.",
+          "Use high-level concurrency utilities over raw threads and wait/notify: ExecutorService, CompletableFuture, concurrent collections, CountDownLatch, Semaphore, StructuredTaskScope.",
+          "Always bound your queues and pools, and always set timeouts on blocking calls and Future.get. Unbounded anything is a latent OOM.",
+          "Acquire multiple locks in a consistent global order, and keep critical sections as short as possible to reduce contention.",
+          "Use volatile only for a single flag/reference whose visibility you need; use atomics for counters; use locks for invariants spanning multiple fields.",
+          "Make fields final where possible — final fields have special JMM safe-publication guarantees once the constructor completes.",
+          "Name your threads, and instrument pool queue depth and active count as metrics. A growing queue is your earliest backpressure signal.",
+          "On Java 21+, default I/O-bound, thread-per-request servers to virtual threads; reserve bounded platform-thread pools for CPU-bound work."
+        ]},
+        {"type": "callout", "variant": "success", "text": "The senior heuristic: reach for the highest level of abstraction that solves the problem. Plain locks and volatile are powerful but error-prone; most code is safer and clearer built from executors, atomics, and concurrent collections."}
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "happens-before-flow",
+      "title": "Safe publication via a volatile flag (happens-before)",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n    participant P as Publisher Thread\n    participant M as Shared Memory\n    participant C as Consumer Thread\n    P->>M: write x = 42 (plain)\n    P->>M: write ready = true (volatile)\n    Note over P,M: program order edge\n    C->>M: read ready (volatile) returns true\n    Note over M,C: volatile rule creates happens-before\n    C->>M: read x returns 42 not 0\n    Note over C: transitivity guarantees visibility of x"
+    },
+    {
+      "id": "thread-pool-architecture",
+      "title": "ThreadPoolExecutor task lifecycle",
+      "type": "mermaid",
+      "content": "flowchart TD\n    A[submit task] --> B{core threads busy?}\n    B -- no --> C[run on a core thread]\n    B -- yes --> D{queue has room?}\n    D -- yes --> E[enqueue task]\n    D -- no --> F{below max threads?}\n    F -- yes --> G[spawn new thread and run]\n    F -- no --> H[RejectedExecutionHandler]\n    H --> I[CallerRunsPolicy applies backpressure]\n    E --> C"
+    },
+    {
+      "id": "virtual-thread-mounting",
+      "title": "Virtual thread mounting on carrier threads",
+      "type": "ascii",
+      "content": "+--------------------------------------------------------------+\n|                   JVM Virtual Thread Scheduler               |\n|                                                              |\n|   VT1   VT2   VT3   VT4  ...  VTn   (millions, cheap)         |\n|    |     |           |          |                            |\n|    v     v           v          v                            |\n|  mounted          mounted    mounted   <-- only a few at once|\n+----|-----|-----------|----------|----------------------------+\n     |     |           |          |\n     v     v           v          v\n  +-----+-----+-----+-----+   Carrier (platform) thread pool\n  | C0  | C1  | C2  | C3  |   ~ number of CPU cores\n  +-----+-----+-----+-----+\n        |\n        v  (VT blocks on I/O)\n  VT unmounts, carrier freed to run another VT; VT parks\n  cheaply on the heap until the I/O completes, then remounts."
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-volatile-vs-sync",
+      "question": "What is the difference between volatile and synchronized?",
+      "answer": "volatile guarantees visibility and ordering for reads/writes of a single variable: a write to a volatile field is immediately visible to subsequent reads, and it establishes a happens-before edge. It does not provide atomicity for compound operations and never blocks. synchronized provides mutual exclusion (only one thread in the critical section) plus visibility of all state mutated in that section, and it blocks contending threads. Use volatile for a single flag or reference whose visibility matters; use synchronized (or a lock) when you need to make a multi-step operation atomic or protect an invariant across multiple fields.",
+      "difficulty": "junior",
+      "category": "Concurrency",
+      "tricky": false,
+      "tags": ["volatile", "synchronized", "visibility"],
+      "followUps": ["Why is volatile count++ still not thread-safe?", "Does synchronized guarantee visibility for fields not touched inside it?"]
+    },
+    {
+      "id": "q-happens-before",
+      "question": "Explain the happens-before relationship and why it matters.",
+      "answer": "Happens-before is the JMM's ordering and visibility contract: if action A happens-before action B, then A's memory effects are visible to B and A is ordered before B. Key edges include program order within a thread, monitor unlock-before-lock, volatile write-before-read, Thread.start before the thread's actions, and a thread's actions before another's return from join. Crucially it is transitive. Without a happens-before edge between a write and a read of the same non-final field, you have a data race and the read may legally observe a stale value. Correct concurrent code is built by establishing the right happens-before edges, not by reasoning about wall-clock timing.",
+      "difficulty": "senior",
+      "category": "Concurrency",
+      "tricky": false,
+      "tags": ["jmm", "happens-before", "visibility"],
+      "followUps": ["How does a volatile write publish non-volatile fields written before it?", "What guarantee do final fields give after construction?"]
+    },
+    {
+      "id": "q-pool-sizing",
+      "question": "How do you size a thread pool for CPU-bound vs I/O-bound work?",
+      "answer": "For CPU-bound work, set the pool to roughly the number of available cores (Runtime.getRuntime().availableProcessors()), perhaps +1 to absorb occasional stalls; more threads only add context-switch overhead. For I/O-bound work on platform threads, threads spend most time blocked, so you need more: a practical formula is cores * targetUtilization * (1 + waitTime/computeTime). For 8 cores, 100% target, 90ms wait and 10ms compute, that is 8*(1+9)=80 threads. Always pair the pool with a bounded queue and a rejection policy for backpressure. On Java 21+, the cleaner answer for I/O-bound thread-per-request work is virtual threads, which remove the sizing problem for blocking I/O entirely.",
+      "difficulty": "mid",
+      "category": "Concurrency",
+      "tricky": false,
+      "tags": ["executors", "thread-pool", "sizing"],
+      "followUps": ["Why must the queue be bounded?", "What does CallerRunsPolicy do under overload?"]
+    },
+    {
+      "id": "q-cas",
+      "question": "What is compare-and-swap and how do atomics use it?",
+      "answer": "Compare-and-swap (CAS) is an atomic CPU instruction: given a memory location, an expected value, and a new value, it sets the location to the new value only if it currently equals the expected value, and reports whether it succeeded — all atomically. Atomic classes like AtomicInteger implement operations such as incrementAndGet as a read-then-CAS retry loop: read the current value, compute the new one, attempt the CAS, and retry if another thread changed it first. This is lock-free and optimistic, avoiding blocking and context switches, which makes it fast under low to moderate contention. Under extreme contention the retry loop spins; LongAdder addresses that by striping across cells.",
+      "difficulty": "mid",
+      "category": "Concurrency",
+      "tricky": false,
+      "tags": ["atomics", "cas", "lock-free"],
+      "followUps": ["What is the ABA problem and how does AtomicStampedReference fix it?", "When would you prefer LongAdder over AtomicLong?"]
+    },
+    {
+      "id": "q-chm-atomicity",
+      "question": "ConcurrentHashMap's methods are thread-safe, so why can code using it still have races?",
+      "answer": "Each individual CHM method is atomic, but a sequence of method calls is not. The classic check-then-act bug is if (!map.containsKey(k)) map.put(k, v): two threads can both see the key absent and both put, losing one update. The fix is to use the atomic compound methods CHM provides: computeIfAbsent, merge, compute, or putIfAbsent. For a counter, map.merge(k, 1L, Long::sum) is an atomic read-modify-write. The lesson is that thread-safe building blocks do not make composed operations on them atomic; you must use operations the collection guarantees as a single atomic step.",
+      "difficulty": "mid",
+      "category": "Concurrency",
+      "tricky": false,
+      "tags": ["concurrenthashmap", "check-then-act", "atomicity"],
+      "followUps": ["Why does CHM forbid null keys and values?", "Why is size() only an estimate under concurrency?"]
+    },
+    {
+      "id": "q-completablefuture-pool",
+      "question": "What pool does CompletableFuture.supplyAsync use by default and why is that a trap?",
+      "answer": "Without an explicit Executor, supplyAsync and the *Async stages run on ForkJoinPool.commonPool(), which is sized to roughly cores-1 and shared JVM-wide (it also backs parallel streams). The common pool is meant for short CPU-bound tasks. If you put blocking I/O on it, those threads sit idle-blocked, and a handful of slow tasks can starve the entire pool, stalling all async work and parallel streams across the application. The fix is to always pass your own bounded, named executor for any blocking or long-running stage, reserving the common pool for quick CPU work.",
+      "difficulty": "senior",
+      "category": "Concurrency",
+      "tricky": false,
+      "tags": ["completablefuture", "forkjoinpool", "executors"],
+      "followUps": ["What is the difference between thenApply and thenApplyAsync regarding which thread runs?", "How do you bound the total time of a CompletableFuture chain?"]
+    },
+    {
+      "id": "q-virtual-threads",
+      "question": "What problem do virtual threads solve and when do they NOT help?",
+      "answer": "Virtual threads (Java 21, JEP 444) solve the cost of thread-per-request scaling for I/O-bound workloads. They are cheap, JVM-scheduled threads multiplexed onto a small pool of carrier platform threads; when one blocks on I/O it unmounts and parks cheaply, freeing the carrier. This lets a server handle hundreds of thousands or millions of concurrent blocking tasks with simple imperative code, replacing much reactive complexity. They do NOT help CPU-bound work — you still only have so many cores, so virtual threads give no speedup there and a bounded platform-thread pool is the right tool. They also should not be pooled; use newVirtualThreadPerTaskExecutor.",
+      "difficulty": "senior",
+      "category": "Concurrency",
+      "tricky": false,
+      "tags": ["virtual-threads", "loom", "scaling"],
+      "followUps": ["What is pinning and how do you avoid it?", "Why is pooling virtual threads an anti-pattern?"]
+    },
+    {
+      "id": "q-deadlock-prevention",
+      "question": "How do you prevent and detect deadlocks?",
+      "answer": "Prevent by removing one of the four Coffman conditions, most practically the circular-wait condition: acquire multiple locks in a consistent global order (e.g. by a stable account id or System.identityHashCode tiebreak). Alternatives are tryLock with a timeout plus backoff so a thread gives up rather than waiting forever, keeping critical sections short, and using a single coarser lock when fine-grained locking is not worth it. Detect at runtime with a thread dump (jstack/kill -3), which prints the deadlock cycle explicitly, or programmatically via ThreadMXBean.findDeadlockedThreads() in a watchdog that alerts and optionally dumps stacks.",
+      "difficulty": "senior",
+      "category": "Concurrency",
+      "tricky": false,
+      "tags": ["deadlock", "locks", "lock-ordering"],
+      "followUps": ["How does livelock differ from deadlock?", "What does tryLock with a timeout buy you over plain lock?"]
+    },
+    {
+      "id": "q-executor-shutdown",
+      "question": "How do you shut down an ExecutorService cleanly?",
+      "answer": "Call shutdown() to stop accepting new tasks while letting submitted ones finish, then awaitTermination with a timeout. If it does not terminate in time, call shutdownNow() to interrupt running tasks and drain the queue, and await again. Tasks must respond to interruption (check Thread.interrupted() in loops, propagate InterruptedException) for shutdownNow to be effective. A common pattern is shutdown -> awaitTermination -> shutdownNow -> awaitTermination, wrapped so the current thread re-asserts its interrupt status if interrupted while waiting.",
+      "difficulty": "mid",
+      "category": "Concurrency",
+      "tricky": false,
+      "tags": ["executors", "shutdown", "interruption"],
+      "followUps": ["What does shutdownNow do with tasks still in the queue?", "Why must tasks honor interruption?"]
+    },
+    {
+      "id": "q-dcl-broken",
+      "question": "Why is double-checked locking broken without volatile?",
+      "answer": "In double-checked locking you check a field for null, and only synchronize and create the instance if it is null, re-checking inside the lock. The trap is that object construction and the field assignment can be reordered: another thread may observe a non-null reference to an object whose constructor has not finished, reading default/garbage field values. This is a publication problem — the second thread has no happens-before edge to the construction. Marking the field volatile fixes it because a volatile write happens-before subsequent volatile reads, ensuring the fully constructed object is published before any thread can see the reference. Since Java 5's JMM, volatile makes DCL correct; without it the idiom is broken. A cleaner alternative is the initialization-on-demand holder idiom, which uses classloading guarantees instead.",
+      "difficulty": "senior",
+      "category": "Concurrency",
+      "tricky": true,
+      "tags": ["double-checked-locking", "volatile", "safe-publication", "jmm"],
+      "followUps": ["How does the holder-class idiom avoid synchronization entirely?", "Why don't final fields help here if the object is published mid-construction?"]
+    },
+    {
+      "id": "q-hashmap-infinite-loop",
+      "question": "Why could a plain HashMap shared across threads spin forever at 100% CPU?",
+      "answer": "On Java 7 and earlier, HashMap.resize() rehashed each bucket's linked list and, due to its head-insertion transfer, two threads resizing concurrently could splice a list into a cycle (node A.next = B, B.next = A). A later get() that hashed into that bucket would traverse the list and never reach a null terminator, spinning at 100% CPU on one core — a hang with no exception and no obvious cause in logs. This is undefined behavior: HashMap is not thread-safe. Java 8 changed resize to preserve order and split buckets into low/high lists, removing this specific cycle, but concurrent use still corrupts the map, loses entries, and can throw or misbehave. The fix is ConcurrentHashMap or external synchronization — never share a plain HashMap for writes.",
+      "difficulty": "senior",
+      "category": "Concurrency",
+      "tricky": true,
+      "tags": ["hashmap", "race-condition", "resize", "infinite-loop"],
+      "followUps": ["Does Java 8's change make concurrent HashMap use safe?", "How does ConcurrentHashMap avoid this with per-bin locking?"]
+    },
+    {
+      "id": "q-check-then-act",
+      "question": "What is a check-then-act race and where do experienced engineers still hit it?",
+      "answer": "A check-then-act race is when you observe state (the check) and then act on it as if the state is unchanged, but another thread mutates it in between. Even with thread-safe components the composite is unsafe. Common spots: if(!map.containsKey(k)) map.put(k,v) on a ConcurrentHashMap (use computeIfAbsent/merge), lazy init like if(instance==null) instance=create() (use a holder or volatile DCL), and 'check the collection is non-empty then remove' on a concurrent queue (use poll() and check the result instead). The fix is to make the check and the act a single atomic operation provided by the data structure, or to hold a lock across both. The footgun is that each individual call is correct, so it looks safe.",
+      "difficulty": "senior",
+      "category": "Concurrency",
+      "tricky": true,
+      "tags": ["check-then-act", "race-condition", "atomicity"],
+      "followUps": ["How does poll() avoid the empty-then-remove race?", "Why doesn't making each field volatile fix a multi-field invariant?"]
+    },
+    {
+      "id": "q-volatile-array",
+      "question": "If you declare a volatile array, are writes to its elements visible across threads?",
+      "answer": "No — and this surprises many engineers. volatile applies to the array reference, not its elements. Writing arr[i] = x is a plain write with no happens-before guarantee; another thread may see a stale element even though the reference is volatile. Reading the volatile reference only guarantees you see the latest array object, not the latest contents. To get per-element visibility and atomicity use AtomicIntegerArray / AtomicReferenceArray, which apply volatile-like semantics and CAS to each slot, or guard element access with a lock. The same gotcha applies to volatile references to mutable objects: the reference is published safely, but later mutations to the object's fields are not.",
+      "difficulty": "senior",
+      "category": "Concurrency",
+      "tricky": true,
+      "tags": ["volatile", "arrays", "visibility", "atomics"],
+      "followUps": ["What does AtomicReferenceArray give you that a volatile array does not?", "How does final-field publication interact with mutable contents?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-bounded-blocking-queue",
+      "title": "Implement a thread-safe bounded blocking queue",
+      "difficulty": "senior",
+      "category": "Concurrency",
+      "prompt": "Implement a generic bounded blocking queue with capacity N. put(e) blocks while the queue is full; take() blocks while it is empty. It must be correct under many concurrent producers and consumers, support interruption, and not busy-wait. Use a ReentrantLock with two Condition variables (notFull, notEmpty). Do not use java.util.concurrent.ArrayBlockingQueue.",
+      "hints": [
+        "Use one ReentrantLock guarding the buffer, plus lock.newCondition() twice: notFull and notEmpty.",
+        "Wait in a while loop, not an if — you must re-check the condition after waking because of spurious wakeups and because another thread may have changed state between signal and reacquiring the lock.",
+        "After a put, signal notEmpty; after a take, signal notFull.",
+        "Use a circular buffer (array + head/tail/count) or an ArrayDeque internally; guard every access with the lock.",
+        "Always unlock in a finally block; let await throw InterruptedException to support interruption."
+      ],
+      "solutionCode": "import java.util.concurrent.locks.*;\n\npublic class BoundedBlockingQueue<E> {\n    private final E[] buf;\n    private int head = 0, tail = 0, count = 0;\n    private final ReentrantLock lock = new ReentrantLock();\n    private final Condition notFull  = lock.newCondition();\n    private final Condition notEmpty = lock.newCondition();\n\n    @SuppressWarnings(\"unchecked\")\n    public BoundedBlockingQueue(int capacity) {\n        if (capacity <= 0) throw new IllegalArgumentException(\"capacity > 0\");\n        this.buf = (E[]) new Object[capacity];\n    }\n\n    public void put(E e) throws InterruptedException {\n        if (e == null) throw new NullPointerException();\n        lock.lockInterruptibly();\n        try {\n            while (count == buf.length) {   // while, not if\n                notFull.await();            // releases lock, parks thread\n            }\n            buf[tail] = e;\n            tail = (tail + 1) % buf.length;\n            count++;\n            notEmpty.signal();             // wake one waiting consumer\n        } finally {\n            lock.unlock();\n        }\n    }\n\n    public E take() throws InterruptedException {\n        lock.lockInterruptibly();\n        try {\n            while (count == 0) {           // while, not if\n                notEmpty.await();\n            }\n            E e = buf[head];\n            buf[head] = null;             // help GC\n            head = (head + 1) % buf.length;\n            count--;\n            notFull.signal();             // wake one waiting producer\n            return e;\n        } finally {\n            lock.unlock();\n        }\n    }\n\n    public int size() {\n        lock.lock();\n        try { return count; } finally { lock.unlock(); }\n    }\n}",
+      "solutionLanguage": "java",
+      "explanation": "Correctness rests on a single lock making the whole buffer-and-counters update atomic, and two Conditions so producers and consumers wait on the specific event they care about. The critical subtlety is the while loop around await(): when a thread returns from await() it has only just reacquired the lock, and between being signaled and reacquiring it, another thread may have consumed the slot or item (the signaled-but-not-yet-running thread is not privileged). It also covers spurious wakeups, which the spec explicitly permits. Using if instead of while would let a thread proceed when the precondition no longer holds — e.g. take() returning from an empty queue. We signal the opposite condition after each mutation: put() makes the queue non-empty so it signals notEmpty; take() frees a slot so it signals notFull. Using signal (one waiter) rather than signalAll is safe here because each put creates exactly one takeable item and each take frees exactly one put slot, so waking one matching waiter is sufficient and avoids a thundering herd. lockInterruptibly plus letting await throw InterruptedException makes the queue respond to thread interruption and cooperative shutdown. Every field access goes through the lock, including size(), so reads are consistent. Complexity is O(1) per put/take; no busy-waiting because await parks the thread.",
+      "relatedTopic": "java-concurrency"
+    },
+    {
+      "id": "ch-thread-safe-counter",
+      "title": "Build a high-throughput thread-safe counter and explain the tradeoffs",
+      "difficulty": "mid",
+      "category": "Concurrency",
+      "prompt": "Implement a Counter with increment() and sum() that is correct under heavy concurrent increments from dozens of threads. First show a naive but correct version, then a version optimized for high write contention. Explain when each is appropriate. You may use java.util.concurrent.atomic.",
+      "hints": [
+        "volatile alone is wrong: count++ is read-modify-write and loses updates.",
+        "AtomicLong.incrementAndGet is a CAS loop — correct and great under low/moderate contention.",
+        "Under very high contention many threads CAS the same cache line and retry repeatedly; that hot line ping-pongs between cores.",
+        "LongAdder spreads the count across multiple cells so threads usually update different cells, then sum() adds them up."
+      ],
+      "solutionCode": "import java.util.concurrent.atomic.*;\n\n// (A) Correct, simple, best under LOW/MODERATE contention:\npublic final class AtomicCounter {\n    private final AtomicLong value = new AtomicLong();\n    public void increment() { value.incrementAndGet(); } // CAS retry loop\n    public long sum()        { return value.get(); }     // exact, lock-free\n}\n\n// (B) Correct, best under HIGH write contention:\npublic final class StripedCounter {\n    private final LongAdder adder = new LongAdder();\n    public void increment() { adder.increment(); }       // updates a per-thread cell\n    public long sum()        { return adder.sum(); }     // adds all cells; not\n                                                         // atomic vs concurrent writes\n}\n\n// WRONG for reference (loses increments) -- do NOT ship:\n//   private volatile long v;\n//   void increment() { v++; }  // read-modify-write race",
+      "solutionLanguage": "java",
+      "explanation": "The starting insight is why volatile is insufficient: v++ compiles to read v, add 1, write v — three steps — so two threads can read the same value and both write back the same incremented value, silently dropping one count. volatile fixes visibility, never the lost-update atomicity, so the volatile version is incorrect. AtomicLong (version A) is correct because incrementAndGet is an atomic CAS-retry loop: read current, compute +1, compareAndSet, retry if another thread won. It is lock-free, sum() via get() is exact, and it is the right default. Its weakness appears only under very high contention: all threads CAS the same 8-byte field, so its cache line ping-pongs between cores and CAS failures cause spinning, degrading throughput. LongAdder (version B) trades exact-at-all-times reads for write scalability: it maintains a base plus an array of Cells, and contending threads are steered to different cells (reducing the chance two cores touch the same line), so increments rarely conflict. sum() walks the base and all cells and adds them, which is O(number of cells) and is not a consistent snapshot if increments happen concurrently with the sum — fine for metrics/statistics where a slightly fuzzy total is acceptable, wrong if you need an exact value that another thread's decision depends on at that instant. Rule of thumb: AtomicLong when you need exact reads or contention is moderate; LongAdder for hot write-mostly counters like request metrics where read frequency is low and approximate sums are acceptable.",
+      "relatedTopic": "java-concurrency"
+    }
+  ],
+  "references": [
+    {"label": "JSR-133: Java Memory Model and Thread Specification", "url": "https://www.cs.umd.edu/~pugh/java/memoryModel/jsr133.pdf"},
+    {"label": "Java Language Specification, Chapter 17: Threads and Locks", "url": "https://docs.oracle.com/javase/specs/jls/se21/html/jls-17.html"},
+    {"label": "JEP 444: Virtual Threads", "url": "https://openjdk.org/jeps/444"},
+    {"label": "java.util.concurrent package documentation", "url": "https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/package-summary.html"},
+    {"label": "Java Concurrency in Practice (Goetz et al.)", "url": "https://jcip.net/"}
+  ]
+}

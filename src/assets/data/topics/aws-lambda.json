@@ -1,0 +1,348 @@
+{
+  "id": "aws-lambda",
+  "title": "AWS Lambda",
+  "category": "Cloud",
+  "subcategory": "Serverless",
+  "difficulty": "mid",
+  "tags": ["aws", "lambda", "serverless", "cold-start", "concurrency", "idempotency", "event-driven"],
+  "description": "A staff-level deep dive into AWS Lambda's execution model, cold starts, concurrency, event sources, and the idempotency patterns that keep at-least-once delivery from corrupting your data.",
+  "estReadMinutes": 28,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction: What Lambda Actually Is",
+      "kind": "intro",
+      "blocks": [
+        {"type": "paragraph", "text": "AWS Lambda is a function-as-a-service (FaaS) compute platform: you upload a deployment package (zip or container image), declare a handler entry point, and AWS runs it in response to events. You never provision or patch servers, you never run a process manager, and you pay per millisecond of execution rounded to the nearest 1ms, plus a per-request fee. The unit of scale is a single concurrent invocation, not a host."},
+        {"type": "paragraph", "text": "The mental model that trips up most engineers: Lambda is not 'a server that AWS keeps warm for you.' It is a fleet of micro-VMs (Firecracker) that AWS spins up and tears down based on demand. A single execution environment handles exactly one invocation at a time. To handle N concurrent requests, AWS materializes N execution environments. Understanding that 1:1 concurrency-to-environment mapping is the key to reasoning about cold starts, connection pools, and throttling."},
+        {"type": "callout", "variant": "info", "text": "Lambda's hard ceilings as of 2024: 15-minute max timeout, 10 GB max memory, 6 MB synchronous payload (256 KB for async), 512 MB to 10 GB of /tmp, 250 MB unzipped package (zip) or 10 GB (container image), and a default account concurrency of 1000 (soft, raisable)."}
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {"type": "paragraph", "text": "Lambda collapses operational surface area. There is no OS to patch, no autoscaling group to tune, no instance to right-size at the host level. For spiky, event-driven, or glue workloads it is dramatically cheaper and faster to ship than a fleet of EC2 instances or a Kubernetes deployment. A team can go from idea to production HTTP endpoint in an afternoon."},
+        {"type": "list", "items": [
+          "Cost follows usage: idle functions cost nothing. A workload running 2 hours/day costs ~8% of an always-on instance.",
+          "Scaling is automatic and near-instant: from 0 to thousands of concurrent executions in seconds (subject to burst limits).",
+          "It forces good event-driven design: small, single-purpose, stateless functions wired to managed event sources.",
+          "It removes whole classes of incidents: no SSH, no kernel CVEs to chase, no capacity planning for traffic spikes."
+        ]},
+        {"type": "callout", "variant": "warning", "text": "Lambda is not free of failure modes. It trades server management for a new set of concerns: cold starts, the 15-minute wall, statelessness, at-least-once delivery (duplicates), and downstream connection exhaustion when concurrency fans out. Senior engineers are paid to know where the trade is bad."}
+      ]
+    },
+    {
+      "id": "execution-model",
+      "heading": "Core Concept: The Execution Model and Concurrency",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Each invocation runs inside an execution environment: an isolated micro-VM with your runtime, your code, and any /tmp scratch space. The lifecycle has three phases — Init (download code, start runtime, run code outside the handler), Invoke (run the handler), and Shutdown. The Init phase is where cold starts live. Anything you compute at module scope (outside the handler) runs once per environment and is reused across invocations on that environment."},
+        {"type": "code", "language": "typescript", "code": "// Module scope: runs ONCE per execution environment (during Init).\n// Reuse expensive clients across warm invocations.\nimport { DynamoDBClient } from '@aws-sdk/client-dynamodb';\nimport { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';\n\nconst ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));\nconst TABLE = process.env.TABLE_NAME!;\n\n// Handler scope: runs ONCE PER INVOCATION on a warm environment.\nexport const handler = async (event: { id: string; body: string }) => {\n  await ddb.send(new PutCommand({\n    TableName: TABLE,\n    Item: { pk: event.id, body: event.body, ts: Date.now() },\n  }));\n  return { statusCode: 200 };\n};"},
+        {"type": "heading", "text": "Concurrency, not throughput"},
+        {"type": "paragraph", "text": "Concurrency is the number of in-flight invocations at one instant. If each invocation takes 100ms and you receive 1000 requests/second, your steady-state concurrency is requests/sec * duration = 1000 * 0.1 = 100. Lambda bills and throttles on concurrency. Reserved concurrency caps a function's max environments (and guarantees that capacity); provisioned concurrency pre-warms a fixed number of environments so they skip Init entirely."},
+        {"type": "table", "headers": ["Setting", "What it does", "Use when"], "rows": [
+          ["Account concurrency", "Soft 1000 default ceiling across all functions in the account/region", "Raise via quota request before launch"],
+          ["Reserved concurrency", "Caps AND reserves N environments for one function", "Protect a downstream DB from fan-out; isolate a noisy function"],
+          ["Provisioned concurrency", "Keeps N environments initialized and warm", "Latency-sensitive paths that can't tolerate cold starts"],
+          ["Burst limit", "Initial burst (500-3000 region-dependent) then +500/min", "Explains throttling on sudden traffic spikes"]
+        ]}
+      ]
+    },
+    {
+      "id": "cold-starts",
+      "heading": "Core Concept: Cold Start Anatomy and Mitigation",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "A cold start is the latency added when an invocation has no warm environment available and AWS must create one. The anatomy: (1) AWS provisions a micro-VM, (2) downloads and unpacks your code/layers, (3) starts the language runtime (JVM, .NET, Node, Python), (4) runs your Init code (module-scope statements, static initializers, DI container wiring). Only then does the handler run. Steps 3 and 4 are where you have leverage."},
+        {"type": "list", "items": [
+          "Package size matters: a 5 MB Node bundle initializes far faster than a 200 MB one. Tree-shake, externalize the AWS SDK (present in the runtime), and avoid bundling unused deps.",
+          "Runtime matters: Node and Python cold-start in the low hundreds of ms; JVM and .NET can be 1-5s due to runtime + framework boot. Go and Rust (provided.al2) are fastest.",
+          "Provisioned concurrency eliminates cold starts for a fixed number of environments — at the cost of paying for them whether used or not.",
+          "SnapStart (Java, and now Python/.NET) snapshots the initialized environment with Firecracker and restores from the snapshot, cutting JVM cold starts by up to 90%.",
+          "VPC attachment used to add seconds for ENI creation; since the 2019 Hyperplane rework, ENIs are shared and pre-created, so VPC cold-start penalty is now small — but it is not zero and the ENI/IP pool can still bottleneck at very high concurrency."
+        ]},
+        {"type": "callout", "variant": "danger", "text": "SnapStart gotcha: the snapshot is taken once and restored many times. Anything captured during Init — random seeds, unique IDs, ephemeral connection state, cached timestamps — is FROZEN into the snapshot and shared across every restored environment. Re-seed your RNG and re-establish connections in a runtime hook (afterRestore), or you will hand out duplicate 'unique' values."},
+        {"type": "code", "language": "java", "code": "// SnapStart: re-initialize anything that must not be shared across restores.\nimport org.crac.Core;\nimport org.crac.Resource;\nimport java.security.SecureRandom;\n\npublic class Handler implements Resource {\n  private static SecureRandom rng = new SecureRandom();\n\n  public Handler() {\n    Core.getGlobalContext().register(this);\n  }\n\n  @Override public void beforeCheckpoint(org.crac.Context<? extends Resource> c) {}\n\n  @Override public void afterRestore(org.crac.Context<? extends Resource> c) {\n    // Frozen RNG state would otherwise repeat across every restored env.\n    rng = new SecureRandom();\n    rng.nextLong(); // force reseed from the kernel entropy pool\n  }\n}"}
+      ]
+    },
+    {
+      "id": "memory-cpu-timeouts",
+      "heading": "Core Concept: Memory/CPU Coupling, Timeouts, and /tmp",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Lambda gives you one knob — memory, from 128 MB to 10240 MB — and CPU is allocated proportionally. At ~1769 MB you get the equivalent of one full vCPU; above that you get more than one vCPU and your single-threaded code stops benefiting unless it parallelizes. This means raising memory often makes a CPU-bound function both faster AND cheaper, because the per-ms price increase is offset by a larger drop in duration."},
+        {"type": "table", "headers": ["Memory", "Approx vCPU", "Good for"], "rows": [
+          ["128-512 MB", "Fraction of 1", "Light glue, IO-bound, cheap async workers"],
+          ["1769 MB", "~1 full vCPU", "CPU-bound single-threaded work breaks even here"],
+          ["3008+ MB", "~2 vCPU", "Image/video processing, compression, multithreaded code"],
+          ["10240 MB", "~6 vCPU", "Heavy ML inference, large in-memory transforms"]
+        ]},
+        {"type": "paragraph", "text": "Timeouts cap at 15 minutes (900s). Set the timeout to a realistic p99 plus headroom — too high and a hung downstream call burns money and holds a concurrency slot; too low and legitimate slow requests fail. For API Gateway, remember the gateway's own integration timeout (29s for REST) caps the practical synchronous limit regardless of the function's setting."},
+        {"type": "paragraph", "text": "/tmp is local ephemeral scratch space (512 MB default, configurable up to 10 GB). It survives across warm invocations on the same environment — which is a feature (cache a downloaded model) and a footgun (one invocation's leftover files leak into the next). Never assume /tmp is empty; clean up, and never put secrets there."},
+        {"type": "callout", "variant": "warning", "text": "/tmp persistence is per-environment, not global. Caching a 200 MB model in /tmp helps warm invocations but is downloaded fresh on every cold start. And because environments are reused, a function that writes to /tmp/output.csv without unique names can read a stale file from a previous invocation."}
+      ]
+    },
+    {
+      "id": "event-sources",
+      "heading": "Core Concept: Event Sources and Invocation Types",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Lambda is triggered by events, and the invocation type changes the retry and durability semantics dramatically. There are three invocation models: synchronous (caller waits, handles errors), asynchronous (Lambda queues the event, retries on failure), and poll-based / event source mapping (Lambda's own pollers read from a stream/queue and invoke in batches)."},
+        {"type": "table", "headers": ["Source", "Invocation type", "Delivery / retries", "Key gotcha"], "rows": [
+          ["API Gateway / ALB", "Synchronous", "Caller decides retries", "29s REST gateway timeout; 6 MB payload cap"],
+          ["S3 / SNS / EventBridge", "Asynchronous", "2 retries, then DLQ/on-failure dest", "At-least-once: duplicates possible"],
+          ["SQS", "Poll (event source mapping)", "At-least-once; redrive to DLQ", "Partial batch failures must be reported or whole batch retries"],
+          ["Kinesis / DynamoDB Streams", "Poll (per-shard, ordered)", "Retries block the shard until success or expiry", "A poison pill stalls the shard — set bisectBatchOnError + maxRetry"]
+        ]},
+        {"type": "code", "language": "typescript", "code": "// SQS: report partial batch failures so SQS only retries the failed messages.\n// Requires functionResponseTypes: ['ReportBatchItemFailures'] on the ESM.\nexport const handler = async (event: { Records: { messageId: string; body: string }[] }) => {\n  const batchItemFailures: { itemIdentifier: string }[] = [];\n  for (const record of event.Records) {\n    try {\n      await process(record.body);\n    } catch (err) {\n      // Without this, ONE bad message re-delivers the entire batch.\n      batchItemFailures.push({ itemIdentifier: record.messageId });\n    }\n  }\n  return { batchItemFailures };\n};"},
+        {"type": "callout", "variant": "info", "text": "Layers let you share code/runtime deps (up to 5 layers, 250 MB unzipped total with the function). Good for shared utilities, native binaries (ffmpeg, ImageMagick), or pinning a runtime. Bad for things you change every deploy — layer version churn complicates rollbacks."}
+      ]
+    },
+    {
+      "id": "idempotency",
+      "heading": "Core Concept: Idempotency for At-Least-Once Delivery",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Every asynchronous and poll-based source in Lambda is at-least-once. S3 can fire the same event twice, SQS standard queues deliver duplicates, async retries replay events, and event source mappings can re-invoke a batch after a partial failure. If your handler is not idempotent, retries corrupt data: double charges, duplicate emails, double-incremented counters."},
+        {"type": "paragraph", "text": "The fix is an idempotency key plus a durable store (DynamoDB with a conditional write, often with TTL). Derive a deterministic key from the event (S3 object key + version, SQS message dedup id, or a hash of the payload), then use a conditional put to claim that key. If the claim fails because the key already exists in a completed state, you short-circuit and return the prior result."},
+        {"type": "code", "language": "typescript", "code": "import { DynamoDBClient } from '@aws-sdk/client-dynamodb';\nimport { DynamoDBDocumentClient, PutCommand, ConditionalCheckFailedException } from '@aws-sdk/lib-dynamodb';\n\nconst ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));\n\nasync function claim(idempotencyKey: string): Promise<boolean> {\n  try {\n    await ddb.send(new PutCommand({\n      TableName: process.env.IDEMP_TABLE!,\n      Item: { pk: idempotencyKey, status: 'IN_PROGRESS', ttl: Math.floor(Date.now() / 1000) + 86400 },\n      ConditionExpression: 'attribute_not_exists(pk)',\n    }));\n    return true; // we own this work unit\n  } catch (e) {\n    if (e instanceof ConditionalCheckFailedException) return false; // already claimed\n    throw e;\n  }\n}"},
+        {"type": "callout", "variant": "danger", "text": "Idempotency footgun: claiming the key BEFORE doing the work means a crash mid-work leaves the key stuck IN_PROGRESS and the event never reprocesses. You need a state machine (IN_PROGRESS with a short lease/TTL, then COMPLETED) so a stale in-progress lock can be reclaimed. AWS's aws-lambda-powertools idempotency utility implements exactly this."}
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: The Double-Thumbnail Incident",
+      "kind": "example",
+      "blocks": [
+        {"type": "paragraph", "text": "Scenario: a media platform processes user uploads. S3 ObjectCreated events trigger a Lambda that generates thumbnails and writes a row to a billing table charging the customer per processed asset. Under normal load it works. During a regional S3 event-delivery hiccup, a fraction of uploads fired the S3 notification twice. The thumbnail Lambda ran twice per affected object — harmless for the image (overwrites the same key) but the billing insert ran twice, double-charging ~3,000 customers."},
+        {"type": "paragraph", "text": "Root cause: the team assumed S3 -> Lambda was exactly-once. It is at-least-once. The thumbnail write was naturally idempotent (same output key), which masked the bug in testing, but the billing side-effect was not. The fix added a DynamoDB idempotency claim keyed on the S3 object key plus eTag (version), wrapping only the billing write."},
+        {"type": "code", "language": "typescript", "code": "// The fix: make the billing side-effect idempotent on objectKey + eTag.\nexport const handler = async (event: { Records: { s3: { object: { key: string; eTag: string } } }[] }) => {\n  for (const r of event.Records) {\n    const { key, eTag } = r.Records?.[0] ? r.Records[0].s3.object : r.s3.object;\n    const idempotencyKey = `thumb#${key}#${eTag}`;\n\n    await generateThumbnail(key);          // safe to repeat: same output key\n    if (await claim(idempotencyKey)) {     // claim succeeds only once per version\n      await chargeCustomer(key);           // the side-effect we must not repeat\n      await markCompleted(idempotencyKey);\n    }\n  }\n};"},
+        {"type": "callout", "variant": "success", "text": "Lesson that generalizes: separate idempotent operations (overwriting an object, an upsert) from non-idempotent side-effects (charges, emails, counter increments). You only need to guard the latter, and the idempotency key must include a version (eTag) so a genuinely new version of the same object is still processed."}
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {"type": "list", "items": [
+          "Opening a fresh DB connection inside the handler on every invocation, then exhausting the database's connection limit when Lambda fans out to 500 concurrent environments. Use RDS Proxy or move the client to module scope (one connection per warm env, not per invocation).",
+          "Assuming events are exactly-once. S3, SNS, SQS, and async invokes are all at-least-once. No idempotency = duplicate side-effects under retry.",
+          "Setting a 15-minute timeout 'to be safe.' A hung downstream call now holds a concurrency slot and bills for 15 minutes instead of failing fast at the real p99.",
+          "Ignoring partial batch failures on SQS/Kinesis. One poison message re-delivers (or blocks the shard for) the whole batch indefinitely until it expires.",
+          "Bundling the AWS SDK and unused dependencies into the package, inflating cold-start init time. The v3 SDK is already in the Node runtime.",
+          "Writing non-unique filenames to /tmp and reading stale data from a previous invocation on the same warm environment.",
+          "Putting a low reserved concurrency on a function and being surprised by throttling, or putting none and letting it starve every other function in the account during a spike."
+        ]},
+        {"type": "callout", "variant": "danger", "text": "The classic cascading incident: a Lambda behind API Gateway calls an RDS instance directly. Traffic spikes, Lambda scales to 800 concurrent environments, each opens a connection, RDS hits max_connections, every query starts failing, retries amplify load, and the database falls over — taking down services that share it. The fix is RDS Proxy plus reserved concurrency to cap the blast radius."}
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {"type": "list", "items": [
+          "Initialize clients, configs, and connections at module scope so warm invocations reuse them. Keep the handler thin.",
+          "Make every async/poll-triggered handler idempotent. Use a DynamoDB conditional write with TTL, or aws-lambda-powertools idempotency.",
+          "Right-size memory empirically with AWS Lambda Power Tuning — don't guess. CPU-bound functions are often cheaper at higher memory.",
+          "Enable ReportBatchItemFailures on SQS ESMs and set bisectBatchOnFunctionError + a maxRetry/maxRecordAge on stream sources to contain poison pills.",
+          "Use provisioned concurrency or SnapStart only on latency-critical paths; for everything else accept cold starts and keep packages small.",
+          "Always configure a DLQ or OnFailure destination for async invocations so failed events aren't silently dropped after retries.",
+          "Cap blast radius with reserved concurrency on functions that hit fragile downstreams; front databases with RDS Proxy.",
+          "Set timeouts to realistic p99 + headroom, not the 15-minute max. Instrument with structured logs, X-Ray, and CloudWatch concurrency/throttle/error alarms."
+        ]},
+        {"type": "callout", "variant": "info", "text": "Observability shortlist: alarm on Throttles > 0, Errors rate, IteratorAge (streams falling behind), ConcurrentExecutions approaching the account limit, and DeadLetterErrors. Emit a correlation/idempotency id in every structured log line so you can trace duplicate invocations."}
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "execution-lifecycle",
+      "title": "Execution Environment Lifecycle (Cold vs Warm)",
+      "type": "mermaid",
+      "content": "flowchart TD\n  A[Event arrives] --> B{Warm env available}\n  B -->|Yes warm path| H[Run handler]\n  B -->|No cold path| C[Provision micro VM]\n  C --> D[Download code and layers]\n  D --> E[Start runtime]\n  E --> F[Run Init module scope]\n  F --> H[Run handler]\n  H --> I[Return response]\n  I --> J[Keep env warm for reuse]\n  J -.idle timeout.-> K[Shutdown env]"
+    },
+    {
+      "id": "idempotent-s3-flow",
+      "title": "Idempotent S3-Triggered Processing",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n  participant S3\n  participant LAM as Lambda\n  participant DDB as DynamoDB Idempotency\n  participant BILL as Billing\n  S3->>LAM: ObjectCreated key plus eTag\n  LAM->>DDB: Conditional put attribute_not_exists\n  alt First time\n    DDB-->>LAM: Claim acquired\n    LAM->>BILL: Charge customer\n    LAM->>DDB: Mark COMPLETED\n  else Duplicate delivery\n    DDB-->>LAM: ConditionalCheckFailed\n    LAM-->>S3: Skip side effect ack\n  end"
+    },
+    {
+      "id": "concurrency-fanout",
+      "title": "Concurrency Fan-out and Downstream Protection",
+      "type": "ascii",
+      "content": "        spike of requests\n               |\n               v\n   +-----------------------+\n   |     API Gateway       |\n   +-----------------------+\n               |\n        many invocations\n               |\n   +-----------------------+\n   |  Lambda (reserved=200)|  <- caps environments\n   +-----------------------+\n       |    |    |    |\n       v    v    v    v   (up to 200 envs)\n   +-----------------------+\n   |      RDS Proxy        |  <- multiplexes connections\n   +-----------------------+\n               |\n               v\n   +-----------------------+\n   |   RDS (max_conn=100)  |\n   +-----------------------+"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-ec2-vs-lambda",
+      "question": "When would you choose Lambda over EC2/ECS, and when would you not?",
+      "answer": "Choose Lambda for spiky, event-driven, or bursty workloads where idle time is high and per-request latency tolerance allows occasional cold starts: webhooks, S3/stream processing, cron jobs, glue between services, and APIs with unpredictable traffic. Its scale-to-zero cost model and zero server management win there. Avoid Lambda for sustained high-throughput workloads (where always-on EC2/ECS is cheaper per request), jobs longer than 15 minutes, workloads needing large persistent local state or GPUs, sub-millisecond-consistent latency requirements that cold starts violate, or anything needing a long-lived connection (WebSocket servers, though API Gateway WebSocket + Lambda exists). The crossover point is roughly: if a function runs near-continuously, a reserved EC2 instance is cheaper than paying Lambda per-ms around the clock.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["ec2", "lambda", "cost"],
+      "followUps": ["How do you estimate the cost crossover point?", "How does Fargate fit between Lambda and EC2?"]
+    },
+    {
+      "id": "q-cold-start-anatomy",
+      "question": "Walk me through exactly what happens during a cold start and where you can intervene.",
+      "answer": "A cold start has four phases. First, AWS provisions a Firecracker micro-VM and sets up the sandbox — you cannot influence this. Second, it downloads and unpacks your deployment package and layers; you reduce this by shrinking package size (tree-shaking, externalizing the runtime SDK, fewer/smaller layers). Third, it boots the language runtime; you influence this by runtime choice (Node/Python fast, JVM/.NET slow, Go/Rust fastest). Fourth, it runs your Init code — module-scope statements, static initializers, DI wiring, connection setup; you control this by deferring non-critical work, lazily initializing rarely-used clients, and minimizing framework bootstrap. After Init, the handler runs. To skip Init entirely you use provisioned concurrency (pre-warmed envs) or SnapStart (restore from a snapshot of the post-Init state). The handler-phase duration is not part of the cold start.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["cold-start", "performance", "snapstart"],
+      "followUps": ["Why doesn't provisioned concurrency eliminate cold starts entirely under spikes?", "What does SnapStart freeze that you must reset?"]
+    },
+    {
+      "id": "q-memory-cpu",
+      "question": "Why might increasing a Lambda's memory make it cheaper, not more expensive?",
+      "answer": "Lambda allocates CPU proportionally to memory; at ~1769 MB you get one full vCPU and beyond that you get more vCPUs. For a CPU-bound function, more CPU means shorter duration. Lambda bills memory-GB * duration-ms. If doubling memory more than halves the duration (common for CPU-bound work below the 1-vCPU threshold), total cost drops even though the per-ms rate rose. You find the sweet spot empirically with AWS Lambda Power Tuning, which sweeps memory settings and plots cost vs latency. For purely IO-bound functions this doesn't hold — extra CPU sits idle — so more memory just costs more.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["memory", "cpu", "cost", "tuning"],
+      "followUps": ["At what memory do you get more than one vCPU?", "How does multithreading change the calculus?"]
+    },
+    {
+      "id": "q-concurrency-types",
+      "question": "Explain the difference between reserved and provisioned concurrency.",
+      "answer": "Reserved concurrency sets a maximum number of simultaneous environments a function can use AND carves that capacity out of the account pool so the function is guaranteed it (and so it can't starve other functions). It does not pre-warm anything — environments still cold-start. Provisioned concurrency pre-initializes a specified number of environments and keeps them warm, so invocations up to that number skip Init and have no cold start; you pay for them continuously whether used or not. They compose: you can set provisioned concurrency below a function's reserved concurrency. Reserved is about capacity isolation and capping; provisioned is about latency.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["concurrency", "provisioned", "reserved"],
+      "followUps": ["What happens to invocations above the provisioned count?", "How do you autoscale provisioned concurrency?"]
+    },
+    {
+      "id": "q-vpc-cold-start",
+      "question": "Why did VPC-attached Lambdas historically have terrible cold starts, and what changed?",
+      "answer": "Before 2019, attaching a Lambda to a VPC meant Lambda created a dedicated Elastic Network Interface (ENI) per environment at cold-start time. ENI creation and attachment took 5-10+ seconds and consumed subnet IPs, so VPC Lambdas had brutal cold starts and could exhaust subnet IP space at scale. AWS reworked this with VPC-to-Lambda networking built on Hyperplane: ENIs are now shared across execution environments and pre-created per unique subnet+security-group combination, so the per-invocation ENI penalty is largely gone. The cold-start cost of being in a VPC is now small but not zero, and you can still hit limits on the shared ENI/IP pool under extreme concurrency or with many distinct subnet/SG combinations.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["vpc", "eni", "cold-start", "networking"],
+      "followUps": ["When do you actually need a Lambda in a VPC?", "How do VPC endpoints help avoid NAT for AWS API calls?"]
+    },
+    {
+      "id": "q-duplicate-invocations",
+      "question": "A teammate says 'S3 triggers Lambda exactly once.' Is that correct? What's the consequence?",
+      "answer": "No — it's incorrect and a dangerous assumption. S3 event notifications (and SNS, async invokes, and SQS standard queues) provide at-least-once delivery. The same S3 event can be delivered more than once, and async invocation retries replay events on transient failure. The consequence is duplicate execution of side-effects: double charges, duplicate emails, double-incremented counters. The only safe design is idempotency — derive a deterministic key (e.g., object key + eTag), claim it with a DynamoDB conditional write, and guard the non-idempotent side-effects behind that claim. Naturally-idempotent operations (overwriting the same output object) hide the bug in testing, which is exactly why these incidents reach production.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["idempotency", "s3", "at-least-once", "duplicates"],
+      "followUps": ["Why include the eTag in the idempotency key?", "How do you avoid a stuck IN_PROGRESS lock?"]
+    },
+    {
+      "id": "q-sqs-partial-batch",
+      "question": "An SQS-triggered Lambda processes batches of 10. One message keeps failing. What happens, and how do you fix it?",
+      "answer": "By default, if the handler throws, the entire batch is considered failed and SQS re-delivers all 10 messages after the visibility timeout — even the 9 that succeeded, which get reprocessed (duplicates) while the one poison message keeps poisoning the batch forever until it hits the redrive maxReceiveCount and goes to the DLQ. The fix is to enable ReportBatchItemFailures on the event source mapping and return a batchItemFailures array containing only the messageIds that failed, so SQS retries just those. Combine with a DLQ via a redrive policy so a genuinely poison message lands somewhere after N attempts instead of looping. Also keep handlers idempotent because successful messages can still be redelivered.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["sqs", "batch", "partial-failure", "dlq"],
+      "followUps": ["How does this differ for Kinesis/DynamoDB Streams?", "What does bisectBatchOnFunctionError do?"]
+    },
+    {
+      "id": "q-db-connections",
+      "question": "Your Lambda calls RDS directly and the database falls over during a traffic spike. Diagnose and fix.",
+      "answer": "Lambda's concurrency model means each concurrent invocation runs in its own environment with its own connection. During a spike Lambda fans out to hundreds or thousands of environments, each opening a database connection, blowing past RDS max_connections. New connections fail, queries error, retries amplify the load, and the DB can fall over — affecting everything sharing it. Fixes: (1) put RDS Proxy in front to pool and multiplex connections so thousands of Lambda envs share a small number of real DB connections; (2) cap the function's reserved concurrency to bound the maximum connections; (3) initialize the client at module scope (one connection per warm env, reused across invocations) instead of per-invocation; (4) for read-heavy paths consider caching. RDS Proxy is the primary fix.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["rds", "connections", "concurrency", "rds-proxy"],
+      "followUps": ["Why doesn't module-scope alone fully solve this?", "How does Aurora Serverless v2 change the picture?"]
+    },
+    {
+      "id": "q-limits",
+      "question": "What are the key hard limits of Lambda an architect must design around?",
+      "answer": "Timeout caps at 15 minutes (900s) — long jobs need Step Functions, Fargate, or batch. Memory caps at 10 GB (CPU scales with it). Synchronous payload is 6 MB request/response; async event payload is 256 KB — large data goes through S3 (the claim-check pattern). Deployment package is 250 MB unzipped (zip) or 10 GB (container image). /tmp is 512 MB default up to 10 GB. Default account concurrency is 1000 (soft) with a burst limit (500-3000 region-dependent) then +500/min. Up to 5 layers per function. Environment variables are capped at 4 KB total. API Gateway REST adds its own 29s integration timeout regardless of the function setting. Knowing these prevents designing yourself into a wall — e.g., choosing Lambda for a 40-minute ETL job.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["limits", "timeout", "payload", "concurrency"],
+      "followUps": ["How do you process a 1 GB file with Lambda?", "What's the claim-check pattern?"]
+    },
+    {
+      "id": "q-tmp-reuse",
+      "question": "A Lambda writes results to /tmp/report.csv and occasionally returns another request's data. Why?",
+      "answer": "/tmp is local ephemeral storage scoped to the execution environment, and environments are reused across warm invocations. If invocation A writes /tmp/report.csv and invocation B (on the same warm environment) reads /tmp/report.csv before overwriting it — or appends to it, or fails midway leaving partial data — it reads stale data from A. /tmp is not reset between invocations, only between environments. The fix is to never rely on /tmp being empty: use unique filenames per invocation (request id), clean up after yourself, or write to an in-memory buffer for small data. This is the same class of bug as global mutable state leaking across warm invocations.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["tmp", "state", "warm-reuse"],
+      "followUps": ["What other warm-environment state leaks cause bugs?", "When is /tmp persistence actually useful?"]
+    },
+    {
+      "id": "q-async-retry-dlq",
+      "question": "For async invocations, how many times does Lambda retry and what happens to events that exhaust retries?",
+      "answer": "For asynchronous invocations (S3, SNS, EventBridge), Lambda retries a failed invocation up to 2 times (so 3 total attempts) with backoff, over up to ~6 hours by default (maxEventAge and maxRetryAttempts are configurable on the event invoke config). If all attempts fail, the event is dropped unless you've configured a destination: either a Dead Letter Queue (legacy, SQS/SNS) or the newer Lambda Destinations OnFailure target (SQS, SNS, EventBridge, or another Lambda), which also captures richer context including the response/error. Without one of these, failed async events vanish silently — a common cause of 'we lost data and didn't know.' Always configure an OnFailure destination for async functions.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["async", "retry", "dlq", "destinations"],
+      "followUps": ["Difference between a DLQ and Lambda Destinations?", "How do retries interact with idempotency?"]
+    },
+    {
+      "id": "q-provisioned-spike",
+      "question": "You set provisioned concurrency to 50. Traffic spikes to 300 concurrent. What happens to the extra 250?",
+      "answer": "Provisioned concurrency only pre-warms 50 environments. The 51st through 300th concurrent invocations are served by on-demand (standard) scaling, which means those incur cold starts as new environments are created — subject to the account burst limit, so some may even be throttled if the burst rate is exceeded. Provisioned concurrency is not a ceiling and not a guarantee against cold starts above its number; it just guarantees N warm environments. To handle predictable spikes you either raise provisioned concurrency (paying for idle capacity) or use Application Auto Scaling to schedule/track provisioned concurrency up before known peaks. Many teams pair a baseline of provisioned concurrency with on-demand for the long tail.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["provisioned", "concurrency", "spike", "autoscaling"],
+      "followUps": ["How does scheduled scaling of provisioned concurrency work?", "How do you measure if you have enough?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-idempotent-image-processor",
+      "title": "Build an Idempotent S3-Triggered Image Processor",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "prompt": "Implement an S3-triggered Lambda (TypeScript, Node 20) that generates a thumbnail for each uploaded image AND records a billing charge per processed asset. S3 delivery is at-least-once, so the same event may fire more than once. The thumbnail write is naturally idempotent (overwrites the same output key) but the billing charge must happen EXACTLY ONCE per object version. Use DynamoDB with a conditional write as the idempotency store, key on objectKey + eTag, handle a crash between claim and completion (no permanently-stuck locks), and process all records in the event.",
+      "hints": [
+        "Derive the idempotency key from the S3 object key and eTag so a new version of the same object is still processed.",
+        "Use a DynamoDB conditional PutItem (attribute_not_exists) to atomically claim the work; ConditionalCheckFailedException means someone already claimed it.",
+        "Use an IN_PROGRESS -> COMPLETED state with a short TTL/lease so a crash mid-work lets the event reclaim the lock later rather than being blocked forever.",
+        "Only guard the non-idempotent side-effect (the charge). Always generate the thumbnail; it's safe to repeat.",
+        "Treat an existing COMPLETED record as 'already done, skip'; treat a stale IN_PROGRESS (past lease) as reclaimable."
+      ],
+      "solutionCode": "import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';\nimport { DynamoDBClient } from '@aws-sdk/client-dynamodb';\nimport {\n  DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand,\n  ConditionalCheckFailedException,\n} from '@aws-sdk/lib-dynamodb';\nimport sharp from 'sharp';\n\nconst s3 = new S3Client({});\nconst ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));\n\nconst TABLE = process.env.IDEMP_TABLE!;\nconst THUMB_BUCKET = process.env.THUMB_BUCKET!;\nconst LEASE_SECONDS = 300; // a crashed claim becomes reclaimable after 5 min\n\ninterface S3Event { Records: { s3: { bucket: { name: string }; object: { key: string; eTag: string } } }[] }\n\nasync function streamToBuffer(stream: any): Promise<Buffer> {\n  const chunks: Buffer[] = [];\n  for await (const c of stream) chunks.push(Buffer.from(c));\n  return Buffer.concat(chunks);\n}\n\n// Returns true if THIS invocation now owns the work and must do the side-effect.\nasync function tryClaim(key: string): Promise<boolean> {\n  const now = Math.floor(Date.now() / 1000);\n  try {\n    await ddb.send(new PutCommand({\n      TableName: TABLE,\n      Item: { pk: key, status: 'IN_PROGRESS', leaseExpiry: now + LEASE_SECONDS, ttl: now + 86400 },\n      // Claim if no record OR the prior claim is COMPLETED-absent and its lease expired.\n      ConditionExpression: 'attribute_not_exists(pk) OR (#s = :inprog AND leaseExpiry < :now)',\n      ExpressionAttributeNames: { '#s': 'status' },\n      ExpressionAttributeValues: { ':inprog': 'IN_PROGRESS', ':now': now },\n    }));\n    return true;\n  } catch (e) {\n    if (e instanceof ConditionalCheckFailedException) return false; // completed or actively in-progress\n    throw e;\n  }\n}\n\nasync function markCompleted(key: string): Promise<void> {\n  await ddb.send(new UpdateCommand({\n    TableName: TABLE,\n    Key: { pk: key },\n    UpdateExpression: 'SET #s = :done',\n    ExpressionAttributeNames: { '#s': 'status' },\n    ExpressionAttributeValues: { ':done': 'COMPLETED' },\n  }));\n}\n\nasync function alreadyCompleted(key: string): Promise<boolean> {\n  const r = await ddb.send(new GetCommand({ TableName: TABLE, Key: { pk: key } }));\n  return r.Item?.status === 'COMPLETED';\n}\n\nasync function generateThumbnail(bucket: string, key: string): Promise<void> {\n  const obj = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));\n  const input = await streamToBuffer(obj.Body);\n  const thumb = await sharp(input).resize(200, 200, { fit: 'inside' }).jpeg().toBuffer();\n  // Idempotent: same output key, safe to repeat.\n  await s3.send(new PutObjectCommand({ Bucket: THUMB_BUCKET, Key: `thumbs/${key}.jpg`, Body: thumb, ContentType: 'image/jpeg' }));\n}\n\nasync function chargeCustomer(key: string): Promise<void> {\n  // Non-idempotent side-effect: must run exactly once per object version.\n  // (write a billing row, call a payments API, etc.)\n}\n\nexport const handler = async (event: S3Event) => {\n  for (const r of event.Records) {\n    const bucket = r.s3.bucket.name;\n    const key = decodeURIComponent(r.s3.object.key.replace(/\\+/g, ' '));\n    const idempotencyKey = `thumb#${key}#${r.s3.object.eTag}`;\n\n    // Fast skip if a prior attempt already completed the billing side-effect.\n    if (await alreadyCompleted(idempotencyKey)) continue;\n\n    await generateThumbnail(bucket, key); // safe to repeat regardless of claim\n\n    if (await tryClaim(idempotencyKey)) {\n      await chargeCustomer(key);          // guarded: exactly once per version\n      await markCompleted(idempotencyKey);\n    }\n    // else: another invocation owns it (or it's done) -> do not double-charge\n  }\n};",
+      "solutionLanguage": "typescript",
+      "explanation": "The design separates the two operations by their idempotency properties. The thumbnail write overwrites a deterministic output key (thumbs/{key}.jpg), so running it twice is harmless and we don't guard it at all. The billing charge is the dangerous non-idempotent side-effect, so it sits behind a DynamoDB claim. The idempotency key is thumb#{key}#{eTag}: including the eTag means a genuinely new version of the same object key is treated as new work (so re-uploads get charged) while a duplicate delivery of the same version is deduplicated. tryClaim uses a conditional PutItem that succeeds only when there's no existing record OR the existing record is still IN_PROGRESS but past its lease — that single condition both deduplicates concurrent/retried deliveries AND self-heals a crash: if an invocation claimed the key, charged, then died before markCompleted, the lease expiry lets a later delivery reclaim it (at the cost of a possible double-charge in that rare crash window — a deliberate trade favoring eventual processing; for stricter once-only semantics you'd make the charge itself idempotent via a payment-provider idempotency key derived from the same key). A COMPLETED record blocks all future claims because the condition only permits reclaiming IN_PROGRESS records. The fast-path alreadyCompleted check avoids re-running the thumbnail for clearly-done work. A TTL on the row prevents the idempotency table from growing unbounded. This is exactly the state machine aws-lambda-powertools' idempotency utility implements; rolling it by hand here makes the invariants explicit.",
+      "relatedTopic": "aws-lambda"
+    },
+    {
+      "id": "ch-power-tune-cost",
+      "title": "Compute the Cost-Optimal Memory Setting",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "prompt": "Given measured average billed durations of a CPU-bound Lambda at several memory settings, write a function that computes the cost per million invocations at each setting and returns the cheapest one. Use Lambda's pricing model: cost = requests * requestFee + GB-seconds * gbSecondPrice, where GB-seconds = (memoryMB/1024) * (billedDurationMs/1000). Demonstrate why a higher memory setting can be cheaper for CPU-bound work.",
+      "hints": [
+        "GB-seconds for one invocation = (memoryMB / 1024) * (durationMs / 1000).",
+        "Total cost per N invocations = N * requestFee + N * gbSeconds * gbSecondPrice.",
+        "CPU-bound durations shrink as memory (and thus vCPU) rises, sometimes more than offsetting the higher per-ms rate.",
+        "Return both the cheapest setting and the full table so a human can see the latency/cost trade-off."
+      ],
+      "solutionCode": "interface Sample { memoryMB: number; avgDurationMs: number; }\ninterface Pricing { requestFee: number; gbSecondPrice: number; }\ninterface Result { memoryMB: number; avgDurationMs: number; costPerMillion: number; }\n\n// us-east-1 x86 on-demand (illustrative): $0.20 per 1M requests, $0.0000166667 per GB-second.\nconst PRICING: Pricing = { requestFee: 0.20 / 1_000_000, gbSecondPrice: 0.0000166667 };\n\nfunction costPerMillion(sample: Sample, p: Pricing): number {\n  const gbSeconds = (sample.memoryMB / 1024) * (sample.avgDurationMs / 1000);\n  const perInvoke = p.requestFee + gbSeconds * p.gbSecondPrice;\n  return perInvoke * 1_000_000;\n}\n\nfunction optimalMemory(samples: Sample[], p: Pricing = PRICING): { best: Result; table: Result[] } {\n  const table: Result[] = samples.map((s) => ({\n    memoryMB: s.memoryMB,\n    avgDurationMs: s.avgDurationMs,\n    costPerMillion: Number(costPerMillion(s, p).toFixed(4)),\n  }));\n  const best = table.reduce((a, b) => (b.costPerMillion < a.costPerMillion ? b : a));\n  return { best, table };\n}\n\n// CPU-bound: duration falls faster than memory rises -> 1769MB beats 512MB on cost.\nconst measured: Sample[] = [\n  { memoryMB: 512, avgDurationMs: 4200 },\n  { memoryMB: 1024, avgDurationMs: 2100 },\n  { memoryMB: 1769, avgDurationMs: 1180 },\n  { memoryMB: 3008, avgDurationMs: 950 },\n];\n\nconst { best, table } = optimalMemory(measured);\nconsole.table(table);\nconsole.log(`Cheapest: ${best.memoryMB}MB at $${best.costPerMillion} / 1M invocations`);",
+      "solutionLanguage": "typescript",
+      "explanation": "The function applies Lambda's exact billing formula. For each measured memory setting it computes GB-seconds = (memoryMB/1024) * (durationMs/1000), multiplies by the GB-second price, adds the per-request fee, and scales to a million invocations. The key insight the sample data demonstrates: from 512MB to 1769MB the per-ms rate roughly triples (3.45x the memory) but the duration drops to about 28% of the original because the function is CPU-bound and 1769MB grants a full vCPU. 0.512GB * 4.2s = 2.15 GB-s versus 1.728GB * 1.18s = 2.04 GB-s, so the higher-memory setting is actually cheaper AND ~3.5x faster. Beyond ~1 vCPU the gains taper because single-threaded code can't use extra cores, so 3008MB is faster but more expensive. The function returns the full table, not just the winner, because the real decision balances cost against the latency SLO — sometimes you pay slightly more for the lower-latency tier. This is precisely the analysis AWS Lambda Power Tuning automates by invoking the real function across memory settings and reading actual billed durations rather than estimates.",
+      "relatedTopic": "aws-lambda"
+    }
+  ],
+  "references": [
+    {"label": "AWS Lambda Developer Guide", "url": "https://docs.aws.amazon.com/lambda/latest/dg/welcome.html"},
+    {"label": "Lambda Execution Environment Lifecycle", "url": "https://docs.aws.amazon.com/lambda/latest/dg/lambda-runtime-environment.html"},
+    {"label": "Lambda SnapStart", "url": "https://docs.aws.amazon.com/lambda/latest/dg/snapstart.html"},
+    {"label": "AWS Lambda Powertools (Idempotency)", "url": "https://docs.powertools.aws.dev/lambda/typescript/latest/utilities/idempotency/"},
+    {"label": "AWS Lambda Power Tuning", "url": "https://github.com/alexcasalboni/aws-lambda-power-tuning"},
+    {"label": "Lambda Quotas and Limits", "url": "https://docs.aws.amazon.com/lambda/latest/dg/gettingstarted-limits.html"}
+  ]
+}

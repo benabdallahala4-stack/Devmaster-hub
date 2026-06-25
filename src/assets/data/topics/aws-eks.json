@@ -1,0 +1,381 @@
+{
+  "id": "aws-eks",
+  "title": "AWS EKS",
+  "category": "Cloud",
+  "subcategory": "Kubernetes",
+  "difficulty": "senior",
+  "tags": ["aws", "eks", "kubernetes", "irsa", "vpc-cni", "karpenter", "fargate"],
+  "description": "A staff-level deep dive into running production Kubernetes on AWS EKS: control plane, node compute models, IRSA, networking, autoscaling, and the operational footguns that page you at 3am.",
+  "estReadMinutes": 28,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction: What EKS Actually Manages",
+      "kind": "intro",
+      "blocks": [
+        {"type": "paragraph", "text": "Amazon Elastic Kubernetes Service (EKS) is a managed Kubernetes offering where AWS runs the control plane (API server, etcd, scheduler, controller-manager) across multiple Availability Zones, and you remain responsible for the data plane (worker nodes or Fargate) and everything you deploy on top. The key mental model: EKS gives you a conformant, upstream-compatible Kubernetes API endpoint plus deep AWS integration, but it is not a PaaS. You still own node lifecycle, networking decisions, IAM wiring, add-on management, and upgrades."},
+        {"type": "paragraph", "text": "EKS deliberately tracks upstream Kubernetes closely. That is the whole point for teams that have invested in the Kubernetes ecosystem (Helm, operators, CRDs, service meshes) and want portability across clouds or on-prem. The tradeoff is that EKS exposes more sharp edges than a fully proprietary service like ECS."},
+        {"type": "callout", "variant": "info", "text": "The EKS control plane is billed per cluster per hour regardless of load. The data plane (EC2, Fargate, EBS, ELB) is billed separately. A common cost surprise is forgetting the per-cluster control-plane charge multiplied across dozens of dev/preview clusters."}
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why EKS Matters",
+      "kind": "why",
+      "blocks": [
+        {"type": "paragraph", "text": "Choosing your container orchestration platform is one of the highest-leverage architectural decisions a team makes. It dictates your deployment workflow, your hiring pool, your portability story, and your blast radius during incidents. EKS matters because it lets you adopt the de-facto industry-standard orchestrator without operating etcd yourself, which is historically the single hardest part of running Kubernetes."},
+        {"type": "list", "items": [
+          "Ecosystem leverage: Helm charts, operators, ArgoCD, Istio/Linkerd, Prometheus stack all work unmodified.",
+          "Portability: the same manifests can target GKE, AKS, or on-prem, reducing lock-in at the orchestration layer.",
+          "Deep AWS integration: IRSA for fine-grained IAM, VPC CNI for native VPC IP addressing, AWS Load Balancer Controller for ALB/NLB provisioning.",
+          "Operational offload: AWS patches and scales the control plane and guarantees a multi-AZ, highly available API server.",
+          "Compliance and scale: EKS underpins workloads at companies running tens of thousands of pods with audit, PrivateLink, and FIPS endpoints available."
+        ]},
+        {"type": "callout", "variant": "warning", "text": "EKS is not automatically cheaper or simpler than ECS. If your team is small, all-in on AWS, and does not need the Kubernetes ecosystem, ECS on Fargate is usually the lower-TCO choice. Pick EKS for a reason, not by default."}
+      ]
+    },
+    {
+      "id": "compute-models",
+      "heading": "Core Concept: Compute Models — Managed Node Groups, Self-Managed Nodes, Fargate",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "EKS gives you three ways to run pods, and a serious cluster often mixes them. Understanding the tradeoffs is core senior knowledge."},
+        {"type": "heading", "text": "Managed Node Groups (MNG)"},
+        {"type": "paragraph", "text": "AWS provisions and manages a group of EC2 instances via an Auto Scaling Group, handles graceful draining on scale-in and during upgrades, and applies the EKS-optimized AMI. You still pick instance types, AMI family, and scaling bounds. MNG is the default sweet spot: you get EC2 flexibility (DaemonSets, privileged pods, GPUs, custom AMIs via launch templates) without writing ASG glue."},
+        {"type": "heading", "text": "Self-Managed Nodes"},
+        {"type": "paragraph", "text": "You run your own ASG and bootstrap nodes yourself (custom bootstrap.sh, exotic AMIs, Windows, or bare-metal-like configs). You own draining, upgrades, and AMI rotation. Choose this only when MNG cannot express what you need."},
+        {"type": "heading", "text": "Fargate Profiles"},
+        {"type": "paragraph", "text": "Fargate runs each pod in its own micro-VM with no node to manage, patch, or right-size. You define a Fargate profile that matches pods by namespace and labels; matching pods get scheduled onto Fargate. There is no node-level access, no DaemonSets, no privileged containers, no host networking, and EBS volumes are not supported (EFS is). Each pod gets dedicated CPU/memory rounded up to Fargate sizes, which can be wasteful for many small pods but excellent for bursty or security-isolated workloads."},
+        {"type": "table", "headers": ["Dimension", "Managed Node Group", "Self-Managed", "Fargate"], "rows": [
+          ["Node ops", "AWS-assisted", "You own it", "None"],
+          ["DaemonSets", "Yes", "Yes", "No"],
+          ["GPU / privileged", "Yes", "Yes", "No"],
+          ["EBS volumes", "Yes", "Yes", "No (EFS only)"],
+          ["Per-pod isolation", "Shared kernel", "Shared kernel", "Micro-VM per pod"],
+          ["Bin-packing efficiency", "High", "High", "Low (per-pod rounding)"],
+          ["Best for", "General workloads", "Special cases", "Bursty / isolated jobs"]
+        ]},
+        {"type": "callout", "variant": "warning", "text": "Fargate pods cannot run DaemonSet-based agents. Your logging/metrics/security agents (Fluent Bit, Datadog, Falco) must be redesigned as sidecars or use Fargate's built-in log router, or you lose observability silently."}
+      ]
+    },
+    {
+      "id": "irsa",
+      "heading": "Core Concept: IRSA — IAM Roles for Service Accounts",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "IRSA is the mechanism that lets a specific Kubernetes ServiceAccount assume a specific IAM role, giving individual pods least-privilege AWS permissions instead of granting the entire node's instance profile to every pod on that node. Before IRSA, any pod could reach the node's instance metadata and inherit broad node permissions — a serious lateral-movement risk."},
+        {"type": "paragraph", "text": "IRSA works by combining an OIDC identity provider with the AWS STS AssumeRoleWithWebIdentity flow. The EKS cluster exposes an OIDC issuer URL. You register that issuer as an IAM OIDC provider. Then you create an IAM role whose trust policy says: 'trust tokens from this OIDC provider, but only for ServiceAccount X in namespace Y.' EKS projects a signed OIDC token into the pod, and the AWS SDK exchanges it for temporary credentials."},
+        {"type": "code", "language": "json", "code": "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [{\n    \"Effect\": \"Allow\",\n    \"Principal\": {\n      \"Federated\": \"arn:aws:iam::111122223333:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B716D3041E\"\n    },\n    \"Action\": \"sts:AssumeRoleWithWebIdentity\",\n    \"Condition\": {\n      \"StringEquals\": {\n        \"oidc.eks.us-east-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B716D3041E:sub\": \"system:serviceaccount:payments:report-writer\",\n        \"oidc.eks.us-east-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B716D3041E:aud\": \"sts.amazonaws.com\"\n      }\n    }\n  }]\n}"},
+        {"type": "paragraph", "text": "The ServiceAccount is then annotated to point at the role. The EKS Pod Identity Webhook injects the AWS_ROLE_ARN and AWS_WEB_IDENTITY_TOKEN_FILE env vars plus the projected token volume automatically — no app code changes needed beyond using a recent AWS SDK."},
+        {"type": "code", "language": "yaml", "code": "apiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: report-writer\n  namespace: payments\n  annotations:\n    eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/eks-report-writer"},
+        {"type": "callout", "variant": "info", "text": "EKS Pod Identity (launched 2023) is the newer alternative to IRSA. It removes the per-cluster OIDC provider management and uses an EKS-managed agent and association API instead of trust-policy editing. IRSA is still the most widely deployed and the one most interviews probe — know both, but master IRSA's mechanics."}
+      ]
+    },
+    {
+      "id": "networking",
+      "heading": "Core Concept: VPC CNI, Pod Networking, and IP Exhaustion",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "The default EKS networking plugin is the Amazon VPC CNI. Unlike overlay CNIs (Calico VXLAN, Cilium overlay), the VPC CNI gives every pod a real, routable VPC IP address from the subnet. This means pods are first-class VPC citizens: security groups, flow logs, and PrivateLink work natively, and there is no overlay encapsulation overhead. The cost of this design is IP consumption — pods burn real subnet IPs."},
+        {"type": "paragraph", "text": "Mechanically, the VPC CNI attaches multiple Elastic Network Interfaces (ENIs) to each node and assigns a pool of secondary IPs to each ENI. The number of pods a node can run is bounded by (ENIs per instance type) × (IPs per ENI − 1). A small instance like t3.medium tops out around 17 pods. This is why a cluster can hit 'pod IP exhaustion' or 'too few pods schedulable' long before CPU/memory is full."},
+        {"type": "code", "language": "bash", "code": "# Max pods is derived from the instance type's ENI limits.\n# t3.medium: 3 ENIs * (6 IPs - 1) = 17 pods (minus a couple reserved)\n# Increase pod density with prefix delegation (assigns /28 prefixes\n# instead of single IPs, ~16x more IPs per ENI):\naws eks update-addon \\\n  --cluster-name prod \\\n  --addon-name vpc-cni \\\n  --configuration-values '{\"env\":{\"ENABLE_PREFIX_DELEGATION\":\"true\"}}'\n\n# Verify the warm pool / prefix settings on a node:\nkubectl describe node ip-10-0-1-23 | grep -i pods"},
+        {"type": "list", "items": [
+          "Prefix delegation (ENABLE_PREFIX_DELEGATION=true) assigns /28 prefixes per ENI, dramatically increasing IPs per node and raising effective max-pods.",
+          "Custom networking lets pods use a separate subnet (often a secondary CIDR like 100.64.0.0/10) so pod IPs don't drain your primary subnet.",
+          "WARM_IP_TARGET / WARM_ENI_TARGET tune how many IPs/ENIs are kept pre-attached to reduce pod-start latency at the cost of holding IPs.",
+          "Security groups for pods (ENABLE_POD_ENI) attach an EC2 security group directly to a pod's branch ENI for fine-grained network policy."
+        ]},
+        {"type": "callout", "variant": "danger", "text": "A classic outage: a /24 pod subnet (251 usable IPs) silently caps the cluster. New pods stick in ContainerCreating with 'failed to assign an IP address to container'. Nodes have CPU to spare, HPA scales replicas, but pods never start. Size subnets for peak pod count plus warm-pool headroom, or use prefix delegation + secondary CIDR from day one."}
+      ]
+    },
+    {
+      "id": "autoscaling",
+      "heading": "Core Concept: Cluster Autoscaler vs Karpenter, and the AWS Load Balancer Controller",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Two distinct autoscaling layers exist. The Horizontal Pod Autoscaler (HPA) scales pod replicas based on metrics. Node autoscaling adds/removes EC2 capacity when pods are pending. The two node-scaling options are Cluster Autoscaler and Karpenter."},
+        {"type": "heading", "text": "Cluster Autoscaler (CA)"},
+        {"type": "paragraph", "text": "CA works against pre-defined Auto Scaling Groups. When pods are unschedulable, it increases the desired count of a matching ASG. It is mature and predictable but constrained: each ASG is a fixed instance type/AZ shape, so you maintain many node groups to get instance diversity, and scale-up is slower because it waits on ASG mechanics and can pick a poorly-fitting instance."},
+        {"type": "heading", "text": "Karpenter"},
+        {"type": "paragraph", "text": "Karpenter is a groupless, just-in-time provisioner. It watches pending pods, computes the optimal instance type(s) to fit them (considering CPU, memory, architecture, zone, Spot vs On-Demand), and launches EC2 directly — no ASGs. It consolidates underutilized nodes, bin-packs aggressively, and reacts in seconds. For dynamic, heterogeneous workloads it both scales faster and cuts cost, which is why it has become the default recommendation for greenfield EKS."},
+        {"type": "code", "language": "yaml", "code": "apiVersion: karpenter.sh/v1\nkind: NodePool\nmetadata:\n  name: default\nspec:\n  template:\n    spec:\n      requirements:\n        - key: karpenter.sh/capacity-type\n          operator: In\n          values: [\"spot\", \"on-demand\"]\n        - key: kubernetes.io/arch\n          operator: In\n          values: [\"amd64\", \"arm64\"]\n      nodeClassRef:\n        group: karpenter.k8s.aws\n        kind: EC2NodeClass\n        name: default\n  disruption:\n    consolidationPolicy: WhenEmptyOrUnderutilized\n    consolidateAfter: 30s\n  limits:\n    cpu: 1000"},
+        {"type": "heading", "text": "AWS Load Balancer Controller"},
+        {"type": "paragraph", "text": "The AWS Load Balancer Controller watches Ingress and Service resources and provisions real AWS load balancers: an Application Load Balancer for Ingress, a Network Load Balancer for Service type LoadBalancer (with the right annotations). With IP target mode, the ALB routes directly to pod IPs (made possible by the VPC CNI), bypassing kube-proxy NodePort hops for lower latency and clean draining. The controller itself runs via IRSA so it has scoped permissions to mutate ELBs."},
+        {"type": "table", "headers": ["Criteria", "Cluster Autoscaler", "Karpenter"], "rows": [
+          ["Provisioning unit", "ASG desired count", "Direct EC2, groupless"],
+          ["Instance flexibility", "Per-ASG, manual", "Automatic, optimal fit"],
+          ["Scale-up latency", "Slower", "Seconds"],
+          ["Consolidation", "Limited", "First-class"],
+          ["Spot handling", "Manual ASG mixing", "Native, interruption-aware"],
+          ["Maturity / simplicity", "Very mature", "Newer, fast-moving"]
+        ]}
+      ]
+    },
+    {
+      "id": "addons",
+      "heading": "Core Concept: EKS Add-ons and Cluster Lifecycle",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "EKS Add-ons let AWS manage the lifecycle of core cluster components so you don't pin and patch them by hand. Managed add-ons include the VPC CNI, kube-proxy, CoreDNS, the EBS CSI driver, the EFS CSI driver, and EKS Pod Identity Agent. AWS handles version compatibility with the control plane and lets you apply security patches with one API call."},
+        {"type": "list", "items": [
+          "vpc-cni: pod networking (covered above).",
+          "kube-proxy: in-cluster service routing via iptables/IPVS.",
+          "coredns: cluster DNS; on Fargate-only clusters it must be patched to run on Fargate.",
+          "aws-ebs-csi-driver: dynamic provisioning of EBS volumes for PersistentVolumeClaims (requires IRSA).",
+          "eks-pod-identity-agent: backs the newer Pod Identity feature."
+        ]},
+        {"type": "callout", "variant": "warning", "text": "Add-on version skew during upgrades is a top incident source. Kubernetes supports a limited control-plane/kubelet version skew (typically the kubelet may be up to 3 minor versions behind the API server). Upgrade order matters: control plane first, then add-ons, then node groups — and never let nodes drift more than the supported skew or pods will fail to schedule or networking breaks."},
+        {"type": "code", "language": "bash", "code": "# Upgrade flow, in order:\naws eks update-cluster-version --name prod --kubernetes-version 1.30\n# wait for ACTIVE, then bump add-ons to compatible versions\naws eks update-addon --cluster-name prod --addon-name vpc-cni \\\n  --addon-version v1.18.1-eksbuild.1 --resolve-conflicts PRESERVE\n# finally roll node groups (drains + replaces nodes)\naws eks update-nodegroup-version --cluster-name prod --nodegroup-name ng-1"}
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: The S3 Reporting Service That Could Read Every Bucket",
+      "kind": "example",
+      "blocks": [
+        {"type": "paragraph", "text": "Scenario: a payments team ships a nightly reporting pod that writes CSVs to s3://acme-payment-reports. It works in staging. A security review before go-live flags that the pod is reading from S3 using the node's instance profile, which — because other teams' workloads share the same node groups — grants s3:* on a broad set of buckets. Any compromised pod on that node could exfiltrate from any of them."},
+        {"type": "paragraph", "text": "The fix is IRSA with a tightly scoped policy. We create a role trusted only by the payments/report-writer ServiceAccount and grant only PutObject/GetObject on the single report bucket prefix. We also lock down the instance metadata service so pods cannot fall back to the node role."},
+        {"type": "code", "language": "bash", "code": "# 1. Associate the cluster OIDC provider (idempotent)\neksctl utils associate-iam-oidc-provider --cluster prod --approve\n\n# 2. Create the SA + role + least-privilege policy in one step\neksctl create iamserviceaccount \\\n  --cluster prod --namespace payments --name report-writer \\\n  --attach-policy-arn arn:aws:iam::111122223333:policy/report-writer-s3 \\\n  --role-name eks-report-writer --approve\n\n# 3. Block IMDS hop count so pods can't reach node credentials\naws ec2 modify-instance-metadata-options \\\n  --instance-id i-0abc --http-put-response-hop-limit 1 \\\n  --http-tokens required"},
+        {"type": "code", "language": "json", "code": "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [{\n    \"Effect\": \"Allow\",\n    \"Action\": [\"s3:PutObject\", \"s3:GetObject\"],\n    \"Resource\": \"arn:aws:s3:::acme-payment-reports/reports/*\"\n  }]\n}"},
+        {"type": "paragraph", "text": "Outcome: the pod now assumes only eks-report-writer, scoped to one prefix in one bucket. The blast radius of a compromise drops from 'every bucket the node can see' to 'write CSVs into one prefix.' The IMDS hop-limit change closes the fallback path that would otherwise let a malicious process grab the node role. This is the canonical least-privilege pattern on EKS."},
+        {"type": "callout", "variant": "success", "text": "After rollout, audit with CloudTrail: filter AssumeRoleWithWebIdentity events to confirm only the intended ServiceAccount assumes the role, and alert on any sts:AssumeRole using the node instance profile from pod subnets."}
+      ]
+    },
+    {
+      "id": "mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {"type": "heading", "text": "1. Sizing pod subnets too small (IP exhaustion)"},
+        {"type": "paragraph", "text": "A /24 pod subnet caps the cluster at ~250 pod IPs regardless of node capacity. Pods hang in ContainerCreating with 'failed to assign an IP address.' Fix: prefix delegation, custom networking with secondary CIDR, or larger subnets — decided before launch, not during an outage."},
+        {"type": "heading", "text": "2. Broken IRSA trust policy (wrong sub or aud)"},
+        {"type": "paragraph", "text": "The most common IRSA failure is a trust-policy 'sub' that doesn't exactly match system:serviceaccount:<namespace>:<sa-name>, or forgetting the aud=sts.amazonaws.com condition. The pod gets AccessDenied on AssumeRoleWithWebIdentity. Also: the SA annotation must be present before the pod starts — restart pods after annotating."},
+        {"type": "heading", "text": "3. Trusting the node role instead of scoping pods"},
+        {"type": "paragraph", "text": "Granting broad permissions to the node instance role 'to make things work' recreates the lateral-movement problem IRSA solves. Lock IMDS (hop-limit 1, IMDSv2 required) and use IRSA per workload."},
+        {"type": "heading", "text": "4. Upgrading nodes before the control plane (or skipping versions)"},
+        {"type": "paragraph", "text": "EKS forbids skipping minor versions and enforces version-skew limits. Upgrading kubelet ahead of the API server, or jumping two minors, breaks scheduling and CNI. Always go control plane -> add-ons -> nodes, one minor at a time."},
+        {"type": "heading", "text": "5. Fargate observability gap from missing DaemonSets"},
+        {"type": "paragraph", "text": "Teams move workloads to Fargate and silently lose their DaemonSet-based logging/security agents. Logs vanish from dashboards. Use the Fargate log router (Fluent Bit) configured via a ConfigMap, or run agents as sidecars."},
+        {"type": "callout", "variant": "danger", "text": "6. PodDisruptionBudgets that block node drains. A PDB with minAvailable equal to the replica count makes nodes undrainable. Cluster Autoscaler/Karpenter consolidation and EKS upgrades stall indefinitely. Set realistic PDBs (e.g., maxUnavailable: 1) and watch for stuck node terminations."}
+      ]
+    },
+    {
+      "id": "bestpractices",
+      "heading": "Best Practices for Production EKS",
+      "kind": "bestpractice",
+      "blocks": [
+        {"type": "list", "items": [
+          "Use IRSA (or Pod Identity) for every workload that touches AWS APIs; grant least privilege and never lean on the node role.",
+          "Require IMDSv2 and set the metadata hop limit to 1 so pods cannot steal node credentials.",
+          "Plan pod IP capacity up front: enable prefix delegation and/or custom networking with a secondary CIDR for large clusters.",
+          "Prefer Karpenter for dynamic workloads; mix Spot and On-Demand with interruption handling and consolidation.",
+          "Manage CNI, CoreDNS, kube-proxy, and CSI drivers as EKS managed add-ons to stay version-compatible during upgrades.",
+          "Upgrade in order — control plane, then add-ons, then node groups — one minor version at a time, in a non-prod cluster first.",
+          "Set sensible PodDisruptionBudgets (maxUnavailable: 1) so drains and consolidation can proceed.",
+          "Use the AWS Load Balancer Controller in IP target mode for direct pod routing and clean connection draining.",
+          "Enable control-plane audit logging to CloudWatch and ship Kubernetes events; alert on AssumeRoleWithWebIdentity anomalies.",
+          "Encrypt etcd secrets with a KMS key (EKS envelope encryption) and restrict the cluster endpoint to private or allow-listed CIDRs."
+        ]},
+        {"type": "callout", "variant": "success", "text": "Codify all of this with Terraform/CDK and GitOps (ArgoCD/Flux). Clusters created and upgraded by clickops drift; declarative infra plus a tested upgrade runbook is what keeps EKS boring in production."}
+      ]
+    },
+    {
+      "id": "note-ecs-vs-eks",
+      "heading": "Note: ECS vs EKS — Choosing Deliberately",
+      "kind": "note",
+      "blocks": [
+        {"type": "paragraph", "text": "ECS is AWS's proprietary orchestrator: simpler, deeply integrated, no control-plane fee, minimal moving parts, and excellent when you are all-in on AWS. EKS gives you upstream Kubernetes: portability, the vast CNCF ecosystem, and standard tooling, at the cost of more operational surface area."},
+        {"type": "list", "items": [
+          "Choose ECS when: small team, AWS-only, you want the lowest operational burden, no Kubernetes-specific tooling needed.",
+          "Choose EKS when: you need the Kubernetes ecosystem (operators, CRDs, Helm, service mesh), multi-cloud/on-prem portability, an existing k8s skill set, or advanced scheduling/extensibility."
+        ]}
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "irsa-flow",
+      "title": "IRSA Credential Flow",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n  participant Pod\n  participant SA as ServiceAccount Token\n  participant STS as AWS STS\n  participant OIDC as EKS OIDC Provider\n  participant S3\n  Pod->>SA: Read projected web identity token\n  Pod->>STS: AssumeRoleWithWebIdentity token roleArn\n  STS->>OIDC: Validate token signature and issuer\n  OIDC-->>STS: Token valid sub and aud match\n  STS-->>Pod: Temporary scoped credentials\n  Pod->>S3: PutObject with temp credentials\n  S3-->>Pod: 200 OK"
+    },
+    {
+      "id": "eks-architecture",
+      "title": "EKS High-Level Architecture",
+      "type": "mermaid",
+      "content": "flowchart TD\n  subgraph AWS_Managed[AWS Managed Control Plane]\n    API[API Server]\n    ETCD[etcd encrypted with KMS]\n    SCHED[Scheduler]\n  end\n  subgraph Customer[Customer Data Plane in VPC]\n    MNG[Managed Node Group]\n    FAR[Fargate Pods]\n    KARP[Karpenter Nodes]\n  end\n  ALB[AWS Load Balancer Controller -> ALB NLB]\n  API --> MNG\n  API --> FAR\n  API --> KARP\n  ALB --> MNG\n  ALB --> KARP\n  MNG --> ETCD\n  KARP --> API"
+    },
+    {
+      "id": "vpc-cni-eni",
+      "title": "VPC CNI ENI and IP Allocation per Node",
+      "type": "ascii",
+      "content": "+--------------------------------------------------+\n|                EC2 Worker Node                   |\n|                                                  |\n|  +-----------+   +-----------+   +-----------+    |\n|  |   ENI 0   |   |   ENI 1   |   |   ENI 2   |    |\n|  | primary   |   | secondary |   | secondary |    |\n|  +-----------+   +-----------+   +-----------+    |\n|   | IP IP IP |    | IP IP IP |    | IP IP IP |     |\n|   +----+-----+    +----+-----+    +----+-----+     |\n|        |               |              |           |\n|     [pod a]         [pod b]        [pod c]         |\n|                                                   |\n|  max_pods = ENIs * (IPs_per_ENI - 1)              |\n|  prefix delegation -> /28 per slot (~16x IPs)     |\n+--------------------------------------------------+\n         |                |               |\n         v                v               v\n   VPC subnet IPs (routable, real, security-group aware)"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-control-plane",
+      "question": "In EKS, what exactly does AWS manage versus what do you manage?",
+      "answer": "AWS manages the control plane — the API server, etcd, scheduler, and controller-manager — running it highly available across multiple AZs, patching and scaling it, and charging a flat per-cluster hourly fee. You manage the data plane (EC2 worker nodes, node groups, or Fargate), the workloads, networking choices (CNI config, subnets), IAM wiring via IRSA, add-on versions, and the upgrade process for nodes. EKS is managed Kubernetes, not a PaaS.",
+      "difficulty": "junior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["eks", "control-plane", "architecture"],
+      "followUps": ["Is the control plane fee charged even with zero nodes?", "How is etcd backed up and encrypted?"]
+    },
+    {
+      "id": "q-ecs-vs-eks",
+      "question": "When would you choose EKS over ECS, and when ECS over EKS?",
+      "answer": "Choose EKS when you need the Kubernetes ecosystem (Helm, operators, CRDs, service meshes), portability across clouds or on-prem, an existing Kubernetes skill set, or advanced/extensible scheduling. Choose ECS when you're a smaller team committed to AWS, want the lowest operational burden, have no Kubernetes-specific requirements, and want to avoid the per-cluster control-plane fee and upgrade overhead. EKS buys portability and ecosystem at the cost of operational surface area; ECS buys simplicity at the cost of lock-in.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["ecs", "eks", "architecture-decision"],
+      "followUps": ["How does EKS portability claim hold up given VPC CNI and IRSA are AWS-specific?", "What's the cost difference at small scale?"]
+    },
+    {
+      "id": "q-compute-models",
+      "question": "Compare managed node groups, self-managed nodes, and Fargate profiles. When do you use each?",
+      "answer": "Managed node groups: AWS provisions and lifecycle-manages EC2 via an ASG, handling drains and upgrades; the default for general workloads needing DaemonSets, GPUs, or EBS. Self-managed nodes: you own the ASG and bootstrap, used only for exotic AMIs, Windows, or configs MNG can't express. Fargate: serverless per-pod micro-VMs with no nodes to manage, ideal for bursty or security-isolated workloads, but with no DaemonSets, no privileged containers, no EBS, and poor bin-packing. Many production clusters mix MNG (or Karpenter) for steady workloads with Fargate for isolated jobs.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["nodegroups", "fargate", "compute"],
+      "followUps": ["Why can't Fargate run DaemonSets?", "How do you get logs off Fargate pods?"]
+    },
+    {
+      "id": "q-irsa-mechanics",
+      "question": "Walk me through how IRSA actually grants a pod AWS permissions.",
+      "answer": "EKS exposes an OIDC issuer URL for the cluster. You register it as an IAM OIDC identity provider. You then create an IAM role whose trust policy allows sts:AssumeRoleWithWebIdentity from that provider, conditioned on the OIDC sub claim equaling system:serviceaccount:<namespace>:<sa> and aud equaling sts.amazonaws.com. You annotate the Kubernetes ServiceAccount with eks.amazonaws.com/role-arn. The EKS Pod Identity Webhook injects AWS_ROLE_ARN, AWS_WEB_IDENTITY_TOKEN_FILE, and a projected signed OIDC token volume into matching pods. The AWS SDK reads the token, calls STS AssumeRoleWithWebIdentity, STS validates it against the OIDC provider, and returns temporary scoped credentials — all without app code changes.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["irsa", "iam", "oidc", "security"],
+      "followUps": ["What's the difference between IRSA and EKS Pod Identity?", "How do temporary credentials get rotated?"]
+    },
+    {
+      "id": "q-alb-controller",
+      "question": "What does the AWS Load Balancer Controller do, and what is IP target mode?",
+      "answer": "It's a controller that watches Ingress and Service resources and provisions real AWS load balancers: an ALB for Ingress and an NLB for Service type LoadBalancer (with annotations). IP target mode registers pod IPs directly as ALB/NLB targets — possible because the VPC CNI gives pods routable VPC IPs — instead of routing through node NodePorts. This removes a kube-proxy hop, lowers latency, and enables graceful connection draining tied to pod lifecycle. The controller itself runs with IRSA to get scoped permissions to manage ELB resources.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["load-balancer", "ingress", "networking"],
+      "followUps": ["Instance target mode vs IP target mode tradeoffs?", "How does it handle TLS termination?"]
+    },
+    {
+      "id": "q-karpenter-vs-ca",
+      "question": "How does Karpenter differ from Cluster Autoscaler, and why might you prefer it?",
+      "answer": "Cluster Autoscaler scales pre-defined Auto Scaling Groups by adjusting desired counts; you maintain many ASGs to get instance diversity, and scale-up is slower and shape-constrained. Karpenter is groupless: it watches pending pods, computes the optimal instance type(s) to fit them across CPU/memory/arch/zone/capacity-type, and launches EC2 directly in seconds. It consolidates underutilized nodes and natively mixes Spot and On-Demand. You'd prefer Karpenter for dynamic, heterogeneous workloads where faster scaling, better bin-packing, and lower cost matter. Cluster Autoscaler remains a fine, very mature choice for simple, homogeneous clusters.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["karpenter", "autoscaling", "cost"],
+      "followUps": ["How does Karpenter handle Spot interruptions?", "What is consolidation and when can it be unsafe?"]
+    },
+    {
+      "id": "q-addons-upgrade",
+      "question": "What's the correct order to upgrade an EKS cluster and why does it matter?",
+      "answer": "Control plane first, then managed add-ons (vpc-cni, kube-proxy, coredns, CSI drivers), then node groups — one minor version at a time, never skipping minors. The order matters because Kubernetes enforces a version-skew policy: the kubelet can lag the API server by a limited number of minor versions but must never lead it. Upgrading nodes ahead of the control plane, or jumping two minors, breaks scheduling, the CNI, and core controllers. You also test the full sequence in a non-prod cluster first and keep a rollback/runbook.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["upgrade", "addons", "version-skew"],
+      "followUps": ["What is the supported kubelet-to-API-server skew?", "How do PDBs affect node-group upgrades?"]
+    },
+    {
+      "id": "q-vpc-cni-tradeoff",
+      "question": "What are the tradeoffs of the VPC CNI versus an overlay CNI?",
+      "answer": "The VPC CNI assigns every pod a real, routable VPC IP, so pods are first-class VPC citizens — native security groups, flow logs, PrivateLink, and direct ALB targeting all work with no encapsulation overhead and lower latency. The tradeoff is real-IP consumption: pods burn subnet IPs and node pod density is bounded by ENI/IP limits, leading to IP exhaustion if subnets are undersized. Overlay CNIs (Calico/Cilium VXLAN) decouple pod IPs from the VPC, conserving VPC addresses, but add encapsulation overhead and break native VPC features. On EKS the VPC CNI is the default and usually the right choice, mitigated with prefix delegation and custom networking.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["vpc-cni", "networking", "overlay"],
+      "followUps": ["Can you run Cilium on EKS?", "What does prefix delegation change about IP math?"]
+    },
+    {
+      "id": "q-tricky-irsa-cache",
+      "question": "You set up IRSA correctly, annotated the ServiceAccount, and the role trust policy is right — but the pod still uses the node role and gets unexpected access. Why?",
+      "answer": "Several subtle causes: (1) The pod was created before the SA annotation existed, so the Pod Identity Webhook never injected the token volume and env vars — you must recreate/restart pods after annotating. (2) The app uses an old AWS SDK version that doesn't support the web identity token file provider, so it falls through the credential chain to IMDS (the node role). (3) The pod sets AWS_* env vars or mounts a credentials file that takes precedence in the SDK chain. (4) The container uses hostNetwork or has an SDK that reaches IMDS first. The fix is recent SDKs, recreating pods, and — critically — locking IMDS (hop limit 1, IMDSv2 required) so the node-role fallback path is simply unavailable.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["irsa", "credential-chain", "gotcha", "security"],
+      "followUps": ["What is the AWS SDK default credential provider order?", "How does IMDS hop limit close the fallback?"]
+    },
+    {
+      "id": "q-tricky-ip-exhaustion",
+      "question": "Nodes have plenty of free CPU and memory, HPA keeps adding replicas, but new pods stay in ContainerCreating. CPU isn't the bottleneck. What's happening?",
+      "answer": "This is VPC CNI pod IP exhaustion. Each pod needs a real secondary VPC IP from an ENI, and the pod subnet or the instance's ENI/IP limits have run dry. The kubelet event reads 'failed to assign an IP address to container.' CPU/memory are irrelevant because the constraint is IP addresses, not compute. Diagnosis: check the pod subnet's free IP count and the node's max-pods. Fixes: enable prefix delegation (ENABLE_PREFIX_DELEGATION, ~16x IPs per ENI), add a secondary CIDR with custom networking so pods use a separate large subnet, or move to larger subnets. The deeper lesson: schedulability on EKS is bounded by IPs and ENIs, not just CPU/memory, and HPA scaling can stall silently against it.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["vpc-cni", "ip-exhaustion", "gotcha", "scaling"],
+      "followUps": ["How does prefix delegation change max-pods?", "Why might WARM_IP_TARGET make this worse?"]
+    },
+    {
+      "id": "q-tricky-fargate-daemonset",
+      "question": "After migrating a namespace to a Fargate profile, your logging and security dashboards go dark even though pods are healthy. Why, and how do you fix it?",
+      "answer": "Your observability agents (Fluent Bit, Datadog agent, Falco) were deployed as DaemonSets, and Fargate does not run DaemonSets — there is no node to schedule one pod per node onto, since each Fargate pod is its own micro-VM. The agents silently never schedule on Fargate pods, so logs and security telemetry stop. Fixes: use the built-in Fargate log router (Fluent Bit configured via the aws-observability ConfigMap) to ship logs to CloudWatch/S3/OpenSearch, and convert any required agents into sidecar containers injected per pod. Plan this before migrating, because the failure is silent — pods stay green while telemetry quietly vanishes.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["fargate", "daemonset", "observability", "gotcha"],
+      "followUps": ["How is the Fargate log router configured?", "What other DaemonSet-based features break on Fargate?"]
+    },
+    {
+      "id": "q-tricky-pdb-drain",
+      "question": "Karpenter consolidation and an EKS node-group upgrade both stall — nodes won't drain. What's the likely cause?",
+      "answer": "A PodDisruptionBudget is blocking the eviction. If a deployment has, say, 2 replicas and a PDB with minAvailable: 2 (or maxUnavailable: 0), Kubernetes will never voluntarily evict any of those pods, so the node can't be drained. Both Karpenter consolidation and EKS managed node-group upgrades rely on voluntary eviction respecting PDBs, so they wait indefinitely. The fix is to set realistic PDBs (e.g., maxUnavailable: 1) and ensure replica counts exceed the PDB floor so at least one pod can move at a time. Watch for stuck 'cordoned' nodes and evictions blocked by 'Cannot evict pod as it would violate the pod's disruption budget.'",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["pdb", "drain", "karpenter", "gotcha"],
+      "followUps": ["How do you force-drain in an emergency?", "What's the interaction between PDBs and Spot interruptions?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-irsa-s3",
+      "title": "Wire IRSA so a pod can write to one S3 prefix with least privilege",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "prompt": "On an existing EKS cluster named prod, configure IRSA so that a pod running under the ServiceAccount report-writer in the payments namespace can s3:PutObject and s3:GetObject only on objects under s3://acme-payment-reports/reports/* — and nothing else. The cluster already has an OIDC provider associated. Produce the IAM policy, the IAM role trust policy, the kubectl ServiceAccount manifest, and a minimal Python pod snippet proving access. Do not grant any node-role permissions.",
+      "hints": [
+        "The trust policy must condition on both the OIDC sub (system:serviceaccount:payments:report-writer) and aud (sts.amazonaws.com).",
+        "Scope the resource ARN to the single prefix; never use a wildcard bucket or s3:*.",
+        "Annotate the ServiceAccount with eks.amazonaws.com/role-arn so the Pod Identity Webhook injects credentials.",
+        "Recreate the pod after annotating, and use a recent AWS SDK so the web identity token provider is picked up."
+      ],
+      "solutionCode": "# 1. Least-privilege IAM policy (report-writer-s3)\ncat > policy.json <<'EOF'\n{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [{\n    \"Effect\": \"Allow\",\n    \"Action\": [\"s3:PutObject\", \"s3:GetObject\"],\n    \"Resource\": \"arn:aws:s3:::acme-payment-reports/reports/*\"\n  }]\n}\nEOF\naws iam create-policy --policy-name report-writer-s3 \\\n  --policy-document file://policy.json\n\n# 2. Trust policy bound to the exact ServiceAccount\nOIDC=oidc.eks.us-east-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B716D3041E\ncat > trust.json <<EOF\n{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [{\n    \"Effect\": \"Allow\",\n    \"Principal\": { \"Federated\": \"arn:aws:iam::111122223333:oidc-provider/$OIDC\" },\n    \"Action\": \"sts:AssumeRoleWithWebIdentity\",\n    \"Condition\": { \"StringEquals\": {\n      \"$OIDC:sub\": \"system:serviceaccount:payments:report-writer\",\n      \"$OIDC:aud\": \"sts.amazonaws.com\"\n    }}\n  }]\n}\nEOF\naws iam create-role --role-name eks-report-writer \\\n  --assume-role-policy-document file://trust.json\naws iam attach-role-policy --role-name eks-report-writer \\\n  --policy-arn arn:aws:iam::111122223333:policy/report-writer-s3\n\n# 3. ServiceAccount annotated to the role\nkubectl apply -f - <<'EOF'\napiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: report-writer\n  namespace: payments\n  annotations:\n    eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/eks-report-writer\nEOF\n\n# 4. Proof pod (Python). The SDK auto-discovers the web identity token.\nkubectl run prove -n payments --serviceaccount report-writer \\\n  --image public.ecr.aws/sam/build-python3.12 --restart=Never -- \\\n  python -c \"import boto3; boto3.client('s3').put_object(\\\n Bucket='acme-payment-reports', Key='reports/proof.txt', Body=b'ok'); \\\n print('wrote reports/proof.txt')\"",
+      "solutionLanguage": "bash",
+      "explanation": "The solution implements least privilege end to end. The IAM policy grants exactly two actions on exactly one prefix ARN — no wildcards, no bucket-level list. The role trust policy uses sts:AssumeRoleWithWebIdentity and conditions on both the OIDC sub (binding the role to precisely system:serviceaccount:payments:report-writer) and aud=sts.amazonaws.com, so no other ServiceAccount in any namespace can assume it. The ServiceAccount annotation triggers the EKS Pod Identity Webhook to inject AWS_ROLE_ARN, AWS_WEB_IDENTITY_TOKEN_FILE, and the projected token volume; the boto3 client then transparently calls STS to exchange the OIDC token for temporary scoped credentials — no static keys, no node-role reliance, and no application code dealing with credentials. The pod must be created after the annotation exists (here it's a fresh pod), and a current SDK is required so the web identity provider is honored. To fully close the node-role fallback, you'd additionally enforce IMDSv2 with hop limit 1 on the nodes so a compromised process can't reach the broader node instance profile.",
+      "relatedTopic": "aws-eks"
+    },
+    {
+      "id": "ch-prefix-delegation",
+      "title": "Diagnose and fix VPC CNI pod IP exhaustion with prefix delegation",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "prompt": "Pods in the prod cluster are stuck in ContainerCreating with 'failed to assign an IP address to container.' Nodes have free CPU and memory. Write the steps to (a) confirm the cause is IP exhaustion, (b) compute why a t3.medium caps out at 17 pods, and (c) enable prefix delegation on the vpc-cni add-on and verify new max-pods. Provide the commands and the math.",
+      "hints": [
+        "The error string and node max-pods are your first signals, not CPU dashboards.",
+        "Max pods = ENIs per instance type * (IPs per ENI - 1); look up the instance's ENI limits.",
+        "Prefix delegation assigns /28 prefixes (16 IPs) per IP slot instead of single IPs.",
+        "Update the vpc-cni add-on configuration and roll nodes so the new max-pods takes effect."
+      ],
+      "solutionCode": "# (a) Confirm IP exhaustion, not compute pressure\nkubectl get pods -A --field-selector status.phase=Pending\nkubectl describe pod stuck-pod -n payments | grep -i 'failed to assign'\n# -> 'failed to assign an IP address to container'\nkubectl describe node ip-10-0-1-23 | grep -i 'pods:'  # allocatable pods low\n# Check subnet free IPs in the AWS console / CLI:\naws ec2 describe-subnets --subnet-ids subnet-0abc \\\n  --query 'Subnets[0].AvailableIpAddressCount'\n\n# (b) The math for t3.medium (no prefix delegation):\n#   ENIs per t3.medium       = 3\n#   IPv4 addresses per ENI    = 6\n#   max_pods = 3 * (6 - 1)    = 15  (+2 for host networking pods => ~17)\n# So ~17 pods regardless of free CPU/memory.\n\n# (c) Enable prefix delegation on the managed add-on\naws eks update-addon \\\n  --cluster-name prod --addon-name vpc-cni \\\n  --resolve-conflicts PRESERVE \\\n  --configuration-values '{\"env\":{\"ENABLE_PREFIX_DELEGATION\":\"true\",\"WARM_PREFIX_TARGET\":\"1\"}}'\n\n# Roll the node group so new nodes pick up the higher max-pods\naws eks update-nodegroup-version --cluster-name prod --nodegroup-name ng-1\n\n# Verify the new capacity on a freshly launched node\nkubectl get node ip-10-0-2-44 -o jsonpath='{.status.allocatable.pods}{\"\\n\"}'\n# With prefix delegation each slot becomes a /28 (16 IPs):\n#   3 ENIs * (6 - 1) slots * 16 IPs = up to 240 -> capped by max-pods limit (110 default)\n# Result: ~110 schedulable pods per node instead of 17.",
+      "solutionLanguage": "bash",
+      "explanation": "Step (a) proves the bottleneck is addressing, not compute: the kubelet event explicitly says it could not assign an IP, the node's allocatable pods is low while CPU/memory are free, and the pod subnet's AvailableIpAddressCount is near zero. Step (b) shows why: the VPC CNI assigns each pod a real secondary VPC IP from an ENI, and a t3.medium supports only 3 ENIs with 6 IPv4s each, so max-pods is 3*(6-1)=15 plus a couple of host-networking pods — about 17, independent of CPU. Step (c) fixes it with prefix delegation: instead of one IP per slot, the CNI assigns a /28 prefix (16 IPs) per slot, multiplying available pod IPs roughly 16x; effective max-pods then rises to the Kubernetes default cap (~110) per node. Because max-pods is computed at node bootstrap, you must launch new nodes (roll the node group) for the change to take effect. The durable architectural lesson is that EKS pod schedulability is bounded by ENIs and IPs, so capacity planning must account for IP math — and for very large clusters you also add a secondary CIDR with custom networking so pods don't drain the primary subnet at all.",
+      "relatedTopic": "aws-eks"
+    }
+  ],
+  "references": [
+    {"label": "EKS User Guide", "url": "https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html"},
+    {"label": "IAM Roles for Service Accounts (IRSA)", "url": "https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html"},
+    {"label": "Amazon VPC CNI and prefix delegation", "url": "https://docs.aws.amazon.com/eks/latest/userguide/cni-increase-ip-addresses.html"},
+    {"label": "Karpenter documentation", "url": "https://karpenter.sh/docs/"},
+    {"label": "AWS Load Balancer Controller", "url": "https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/"},
+    {"label": "EKS Best Practices Guide", "url": "https://aws.github.io/aws-eks-best-practices/"}
+  ]
+}

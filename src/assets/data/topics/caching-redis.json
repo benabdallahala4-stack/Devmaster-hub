@@ -1,0 +1,594 @@
+{
+  "id": "caching-redis",
+  "title": "Caching & Redis",
+  "category": "Backend",
+  "subcategory": "Performance",
+  "difficulty": "senior",
+  "tags": ["redis", "caching", "performance", "distributed-systems", "cache-aside", "concurrency", "scalability"],
+  "description": "A staff-level deep dive into caching strategies and Redis internals: cache patterns, eviction, data structures, distributed locks, and the hard problems of invalidation and cache stampede.",
+  "estReadMinutes": 28,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Caching is the practice of storing the result of an expensive computation or a frequently accessed piece of state in a faster, closer storage tier so that subsequent reads avoid the expensive path. Redis is the de facto in-memory data store for this job: a single-threaded (for command execution) key-value engine with rich data structures, microsecond latencies, and a mature replication and clustering story."
+        },
+        {
+          "type": "paragraph",
+          "text": "But a cache is not free latency. It is a second copy of the truth, and the moment you have two copies of the truth you have inherited a distributed-consistency problem. Most production caching incidents are not about Redis being slow — they are about the cache lying, the cache disappearing all at once, or one hot key melting a single shard. This topic covers the patterns, the data structures, and most importantly the two hard problems: cache invalidation and stampede protection."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Phil Karlton's famous line: 'There are only two hard things in Computer Science: cache invalidation and naming things.' This topic is largely about the first."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why Caching Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "At scale, the database is almost always the bottleneck. A Postgres primary doing a complex join might serve a few thousand QPS; Redis on the same hardware serves hundreds of thousands of GETs. Caching converts repeated expensive work into cheap memory lookups, which directly translates into lower p99 latency, higher throughput, and dramatically lower database cost."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Latency: a Postgres query that takes 25ms becomes a 0.3ms Redis GET — a ~80x improvement on the hot path.",
+            "Throughput / load shedding: the cache absorbs read traffic so the primary database can serve writes and cache-miss reads without falling over.",
+            "Cost: scaling a relational primary vertically is expensive; adding a Redis replica or shard is cheap by comparison.",
+            "Capability: Redis data structures (sorted sets, HyperLogLog, streams) let you implement leaderboards, rate limiters, and queues that would be awkward and slow in a relational DB."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The flip side: a cache changes your failure modes. When the cache is empty (cold start, flush, or mass expiry) all that traffic hits the database at once. A system that runs fine at 95% cache hit rate can collapse instantly at 0%. Capacity-plan for the miss path, not the hit path."
+        }
+      ]
+    },
+    {
+      "id": "cache-patterns",
+      "heading": "Core Cache Patterns",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "There are four canonical patterns. The distinction is about who writes to the cache and when, and what consistency and latency tradeoffs that implies."
+        },
+        {
+          "type": "heading",
+          "text": "Cache-Aside (Lazy Loading)"
+        },
+        {
+          "type": "paragraph",
+          "text": "The application owns the cache. On read: check cache; on miss, load from DB, populate cache, return. On write: update the DB, then invalidate (or update) the cache key. This is the most common pattern because it is simple, the cache only holds data that is actually requested, and a cache outage degrades to slow-but-correct rather than broken."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "async function getUser(id: string): Promise<User> {\n  const key = `user:${id}`;\n  const cached = await redis.get(key);\n  if (cached) return JSON.parse(cached);\n\n  const user = await db.users.findById(id); // cache miss -> DB\n  if (user) {\n    // Always set a TTL so a stale/forgotten key self-heals.\n    await redis.set(key, JSON.stringify(user), 'EX', 300);\n  }\n  return user;\n}\n\nasync function updateUser(id: string, patch: Partial<User>): Promise<void> {\n  await db.users.update(id, patch);\n  // Invalidate, do NOT write-through here: avoids a stale write racing the DB.\n  await redis.del(`user:${id}`);\n}"
+        },
+        {
+          "type": "heading",
+          "text": "Read-Through and Write-Through"
+        },
+        {
+          "type": "paragraph",
+          "text": "With read-through and write-through the cache itself is a library/provider that sits inline with the data store. Read-through: the cache loads from the DB on a miss transparently. Write-through: every write goes through the cache, which synchronously writes to the DB before returning. Writes are kept consistent (cache and DB always agree) at the cost of higher write latency, and the cache may hold cold data that is never read."
+        },
+        {
+          "type": "heading",
+          "text": "Write-Behind (Write-Back)"
+        },
+        {
+          "type": "paragraph",
+          "text": "The write goes to the cache and returns immediately; a background process flushes batched writes to the DB asynchronously. This gives the lowest write latency and lets you coalesce many writes to the same key, but you can lose acknowledged writes if the cache node dies before the flush. Use it only where some data loss is acceptable (view counters, last-seen timestamps) or where the cache is durable."
+        },
+        {
+          "type": "table",
+          "headers": ["Pattern", "Write latency", "Consistency", "Failure on cache loss", "Typical use"],
+          "rows": [
+            ["Cache-aside", "DB write + del", "Eventually consistent (race window)", "Slow but correct", "General read-heavy data"],
+            ["Read-through", "n/a", "Same as cache-aside", "Slow but correct", "When cache is a managed provider"],
+            ["Write-through", "DB write inline (high)", "Strong (cache == DB)", "Slow but correct", "Read-after-write critical data"],
+            ["Write-behind", "Memory write (lowest)", "Weak; can lose writes", "Data loss possible", "Counters, telemetry, tolerant data"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ttl-eviction",
+      "heading": "TTL and Eviction Policies",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "TTL (time-to-live) is the per-key expiry you set. Eviction is what Redis does when it hits maxmemory and must make room. These are different mechanisms and confusing them causes real incidents."
+        },
+        {
+          "type": "list",
+          "items": [
+            "TTL is a correctness/freshness control: 'this value may be stale after N seconds.' Always set one on cache-aside keys so a forgotten invalidation self-heals.",
+            "Eviction is a capacity control: when memory is full, which key gets dropped to admit a new one.",
+            "Redis expires keys both lazily (on access) and via a background sampling job — so memory is not reclaimed the instant a TTL passes."
+          ]
+        },
+        {
+          "type": "heading",
+          "text": "maxmemory-policy options"
+        },
+        {
+          "type": "table",
+          "headers": ["Policy", "Behavior"],
+          "rows": [
+            ["noeviction", "Reject writes with an error when full (default; dangerous for a pure cache)"],
+            ["allkeys-lru", "Evict least-recently-used key across all keys (good general cache default)"],
+            ["allkeys-lfu", "Evict least-frequently-used; better when access frequency is skewed"],
+            ["volatile-lru", "LRU but only among keys that have a TTL set"],
+            ["allkeys-random / volatile-ttl", "Random, or evict the key with the nearest TTL"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "If you use Redis as a cache, NEVER leave maxmemory-policy on the default 'noeviction'. When memory fills, every SET starts failing with OOM errors, your cache stops accepting new entries, and the app falls back to the database for everything — a slow cascading outage. Set 'allkeys-lru' (or 'allkeys-lfu') and a maxmemory below the box's physical RAM."
+        },
+        {
+          "type": "paragraph",
+          "text": "Redis LRU/LFU is approximate: it samples a small number of keys (maxmemory-samples, default 5) rather than maintaining a global ordering, trading a bit of precision for O(1) eviction. LFU additionally uses a probabilistic logarithmic counter with time decay, so a key that was hot last week but cold now will eventually be evicted."
+        }
+      ]
+    },
+    {
+      "id": "data-structures",
+      "heading": "Redis Data Structures and When to Use Them",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Redis is not just a string-to-string map. Choosing the right structure is the difference between an elegant O(log n) solution and pulling a 200KB blob over the wire to mutate one field."
+        },
+        {
+          "type": "table",
+          "headers": ["Type", "Key commands", "Use case"],
+          "rows": [
+            ["String", "GET / SET / INCR / SETEX", "Cached JSON blob, counter, flag, full-page cache"],
+            ["Hash", "HSET / HGET / HGETALL / HINCRBY", "Object with independently updated fields (user profile, cart)"],
+            ["List", "LPUSH / RPOP / LRANGE", "Queue, recent-activity feed, capped log (with LTRIM)"],
+            ["Set", "SADD / SISMEMBER / SINTER", "Unique membership, tags, deduplication, intersections"],
+            ["Sorted Set", "ZADD / ZRANGE / ZRANGEBYSCORE", "Leaderboards, time-ordered windows, rate limiting, priority queues"],
+            ["Stream", "XADD / XREAD / XREADGROUP", "Append-only event log with consumer groups (Kafka-lite)"],
+            ["HyperLogLog", "PFADD / PFCOUNT", "Approximate unique counts in ~12KB regardless of cardinality"],
+            ["Bitmap / Bitfield", "SETBIT / BITCOUNT", "Daily-active flags, compact boolean per-user state"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Example: a sliding-window rate limiter built on a sorted set. Each request is a member scored by timestamp; we trim the window and count atomically."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Sliding-window rate limit: max `limit` requests per `windowMs`.\nasync function allow(userId: string, limit: number, windowMs: number): Promise<boolean> {\n  const key = `rl:${userId}`;\n  const now = Date.now();\n  const member = `${now}-${Math.random()}`; // unique to avoid score collisions\n  const results = await redis\n    .multi()\n    .zremrangebyscore(key, 0, now - windowMs) // drop events outside window\n    .zadd(key, now, member)                   // record this request\n    .zcard(key)                               // count events in window\n    .pexpire(key, windowMs)                   // let the key self-clean\n    .exec();\n  const count = results[2][1] as number;\n  return count <= limit;\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Prefer a hash over a JSON string when callers mutate individual fields frequently — HINCRBY on a counter field is far cheaper than read-modify-write of a whole JSON blob, and it is atomic so it avoids lost-update races."
+        }
+      ]
+    },
+    {
+      "id": "stampede",
+      "heading": "Cache Stampede / Thundering Herd",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A cache stampede (thundering herd) happens when a popular key expires or is evicted and many concurrent requests all miss at the same instant. They all run the expensive recompute simultaneously, hammering the database with identical queries. The recompute is slow precisely because the DB is now overloaded, which keeps the key empty longer, which lets even more requests pile in — a feedback loop that can take down the origin."
+        },
+        {
+          "type": "heading",
+          "text": "Mitigation techniques"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Per-key locking (mutex): the first miss acquires a short-lived lock (SET NX EX), recomputes, and repopulates; other requests either wait-and-retry or serve slightly stale data. Only one DB query runs per key.",
+            "TTL jitter: never set a fixed TTL for many keys. Add randomness (e.g. base + rand(0, base*0.2)) so a batch of keys created together does not expire in the same second.",
+            "Early / probabilistic recomputation (XFetch): refresh the key before it expires, with a probability that rises as expiry approaches, so a single request proactively repopulates while the old value is still served.",
+            "Serve-stale-on-error: keep the last good value beyond its logical TTL and return it if recompute fails or while a refresh is in flight.",
+            "Request coalescing / singleflight at the app layer: dedupe concurrent identical loads within one process so they share a single backend call."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Cache-aside with stampede protection via a per-key lock + jittered TTL.\nasync function getWithLock<T>(key: string, ttl: number, load: () => Promise<T>): Promise<T> {\n  const hit = await redis.get(key);\n  if (hit) return JSON.parse(hit);\n\n  const lockKey = `lock:${key}`;\n  const token = crypto.randomUUID();\n  const gotLock = await redis.set(lockKey, token, 'NX', 'PX', 5000);\n\n  if (!gotLock) {\n    // Someone else is recomputing. Back off briefly and read the fresh value.\n    await sleep(50 + Math.random() * 100);\n    const retry = await redis.get(key);\n    if (retry) return JSON.parse(retry);\n    return load(); // fallback: very rare, lock holder died\n  }\n\n  try {\n    const value = await load();\n    const jitter = Math.floor(ttl * 0.2 * Math.random());\n    await redis.set(key, JSON.stringify(value), 'EX', ttl + jitter);\n    return value;\n  } finally {\n    // Release only if we still own the lock (avoid deleting someone else's).\n    await redis.eval(\n      \"if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end\",\n      1, lockKey, token,\n    );\n  }\n}"
+        }
+      ]
+    },
+    {
+      "id": "distributed-locks",
+      "heading": "Distributed Locks and Redlock Caveats",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A single-instance Redis lock is just SET key token NX PX 30000 to acquire and a check-and-delete Lua script to release. The token must be unique per acquirer so you only release your own lock, and you must always set an expiry so a crashed holder cannot deadlock the system forever."
+        },
+        {
+          "type": "paragraph",
+          "text": "Redlock extends this across N independent Redis masters: acquire on a majority within a time bound, treating the lock as held only if you got it on (N/2 + 1) nodes fast enough. It is more available under single-node failure, but Martin Kleppmann's well-known critique shows it is NOT safe as a correctness primitive when mutual exclusion really matters."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Any TTL-based lock can be violated by a process pause (GC, VM stop, slow I/O). Holder A acquires the lock, pauses for longer than the TTL, the lock expires and B acquires it — now A and B both believe they hold it. Redlock does not solve this. If correctness depends on exclusion, you need a fencing token: a monotonically increasing number handed out with the lock that the protected resource checks and rejects if it is stale."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Use Redis locks for efficiency (avoid duplicate work), where an occasional double-execution is merely wasteful, not incorrect.",
+            "Do NOT use Redis locks alone for safety (financial transfers, exclusive resource ownership) — combine with fencing tokens or use a consensus system (etcd/ZooKeeper) that supports them.",
+            "Always: unique token + expiry + atomic Lua release. Never release with a plain DEL (you may delete a lock that already expired and was re-acquired by someone else)."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "invalidation-hotkeys",
+      "heading": "Invalidation and Hot Keys",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "heading",
+          "text": "Invalidation strategies"
+        },
+        {
+          "type": "list",
+          "items": [
+            "TTL-only (passive): simplest; accept bounded staleness. Good for data that tolerates being a few minutes old.",
+            "Write-time invalidation (DEL on update): low staleness but has a race — see the mistakes section. Prefer DEL over write-through update to shrink the window.",
+            "Versioned keys: embed a version in the key (user:42:v7). A write bumps the version pointer; old keys are orphaned and evicted by LRU. No DEL race, but you store extra garbage.",
+            "Event-driven: publish change events (CDC / outbox) and invalidate keys from a consumer; decouples write path from cache topology but adds lag and infra."
+          ]
+        },
+        {
+          "type": "heading",
+          "text": "Hot keys"
+        },
+        {
+          "type": "paragraph",
+          "text": "A hot key is a single key receiving a disproportionate share of traffic — a celebrity user, a viral product, a global feature flag. In Redis Cluster every key maps to exactly one shard by CRC16 hash slot, so a hot key concentrates all that load onto one node's single command thread. You cannot scale it away by adding shards; the key lives on one shard."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Client-side / local cache (near cache): cache the hot value in process memory for a short TTL so most reads never touch Redis. Redis 6+ client-side caching with invalidation tracking automates this.",
+            "Key splitting / replication: store the value under N suffixed keys (hot:item:0..N) on different slots and have clients read a random replica; trade consistency for spread.",
+            "Read replicas: route reads of the hot key to replicas (accepting replication lag).",
+            "Detect first: use redis-cli --hotkeys (needs LFU) or MONITOR sampling to find them before they melt a shard."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: Product Page Cache Meltdown",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Scenario from a real e-commerce incident. The product-detail service cached the rendered product payload in Redis with a flat 600-second TTL. A marketing campaign warmed ~50,000 product pages within a two-minute window during a deploy (cache was flushed on deploy). 600 seconds later, all 50,000 keys expired in roughly the same 10-second band. Every product page missed at once, each firing a heavy multi-join query and a downstream pricing-service call."
+        },
+        {
+          "type": "paragraph",
+          "text": "Within 15 seconds the Postgres primary hit connection-pool exhaustion, query latency spiked to seconds, recomputes could not complete before more requests piled in, and the pricing service started timing out. The site p99 went from 180ms to 9s. Classic synchronized-expiry stampede, made worse by a cache flush on deploy."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// BEFORE: flat TTL -> synchronized expiry, no stampede protection.\nasync function getProductBad(id: string) {\n  const k = `product:${id}`;\n  const c = await redis.get(k);\n  if (c) return JSON.parse(c);\n  const p = await loadProductExpensive(id); // heavy join + pricing call\n  await redis.set(k, JSON.stringify(p), 'EX', 600); // every key dies together\n  return p;\n}\n\n// AFTER: jittered TTL + per-key lock + serve-stale on lock contention.\nasync function getProductGood(id: string) {\n  const k = `product:${id}`;\n  const c = await redis.get(k);\n  if (c) return JSON.parse(c);\n  const lockKey = `lock:${k}`;\n  const token = crypto.randomUUID();\n  if (await redis.set(lockKey, token, 'NX', 'PX', 4000)) {\n    try {\n      const p = await loadProductExpensive(id);\n      const ttl = 600 + Math.floor(Math.random() * 120); // +0..20% jitter\n      await redis.set(k, JSON.stringify(p), 'EX', ttl);\n      return p;\n    } finally {\n      await releaseLock(lockKey, token);\n    }\n  }\n  await sleep(75);\n  const again = await redis.get(k);\n  return again ? JSON.parse(again) : loadProductExpensive(id);\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The fix combined three cheap changes: TTL jitter (no synchronized expiry), a per-key recompute lock (one DB query per product instead of thousands), and warming the cache asynchronously after deploy instead of flushing it. Post-fix, a full cache miss event produced a brief, bounded DB load bump instead of an outage."
+        }
+      ]
+    },
+    {
+      "id": "mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "heading",
+          "text": "1. Update-the-cache race (write-through into a stale value)"
+        },
+        {
+          "type": "paragraph",
+          "text": "On a write, doing redis.set(key, newValue) instead of redis.del(key) opens a lost-update race: reader R loads old value from DB (just before the writer commits), writer W commits new value and sets cache, then R's delayed SET overwrites the cache with the old value. The cache is now permanently stale until TTL. DEL-on-write is safer because a subsequent reader simply reloads fresh from the DB."
+        },
+        {
+          "type": "heading",
+          "text": "2. Caching negative results without thought (or not at all)"
+        },
+        {
+          "type": "paragraph",
+          "text": "Cache penetration: requests for non-existent keys (often malicious, scanning random IDs) always miss the cache and always hit the DB. Cache a short-lived sentinel for 'not found', or front the cache with a Bloom filter, so missing keys do not become a DB DoS vector."
+        },
+        {
+          "type": "heading",
+          "text": "3. Unbounded keys and the KEYS command"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Running KEYS pattern* in production: it is O(N) and blocks the single command thread, freezing the whole instance. Use SCAN with a cursor instead.",
+            "No TTL + no eviction policy: memory grows until OOM and the box swaps or the OOM killer reaps redis-server.",
+            "Giant values (multi-MB strings, million-element lists): a single big operation blocks the thread and bloats network. Split or restructure."
+          ]
+        },
+        {
+          "type": "heading",
+          "text": "4. Treating a Redis lock as a safety guarantee"
+        },
+        {
+          "type": "paragraph",
+          "text": "Covered above: a GC pause longer than the lock TTL means two holders. Teams that used a Redis lock to guard 'process this payment once' eventually double-charged customers. Use fencing tokens or idempotency keys."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Connection storms after a Redis failover are a frequent silent incident: when the cache blips, every app instance simultaneously falls back to the DB and re-opens connections. Bound your DB pool, add a circuit breaker on the cache, and randomize reconnect backoff so the herd does not synchronize."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Always set a TTL on cache-aside keys, and always jitter it for keys created in bulk.",
+            "Set maxmemory and an eviction policy (allkeys-lru or allkeys-lfu) — never run a cache on noeviction.",
+            "Invalidate with DEL on write, not SET, to avoid the stale-write race; consider versioned keys to eliminate it entirely.",
+            "Protect against stampede with per-key locks + serve-stale, especially on expensive or hot recomputes.",
+            "Design a consistent, namespaced key schema: service:entity:id:version (e.g. catalog:product:42:v3). Naming is the other hard problem — get it right early.",
+            "Use the right data structure; reach for hashes/sorted sets before stuffing JSON into strings.",
+            "Pipeline or use MULTI/Lua for multi-step atomic operations to cut round trips and avoid races.",
+            "Treat the cache as optional: the system must be correct (if slower) when Redis is down. Wrap calls with timeouts and a circuit breaker.",
+            "Monitor hit rate, evicted_keys, used_memory, p99 command latency, and keyspace misses; alert on hit-rate cliffs.",
+            "For locks that protect correctness, use fencing tokens or a consensus store; reserve Redis locks for efficiency."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Rule of thumb for consistency: choose TTL = the maximum staleness your product can tolerate. If the answer is 'zero staleness ever', you do not want a TTL cache — you want write-through with versioned keys or no cache at all on that path."
+        }
+      ]
+    },
+    {
+      "id": "note-persistence",
+      "heading": "A Note on Persistence and HA",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Redis is in-memory but can persist via RDB snapshots (point-in-time forks) and AOF (append-only command log). For a pure cache you often disable both for performance — losing the cache is acceptable, it just rewarms. For Redis-as-database use AOF with everysec fsync. High availability comes from replication plus Redis Sentinel (automatic failover) or Redis Cluster (sharding + failover). Remember replicas are asynchronous: a failover can lose the last few writes, which matters if you treated the cache as a source of truth."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "RDB snapshots fork the process; on a large dataset the copy-on-write fork can transiently double memory and cause a latency blip. Size your box and snapshot schedule accordingly, or offload snapshotting to a replica."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "cache-aside-flow",
+      "title": "Cache-Aside Read and Write Flow",
+      "type": "mermaid",
+      "content": "flowchart TD\n    A[Request] --> B{Key in Redis?}\n    B -->|Hit| C[Return cached value]\n    B -->|Miss| D[Query database]\n    D --> E[Populate Redis with TTL]\n    E --> C\n    F[Write request] --> G[Update database]\n    G --> H[DEL cache key]\n    H --> I[Next read repopulates]"
+    },
+    {
+      "id": "stampede-sequence",
+      "title": "Stampede Protection with Per-Key Lock",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n    participant R1 as Request 1\n    participant R2 as Request 2\n    participant Redis\n    participant DB\n    R1->>Redis: GET key (miss)\n    R2->>Redis: GET key (miss)\n    R1->>Redis: SET lock NX PX 5000\n    Redis-->>R1: OK acquired\n    R2->>Redis: SET lock NX PX 5000\n    Redis-->>R2: nil contended\n    R1->>DB: expensive load\n    DB-->>R1: value\n    R1->>Redis: SET key value EX ttl\n    R1->>Redis: release lock\n    R2->>Redis: GET key after backoff\n    Redis-->>R2: value (no DB hit)"
+    },
+    {
+      "id": "cluster-hotkey-layers",
+      "title": "Hot Key on a Cluster Shard and Near-Cache Mitigation",
+      "type": "ascii",
+      "content": "  Clients (many)                Near cache (in-process, short TTL)\n  +--------+  +--------+  +--------+\n  | app A  |  | app B  |  | app C  |   <-- most reads served locally\n  +---+----+  +---+----+  +---+----+\n      |           |           |\n      +-----------+-----------+\n                  |  (only misses go to Redis)\n                  v\n        +-------------------+\n        |   Redis Cluster   |\n        +----+----+----+----+\n        |slot|slot|slot|slot|\n        | 0  | 1  | 2  | 3  |\n        +----+----+--+-+----+\n                     |\n                     v  CRC16(hot_key) maps to ONE slot\n                +---------+\n                | shard 2 |  <-- hot key concentrates load here\n                +---------+"
+    },
+    {
+      "id": "write-patterns",
+      "title": "Write-Through vs Write-Behind",
+      "type": "mermaid",
+      "content": "flowchart LR\n    subgraph WriteThrough\n    A1[App] --> B1[Cache]\n    B1 -->|sync write| C1[Database]\n    C1 -->|ack| B1\n    B1 -->|ack| A1\n    end\n    subgraph WriteBehind\n    A2[App] --> B2[Cache]\n    B2 -->|ack immediately| A2\n    B2 -.->|async batched flush| C2[Database]\n    end"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-cache-aside-vs-write-through",
+      "question": "Explain cache-aside vs write-through. When would you choose each?",
+      "answer": "Cache-aside puts the application in control: reads check the cache and lazily populate on a miss; writes update the database and then invalidate the cache key. The cache only holds data that is actually read, and a cache outage degrades to slow-but-correct. Write-through inserts the cache inline on the write path: every write goes through the cache which synchronously persists to the DB before acking, so the cache and DB always agree and reads after a write are immediately consistent — at the cost of higher write latency and caching data that may never be read. Choose cache-aside for general read-heavy workloads (the default). Choose write-through when you need strong read-after-write consistency on a key and can absorb the extra write latency, often paired with versioned keys to avoid stale overwrites.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["cache-aside", "write-through", "patterns"],
+      "followUps": ["How does write-behind differ and what does it risk?", "Why is DEL-on-write usually safer than SET-on-write in cache-aside?"]
+    },
+    {
+      "id": "q-ttl-vs-eviction",
+      "question": "What is the difference between a key's TTL and the maxmemory eviction policy?",
+      "answer": "TTL is a per-key freshness control — the value is considered stale and removed after N seconds regardless of memory pressure. Eviction is a capacity control that kicks in only when Redis reaches maxmemory and needs room for a new write; the maxmemory-policy (e.g. allkeys-lru, allkeys-lfu) decides which existing key to drop. They are orthogonal: a key can be evicted long before its TTL if memory is tight, or outlive nothing because it expired first. A correct cache configures both — TTLs for freshness and an eviction policy (never noeviction) for capacity.",
+      "difficulty": "junior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["ttl", "eviction", "memory"],
+      "followUps": ["What happens if maxmemory-policy is noeviction and you fill memory?", "How does Redis approximate LRU rather than tracking exact recency?"]
+    },
+    {
+      "id": "q-data-structure-choice",
+      "question": "You need a leaderboard with millions of players, real-time rank lookups, and top-N queries. Which Redis structure and why?",
+      "answer": "A sorted set (ZSET). ZADD stores each player keyed by id with their score, kept ordered by score in a skip-list + hash. Top-N is ZREVRANGE 0 N-1 in O(log n + N); a specific player's rank is ZREVRANK in O(log n); score updates are ZADD/ZINCRBY in O(log n). This beats sorting a relational table on every query and beats a plain string/list because rank and range queries are built in. For very large boards you can shard by score band or maintain a coarse global board plus per-region boards.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["sorted-set", "data-structures", "leaderboard"],
+      "followUps": ["How would you bound memory if the board grows unbounded?", "How do you get a player's rank without scanning all members?"]
+    },
+    {
+      "id": "q-stampede-definition",
+      "question": "What is a cache stampede and what are the standard defenses?",
+      "answer": "A cache stampede (thundering herd) occurs when a popular key expires or is evicted and many concurrent requests miss simultaneously, all triggering the same expensive recompute against the origin. The origin overloads, recomputes slow down, the key stays empty longer, and more requests pile in — a feedback loop. Defenses: per-key recompute locks (only one request recomputes, others wait or serve stale), TTL jitter to desynchronize bulk expiries, probabilistic early recomputation (refresh before expiry with rising probability), serve-stale-on-error, and app-level request coalescing/singleflight to dedupe identical in-flight loads.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["stampede", "thundering-herd", "reliability"],
+      "followUps": ["How does probabilistic early recomputation (XFetch) work?", "Why is jitter alone insufficient for a single super-hot key?"]
+    },
+    {
+      "id": "q-invalidation-strategies",
+      "question": "Compare strategies for cache invalidation and their tradeoffs.",
+      "answer": "TTL-only (passive): simplest, bounded staleness, no write-path coupling — good when some staleness is fine. Write-time DEL: low staleness but has a read/write race window; preferred over SET because the next read reloads fresh. Versioned keys (entity:id:v7): a write bumps a version pointer so old keys are orphaned and LRU-evicted, eliminating the stale-write race at the cost of storing garbage and an extra indirection. Event-driven (CDC/outbox consumer invalidates keys): decouples the write path from cache topology and works across services, but adds lag and infrastructure. The right choice depends on tolerable staleness, write rate, and how many services share the cache.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["invalidation", "consistency", "versioning"],
+      "followUps": ["How do versioned keys avoid the stale-write race?", "What lag does CDC-based invalidation introduce and does it matter?"]
+    },
+    {
+      "id": "q-hot-key",
+      "question": "A single product goes viral and one Redis Cluster shard is saturated while others are idle. Why, and how do you fix it?",
+      "answer": "In Redis Cluster a key maps to exactly one of 16384 hash slots via CRC16(key), and each slot lives on exactly one shard. A hot key therefore concentrates all its traffic on a single node's single command-execution thread; adding shards does not help because the key still lives on one shard. Mitigations: a near-cache (short-TTL in-process cache or Redis 6+ client-side caching with invalidation) so most reads never reach Redis; route hot-key reads to read replicas (accepting replication lag); or key-splitting — replicate the value under N suffixed keys on different slots and read a random one (trading consistency for spread). First detect it with redis-cli --hotkeys or MONITOR sampling.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["hot-key", "cluster", "sharding"],
+      "followUps": ["Why does adding more shards not solve a single hot key?", "What consistency cost does key-splitting introduce?"]
+    },
+    {
+      "id": "q-redis-single-threaded",
+      "question": "Redis is described as single-threaded yet handles hundreds of thousands of ops/sec. How?",
+      "answer": "Command execution runs on a single thread, which is why each command is effectively atomic and there are no per-command locks. It is fast because operations are in-memory (no disk seek), it uses an efficient event loop with non-blocking I/O multiplexing (epoll/kqueue), and most operations are O(1) or O(log n) on optimized data structures. Modern Redis (6+) does add I/O threads for reading/parsing requests and writing replies, and background threads for slow tasks like fsync and async key deletion (UNLINK) — but the core command processing remains single-threaded by design. The implication for engineers: one slow O(N) command (KEYS, a huge SORT, a million-element LRANGE) blocks every other client, so avoid big blocking operations on the main thread.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["internals", "concurrency", "performance"],
+      "followUps": ["Which commands can block the whole instance?", "What do the I/O threads in Redis 6 actually do?"]
+    },
+    {
+      "id": "q-consistency-model",
+      "question": "Your cache and DB disagree intermittently after writes. Walk through where the inconsistency comes from in cache-aside.",
+      "answer": "Cache-aside is eventually consistent and has a known race even with DEL-on-write. The dangerous interleaving: a reader misses the cache and loads the OLD value from the DB; before it writes that value to the cache, a writer updates the DB to a NEW value and deletes the (empty) cache key; then the reader's delayed SET writes the stale OLD value into the cache. Now the cache holds a value the DB no longer has, until TTL expires. The DEL-on-write pattern shrinks but does not fully close this window; eliminating it requires versioned keys, a short TTL to bound the damage, or a read-modify path that re-checks a version. The practical mitigation in most systems is a small TTL so the staleness is self-limiting.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["consistency", "race-condition", "cache-aside"],
+      "followUps": ["How do versioned keys close this race?", "Would write-through eliminate it, and at what cost?"]
+    },
+    {
+      "id": "q-tricky-redlock",
+      "question": "TRICKY: You use Redlock to guarantee a job runs exactly once. Is that safe? What can still go wrong?",
+      "answer": "No, it is not safe for correctness. Redlock improves availability across multiple Redis masters but it is still a TTL-based lease, and any TTL lease can be violated by a process pause. Concretely: holder A acquires the lock, then a long GC pause (or VM stop, or slow syscall) freezes A for longer than the lock TTL; the lock expires; holder B acquires it and starts the job; A resumes, still believing it holds the lock, and both run the job. Redlock's clock-drift and majority assumptions also make it sensitive to GC pauses and NTP jumps. The fix is a fencing token: the lock service hands out a monotonically increasing number with each grant, and the protected resource (DB, file store) records the highest token it has seen and rejects any write carrying a lower one — so the stale holder A is fenced off. Reserve Redis locks for efficiency (avoiding duplicate work where double-execution is merely wasteful), not for safety where it must be exactly once.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["redlock", "distributed-locks", "fencing", "safety"],
+      "followUps": ["What exactly is a fencing token and where is it checked?", "When is a Redis lock perfectly acceptable despite this?"]
+    },
+    {
+      "id": "q-tricky-del-vs-set",
+      "question": "TRICKY: On a write, your colleague updates the cache with the new value (SET) instead of deleting it (DEL), arguing it saves a future cache miss. Why is this often a bug?",
+      "answer": "Because SET-on-write opens a lost-update race that DEL-on-write largely avoids. With SET, a concurrent reader that loaded the OLD value just before your commit can write that old value to the cache AFTER your new-value SET, leaving the cache permanently stale until TTL. DEL-on-write is safer: after the delete, the very next read finds an empty key and reloads the current value straight from the DB, so a delayed stale writer at worst repopulates a value that will be corrected on next read rather than masking the truth. SET-on-write also wastes work writing values that may never be read and can cause two writers to interleave and leave the cache holding neither final value cleanly. The 'saves a cache miss' argument is a micro-optimization that trades a rare cheap miss for a hard-to-debug consistency bug. Use DEL (or versioned keys) unless you have specifically engineered the write path to be race-free.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["invalidation", "race-condition", "footgun"],
+      "followUps": ["Sketch the exact interleaving that leaves a stale value.", "How would versioned keys make SET-on-write safe?"]
+    },
+    {
+      "id": "q-tricky-keys-scan",
+      "question": "TRICKY: An on-call engineer runs KEYS session:* on the production cache to count active sessions and the whole service times out. What happened and what should they have done?",
+      "answer": "KEYS is O(N) over the entire keyspace and runs on the single command-execution thread, so it blocks every other client for the duration. On a large instance it can pause Redis for seconds, during which all GETs and SETs stall — the app sees timeouts and cascades into a DB fallback storm. The correct approach is SCAN, a cursor-based command that returns keys in small batches without blocking, letting other commands interleave (SCAN 0 MATCH session:* COUNT 1000 repeatedly until the cursor returns 0). Note SCAN gives a weakly-consistent snapshot — keys present for the whole scan are returned, but concurrent additions/removals may or may not appear, which is fine for an approximate count. Even better, maintain the count explicitly (a counter or a set's SCARD) rather than scanning at all. The same blocking caveat applies to SMEMBERS on huge sets, HGETALL on huge hashes, and unbounded LRANGE.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["keys", "scan", "blocking", "operations"],
+      "followUps": ["Why is SCAN only weakly consistent?", "What other commands can block the whole instance and how do you avoid them?"]
+    },
+    {
+      "id": "q-tricky-near-cache-invalidation",
+      "question": "TRICKY: You add an in-process near-cache in front of Redis to fix a hot key. Now some app instances serve stale data after an update even though Redis was invalidated correctly. Why?",
+      "answer": "Because invalidation only reached Redis, not the per-instance local caches. Each app process now holds its own copy with its own TTL, and DEL on the Redis key does nothing to those copies — they keep serving the old value until their local TTL expires. You have added a second, uncoordinated cache layer and reintroduced the invalidation problem N times over. Fixes: keep the local TTL very short (sub-second to a few seconds) so staleness is bounded; use Redis 6+ client-side caching with invalidation tracking (RESP3 push / the tracking feature), where the server notifies clients to evict a key when it changes; or publish invalidation events over pub/sub that every instance subscribes to and uses to purge its local entry. The general lesson: every cache tier you add multiplies the invalidation surface, so each tier needs its own coherence story.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["near-cache", "invalidation", "client-side-caching", "coherence"],
+      "followUps": ["How does Redis client-side caching invalidation tracking work?", "What is the tradeoff of a very short near-cache TTL vs pub/sub invalidation?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-cache-aside-stampede",
+      "title": "Implement Cache-Aside with Stampede Protection",
+      "difficulty": "senior",
+      "category": "Backend",
+      "prompt": "Implement a getOrLoad(key, ttlSeconds, loader) function in TypeScript using ioredis that serves cache-aside reads and protects against cache stampede. Requirements: (1) return the cached value on a hit; (2) on a miss, only ONE concurrent caller may run the expensive loader per key — others must wait and then read the freshly populated value rather than all hitting the loader; (3) apply TTL jitter so bulk-created keys do not expire in the same instant; (4) the lock must be safe — unique token, an expiry so a crashed holder cannot deadlock, and an atomic release that only deletes the lock if you still own it; (5) if the lock holder dies, other callers must not hang forever.",
+      "hints": [
+        "Acquire the lock with SET lockKey token NX PX <ms> — NX makes it a no-op if held, PX guarantees it expires.",
+        "Use a unique token (crypto.randomUUID) so you only release your own lock.",
+        "Release with a Lua script that checks get(lockKey) == token before DEL — a plain DEL could delete someone else's re-acquired lock.",
+        "Losers should back off a short randomized interval, then re-read the key; bound the number of retries so a dead holder does not hang them forever.",
+        "Add jitter as ttl + random(0, ttl * 0.2) before the SET ... EX."
+      ],
+      "solutionCode": "import Redis from 'ioredis';\n\nconst redis = new Redis();\nconst sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));\n\n// Atomic release: only delete the lock if we still own it.\nconst RELEASE = `\n  if redis.call('get', KEYS[1]) == ARGV[1] then\n    return redis.call('del', KEYS[1])\n  else\n    return 0\n  end`;\n\nexport async function getOrLoad<T>(\n  key: string,\n  ttlSeconds: number,\n  loader: () => Promise<T>,\n): Promise<T> {\n  // 1. Fast path: cache hit.\n  const hit = await redis.get(key);\n  if (hit !== null) return JSON.parse(hit) as T;\n\n  const lockKey = `lock:${key}`;\n  const token = crypto.randomUUID();\n  const maxWaitMs = 5000;\n  const deadline = Date.now() + maxWaitMs;\n\n  // 2. Try to become the single recomputer.\n  const acquired = await redis.set(lockKey, token, 'PX', 4000, 'NX');\n\n  if (acquired === 'OK') {\n    try {\n      const value = await loader(); // only ONE caller reaches here per key\n      const jitter = Math.floor(ttlSeconds * 0.2 * Math.random());\n      await redis.set(key, JSON.stringify(value), 'EX', ttlSeconds + jitter);\n      return value;\n    } finally {\n      await redis.eval(RELEASE, 1, lockKey, token); // atomic, owner-checked\n    }\n  }\n\n  // 3. Loser path: wait for the holder to populate, then read.\n  while (Date.now() < deadline) {\n    await sleep(40 + Math.floor(Math.random() * 80)); // jittered backoff\n    const filled = await redis.get(key);\n    if (filled !== null) return JSON.parse(filled) as T;\n    // If the lock is gone but key still empty, holder likely died -> retry to grab it.\n    const lockStillHeld = await redis.exists(lockKey);\n    if (!lockStillHeld) return getOrLoad(key, ttlSeconds, loader);\n  }\n\n  // 4. Last resort after timeout: load directly so the caller never hangs.\n  return loader();\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "The fast path is a plain cache-aside GET. On a miss we use SET lockKey token NX PX 4000 as a single-instance distributed mutex: NX makes acquisition a no-op when the lock is already held (so exactly one caller wins per key), and PX guarantees the lock self-expires within 4s so a crashed holder cannot deadlock the key forever. The winner runs the expensive loader exactly once, then writes the value with a jittered TTL (ttl + up to 20% random) so that a batch of keys populated in the same second will not all expire in the same later second — this is what prevents the synchronized-expiry stampede. Release uses a Lua script that compares the stored token to ours before deleting; this is essential because a naive DEL could delete a DIFFERENT caller's lock if ours had already expired and been re-acquired — the same footgun as releasing someone else's mutex. Losers do not call the loader; they back off with randomized sleep (so they do not re-synchronize into a new herd) and re-read the now-populated key. The loop is bounded by a deadline, and it detects a dead holder (lock gone but key still empty) to retry acquisition, and finally falls back to a direct load after the timeout so no caller ever hangs indefinitely. The net effect: under a thundering herd of N concurrent misses on the same key, the database sees exactly ONE query instead of N, while all callers still get a correct, fresh value. The remaining honest caveat is that this is a single-Redis-instance lock used for efficiency, not a safety lock — if exactly-once execution were required for correctness you would add a fencing token, but here a rare double-load is merely a little wasted work.",
+      "relatedTopic": "caching-redis"
+    },
+    {
+      "id": "ch-sliding-rate-limiter",
+      "title": "Atomic Sliding-Window Rate Limiter with a Sorted Set",
+      "difficulty": "mid",
+      "category": "Backend",
+      "prompt": "Implement a sliding-window rate limiter rateLimit(userId, limit, windowMs) that returns whether the request is allowed. It must be precise (a true sliding window, not a fixed bucket that resets on a boundary), atomic under concurrency (no lost updates when many requests for the same user arrive simultaneously), and self-cleaning (old entries and idle keys must not accumulate in Redis forever). Use a Redis sorted set.",
+      "hints": [
+        "Model each request as a member of a ZSET scored by its timestamp.",
+        "Before counting, remove members older than now - windowMs with ZREMRANGEBYSCORE.",
+        "Make the member unique (timestamp + random/counter) so two requests in the same millisecond do not collide on the same member.",
+        "Wrap remove + add + count + expire in a single MULTI/EXEC (or a Lua script) so the operation is atomic.",
+        "Set PEXPIRE on the key to the window length so idle users' keys are reclaimed automatically."
+      ],
+      "solutionCode": "import Redis from 'ioredis';\n\nconst redis = new Redis();\n\n// Lua keeps the whole check atomic, avoiding races between trim/add/count.\nconst SCRIPT = `\n  local key     = KEYS[1]\n  local now     = tonumber(ARGV[1])\n  local window  = tonumber(ARGV[2])\n  local limit   = tonumber(ARGV[3])\n  local member  = ARGV[4]\n\n  -- 1. Drop events outside the sliding window.\n  redis.call('ZREMRANGEBYSCORE', key, 0, now - window)\n  -- 2. How many remain inside the window?\n  local count = redis.call('ZCARD', key)\n  if count < limit then\n    -- 3. Admit: record this request and refresh the key TTL.\n    redis.call('ZADD', key, now, member)\n    redis.call('PEXPIRE', key, window)\n    return 1   -- allowed\n  end\n  -- Refresh TTL even when rejecting so the key still self-cleans.\n  redis.call('PEXPIRE', key, window)\n  return 0     -- denied\n`;\n\nexport async function rateLimit(\n  userId: string,\n  limit: number,\n  windowMs: number,\n): Promise<boolean> {\n  const key = `rl:${userId}`;\n  const now = Date.now();\n  const member = `${now}-${crypto.randomUUID()}`; // unique per request\n  const allowed = (await redis.eval(\n    SCRIPT, 1, key, String(now), String(windowMs), String(limit), member,\n  )) as number;\n  return allowed === 1;\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "The sorted set holds one member per recent request, scored by the request timestamp, which gives us a precise sliding window rather than a fixed bucket: at any instant we count exactly the events whose timestamp falls within [now - windowMs, now]. The sequence is trim-then-count-then-maybe-add: ZREMRANGEBYSCORE evicts everything older than the window, ZCARD counts what survives, and only if we are under the limit do we ZADD the current request. Running this inside a Lua script makes the read-modify-write atomic on Redis's single command thread — without that, two concurrent requests could both ZCARD a count of limit-1 and both ZADD, admitting one too many (a classic lost-update / check-then-act race). The member is made unique with a UUID suffix so two requests in the same millisecond produce distinct ZSET members instead of overwriting each other's score. PEXPIRE set to the window length means an idle user's key is automatically reclaimed by Redis rather than leaking memory forever, and we refresh it on both the allow and deny branches so an active-but-throttled user's key never expires mid-window. Complexity is dominated by ZREMRANGEBYSCORE (O(log n + m) for the m removed elements) and is comfortably fast for realistic per-user request rates. A known cost of this design is memory proportional to the number of requests in the window per user; for very high-throughput global limits you would switch to an approximate token-bucket counter (INCR + EXPIRE) which trades the exact sliding window for O(1) memory.",
+      "relatedTopic": "caching-redis"
+    }
+  ],
+  "references": [
+    {"label": "Redis Documentation — Data types", "url": "https://redis.io/docs/latest/develop/data-types/"},
+    {"label": "Redis — Key eviction (maxmemory policies)", "url": "https://redis.io/docs/latest/develop/reference/eviction/"},
+    {"label": "Redis — Distributed locks with Redlock", "url": "https://redis.io/docs/latest/develop/use/patterns/distributed-locks/"},
+    {"label": "Martin Kleppmann — How to do distributed locking", "url": "https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html"},
+    {"label": "Optimal Probabilistic Cache Stampede Prevention (XFetch paper)", "url": "https://cseweb.ucsd.edu/~avattani/papers/cache_stampede.pdf"},
+    {"label": "Redis — Client-side caching", "url": "https://redis.io/docs/latest/develop/reference/client-side-caching/"}
+  ]
+}

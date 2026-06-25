@@ -1,0 +1,391 @@
+{
+  "id": "graphql",
+  "title": "GraphQL",
+  "category": "Backend",
+  "subcategory": "API Design",
+  "difficulty": "mid",
+  "tags": ["graphql", "api-design", "dataloader", "federation", "resolvers", "caching", "pagination"],
+  "description": "A deep, production-grade tour of GraphQL — schema design, resolvers, the N+1 problem and DataLoader, federation, pagination, and why caching and rate limiting get genuinely harder than with REST.",
+  "estReadMinutes": 28,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {"type": "paragraph", "text": "GraphQL is a query language for APIs and a server-side runtime for executing those queries against a typed schema. Unlike REST, where the server defines fixed resource shapes across many endpoints, GraphQL exposes a single endpoint and lets the client specify exactly which fields it needs. The server validates the query against a strongly typed schema and resolves each requested field, returning a response whose shape mirrors the query."},
+        {"type": "paragraph", "text": "It was open-sourced by Facebook in 2015 after years of internal use powering mobile clients, where round trips were expensive and over-fetching wasted scarce bandwidth. Today the GraphQL specification is governed by the GraphQL Foundation, and the ecosystem spans servers (Apollo Server, GraphQL Yoga, graphql-java, Hot Chocolate), clients (Apollo Client, Relay, urql), and gateways (Apollo Federation, GraphQL Mesh)."},
+        {"type": "list", "items": [
+          "Single endpoint, typically POST /graphql, with the query in the request body.",
+          "A schema written in SDL (Schema Definition Language) that is introspectable at runtime.",
+          "Three root operation types: Query (reads), Mutation (writes), Subscription (real-time streams).",
+          "Resolvers — functions that produce the value for each field in the schema."
+        ]},
+        {"type": "callout", "variant": "info", "text": "GraphQL is transport-agnostic and storage-agnostic. It does not mandate HTTP, JSON, or any database. In practice the dominant deployment is HTTP+JSON, with WebSockets or SSE for subscriptions."}
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why GraphQL Matters",
+      "kind": "why",
+      "blocks": [
+        {"type": "paragraph", "text": "The core value proposition is client-driven data fetching. A mobile screen that needs a user's name, their last three orders, and each order's total can express that in one request and receive exactly those fields — no more, no less. With REST you would either hit several endpoints (under-fetching, leading to a waterfall of round trips) or hit one fat endpoint that returns far more than the screen needs (over-fetching, wasting bandwidth and CPU)."},
+        {"type": "heading", "text": "Concrete business drivers"},
+        {"type": "list", "items": [
+          "Frontend velocity: product teams add fields to a query without waiting for a backend deploy of a new endpoint.",
+          "Mobile efficiency: fewer round trips and smaller payloads on high-latency, metered networks.",
+          "Schema as contract: a single typed graph that tooling can introspect, generating type-safe clients automatically.",
+          "Graph composition: federation lets dozens of teams own subgraphs that compose into one unified API."
+        ]},
+        {"type": "callout", "variant": "warning", "text": "GraphQL is not a free lunch. The flexibility that helps clients shifts complexity onto the server: caching, rate limiting, authorization, and query-cost control all become harder than their REST equivalents. Adopt it where the client diversity justifies the operational cost, not as a default."},
+        {"type": "table", "headers": ["Concern", "REST", "GraphQL"], "rows": [
+          ["Endpoints", "Many, resource-shaped", "One, schema-shaped"],
+          ["Fetching", "Over/under-fetch common", "Client selects exact fields"],
+          ["HTTP caching", "Native (URL + verbs + headers)", "Hard (single POST URL)"],
+          ["Versioning", "Explicit (/v1, /v2)", "Evolve schema, deprecate fields"],
+          ["Error model", "HTTP status codes", "200 + errors array (usually)"]
+        ]}
+      ]
+    },
+    {
+      "id": "schema-and-types",
+      "heading": "Schema, Types, and Operations",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "The schema is the heart of a GraphQL service. It declares object types, their fields, the scalar leaves (Int, Float, String, Boolean, ID, plus custom scalars), enums, interfaces, unions, and input types. Every query is validated against this schema before execution, so a malformed or unauthorized-shape query is rejected without ever touching a resolver."},
+        {"type": "code", "language": "graphql", "code": "scalar DateTime\n\ntype User {\n  id: ID!\n  email: String!\n  displayName: String!\n  orders(first: Int = 10, after: String): OrderConnection!\n}\n\ntype Order {\n  id: ID!\n  total: Money!\n  placedAt: DateTime!\n  lineItems: [LineItem!]!\n}\n\ntype Money {\n  amountMinor: Int!\n  currency: String!\n}\n\ntype Query {\n  me: User\n  user(id: ID!): User\n  order(id: ID!): Order\n}\n\ntype Mutation {\n  placeOrder(input: PlaceOrderInput!): PlaceOrderPayload!\n}\n\ninput PlaceOrderInput {\n  cartId: ID!\n  idempotencyKey: String!\n}\n\ntype PlaceOrderPayload {\n  order: Order\n  userErrors: [UserError!]!\n}\n\ntype UserError {\n  field: [String!]\n  message: String!\n  code: String!\n}"},
+        {"type": "heading", "text": "Nullability is a design decision"},
+        {"type": "paragraph", "text": "The ! suffix marks a field non-nullable. This is more consequential than it looks: if a non-null field's resolver throws or returns null, GraphQL must null out the nearest nullable parent to keep the response well-typed. Over-using non-null deep in the graph means one flaky downstream service can blow away an entire branch of an otherwise successful response. A common senior heuristic: be strict at the leaves you control, lenient at boundaries with unreliable dependencies."},
+        {"type": "callout", "variant": "info", "text": "Note the PlaceOrderPayload pattern: instead of throwing for business errors like 'cart already checked out', the mutation returns a userErrors array. This separates expected, recoverable domain errors (typed, localizable) from unexpected system errors (the top-level errors array)."}
+      ]
+    },
+    {
+      "id": "resolvers",
+      "heading": "Resolvers and the Execution Model",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "A resolver is a function attached to a field. Its signature is (parent, args, context, info). The runtime walks the query tree depth-first: it calls the root field resolver, takes the returned value as the parent for the next level, and recurses. If a field has no resolver, the default resolver reads parent[fieldName]. The context object is created per request and is where you put the authenticated user, database connections, and DataLoaders."},
+        {"type": "code", "language": "typescript", "code": "const resolvers = {\n  Query: {\n    user: (_parent, { id }, ctx) => ctx.db.users.findById(id),\n  },\n  User: {\n    // parent is the User object returned above\n    orders: (user, { first, after }, ctx) =>\n      ctx.db.orders.page({ userId: user.id, first, after }),\n  },\n  Order: {\n    // total has no resolver -> default resolver returns order.total\n    lineItems: (order, _args, ctx) =>\n      ctx.loaders.lineItemsByOrder.load(order.id),\n  },\n  Mutation: {\n    placeOrder: async (_p, { input }, ctx) => {\n      if (!ctx.user) throw new GraphQLError('Unauthenticated', {\n        extensions: { code: 'UNAUTHENTICATED' },\n      });\n      return ctx.orderService.place(ctx.user.id, input);\n    },\n  },\n};"},
+        {"type": "paragraph", "text": "Three properties of this model matter for production. First, resolvers run independently and can return promises; sibling fields resolve concurrently. Second, the per-field granularity is exactly what creates the N+1 problem — a list field resolved per element fans out into one query per element. Third, the info argument carries the full AST of the selection set, which advanced resolvers use to project only the requested columns or to compute query cost."},
+        {"type": "callout", "variant": "warning", "text": "Avoid putting heavy logic in default resolvers via getters on your model objects — they fire even when the field is not requested by some clients but is on a shared model, and they make it hard to reason about what work each query triggers."}
+      ]
+    },
+    {
+      "id": "n-plus-one",
+      "heading": "The N+1 Problem and DataLoader",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "This is the single most common GraphQL performance failure. Consider the query below. The orders field returns 50 orders. For each order, the lineItems resolver runs and issues its own database query. That is 1 query for the order list plus 50 queries for line items — N+1. Nest one more level (each line item's product) and you get a multiplicative explosion."},
+        {"type": "code", "language": "graphql", "code": "query {\n  user(id: \"42\") {\n    orders(first: 50) {\n      edges { node { id lineItems { sku product { name } } } }\n    }\n  }\n}"},
+        {"type": "paragraph", "text": "DataLoader solves this with per-request batching and caching. You give it a batch function that takes an array of keys and returns an array of values in the same order. Calls to load(key) within the same tick of the event loop are collected, deduplicated, and dispatched as a single call to the batch function. So 50 calls to lineItemsByOrder.load(orderId) become one SELECT ... WHERE order_id IN (...)."},
+        {"type": "code", "language": "typescript", "code": "import DataLoader from 'dataloader';\n\nexport function makeLoaders(db) {\n  return {\n    lineItemsByOrder: new DataLoader<string, LineItem[]>(async (orderIds) => {\n      const rows = await db.query(\n        'SELECT * FROM line_items WHERE order_id = ANY($1)',\n        [orderIds],\n      );\n      const byOrder = new Map<string, LineItem[]>();\n      for (const r of rows) {\n        (byOrder.get(r.order_id) ?? byOrder.set(r.order_id, []).get(r.order_id)!).push(r);\n      }\n      // CRITICAL: return one entry per key, in the SAME ORDER as orderIds\n      return orderIds.map((id) => byOrder.get(id) ?? []);\n    }),\n  };\n}"},
+        {"type": "callout", "variant": "danger", "text": "DataLoaders MUST be created per-request, stored on context. A loader is a cache; sharing one across requests leaks one user's data into another user's response and serves stale data. This is a real security incident, not just a bug."},
+        {"type": "callout", "variant": "info", "text": "The batch function must return results in exactly the input key order and the same length. Returning a Map or filtering out misses silently corrupts the mapping between keys and values."}
+      ]
+    },
+    {
+      "id": "pagination",
+      "heading": "Pagination with Relay Connections",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Offset pagination (limit/offset) is simple but breaks under concurrent writes — inserting a row shifts every subsequent page, causing skipped or duplicated items. The Relay Connection spec standardizes cursor-based pagination, which is stable under inserts because cursors encode a position in a stable sort order rather than a numeric offset."},
+        {"type": "code", "language": "graphql", "code": "type OrderConnection {\n  edges: [OrderEdge!]!\n  pageInfo: PageInfo!\n  totalCount: Int\n}\n\ntype OrderEdge {\n  cursor: String!\n  node: Order!\n}\n\ntype PageInfo {\n  hasNextPage: Boolean!\n  hasPreviousPage: Boolean!\n  startCursor: String\n  endCursor: String\n}"},
+        {"type": "paragraph", "text": "A cursor is an opaque, base64-encoded token. Crucially it is OPAQUE — clients must not parse it. Encoding it as base64(`${placedAt}:${id}`) lets you decode it server-side into a keyset predicate. The query fetches first+1 rows to determine hasNextPage without a second COUNT query."},
+        {"type": "code", "language": "sql", "code": "-- Keyset pagination: stable under concurrent inserts.\n-- Decoded cursor gives (lastPlacedAt, lastId).\nSELECT * FROM orders\nWHERE user_id = $1\n  AND (placed_at, id) < ($2, $3)   -- composite key beats OFFSET\nORDER BY placed_at DESC, id DESC\nLIMIT $4 + 1;                      -- +1 row tells us hasNextPage"},
+        {"type": "callout", "variant": "warning", "text": "totalCount is often the most expensive part of a connection. On large tables an exact COUNT can dominate the request. Make totalCount nullable and either omit it, return an estimate from table statistics, or cache it — never force every list query to pay for an exact count."}
+      ]
+    },
+    {
+      "id": "errors-and-caching",
+      "heading": "Error Handling and the Caching Problem",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "GraphQL responses return HTTP 200 even when fields fail. Errors live in a top-level errors array, and partial data can coexist with errors — a query selecting ten fields where one resolver throws returns the other nine fields plus one error. This partial-success model is powerful but means your monitoring cannot rely on HTTP status codes; you must inspect the errors array and classify by extensions.code."},
+        {"type": "code", "language": "json", "code": "{\n  \"data\": { \"user\": { \"displayName\": \"Ada\", \"orders\": null } },\n  \"errors\": [{\n    \"message\": \"Orders service timeout\",\n    \"path\": [\"user\", \"orders\"],\n    \"extensions\": { \"code\": \"DEPENDENCY_TIMEOUT\", \"traceId\": \"abc-123\" }\n  }]\n}"},
+        {"type": "heading", "text": "Why caching is genuinely harder"},
+        {"type": "paragraph", "text": "REST gets HTTP caching almost for free: GET /orders/42 has a stable URL, so CDNs, browsers, and reverse proxies cache by URL and respect Cache-Control and ETag. GraphQL typically sends every query as POST /graphql with the query in the body. POST is not cacheable by default, the URL is identical for every distinct query, and two requests asking for different field subsets of the same entity are different responses. So the entire HTTP caching layer that REST relies on is bypassed."},
+        {"type": "list", "items": [
+          "Persisted queries / APQ: hash the query, send GET /graphql?sha256=... so CDNs can cache by hash and you regain URL-based caching.",
+          "Normalized client cache: Apollo/Relay cache by entity __typename + id, so overlapping queries reuse cached entities.",
+          "Response cache plugins with cache hints: @cacheControl(maxAge:) directives let a server-side cache key on the operation + variables.",
+          "Field-level caching behind resolvers (Redis) is often the most reliable, since it is keyed on your own domain identifiers."
+        ]},
+        {"type": "callout", "variant": "danger", "text": "A single un-bounded query can be a denial-of-service vector. Without query cost analysis, a client can request deeply nested, cyclic selections (user -> friends -> friends -> ...) that explode into millions of resolver calls. Always enforce max depth, max complexity, and a per-operation cost budget in production."}
+      ]
+    },
+    {
+      "id": "federation",
+      "heading": "Schema Stitching and Federation",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "At scale, one monolithic schema owned by one team becomes a bottleneck. Federation splits the graph into subgraphs, each owned by a team and deployed independently. A gateway composes them into one supergraph. The killer feature is entity extension: the Users subgraph owns User, and the Reviews subgraph can extend User with a reviews field without the Users team being involved."},
+        {"type": "code", "language": "graphql", "code": "# users subgraph\ntype User @key(fields: \"id\") {\n  id: ID!\n  displayName: String!\n}\n\n# reviews subgraph extends the same entity\ntype User @key(fields: \"id\") {\n  id: ID! @external\n  reviews: [Review!]!\n}\n\ntype Review {\n  id: ID!\n  body: String!\n  author: User!\n}"},
+        {"type": "paragraph", "text": "When a client asks for user { displayName reviews { body } }, the gateway calls the Users subgraph for displayName, then uses the @key to call the Reviews subgraph's _entities resolver with the user's id to fetch reviews, and merges the results. The reference resolver (__resolveReference) is how a subgraph rehydrates an entity from just its key."},
+        {"type": "table", "headers": ["Approach", "Composition point", "Team autonomy", "Main risk"], "rows": [
+          ["Schema stitching", "Gateway code", "Low — gateway owns wiring", "Gateway becomes a bottleneck"],
+          ["Apollo Federation", "Declarative @key/@external", "High — subgraphs deploy independently", "Cross-subgraph N+1 at gateway"],
+          ["Monolith schema", "Single service", "None", "One team gates all changes"]
+        ]},
+        {"type": "callout", "variant": "warning", "text": "Federation moves the N+1 problem up to the gateway. Fetching 50 users then resolving each one's reviews subgraph-by-subgraph can mean 50 _entities calls unless the gateway batches keys. Apollo's query planner batches entity fetches, but custom gateways must implement this explicitly."}
+      ]
+    },
+    {
+      "id": "production-incident",
+      "heading": "Production Example: The Dashboard That Took Down Postgres",
+      "kind": "example",
+      "blocks": [
+        {"type": "paragraph", "text": "Real scenario from an e-commerce platform. A new admin analytics dashboard shipped a single query to render an orders table: 200 recent orders, each with its customer, line items, and each line item's product. It passed code review and worked fine in staging with 12 seed orders. In production it pushed the primary Postgres to 100% CPU within minutes of launch and started timing out checkout."},
+        {"type": "code", "language": "graphql", "code": "query AdminOrders {\n  recentOrders(first: 200) {\n    edges { node {\n      id total { amountMinor currency }\n      customer { displayName tier }\n      lineItems { quantity product { name sku } }\n    } }\n  }\n}"},
+        {"type": "paragraph", "text": "The math: 1 query for orders, 200 for customers, 200 for line-item sets, and then ~1,600 for products (one per line item). Roughly 2,000 queries per dashboard render, and the page auto-refreshed every 10 seconds for every logged-in admin. Staging never saw it because 12 orders generated ~100 queries — slow but invisible."},
+        {"type": "heading", "text": "The fix and the lasting guardrail"},
+        {"type": "list", "items": [
+          "Added DataLoaders for customersById, lineItemsByOrder, and productsById on the request context — 2,000 queries collapsed to 4 batched queries.",
+          "Added query-complexity analysis that rejected operations over a cost budget, so the next accidental fan-out fails fast with a clear error instead of melting the database.",
+          "Added a slow-query alert keyed on resolver count per operation, surfaced in tracing, so N+1 regressions are caught in CI load tests."
+        ]},
+        {"type": "code", "language": "typescript", "code": "// productsById loader: 1,600 product lookups -> 1 query\nconst productsById = new DataLoader<string, Product>(async (ids) => {\n  const rows = await db.query(\n    'SELECT * FROM products WHERE id = ANY($1)', [ids]);\n  const map = new Map(rows.map((p) => [p.id, p]));\n  return ids.map((id) => map.get(id) ?? null); // preserve order + length\n});\n\n// resolver now batches transparently\nconst resolvers = {\n  LineItem: { product: (li, _a, ctx) => ctx.loaders.productsById.load(li.productId) },\n};"},
+        {"type": "callout", "variant": "success", "text": "Outcome: P99 for the dashboard dropped from 9s (and frequent timeouts) to 140ms, and primary CPU fell from 100% to under 15%. The single behavioral change that mattered most was making DataLoaders mandatory in the context factory so no resolver could accidentally talk to the DB directly."}
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {"type": "list", "items": [
+          "Sharing DataLoaders across requests — caches one user's data and serves it to another. A correctness AND security bug.",
+          "Batch function returning wrong order or length — silently maps key A's value onto key B. Always map keys -> values explicitly.",
+          "No query depth/complexity limits — a cyclic deep query becomes a DoS amplifier. Enforce limits before exposing publicly.",
+          "Exact totalCount on every connection — turns cheap list reads into expensive full-table counts. Make it nullable/optional.",
+          "Throwing for business errors — losing partial data and giving clients an untyped error. Use a userErrors payload for expected failures.",
+          "Treating HTTP 200 as success in monitoring — GraphQL returns 200 with an errors array, so dashboards under-report failures.",
+          "Over-using non-null deep in the graph — one flaky dependency nulls out a huge subtree of an otherwise good response.",
+          "Putting auth only at the gateway — field-level authorization must live in resolvers; a deeply selected field can leak data the top-level check never saw."
+        ]},
+        {"type": "callout", "variant": "danger", "text": "Introspection enabled in production is an information-disclosure risk: it hands attackers your entire schema, including deprecated and internal fields. Disable introspection (or gate it behind auth) on public-facing production endpoints, and use schema registries for tooling instead."},
+        {"type": "callout", "variant": "warning", "text": "Aliases let one query request the same expensive field many times under different names (a: expensive, b: expensive, ...). Combined with batching directives this is a known abuse vector — cost analysis must account for aliased duplicates, not just distinct fields."}
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {"type": "list", "items": [
+          "Make DataLoaders mandatory: create them in the context factory and forbid raw DB access in resolvers via lint or architecture rules.",
+          "Design schema by domain, not by table. Model the graph around client use cases; do not 1:1 mirror your database.",
+          "Use the Relay connection spec for any list that can grow, with opaque cursors and keyset pagination.",
+          "Adopt the mutation payload pattern: input objects in, typed payload with userErrors out.",
+          "Enforce query cost analysis, max depth, and persisted queries before any public exposure.",
+          "Deprecate fields with @deprecated(reason:) and evolve the schema continuously rather than versioning the endpoint.",
+          "Put authorization at the field/resolver level, derived from context.user, not only at the HTTP boundary.",
+          "Instrument per-resolver tracing (Apollo tracing / OpenTelemetry) so N+1 and slow resolvers are visible in production."
+        ]},
+        {"type": "callout", "variant": "success", "text": "A useful litmus test for adoption: if your clients are homogeneous and your endpoints map cleanly to resources, REST may serve you better. Reach for GraphQL when client diversity, deep relational fetching, or independent team-owned subgraphs are the dominant forces."},
+        {"type": "table", "headers": ["Practice", "Prevents"], "rows": [
+          ["Per-request DataLoaders", "N+1 explosion and cross-user cache leaks"],
+          ["Query cost limits", "Denial-of-service via deep/cyclic queries"],
+          ["Persisted queries", "Lost CDN caching, oversized POST bodies"],
+          ["Field-level auth", "Data leaks through deep selections"],
+          ["Disabled introspection in prod", "Schema disclosure to attackers"]
+        ]}
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "request-lifecycle",
+      "title": "GraphQL Request Lifecycle",
+      "type": "mermaid",
+      "content": "flowchart TD\n  A[Client query] --> B[HTTP POST graphql]\n  B --> C[Parse to AST]\n  C --> D[Validate against schema]\n  D --> E{Valid}\n  E -->|No| F[Return errors array]\n  E -->|Yes| G[Execute resolvers]\n  G --> H[DataLoader batches DB calls]\n  H --> I[Assemble data tree]\n  I --> J[Return data plus errors]"
+    },
+    {
+      "id": "federation-topology",
+      "title": "Federated Supergraph Topology",
+      "type": "mermaid",
+      "content": "flowchart LR\n  C[Client] --> G[Gateway supergraph]\n  G --> U[Users subgraph]\n  G --> R[Reviews subgraph]\n  G --> P[Products subgraph]\n  R -.entities by key.-> U\n  R -.entities by key.-> P"
+    },
+    {
+      "id": "n1-vs-dataloader",
+      "title": "N+1 versus Batched DataLoader",
+      "type": "ascii",
+      "content": "Without DataLoader (N+1):\n\n  orders --> [DB: list 50 orders]\n     |--> order 1 lineItems --> [DB query]\n     |--> order 2 lineItems --> [DB query]\n     |--> ...                    (48 more)\n     +--> order 50 lineItems --> [DB query]\n  Total: 1 + 50 = 51 queries\n\nWith DataLoader (batched):\n\n  orders --> [DB: list 50 orders]\n     |--> load(1) --+\n     |--> load(2)   |  collected in one tick\n     |--> ...       +--> [DB: WHERE order_id IN (1..50)]\n     +--> load(50) -+\n  Total: 1 + 1 = 2 queries"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-what-is-graphql",
+      "question": "What is GraphQL and how does its request model differ from REST?",
+      "answer": "GraphQL is a typed query language and runtime for APIs. Clients send a query describing exactly the fields they want to a single endpoint; the server validates it against a schema and returns data shaped like the query. REST exposes many resource-oriented endpoints with server-defined shapes, which leads to over-fetching (too much data per endpoint) or under-fetching (multiple round trips). GraphQL inverts control: the client declares its data needs, eliminating both in one request.",
+      "difficulty": "junior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["graphql", "rest", "fundamentals"],
+      "followUps": ["When would you still choose REST over GraphQL?", "What are the three root operation types?"]
+    },
+    {
+      "id": "q-resolver-signature",
+      "question": "Explain the resolver signature (parent, args, context, info) and what each argument is for.",
+      "answer": "parent is the value returned by the resolver one level up (the object this field belongs to). args are the field's arguments from the query. context is a per-request object holding cross-cutting state — the authenticated user, DB connections, and DataLoaders. info is the resolved query AST, including the selection set, used for projection or cost analysis. The runtime walks the tree depth-first, feeding each resolver's return value as the parent of its children's resolvers.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["resolvers", "execution"],
+      "followUps": ["Why must context be per-request?", "What does the default resolver do when no resolver is defined?"]
+    },
+    {
+      "id": "q-n-plus-one",
+      "question": "What is the N+1 problem in GraphQL and how does DataLoader solve it?",
+      "answer": "When a list field is resolved, each element's child resolver runs independently and issues its own backend call: one query for the list plus N for the children — N+1, which multiplies with depth. DataLoader fixes this with per-request batching: load(key) calls within the same event-loop tick are collected, deduplicated, and dispatched as a single batched call (e.g. WHERE id IN (...)). The batch function must return values in the same order and length as the input keys. Loaders also memoize within the request, so repeated loads of the same key hit the cache.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["dataloader", "performance", "n-plus-one"],
+      "followUps": ["Why must DataLoaders be per-request?", "What happens if the batch function returns results out of order?"]
+    },
+    {
+      "id": "q-mutations",
+      "question": "How do mutations differ from queries, and what is the recommended payload pattern?",
+      "answer": "Mutations are the write operations; unlike query fields which resolve concurrently, top-level mutation fields execute serially in the order listed, so writes do not race each other. The recommended pattern is a single input object argument and a typed payload return containing the affected entity plus a userErrors array. This separates expected, localizable business errors (returned as data) from unexpected system errors (the top-level errors array), and keeps the mutation extensible without breaking the signature.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["mutations", "schema-design", "errors"],
+      "followUps": ["Why are top-level mutation fields serial but query fields concurrent?", "How would you make a mutation idempotent?"]
+    },
+    {
+      "id": "q-pagination",
+      "question": "Why do Relay connections use cursors instead of offset/limit?",
+      "answer": "Offset pagination is unstable under concurrent writes: inserting or deleting a row shifts every later offset, so users skip or see duplicate items between page loads. Cursor (keyset) pagination encodes a position in a stable sort order, e.g. (placed_at, id), so the next page predicate is WHERE (placed_at, id) < (lastPlacedAt, lastId) — unaffected by inserts elsewhere. The Relay spec standardizes edges, nodes, cursors, and pageInfo. Cursors are opaque so the server can change their encoding without breaking clients.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["pagination", "relay", "cursors"],
+      "followUps": ["Why is totalCount often expensive?", "How do you compute hasNextPage cheaply?"]
+    },
+    {
+      "id": "q-subscriptions",
+      "question": "How do GraphQL subscriptions work and what transport do they use?",
+      "answer": "Subscriptions are long-lived operations that stream results when server-side events occur. The client opens a persistent connection — historically WebSockets (graphql-ws protocol), increasingly Server-Sent Events for simpler unidirectional flows. The server resolves a subscription by returning an async iterator backed by a pub/sub system (Redis, Kafka, NATS). When an event is published, the runtime executes the subscription's selection set against the event payload and pushes the result. The main operational challenges are connection scaling, fan-out, and authorization on the persistent connection.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["subscriptions", "realtime", "websockets"],
+      "followUps": ["How do you scale subscriptions across many server instances?", "How do you authorize a subscription that lives for hours?"]
+    },
+    {
+      "id": "q-federation",
+      "question": "Explain how Apollo Federation composes multiple subgraphs into one graph.",
+      "answer": "Each subgraph owns part of the schema and is deployed independently. An entity is marked with @key(fields:) declaring its primary key. A subgraph can extend an entity it does not own by referencing it with @external and adding new fields. The gateway composes a supergraph and builds a query plan: it fetches base fields from the owning subgraph, then calls other subgraphs' _entities resolver with the entity's key to resolve extended fields, merging the results. Each subgraph implements __resolveReference to rehydrate an entity from just its key. This gives teams independent ownership and deployment of their slice of the graph.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["federation", "architecture", "microservices"],
+      "followUps": ["How does the gateway avoid N+1 across subgraphs?", "How does federation differ from schema stitching?"]
+    },
+    {
+      "id": "q-graphql-vs-rest-tradeoffs",
+      "question": "Give a balanced analysis of GraphQL vs REST tradeoffs at a staff level.",
+      "answer": "GraphQL wins on client-driven fetching, eliminating over/under-fetching, a strongly typed introspectable contract, and graph composition across teams via federation. REST wins on operational simplicity: native HTTP caching (URLs + verbs + Cache-Control + ETag), trivial rate limiting per endpoint, straightforward CDN integration, and ubiquitous tooling. GraphQL shifts complexity to the server — caching, rate limiting, query-cost control, and authorization all get harder. The decision is contextual: choose GraphQL when you have diverse clients (mobile/web/partners), deep relational fetching, or many teams owning subgraphs; choose REST when endpoints map cleanly to resources, clients are homogeneous, and you want to lean on the HTTP caching ecosystem. Many orgs run both — GraphQL for product clients, REST for machine-to-machine.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["graphql", "rest", "tradeoffs", "architecture"],
+      "followUps": ["Where does GraphQL make rate limiting harder?", "Can you get HTTP caching back with GraphQL?"]
+    },
+    {
+      "id": "q-tricky-caching",
+      "question": "TRICKY: Why is HTTP caching so much harder with GraphQL than REST, and how do you recover it?",
+      "answer": "REST caches by URL: GET /orders/42 is a stable cache key that CDNs, browsers, and proxies cache for free with Cache-Control/ETag. GraphQL sends nearly everything as POST /graphql with the query in the body, so (a) POST is uncacheable by default, (b) every request shares one URL, and (c) two queries selecting different field subsets of the same entity are distinct responses — the URL no longer identifies the response. The whole HTTP caching layer is bypassed. Recovery options: Automatic Persisted Queries — hash the query and send GET /graphql?sha256=...&variables=... so CDNs cache by hash; normalized client caches (Apollo/Relay) keyed on __typename+id so overlapping queries reuse entities; server response-cache plugins driven by @cacheControl hints keying on operation+variables; and field-level Redis caching behind resolvers keyed on your own domain ids. The gotcha most people miss: GraphQL's per-field flexibility means even successful APQ caching must account for variables and authorization scope, or you risk serving one user's authorized data to another from the cache.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["caching", "tricky", "cdn", "apq"],
+      "followUps": ["How do you avoid caching per-user data publicly?", "Why is POST not cacheable by default?"]
+    },
+    {
+      "id": "q-tricky-rate-limiting",
+      "question": "TRICKY: Why is rate limiting harder in GraphQL, and what do you use instead of request counts?",
+      "answer": "REST rate limiting counts requests per endpoint, and each endpoint has roughly bounded cost. In GraphQL every request hits the same endpoint but a single query can be arbitrarily expensive — one deeply nested or aliased query can trigger millions of resolver calls, so counting requests is meaningless. You must rate limit by query cost, not request count. Implement static query-complexity analysis that assigns a cost to each field (with multipliers for list arguments like first:), reject operations over a budget before execution, and meter a per-client cost allowance over time (a cost-based token bucket). You also must account for aliases — a: expensive b: expensive duplicates cost under different names — and for list arguments, since friends(first: 1000) is 1000x the cost of friends(first: 1). Without this, a client can stay under any request-per-second limit while still saturating your database.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["rate-limiting", "tricky", "query-cost", "security"],
+      "followUps": ["How do you assign per-field cost weights?", "How do aliases defeat naive cost analysis?"]
+    },
+    {
+      "id": "q-tricky-dataloader-cache",
+      "question": "TRICKY: A DataLoader speeds things up but users intermittently see other users' data. What happened?",
+      "answer": "The DataLoader was created once at module scope (or on a long-lived server object) and shared across requests instead of being created per-request on the context. A DataLoader is not just a batcher — it is also a per-instance memoization cache. When shared globally, request A's load(key) populates the cache, and request B's load(key) returns A's cached value, ignoring B's authorization scope. This crosses tenant/user boundaries and is a genuine data-leak security incident, not merely a staleness bug. The fix is to construct fresh loaders in the context factory for every request so their cache lifetime equals the request lifetime. A subtler variant: even per-request, if your batch function does not include the tenant in the key but you assume row-level security, you can leak across tenants within a request that touches multiple tenants — so keys must be scoped to whatever isolation boundary your data model requires.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["dataloader", "tricky", "security", "caching"],
+      "followUps": ["Where exactly should loaders be instantiated?", "When is it acceptable to share a cache across requests?"]
+    },
+    {
+      "id": "q-tricky-nonnull-propagation",
+      "question": "TRICKY: A single failing leaf resolver wiped out an entire branch of an otherwise successful response. Why?",
+      "answer": "GraphQL's non-null error propagation. If a field typed as non-null (e.g. name: String!) resolves to null or throws, the response cannot be well-typed with null there, so the runtime propagates the null upward to the nearest nullable ancestor, nulling that entire subtree and recording an error in the errors array. If you make a deep chain non-null all the way up — node! inside edges! inside a non-null connection — one flaky downstream field can null out the whole list. The fix is deliberate nullability design: be strict (non-null) only where you fully control the value and at safe leaves, and stay lenient (nullable) at boundaries with unreliable dependencies, so a single failure degrades to a localized null plus an error rather than collapsing a large branch of valid data.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["nullability", "tricky", "errors", "schema-design"],
+      "followUps": ["How do you decide which fields should be non-null?", "How does this interact with partial data in the response?"]
+    },
+    {
+      "id": "q-introspection-security",
+      "question": "What are the security implications of leaving introspection enabled in production?",
+      "answer": "Introspection lets any client query the full schema — every type, field, argument, deprecated field, and internal-looking name. In production this is information disclosure: attackers map your entire attack surface, discover undocumented or internal fields, and find data they can attempt to reach. Best practice is to disable introspection (or gate it behind authentication) on public-facing production endpoints and rely on a schema registry for tooling and codegen. Combine with disabling field suggestions in error messages, since 'Did you mean ...?' hints leak schema details even with introspection off.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["security", "introspection", "production"],
+      "followUps": ["How do you keep client codegen working with introspection disabled?", "What other error-message leaks should you suppress?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-dataloader",
+      "title": "Fix the N+1 with a DataLoader",
+      "difficulty": "mid",
+      "category": "Backend",
+      "prompt": "You have a User type with a posts field and a Post type with an author field. Resolving a list of posts and each post's author currently fires one DB query per post (N+1). Implement an authorById DataLoader and wire it into the resolver so all author lookups in a single request collapse into one batched query. The batch function receives an array of user ids and must return users in the same order and length, with null for ids that have no matching row.",
+      "hints": [
+        "DataLoader's batch function gets an array of keys and must return an array of values aligned by index.",
+        "Build a Map from id to row, then map over the input keys to preserve order and length.",
+        "Create the loader per-request inside the context factory, not at module scope.",
+        "The resolver should call ctx.loaders.authorById.load(post.authorId) instead of querying directly."
+      ],
+      "solutionCode": "import DataLoader from 'dataloader';\n\ninterface User { id: string; displayName: string; }\n\n// 1) Per-request loader factory\nexport function makeLoaders(db: Db) {\n  return {\n    authorById: new DataLoader<string, User | null>(async (ids) => {\n      const rows: User[] = await db.query(\n        'SELECT id, display_name AS \"displayName\" FROM users WHERE id = ANY($1)',\n        [ids as string[]],\n      );\n      const byId = new Map(rows.map((u) => [u.id, u]));\n      // CRITICAL: same order, same length as input ids; null for misses\n      return ids.map((id) => byId.get(id) ?? null);\n    }),\n  };\n}\n\n// 2) Build context per request\nexport function buildContext(req: Request, db: Db) {\n  return { db, loaders: makeLoaders(db), user: authenticate(req) };\n}\n\n// 3) Resolvers use the loader instead of querying directly\nexport const resolvers = {\n  Query: {\n    posts: (_p: unknown, _a: unknown, ctx: Ctx) => ctx.db.query('SELECT * FROM posts LIMIT 100'),\n  },\n  Post: {\n    // 100 posts -> 100 load() calls -> 1 batched query\n    author: (post: { authorId: string }, _a: unknown, ctx: Ctx) =>\n      ctx.loaders.authorById.load(post.authorId),\n  },\n};",
+      "solutionLanguage": "typescript",
+      "explanation": "The fix has three load-bearing parts. First, the batch function: DataLoader collects every load(id) issued within one tick of the event loop, deduplicates the ids, and calls the batch function once with all of them. We issue a single WHERE id = ANY($1) query, build a Map for O(1) lookup, then map over the ORIGINAL ids array so the returned array matches the input by index and length — returning the Map directly or filtering out misses would silently misalign keys and values, a classic correctness bug. We return null for ids with no row so the contract (one result per key) holds. Second, the loader is created per-request in makeLoaders and stored on context; because a DataLoader also memoizes results for its lifetime, sharing it across requests would leak one user's cached data into another's response — a security incident, not just staleness. Third, the resolver calls load() instead of querying directly, so 100 posts produce 100 load calls that collapse into one query. Net effect: the request goes from 1 + 100 queries to 1 + 1, and repeated authors within the request are served from the loader's per-request cache for free.",
+      "relatedTopic": "graphql"
+    },
+    {
+      "id": "ch-cursor-pagination",
+      "title": "Implement a Relay Connection with Keyset Pagination",
+      "difficulty": "senior",
+      "category": "Backend",
+      "prompt": "Implement a resolver that returns an OrderConnection for a user's orders using stable keyset (cursor) pagination, not offset. Accept first and after arguments. Cursors must be opaque (base64) and encode the sort key (placedAt, id). Fetch first+1 rows to determine hasNextPage without a separate COUNT, and return edges with per-node cursors plus a correct pageInfo. Orders are sorted by placedAt DESC, id DESC.",
+      "hints": [
+        "Encode the cursor as base64 of `${placedAt.toISOString()}:${id}` and decode it back into a (placedAt, id) tuple.",
+        "Use a composite/keyset predicate: WHERE (placed_at, id) < (lastPlacedAt, lastId).",
+        "Fetch first + 1 rows; if you got more than first, hasNextPage is true and you drop the extra row.",
+        "endCursor is the cursor of the last edge you actually return; startCursor is the first."
+      ],
+      "solutionCode": "function encodeCursor(placedAt: Date, id: string): string {\n  return Buffer.from(`${placedAt.toISOString()}:${id}`).toString('base64');\n}\n\nfunction decodeCursor(c: string): { placedAt: string; id: string } {\n  const raw = Buffer.from(c, 'base64').toString('utf8');\n  const idx = raw.indexOf(':');\n  return { placedAt: raw.slice(0, idx), id: raw.slice(idx + 1) };\n}\n\nexport async function ordersConnection(\n  userId: string,\n  first: number,\n  after: string | null,\n  db: Db,\n) {\n  const limit = Math.min(first, 100); // cap page size\n  const params: any[] = [userId];\n  let keyset = '';\n  if (after) {\n    const { placedAt, id } = decodeCursor(after);\n    params.push(placedAt, id);\n    keyset = `AND (placed_at, id) < ($2, $3)`;\n  }\n  params.push(limit + 1); // fetch one extra to detect next page\n\n  const rows = await db.query(\n    `SELECT id, placed_at AS \"placedAt\" FROM orders\n     WHERE user_id = $1 ${keyset}\n     ORDER BY placed_at DESC, id DESC\n     LIMIT $${params.length}`,\n    params,\n  );\n\n  const hasNextPage = rows.length > limit;\n  const page = hasNextPage ? rows.slice(0, limit) : rows;\n  const edges = page.map((o: any) => ({\n    cursor: encodeCursor(o.placedAt, o.id),\n    node: o,\n  }));\n\n  return {\n    edges,\n    pageInfo: {\n      hasNextPage,\n      hasPreviousPage: Boolean(after),\n      startCursor: edges[0]?.cursor ?? null,\n      endCursor: edges[edges.length - 1]?.cursor ?? null,\n    },\n  };\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "Keyset pagination is stable under concurrent writes because the next-page predicate references a position in a deterministic sort order rather than a numeric offset. We sort by (placed_at, id) DESC — id is the tiebreaker that guarantees a total order even when many orders share a timestamp, which is essential: without it, rows with equal placed_at could be skipped or duplicated across pages. The cursor opaquely encodes that exact key as base64, so clients cannot depend on its structure and we are free to change the encoding later. The composite comparison (placed_at, id) < (lastPlacedAt, lastId) is row-value comparison: Postgres evaluates it lexicographically, which is exactly the keyset semantics we want and is index-friendly given an index on (user_id, placed_at DESC, id DESC). Fetching limit + 1 rows is the trick that yields hasNextPage without a second COUNT query — if we got more rows than the page size, there is a next page and we slice off the extra. We cap the page size to bound worst-case cost. startCursor and endCursor are taken from the edges we actually return, so a client can resume precisely from endCursor. This avoids the offset pitfalls (skips/dupes on insert, and OFFSET N forcing the DB to scan and discard N rows) entirely.",
+      "relatedTopic": "graphql"
+    }
+  ],
+  "references": [
+    {"label": "GraphQL Specification", "url": "https://spec.graphql.org/"},
+    {"label": "GraphQL Official Learn", "url": "https://graphql.org/learn/"},
+    {"label": "DataLoader (graphql/dataloader)", "url": "https://github.com/graphql/dataloader"},
+    {"label": "Relay Cursor Connections Spec", "url": "https://relay.dev/graphql/connections.htm"},
+    {"label": "Apollo Federation Docs", "url": "https://www.apollographql.com/docs/federation/"},
+    {"label": "Apollo Server Caching", "url": "https://www.apollographql.com/docs/apollo-server/performance/caching/"}
+  ]
+}

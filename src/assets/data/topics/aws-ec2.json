@@ -1,0 +1,388 @@
+{
+  "id": "aws-ec2",
+  "title": "AWS EC2",
+  "category": "Cloud",
+  "subcategory": "Compute",
+  "difficulty": "mid",
+  "tags": ["aws", "ec2", "compute", "autoscaling", "ebs", "spot", "networking"],
+  "description": "A staff-level deep dive into Amazon EC2 — instance families, storage, networking, scaling, and cost models — with the trade-offs you must defend in a senior systems-design interview.",
+  "estReadMinutes": 28,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {"type": "paragraph", "text": "Amazon Elastic Compute Cloud (EC2) is AWS's foundational Infrastructure-as-a-Service offering: resizable virtual machines that you provision in seconds and pay for by the second. Despite the rise of serverless and containers, EC2 remains the substrate underneath much of AWS — EKS nodes, RDS, EMR, and most third-party AMIs ultimately run on EC2 hardware."},
+        {"type": "paragraph", "text": "An EC2 instance is a slice of a physical host managed by the Nitro hypervisor. You select an Amazon Machine Image (AMI) for the boot disk, an instance type that fixes the vCPU/memory/network/storage ratio, a subnet that places it in an Availability Zone and VPC, and security groups that act as a stateful firewall. Everything else — IPs, extra disks, scaling, lifecycle — is composed from smaller primitives."},
+        {"type": "list", "items": [
+          "Instance = AMI (disk image) + instance type (hardware shape) + subnet (network/AZ) + security groups (firewall) + IAM role (permissions).",
+          "Billing is per-second (60s minimum) for Linux on-demand; stopped instances incur no compute charge but still pay for attached EBS.",
+          "Nitro decouples virtualization (network, storage, security) onto dedicated cards, giving near-bare-metal performance.",
+          "EC2 is regional in console but instances always live in exactly one Availability Zone."
+        ]}
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why EC2 Still Matters",
+      "kind": "why",
+      "blocks": [
+        {"type": "paragraph", "text": "Teams reach for Lambda and Fargate for the elasticity, but EC2 is what you choose when you need control: a specific kernel, GPUs, sustained high-throughput workloads, long-running stateful processes, custom networking, or cost optimization at scale where per-request serverless pricing becomes prohibitive."},
+        {"type": "list", "items": [
+          "Cost at scale: a steady-state fleet on Reserved Instances or Savings Plans is dramatically cheaper than equivalent always-on Lambda concurrency.",
+          "Workload fit: GPU training, in-memory caches (large R/X families), HPC with cluster placement groups, and anything needing >15 min runtime.",
+          "Control: pick the OS, kernel modules, sysctls, CPU credits, and tenancy (shared, dedicated, or bare metal for licensing).",
+          "Spot economics: interruptible batch and CI fleets run at up to 90% discount — impossible to express in most managed compute."
+        ]},
+        {"type": "callout", "variant": "info", "text": "Interview framing: nobody gets points for 'EC2 vs Lambda' as a religious war. Senior answers are about request profile, runtime, statefulness, and the blended monthly cost — show the math."}
+      ]
+    },
+    {
+      "id": "instance-families-amis",
+      "heading": "Instance Families, AMIs, and User Data",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Instance type names encode a family, generation, and size: m6i.2xlarge = general-purpose (m), 6th gen, Intel (i), 2xlarge size. Picking the right family is the single biggest lever on both performance and cost."},
+        {"type": "table", "headers": ["Family", "Optimized for", "Examples", "Typical use"], "rows": [
+          ["T (burstable)", "Baseline CPU + credits", "t3, t4g", "Dev boxes, low-traffic web, microservices"],
+          ["M (general)", "Balanced CPU:memory", "m6i, m7g", "App servers, mid-size databases"],
+          ["C (compute)", "High CPU ratio", "c7g, c6i", "Batch, encoding, gaming, HPC"],
+          ["R / X (memory)", "Large RAM", "r6i, x2idn", "In-memory caches, large in-memory DBs"],
+          ["P / G (accelerated)", "GPU", "p4d, g5", "ML training/inference, rendering"],
+          ["I / D (storage)", "Local NVMe / HDD", "i4i, d3", "High-IOPS NoSQL, data warehouses"]
+        ]},
+        {"type": "heading", "text": "AMIs"},
+        {"type": "paragraph", "text": "An AMI bundles a root volume snapshot, a block-device mapping, launch permissions, and architecture. Bake your golden AMI with a tool like Packer so instances boot ready-to-serve rather than configuring at runtime. AMIs are regional — copy them to other regions for multi-region deployments. The g-suffix families (Graviton/ARM) need ARM AMIs; mixing architectures is a classic launch-failure cause."},
+        {"type": "heading", "text": "User Data"},
+        {"type": "paragraph", "text": "User data is a script the cloud-init service runs on first boot. Use it for thin bootstrap (pull config, register with a service, start the agent) — never bake secrets into it, since it's readable from the instance metadata service by anything that can reach the instance."},
+        {"type": "code", "language": "bash", "code": "#!/bin/bash\nset -euo pipefail\n# Thin bootstrap — golden AMI already has the app + agent installed\nINSTANCE_ID=$(curl -s -H \"X-aws-ec2-metadata-token: $(curl -s -X PUT \\\n  http://169.254.169.254/latest/api/token \\\n  -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')\" \\\n  http://169.254.169.254/latest/meta-data/instance-id)\n\n# Pull environment config from SSM Parameter Store (no secrets in user data)\naws ssm get-parameter --name /prod/web/config --with-decryption \\\n  --query Parameter.Value --output text > /etc/app/config.json\n\nsystemctl enable --now app.service\n# Signal CloudFormation/ASG that boot succeeded\n/opt/aws/bin/cfn-signal -e $? --stack \"$STACK\" --resource WebASG --region us-east-1"},
+        {"type": "callout", "variant": "warning", "text": "Always use IMDSv2 (the token-based metadata call above). IMDSv1's simple GET enabled the 2019 Capital One SSRF breach. Enforce HttpTokens=required on every launch template."}
+      ]
+    },
+    {
+      "id": "networking-sg-nacl",
+      "heading": "Networking: Security Groups vs NACLs, Elastic IPs",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "EC2 networking is governed by two firewall layers with very different semantics. Confusing them is the most common networking bug in production VPCs."},
+        {"type": "table", "headers": ["Property", "Security Group", "Network ACL"], "rows": [
+          ["Attaches to", "ENI / instance", "Subnet"],
+          ["State", "Stateful (return traffic auto-allowed)", "Stateless (must allow both directions)"],
+          ["Rules", "Allow only", "Allow and Deny, evaluated by rule number"],
+          ["Evaluation", "All rules, union", "Lowest matching rule number wins"],
+          ["Default", "Deny inbound, allow all outbound", "Default NACL allows all; custom denies all"]
+        ]},
+        {"type": "paragraph", "text": "Because security groups are stateful, if you allow inbound TCP 443, the response is automatically permitted regardless of outbound rules. NACLs are stateless: a request inbound on 443 returns on an ephemeral port (1024-65535), so a custom NACL must explicitly allow that ephemeral range outbound or the connection hangs. This ephemeral-port trap breaks more deployments than any single misconfiguration."},
+        {"type": "heading", "text": "Elastic IPs"},
+        {"type": "paragraph", "text": "An Elastic IP (EIP) is a static public IPv4 you own and can remap between instances or ENIs for failover. As of 2024 all public IPv4 is metered, so EIPs cost money even when associated. For most fleets you should sit behind an ALB/NLB and avoid per-instance public IPs entirely; reserve EIPs for NAT gateways or appliances that genuinely need a fixed egress address."},
+        {"type": "callout", "variant": "danger", "text": "An unassociated Elastic IP is billed hourly precisely to discourage hoarding. Orphaned EIPs after a teardown are a recurring surprise on AWS bills — tag and reap them."}
+      ]
+    },
+    {
+      "id": "storage-ebs-instance-store",
+      "heading": "Storage: EBS vs Instance Store, Key Pairs",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "EC2 offers two fundamentally different block-storage models, and choosing wrong leads to data loss or wasted IOPS spend."},
+        {"type": "table", "headers": ["Property", "EBS", "Instance Store"], "rows": [
+          ["Lifecycle", "Persists independently of instance", "Ephemeral — wiped on stop/terminate"],
+          ["Attachment", "Network-attached, movable across instances (same AZ)", "Physically attached to host"],
+          ["Performance", "gp3: 3k base IOPS, io2 up to 256k", "Very high, low-latency local NVMe"],
+          ["Snapshots", "Yes, to S3", "No"],
+          ["Use case", "Boot volumes, databases, anything durable", "Scratch, caches, shards rebuildable from source"]
+        ]},
+        {"type": "paragraph", "text": "gp3 is the default modern choice: you provision IOPS and throughput independently of size, unlike gp2 where IOPS scaled with GB. io2 Block Express is for latency-sensitive databases needing sustained high IOPS. Instance store gives the best raw performance but vanishes on stop — only use it for data you can reconstruct."},
+        {"type": "code", "language": "bash", "code": "# Create a gp3 volume with explicit IOPS/throughput, attach, format, mount\naws ec2 create-volume --availability-zone us-east-1a --size 200 \\\n  --volume-type gp3 --iops 6000 --throughput 250 \\\n  --tag-specifications 'ResourceType=volume,Tags=[{Key=app,Value=web}]'\n\naws ec2 attach-volume --volume-id vol-0abc --instance-id i-0def --device /dev/xvdf\n\n# On the instance: format only if empty, then mount durably via fstab + UUID\nsudo mkfs -t xfs /dev/xvdf\nUUID=$(sudo blkid -s UUID -o value /dev/xvdf)\necho \"UUID=$UUID /data xfs defaults,nofail 0 2\" | sudo tee -a /etc/fstab\nsudo mkdir -p /data && sudo mount -a"},
+        {"type": "heading", "text": "Key Pairs"},
+        {"type": "paragraph", "text": "Key pairs are 2048-bit RSA or ED25519 SSH keys; AWS holds the public half and injects it into the instance via cloud-init. You receive the private key exactly once. In modern fleets prefer AWS Systems Manager Session Manager over SSH key pairs entirely — it removes inbound port 22, removes long-lived keys, and logs every session to CloudTrail."}
+      ]
+    },
+    {
+      "id": "scaling-asg-launch-templates",
+      "heading": "Auto Scaling Groups, Launch Templates, Placement Groups",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "An Auto Scaling Group (ASG) maintains a desired count of instances across multiple AZs, replaces unhealthy ones, and scales on policies. The ASG references a Launch Template (the versioned spec for AMI, type, security groups, IAM profile, user data). Launch templates supersede the older launch configurations and are required for mixed-instance and Spot strategies."},
+        {"type": "list", "items": [
+          "Target-tracking scaling: keep average CPU at 50% or ALB request count per target at N — the simplest correct policy for most web tiers.",
+          "Step/simple scaling: tie alarms to fixed adjustments; more manual, useful for bespoke metrics.",
+          "Predictive scaling: ML forecasts daily/weekly cycles and pre-warms capacity before the load arrives.",
+          "Health checks: combine EC2 status checks with ELB health checks so app-level failures (not just hardware) trigger replacement."
+        ]},
+        {"type": "heading", "text": "Placement Groups"},
+        {"type": "table", "headers": ["Type", "Goal", "Trade-off"], "rows": [
+          ["Cluster", "Low latency, high throughput within one AZ", "All eggs in one AZ — no AZ fault tolerance"],
+          ["Spread", "Each instance on distinct hardware", "Max 7 instances per AZ per group"],
+          ["Partition", "Isolated hardware partitions for big distributed systems", "Used by HDFS/Cassandra/Kafka for rack awareness"]
+        ]},
+        {"type": "code", "language": "yaml", "code": "# Launch template + mixed-instances ASG: spread capacity across AZs,\n# blend on-demand baseline with Spot for cost.\nResources:\n  WebASG:\n    Type: AWS::AutoScaling::AutoScalingGroup\n    Properties:\n      MinSize: 3\n      MaxSize: 30\n      DesiredCapacity: 6\n      VPCZoneIdentifier: [subnet-az-a, subnet-az-b, subnet-az-c]\n      HealthCheckType: ELB\n      HealthCheckGracePeriod: 90\n      TargetGroupARNs: [!Ref WebTargetGroup]\n      MixedInstancesPolicy:\n        InstancesDistribution:\n          OnDemandBaseCapacity: 3          # always-on floor\n          OnDemandPercentageAboveBaseCapacity: 20\n          SpotAllocationStrategy: price-capacity-optimized\n        LaunchTemplate:\n          LaunchTemplateSpecification:\n            LaunchTemplateId: !Ref WebLT\n            Version: !GetAtt WebLT.LatestVersionNumber\n          Overrides:\n            - InstanceType: m6i.large\n            - InstanceType: m6a.large\n            - InstanceType: m5.large    # diversify pools = fewer interruptions"}
+      ]
+    },
+    {
+      "id": "pricing-models",
+      "heading": "Pricing Models",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Compute cost is usually the largest line on an AWS bill, and EC2 gives you four purchasing models that combine. The senior skill is matching commitment to workload predictability."},
+        {"type": "table", "headers": ["Model", "Discount", "Commitment", "Best for"], "rows": [
+          ["On-Demand", "0% (baseline)", "None", "Spiky, unpredictable, short-lived"],
+          ["Spot", "Up to 90%", "None, can be reclaimed in 2 min", "Fault-tolerant batch, CI, stateless workers"],
+          ["Reserved (RI)", "Up to 72%", "1 or 3 yr, instance family", "Steady-state legacy needing capacity reservation"],
+          ["Savings Plans", "Up to 72%", "1 or 3 yr $/hr spend", "Steady-state with flexibility across family/region"]
+        ]},
+        {"type": "paragraph", "text": "Compute Savings Plans are the modern default for committed spend: they apply across instance family, size, region, OS, and even Fargate/Lambda, so you commit to a dollar amount rather than a specific shape. Use RIs only when you also need a capacity reservation. Layer Spot on top for the elastic, interruptible portion of the fleet."},
+        {"type": "callout", "variant": "success", "text": "A mature steady-state fleet pattern: Savings Plan covers the baseline (~70% of capacity), on-demand absorbs short bursts, and Spot handles the cheap interruptible surge — often cutting compute spend by half versus all on-demand."}
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: Spot Interruption During a Sale",
+      "kind": "example",
+      "blocks": [
+        {"type": "paragraph", "text": "Scenario: A retailer ran a stateless checkout API on an ASG that was 80% Spot to save money. During a flash sale, AWS reclaimed a large slice of m5.large Spot capacity in one AZ because the team had only specified a single instance type. Half the fleet drained in two minutes, the ALB shed in-flight requests, and checkout error rate spiked to 12%."},
+        {"type": "paragraph", "text": "Root cause: no instance-type diversification (one Spot pool), no interruption handler to deregister gracefully, and OnDemandBaseCapacity was 0 so there was no protected floor. The fix combined three things: diversify across 6 instance types and 3 AZs, set an on-demand baseline equal to the minimum safe capacity, and run a lightweight daemon that watches the instance metadata for the rebalance/termination notice and drains connections cleanly."},
+        {"type": "code", "language": "bash", "code": "#!/bin/bash\n# Spot interruption handler — polls IMDSv2 for the 2-minute termination notice\n# and the proactive rebalance recommendation, then drains the instance.\nTOKEN() { curl -s -X PUT http://169.254.169.254/latest/api/token \\\n  -H 'X-aws-ec2-metadata-token-ttl-seconds: 30'; }\n\nwhile true; do\n  T=$(TOKEN)\n  CODE=$(curl -s -o /dev/null -w '%{http_code}' -H \"X-aws-ec2-metadata-token: $T\" \\\n    http://169.254.169.254/latest/meta-data/spot/instance-action)\n  if [ \"$CODE\" = \"200\" ]; then\n    INSTANCE=$(curl -s -H \"X-aws-ec2-metadata-token: $T\" \\\n      http://169.254.169.254/latest/meta-data/instance-id)\n    # Deregister from the target group so the ALB stops sending new requests\n    aws elbv2 deregister-targets --target-group-arn \"$TG_ARN\" \\\n      --targets Id=$INSTANCE\n    sleep 90          # let in-flight requests finish within the 120s window\n    systemctl stop app.service\n    exit 0\n  fi\n  sleep 5\ndone"},
+        {"type": "callout", "variant": "info", "text": "AWS offers a managed alternative: enable Capacity Rebalancing on the ASG and use the open-source AWS Node Termination Handler (for EKS) so you don't maintain this loop yourself. The principle is identical — react to the notice, drain, replace."}
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {"type": "list", "items": [
+          "Single-AZ ASG: setting VPCZoneIdentifier to one subnet means an AZ outage takes the whole tier down. Always span >= 2 AZs, ideally 3.",
+          "IMDSv1 left enabled: a single SSRF in your app exposes the instance role credentials. Enforce HttpTokens=required.",
+          "Treating instance store as durable: stopping the instance (or a host failure) silently wipes local NVMe. Engineers lose data they thought was on a 'disk'.",
+          "Stateless assumption violated: storing sessions/uploads on the instance's local disk, so scaling in deletes user data. Externalize to S3/ElastiCache/EFS.",
+          "NACL ephemeral-port trap: locking down outbound on a custom NACL without allowing 1024-65535 makes every inbound connection hang on the response.",
+          "Over-permissive security group (0.0.0.0/0 on 22 or 3306): the database open to the internet is still a top breach vector.",
+          "HealthCheckType=EC2 only: the instance passes hardware checks while the app is crash-looping; ASG never replaces it. Use ELB health checks.",
+          "No on-demand baseline on a Spot-heavy ASG: a pool reclamation can drain the whole fleet at once."
+        ]},
+        {"type": "callout", "variant": "danger", "text": "The recurring theme: EC2 instances are cattle, not pets. Any state on the local box — sessions, uploads, in-memory data — is a latent incident the first time the ASG scales in or AWS retires the host."}
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {"type": "list", "items": [
+          "Bake golden AMIs with Packer; keep user data thin and idempotent. Immutable infrastructure beats configuration drift.",
+          "Span >= 3 AZs and let an ALB/NLB front the fleet; never expose instances directly with public IPs.",
+          "Enforce IMDSv2 (HttpTokens=required) and attach least-privilege IAM instance profiles instead of embedding credentials.",
+          "Use Session Manager instead of SSH key pairs — no port 22, no long-lived keys, full audit trail.",
+          "Default to gp3 EBS and right-size IOPS/throughput from CloudWatch metrics rather than over-provisioning by size.",
+          "Diversify Spot across instance types and AZs with price-capacity-optimized allocation; keep an on-demand baseline.",
+          "Target-tracking scaling on a meaningful metric (ALB request count per target or CPU), with sane warm-up/grace periods.",
+          "Cover steady-state with Compute Savings Plans; review Cost Explorer recommendations quarterly.",
+          "Tag everything (owner, env, cost-center) and automate reaping of orphaned EIPs, volumes, and snapshots."
+        ]}
+      ]
+    },
+    {
+      "id": "ec2-vs-lambda",
+      "heading": "EC2 vs Lambda: Choosing Compute",
+      "kind": "note",
+      "blocks": [
+        {"type": "paragraph", "text": "The canonical interview question. Frame the answer along four axes: request profile, runtime, state, and cost."},
+        {"type": "table", "headers": ["Dimension", "Lambda fits", "EC2 fits"], "rows": [
+          ["Traffic", "Spiky, bursty, idle gaps", "Steady, high, sustained"],
+          ["Runtime", "Short tasks (< 15 min)", "Long-running / always-on processes"],
+          ["State", "Stateless, event-driven", "Stateful, in-memory, custom kernel/GPU"],
+          ["Cost shape", "Pay per ms — cheap when idle", "Pay per hour — cheap when busy"],
+          ["Ops burden", "No servers, auto-scaled", "You own patching, scaling, AMIs"]
+        ]},
+        {"type": "paragraph", "text": "Rule of thumb: if utilization is below roughly 40-50% with a bursty arrival pattern, Lambda usually wins on cost and ops. If you're driving a node hard most of the day, EC2 (with Savings Plans) is cheaper and gives control. Many real systems are hybrid: Lambda for glue/events, EC2/EKS for the always-on core."}
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "multi-az-web-tier",
+      "title": "Multi-AZ Auto-Scaling Web Tier",
+      "type": "mermaid",
+      "content": "flowchart TD\n  U[Users] --> R53[Route 53]\n  R53 --> ALB[Application Load Balancer]\n  ALB --> A1[EC2 AZ-a]\n  ALB --> B1[EC2 AZ-b]\n  ALB --> C1[EC2 AZ-c]\n  subgraph ASG[Auto Scaling Group]\n    A1\n    B1\n    C1\n  end\n  A1 --> Cache[ElastiCache]\n  B1 --> Cache\n  C1 --> Cache\n  A1 --> RDS[RDS Multi-AZ]\n  B1 --> RDS\n  C1 --> RDS\n  CW[CloudWatch alarms] --> ASG"
+    },
+    {
+      "id": "spot-interruption-flow",
+      "title": "Spot Interruption Handling Sequence",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n  participant AWS as EC2 Spot Service\n  participant IMDS as Instance Metadata\n  participant App as Interruption Handler\n  participant ALB as Load Balancer\n  AWS->>IMDS: Set termination notice T-120s\n  App->>IMDS: Poll spot/instance-action\n  IMDS-->>App: 200 terminate at T\n  App->>ALB: Deregister target\n  ALB-->>App: Stop new requests\n  App->>App: Drain in-flight 90s\n  App->>App: Stop service\n  AWS->>AWS: Reclaim capacity"
+    },
+    {
+      "id": "instance-anatomy",
+      "title": "Anatomy of an EC2 Instance (ASCII)",
+      "type": "ascii",
+      "content": "+-------------------------------------------------------+\n|                  EC2 Instance                         |\n|                                                       |\n|   +-----------+   +-----------+   +---------------+    |\n|   |   AMI     |   | IAM Role  |   |  User Data    |    |\n|   | root vol  |   | (profile) |   | (cloud-init)  |    |\n|   +-----------+   +-----------+   +---------------+    |\n|         |               |               |             |\n|   +-------------------------------------------------+ |\n|   |          Instance Type (vCPU / RAM / net)       | |\n|   +-------------------------------------------------+ |\n|         |                               |             |\n|   +-----------+                   +---------------+   |\n|   | EBS gp3   |  (durable)        | Instance store|   |\n|   | /dev/xvda |                   | ephemeral NVMe|   |\n|   +-----------+                   +---------------+   |\n+----------|--------------------------------------------+\n           | ENI\n   +-----------------+        +------------------+\n   | Security Group  |  -->   | Subnet (one AZ)  |\n   | (stateful FW)   |        | inside a VPC     |\n   +-----------------+        +------------------+\n                                      |\n                              +------------------+\n                              | NACL (stateless) |\n                              +------------------+"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-instance-anatomy",
+      "question": "What are the core components you must specify to launch an EC2 instance, and which of them are mutable after launch?",
+      "answer": "Required: an AMI (boot disk image), an instance type (hardware shape), a subnet (which fixes the AZ and VPC), and at least one security group. Optional but common: a key pair or Session Manager, an IAM instance profile, user data, and additional EBS volumes. After launch you can change security groups, the IAM instance profile, EBS volume attachments, and (when stopped) the instance type. You cannot change the AMI, the subnet/AZ, or the architecture without launching a new instance.",
+      "difficulty": "junior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["ec2", "basics", "ami"],
+      "followUps": ["How would you change the instance type with minimal downtime?", "What stays the same if you stop and start an instance versus reboot?"]
+    },
+    {
+      "id": "q-ebs-vs-instance-store",
+      "question": "Explain the difference between EBS and instance store, and when you'd deliberately choose instance store.",
+      "answer": "EBS is network-attached, durable block storage that persists independently of the instance, supports snapshots, and can be detached and reattached (within the same AZ). Instance store is physically attached local NVMe/HDD that is ephemeral — it's wiped when the instance stops, terminates, or its host fails. You choose instance store when you need maximum IOPS and lowest latency for data you can reconstruct: scratch space, local caches, temp shuffle data, or shards of a distributed store that rebuild from replicas (e.g., a Cassandra node that bootstraps from peers).",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["ebs", "storage", "instance-store"],
+      "followUps": ["What happens to instance store on a reboot versus a stop?", "How do gp3 and gp2 differ in how IOPS is provisioned?"]
+    },
+    {
+      "id": "q-asg-launch-template",
+      "question": "How do Auto Scaling Groups and launch templates work together, and what does a launch template give you that launch configurations didn't?",
+      "answer": "The ASG owns capacity (min/max/desired), AZ placement, health checks, and scaling policies; the launch template is the versioned blueprint for each instance (AMI, type, security groups, IAM profile, user data, block-device mapping). Launch templates are versioned, support newer features like mixed-instances policies, Spot, T-unlimited, multiple network interfaces, and metadata options (IMDSv2). Launch configurations are immutable, unversioned, and don't support mixed instances — AWS recommends migrating off them entirely.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["autoscaling", "launch-template"],
+      "followUps": ["How would you safely roll out a new AMI to a running ASG?", "What is an instance refresh and how do you control its rollout?"]
+    },
+    {
+      "id": "q-pricing-models",
+      "question": "Compare Savings Plans, Reserved Instances, and Spot. How would you structure a steady-state fleet's purchasing?",
+      "answer": "Reserved Instances commit to a specific instance family/region for 1 or 3 years and can include a capacity reservation. Compute Savings Plans commit to a dollar-per-hour of compute for 1 or 3 years but flex across family, size, region, OS, and even Fargate/Lambda — more flexible, so usually preferred unless you specifically need guaranteed capacity. Spot offers up to 90% off but can be reclaimed with a 2-minute notice. For a steady-state fleet I cover the predictable baseline (~70%) with a Compute Savings Plan, let on-demand absorb short bursts, and run the elastic/interruptible surge on diversified Spot.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["pricing", "savings-plans", "spot"],
+      "followUps": ["When would you still pick a Reserved Instance over a Savings Plan?", "How do you decide the right Savings Plan commitment amount?"]
+    },
+    {
+      "id": "q-ec2-vs-lambda",
+      "question": "How do you decide between EC2 and Lambda for a new service?",
+      "answer": "I evaluate four axes. Traffic profile: bursty/idle favors Lambda's pay-per-ms; sustained high load favors EC2. Runtime: anything over 15 minutes or needing custom kernels/GPUs rules out Lambda. State: Lambda is stateless and event-driven; long-lived in-memory state favors EC2. Cost: below roughly 40-50% utilization Lambda usually wins, above it EC2 with Savings Plans wins. I also weigh ops burden — Lambda removes patching and scaling. Many systems end up hybrid: Lambda for event glue, EC2/EKS for the always-on core.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["lambda", "compute", "architecture"],
+      "followUps": ["At what utilization does the cost crossover happen, roughly?", "How does cold start factor into the decision for latency-sensitive APIs?"]
+    },
+    {
+      "id": "q-placement-groups",
+      "question": "What are the three placement group strategies and when would you use each?",
+      "answer": "Cluster packs instances close together in one AZ for the lowest network latency and highest throughput — great for tightly-coupled HPC, but it concentrates risk in a single AZ. Spread places each instance on distinct underlying hardware (max 7 per AZ per group) to minimize correlated failure for a small set of critical instances. Partition divides the group into partitions on separate racks and exposes partition topology, used by large distributed systems like HDFS, Cassandra, and Kafka for rack-aware replica placement.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["placement-groups", "hpc", "networking"],
+      "followUps": ["Why can't you use a cluster placement group for HA?", "How does partition placement help a distributed database avoid data loss?"]
+    },
+    {
+      "id": "q-imds-security",
+      "question": "Why is IMDSv2 a security improvement, and what attack does enforcing it prevent?",
+      "answer": "IMDSv1 lets any process that can make an HTTP GET to 169.254.169.254 read instance metadata, including temporary IAM role credentials. A server-side request forgery (SSRF) bug in your app can be tricked into fetching that endpoint and leaking credentials — this is the mechanism of the 2019 Capital One breach. IMDSv2 requires a session token obtained via a PUT request with a TTL, and PUT requests can't be triggered through most SSRF primitives. It also enforces a low default hop limit so the metadata can't be reached through a forwarding proxy. Enforce HttpTokens=required on every launch template.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["security", "imds", "iam"],
+      "followUps": ["What does the metadata hop limit protect against?", "How do you audit a fleet for instances still allowing IMDSv1?"]
+    },
+    {
+      "id": "q-sg-vs-nacl-tricky",
+      "question": "A team adds a custom NACL that allows inbound HTTPS (443) but the connections hang with no response. The security group is correct. What's wrong?",
+      "answer": "NACLs are stateless, so they don't auto-allow return traffic the way stateful security groups do. The inbound 443 request is permitted, but the response leaves on an ephemeral source port (typically 1024-65535) and the custom NACL has no outbound rule allowing that range — so the server's reply is dropped and the client hangs. The fix is to add an outbound NACL rule allowing TCP 1024-65535 to the client CIDR (and, for the request path, an inbound ephemeral rule for responses to outbound calls). With a stateful security group you'd never hit this; it's purely a NACL gotcha. The deeper lesson: prefer security groups for instance-level control and treat NACLs as coarse subnet-level guardrails.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["nacl", "security-group", "networking"],
+      "followUps": ["Which ephemeral port range do you need for an Elastic Load Balancer specifically?", "If both a SG and NACL are in play, which is evaluated first for inbound traffic?"]
+    },
+    {
+      "id": "q-spot-single-pool-tricky",
+      "question": "An ASG is 90% Spot using a single instance type and it works fine for months, then loses most of its fleet in one moment during peak. The interruption handler was working. What was the real design flaw?",
+      "answer": "The flaw isn't the handler — it's pool concentration plus no protected floor. By specifying a single instance type in a single set of AZs, the whole fleet draws from one Spot capacity pool. When AWS reclaims that pool (which is exactly when demand spikes — peak is when on-demand demand rises and Spot capacity shrinks), every instance gets the interruption notice at once and they all drain together. The handler draining gracefully doesn't help if 90% of capacity disappears simultaneously. Fixes: diversify across many instance types and all AZs with price-capacity-optimized allocation (so interruptions hit different pools at different times), set OnDemandBaseCapacity to a safe minimum so there's a non-interruptible floor, and enable Capacity Rebalancing to proactively replace before reclamation.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["spot", "autoscaling", "resilience"],
+      "followUps": ["Why does Spot capacity tend to shrink exactly when on-demand demand rises?", "How does price-capacity-optimized differ from lowest-price allocation?"]
+    },
+    {
+      "id": "q-stop-vs-terminate-tricky",
+      "question": "You stop an EC2 instance to save money. When you start it again, the app can't find its scratch data and its public IP has changed. Why, and what about the private IP?",
+      "answer": "Two separate gotchas. First, the scratch data was on instance store, which is wiped on stop/start because the instance is reprovisioned onto a (possibly different) physical host — only EBS volumes survive a stop. Second, an auto-assigned public IPv4 is released on stop and a new one is assigned on start; only an Elastic IP gives you a stable public address across stop/start. The private IP within the VPC, however, is retained across stop/start (it's tied to the primary ENI), so anything addressing the instance by private IP or DNS keeps working. A reboot, by contrast, keeps everything including instance store and the public IP because the host doesn't change.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["lifecycle", "instance-store", "elastic-ip"],
+      "followUps": ["How does reboot differ from stop/start at the hypervisor level?", "What's the cost trade-off of attaching an Elastic IP to every instance?"]
+    },
+    {
+      "id": "q-t-instance-credits",
+      "question": "A t3.medium running a CPU-heavy cron job is mysteriously throttled to a fraction of its speed at certain times. What's happening and how do you fix it?",
+      "answer": "T-family instances are burstable: they earn CPU credits at a baseline rate and spend them when running above baseline. A sustained CPU-heavy job depletes the credit balance, and in the default 'standard' mode the instance is then throttled down to its baseline performance (e.g., 20% of a vCPU). The cron job hitting the throttle correlates with a drained balance. Fixes: enable T-unlimited mode (pay a small surcharge to burst beyond credits), move the workload to a fixed-performance family like m6i or c7g if the CPU usage is consistently high, or right-size — if you're constantly bursting, T was the wrong family. Monitor CPUCreditBalance in CloudWatch to confirm.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["burstable", "t-instances", "performance"],
+      "followUps": ["When is T-unlimited cheaper than just using an M instance?", "What CloudWatch metric tells you you've exhausted credits?"]
+    },
+    {
+      "id": "q-asg-health-check",
+      "question": "An ASG instance is running but its application is crash-looping, yet the ASG never replaces it. Why?",
+      "answer": "The ASG's HealthCheckType is set to EC2, which only checks the hypervisor-level system and instance status checks — the VM is reachable and the host is healthy, so from EC2's perspective nothing is wrong even though the app is down. To detect application-level failure you must set HealthCheckType to ELB, which uses the load balancer's target-group health check (an HTTP probe to your app). Then a failing /health endpoint marks the target unhealthy and the ASG replaces the instance. Set an appropriate HealthCheckGracePeriod so new instances have time to boot before being judged.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["autoscaling", "health-check", "elb"],
+      "followUps": ["What's a sensible grace period for a service that takes 60s to warm up?", "How do connection draining and deregistration delay interact with replacement?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-multi-az-web-tier",
+      "title": "Design an Auto-Scaling, Multi-AZ Web Tier",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "prompt": "Author Infrastructure-as-Code (CloudFormation) for a resilient web tier: an ALB across 3 AZs fronting an Auto Scaling Group that target-tracks ALB request count, spans 3 AZs, blends on-demand and Spot, enforces IMDSv2, uses gp3 root volumes, and replaces instances on ELB health-check failure. The fleet must survive the loss of one AZ and a Spot pool reclamation without dropping below safe capacity.",
+      "hints": [
+        "Use a MixedInstancesPolicy with several instance types and price-capacity-optimized Spot allocation.",
+        "Set OnDemandBaseCapacity so there is a non-interruptible floor; spread subnets across 3 AZs.",
+        "Enforce IMDSv2 via MetadataOptions HttpTokens=required in the launch template.",
+        "Set HealthCheckType=ELB with a grace period, and a TargetTrackingScaling policy on ALBRequestCountPerTarget."
+      ],
+      "solutionCode": "AWSTemplateFormatVersion: '2010-09-09'\nParameters:\n  VpcId: { Type: AWS::EC2::VPC::Id }\n  SubnetA: { Type: AWS::EC2::Subnet::Id }\n  SubnetB: { Type: AWS::EC2::Subnet::Id }\n  SubnetC: { Type: AWS::EC2::Subnet::Id }\n  AmiId:  { Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>,\n            Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 }\nResources:\n  WebSG:\n    Type: AWS::EC2::SecurityGroup\n    Properties:\n      GroupDescription: web instances\n      VpcId: !Ref VpcId\n      SecurityGroupIngress:\n        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, SourceSecurityGroupId: !Ref AlbSG }\n  AlbSG:\n    Type: AWS::EC2::SecurityGroup\n    Properties:\n      GroupDescription: alb\n      VpcId: !Ref VpcId\n      SecurityGroupIngress:\n        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0 }\n  ALB:\n    Type: AWS::ElasticLoadBalancingV2::LoadBalancer\n    Properties:\n      Type: application\n      Subnets: [!Ref SubnetA, !Ref SubnetB, !Ref SubnetC]\n      SecurityGroups: [!Ref AlbSG]\n  TG:\n    Type: AWS::ElasticLoadBalancingV2::TargetGroup\n    Properties:\n      VpcId: !Ref VpcId\n      Port: 443\n      Protocol: HTTPS\n      HealthCheckPath: /health\n      HealthCheckIntervalSeconds: 15\n      HealthyThresholdCount: 2\n      UnhealthyThresholdCount: 3\n  WebLT:\n    Type: AWS::EC2::LaunchTemplate\n    Properties:\n      LaunchTemplateData:\n        ImageId: !Ref AmiId\n        SecurityGroupIds: [!Ref WebSG]\n        MetadataOptions: { HttpTokens: required, HttpPutResponseHopLimit: 1 }\n        BlockDeviceMappings:\n          - DeviceName: /dev/xvda\n            Ebs: { VolumeType: gp3, VolumeSize: 30, Iops: 3000, Throughput: 125, Encrypted: true }\n  WebASG:\n    Type: AWS::AutoScaling::AutoScalingGroup\n    Properties:\n      MinSize: 3\n      MaxSize: 30\n      DesiredCapacity: 6\n      VPCZoneIdentifier: [!Ref SubnetA, !Ref SubnetB, !Ref SubnetC]\n      TargetGroupARNs: [!Ref TG]\n      HealthCheckType: ELB\n      HealthCheckGracePeriod: 90\n      CapacityRebalance: true\n      MixedInstancesPolicy:\n        InstancesDistribution:\n          OnDemandBaseCapacity: 3\n          OnDemandPercentageAboveBaseCapacity: 25\n          SpotAllocationStrategy: price-capacity-optimized\n        LaunchTemplate:\n          LaunchTemplateSpecification:\n            LaunchTemplateId: !Ref WebLT\n            Version: !GetAtt WebLT.LatestVersionNumber\n          Overrides:\n            - { InstanceType: m6i.large }\n            - { InstanceType: m6a.large }\n            - { InstanceType: m5.large }\n            - { InstanceType: m5a.large }\n  ScaleOnRequests:\n    Type: AWS::AutoScaling::ScalingPolicy\n    Properties:\n      AutoScalingGroupName: !Ref WebASG\n      PolicyType: TargetTrackingScaling\n      TargetTrackingConfiguration:\n        PredefinedMetricSpecification:\n          PredefinedMetricType: ALBRequestCountPerTarget\n          ResourceLabel: !Sub '${ALB.LoadBalancerFullName}/${TG.TargetGroupFullName}'\n        TargetValue: 1000",
+      "solutionLanguage": "yaml",
+      "explanation": "This template satisfies every resilience requirement. AZ fault tolerance comes from spreading both the ALB and the ASG's VPCZoneIdentifier across three subnets in three AZs — losing one AZ leaves two-thirds of capacity, and the ASG re-balances into the survivors. Spot resilience comes from the MixedInstancesPolicy: four instance types drawn from distinct capacity pools with price-capacity-optimized allocation means a single pool reclamation only affects a fraction of the fleet, while OnDemandBaseCapacity=3 guarantees a non-interruptible floor equal to MinSize. CapacityRebalance lets the ASG proactively launch replacements when AWS signals an elevated interruption risk, before the 2-minute notice. Security and durability: MetadataOptions enforces IMDSv2 (HttpTokens=required) with a hop limit of 1 to block SSRF credential theft, the root volume is encrypted gp3 with explicitly provisioned IOPS/throughput, and the web security group only accepts 443 from the ALB's security group rather than the internet. Correctness of failure detection: HealthCheckType=ELB ties replacement to the target group's /health probe (not just hypervisor checks) with a 90s grace period so booting instances aren't killed prematurely. Finally, TargetTrackingScaling on ALBRequestCountPerTarget scales on actual demand (1000 req/target) which tracks load far better than CPU for a web tier. The result survives an AZ outage and a Spot pool reclamation simultaneously without falling below MinSize.",
+      "relatedTopic": "aws-ec2"
+    },
+    {
+      "id": "ch-spot-handler",
+      "title": "Build a Graceful Spot Interruption Handler",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "prompt": "Write a Python daemon that runs on a Spot instance, uses IMDSv2 to detect both the rebalance recommendation and the 2-minute termination notice, and on detection deregisters the instance from its ALB target group and drains in-flight work before shutting the service down. It must not crash if the metadata endpoint is briefly unreachable.",
+      "hints": [
+        "Fetch an IMDSv2 token with a PUT to /latest/api/token before any metadata GET.",
+        "Poll /latest/meta-data/spot/instance-action; a 200 means interruption is scheduled, a 404 means none.",
+        "Also poll /latest/meta-data/events/recommendations/rebalance for the earlier proactive signal.",
+        "On signal: call elbv2 deregister_targets, sleep through the deregistration delay, then stop the app."
+      ],
+      "solutionCode": "import time\nimport boto3\nimport requests\n\nIMDS = \"http://169.254.169.254/latest\"\nTG_ARN = \"arn:aws:elasticloadbalancing:us-east-1:111111111111:targetgroup/web/abc\"\nDRAIN_SECONDS = 90\nelbv2 = boto3.client(\"elbv2\", region_name=\"us-east-1\")\n\n\ndef token():\n    r = requests.put(f\"{IMDS}/api/token\",\n                     headers={\"X-aws-ec2-metadata-token-ttl-seconds\": \"30\"},\n                     timeout=2)\n    r.raise_for_status()\n    return r.text\n\n\ndef meta(path, tok):\n    return requests.get(f\"{IMDS}/meta-data/{path}\",\n                        headers={\"X-aws-ec2-metadata-token\": tok}, timeout=2)\n\n\ndef interrupted(tok):\n    # Either the 2-minute termination notice or the earlier rebalance signal.\n    action = meta(\"spot/instance-action\", tok)\n    rebalance = meta(\"events/recommendations/rebalance\", tok)\n    return action.status_code == 200 or rebalance.status_code == 200\n\n\ndef drain_and_stop(tok):\n    instance_id = meta(\"instance-id\", tok).text\n    print(f\"Interruption detected; draining {instance_id}\")\n    elbv2.deregister_targets(TargetGroupArn=TG_ARN,\n                             Targets=[{\"Id\": instance_id}])\n    time.sleep(DRAIN_SECONDS)   # let ALB stop routing + finish in-flight reqs\n    # Replace with your real stop, e.g. subprocess systemctl stop app.service\n    print(\"Drain complete; stopping application service\")\n\n\ndef main():\n    while True:\n        try:\n            tok = token()\n            if interrupted(tok):\n                drain_and_stop(tok)\n                return\n        except requests.RequestException as e:\n            # Transient metadata/network blip: log and keep polling, never crash.\n            print(f\"metadata error, retrying: {e}\")\n        time.sleep(5)\n\n\nif __name__ == \"__main__\":\n    main()",
+      "solutionLanguage": "python",
+      "explanation": "The daemon correctly implements the Spot lifecycle. It first acquires an IMDSv2 session token via a PUT (required because the metadata endpoint rejects token-less GETs when IMDSv1 is disabled), then uses that token for every metadata read. It watches two signals: the rebalance recommendation (events/recommendations/rebalance), which AWS emits proactively when an instance is at elevated risk — often well before the hard notice — and the instance-action endpoint, which appears about two minutes before forced termination. Reacting to the rebalance signal gives the most time to drain. On detection it deregisters the instance from the ALB target group so the load balancer stops sending new requests, then sleeps for a drain window that should be at least the target group's deregistration delay so in-flight requests complete, and finally stops the application. Robustness is critical on Spot: the metadata service can briefly return errors or the network can blip, so all metadata calls have timeouts and are wrapped in a try/except that logs and continues rather than letting an exception kill the poller — a crashed handler would mean an ungraceful termination and dropped requests. In production you'd prefer the managed AWS Node Termination Handler or ASG CapacityRebalance, but this shows the underlying mechanics an interviewer wants you to understand: detect early, deregister, drain, then stop.",
+      "relatedTopic": "aws-ec2"
+    }
+  ],
+  "references": [
+    {"label": "Amazon EC2 User Guide", "url": "https://docs.aws.amazon.com/ec2/"},
+    {"label": "EC2 Instance Types", "url": "https://aws.amazon.com/ec2/instance-types/"},
+    {"label": "Auto Scaling Groups Documentation", "url": "https://docs.aws.amazon.com/autoscaling/ec2/userguide/"},
+    {"label": "Spot Instances Best Practices", "url": "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/spot-best-practices.html"},
+    {"label": "Instance Metadata and IMDSv2", "url": "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html"},
+    {"label": "Compute Savings Plans", "url": "https://aws.amazon.com/savingsplans/compute-pricing/"}
+  ]
+}

@@ -1,0 +1,461 @@
+{
+  "id": "rest-apis",
+  "title": "REST APIs",
+  "category": "Backend",
+  "subcategory": "API Design",
+  "difficulty": "senior",
+  "tags": ["rest", "http", "api-design", "idempotency", "pagination", "versioning", "caching", "rfc7807"],
+  "description": "A staff-level deep dive into designing REST APIs that survive scale, partial failure, and a decade of clients — covering constraints, idempotency, pagination, versioning, caching, and security.",
+  "estReadMinutes": 30,
+  "sections": [
+    {
+      "id": "introduction",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {"type": "paragraph", "text": "REST (Representational State Transfer) is an architectural style described by Roy Fielding in his 2000 dissertation. It is not a protocol and not a spec — it is a set of constraints that, when applied on top of HTTP, produce APIs that are scalable, evolvable, and cacheable. The hard part of REST in production is rarely 'which verb' — it is reasoning about idempotency under retries, pagination over mutating datasets, and evolving a contract that thousands of clients depend on without breaking them."},
+        {"type": "paragraph", "text": "This topic treats REST as an engineering discipline. We will model resources, pick verbs and status codes deliberately, make write endpoints safe to retry, paginate at scale, version without pain, return machine-readable errors, and cache correctly with ETags and Cache-Control. Throughout, the lens is: what does a staff engineer say when an interviewer probes the edges?"},
+        {"type": "callout", "variant": "info", "text": "REST's constraints exist to buy properties: statelessness buys horizontal scalability, cache buys latency and load reduction, uniform interface buys client/server independent evolution. If a constraint isn't buying you a property, you don't actually need it."}
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why REST Discipline Matters",
+      "kind": "why",
+      "blocks": [
+        {"type": "paragraph", "text": "An API contract is the most expensive thing to change in a backend, because the cost is paid by every client you don't control. A poorly designed REST endpoint doesn't fail loudly on day one — it fails on day 400 when a mobile app three versions back retries a payment after a timeout and double-charges a customer, or when an offset-paginated export silently skips rows because someone inserted records mid-scan."},
+        {"type": "list", "items": [
+          "Idempotency bugs cause duplicate charges, double-shipped orders, and duplicate emails — usually triggered by the network retries you can't see.",
+          "Offset pagination over a live table produces skipped and duplicated rows; cursor pagination over a poorly chosen key produces missing data.",
+          "Breaking a response shape without versioning takes down old mobile clients that users haven't updated and won't update for months.",
+          "Missing cache headers turn a CDN into a bypass, multiplying origin load by orders of magnitude during traffic spikes.",
+          "Unstructured error bodies force every client to string-match on human messages, which breaks the moment you reword a message."
+        ]},
+        {"type": "callout", "variant": "warning", "text": "The cost of getting REST wrong is asymmetric: it is cheap to get right at design time and catastrophically expensive to fix after clients have shipped against the broken contract."}
+      ]
+    },
+    {
+      "id": "constraints-and-rmm",
+      "heading": "REST Constraints and the Richardson Maturity Model",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Fielding's REST defines six constraints. Five are required; one (code-on-demand) is optional."},
+        {"type": "list", "items": [
+          "Client-server: separation of concerns; UI and data storage evolve independently.",
+          "Stateless: each request carries everything needed; no server-side session affinity. This is what lets you put any request on any node behind a load balancer.",
+          "Cacheable: responses must declare whether they are cacheable so intermediaries can reuse them.",
+          "Uniform interface: resources, representations, self-descriptive messages, and HATEOAS — the constraint that decouples clients from server URL structure.",
+          "Layered system: a client cannot tell whether it is talking to the origin or a proxy/CDN/gateway.",
+          "Code-on-demand (optional): server can ship executable code (e.g. JS) to extend the client."
+        ]},
+        {"type": "heading", "text": "Richardson Maturity Model (RMM)"},
+        {"type": "paragraph", "text": "Leonard Richardson described a 4-level model that grades how 'RESTful' an API is. It's a useful diagnostic, not a scorecard to maximize blindly."},
+        {"type": "table", "headers": ["Level", "Name", "What it adds"], "rows": [
+          ["0", "The Swamp of POX", "One endpoint, one verb (usually POST), RPC-over-HTTP. Think SOAP."],
+          ["1", "Resources", "Distinct URIs per resource (/orders/123) but still often one verb."],
+          ["2", "HTTP Verbs", "Proper use of GET/POST/PUT/PATCH/DELETE and status codes. Most 'good' real-world APIs live here."],
+          ["3", "Hypermedia (HATEOAS)", "Responses include links describing available state transitions; clients navigate by links, not hardcoded URLs."]
+        ]},
+        {"type": "callout", "variant": "info", "text": "Pragmatic truth for interviews: the vast majority of excellent production APIs (Stripe, GitHub) sit at Level 2 with selective Level 3 hypermedia. Full HATEOAS is rare because most clients are written by humans who hardcode URLs anyway. Know the model; don't dogmatically demand Level 3."}
+      ]
+    },
+    {
+      "id": "resource-modeling-verbs-status",
+      "heading": "Resource Modeling, Verbs, and Status Codes",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Model nouns, not verbs. A resource is a thing with an identity and a representation. Actions are expressed through HTTP methods on resources, not through verbs in the path. Prefer /orders/123/cancel only when 'cancel' is genuinely a sub-resource transition that doesn't map cleanly to a state field; otherwise PATCH the status."},
+        {"type": "list", "items": [
+          "Use plural collection nouns: /orders, /orders/123, /orders/123/line-items.",
+          "Avoid verbs in paths (/getOrder, /createOrder) — the verb is the HTTP method.",
+          "Nest only to express ownership, and don't nest more than one level deep; deep nesting couples clients to hierarchy.",
+          "Filtering, sorting, and pagination belong in the query string, not the path."
+        ]},
+        {"type": "heading", "text": "Verb semantics"},
+        {"type": "table", "headers": ["Verb", "Safe", "Idempotent", "Typical use"], "rows": [
+          ["GET", "Yes", "Yes", "Retrieve a resource; never mutate state."],
+          ["POST", "No", "No", "Create a resource (server assigns id) or non-idempotent action."],
+          ["PUT", "No", "Yes", "Replace a resource at a known URI; full representation."],
+          ["PATCH", "No", "Not inherently", "Partial update; idempotency depends on the patch semantics."],
+          ["DELETE", "No", "Yes", "Remove a resource; repeating yields the same end state."]
+        ]},
+        {"type": "heading", "text": "Status codes that carry meaning"},
+        {"type": "table", "headers": ["Code", "Meaning", "When"], "rows": [
+          ["200 OK", "Success with body", "GET, or PUT/PATCH returning updated resource."],
+          ["201 Created", "Resource created", "POST/PUT that created a resource; include Location header."],
+          ["202 Accepted", "Async accepted", "Work queued; return a status URL to poll."],
+          ["204 No Content", "Success no body", "DELETE, or PUT with no return body."],
+          ["400 / 422", "Bad request / unprocessable", "Malformed syntax (400) vs semantically invalid (422)."],
+          ["401 / 403", "Unauthenticated / unauthorized", "Missing/invalid creds (401) vs valid creds lacking permission (403)."],
+          ["404 / 409", "Not found / conflict", "Missing resource (404) vs state conflict like duplicate or version mismatch (409)."],
+          ["428 / 429", "Precondition required / too many", "Missing If-Match (428) vs rate limited (429)."]
+        ]},
+        {"type": "callout", "variant": "warning", "text": "Returning 200 with an {\"error\": ...} body is a classic Level-0 smell. It defeats HTTP caching, retries, and every off-the-shelf client library that branches on status code. Use the status line; it is part of the contract."}
+      ]
+    },
+    {
+      "id": "idempotency",
+      "heading": "Idempotency: Making Writes Safe to Retry",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "An operation is idempotent if performing it N times has the same effect on server state as performing it once. This is the single most important property for reliability, because networks fail after the server has acted but before the client sees the response — and the client's only safe move is to retry."},
+        {"type": "list", "items": [
+          "PUT is idempotent: 'set the resource at /users/7 to this exact representation' — applying twice lands on the same state.",
+          "DELETE is idempotent on end state: the resource is gone after one or after five calls (though the second may return 404).",
+          "POST is not idempotent by default: each call creates a new resource. This is why POST needs an idempotency key.",
+          "PATCH is not inherently idempotent — it depends entirely on the patch's semantics (see the tricky question)."
+        ]},
+        {"type": "heading", "text": "The idempotency key pattern"},
+        {"type": "paragraph", "text": "For non-idempotent operations (POST a payment, POST an order), the client generates a unique key (a UUID) and sends it in an Idempotency-Key header. The server stores the key with the result of the first request and returns the stored result for any retry carrying the same key. Stripe popularized this exact pattern."},
+        {"type": "code", "language": "typescript", "code": "// Server-side idempotency middleware (simplified)\nasync function withIdempotency(req, res, handler) {\n  const key = req.header('Idempotency-Key');\n  if (!key) return res.status(400).json(problem('idempotency-key-required'));\n\n  // Atomically claim the key. INSERT ... ON CONFLICT DO NOTHING returns\n  // the row only when we won the race; otherwise someone else owns it.\n  const claimed = await db.claimKey(key, req.userId, hashBody(req.body));\n  if (!claimed) {\n    const existing = await db.getKey(key);\n    if (existing.requestHash !== hashBody(req.body))\n      return res.status(422).json(problem('idempotency-key-reuse-mismatch'));\n    if (existing.status === 'in_progress')\n      return res.status(409).json(problem('idempotent-request-in-flight'));\n    return res.status(existing.httpStatus).json(existing.responseBody); // replay\n  }\n\n  const result = await handler(req); // do the real work exactly once\n  await db.finalizeKey(key, result.status, result.body);\n  return res.status(result.status).json(result.body);\n}"},
+        {"type": "callout", "variant": "danger", "text": "The claim must be atomic. If you 'SELECT then INSERT' you have a TOCTOU race: two concurrent retries both see no key, both execute the work, and you double-charge. Use a unique constraint with INSERT ... ON CONFLICT (or SETNX in Redis) so exactly one writer wins."}
+      ]
+    },
+    {
+      "id": "pagination-at-scale",
+      "heading": "Pagination at Scale: Offset vs Cursor",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Pagination is where naive APIs quietly corrupt data. The two dominant strategies are offset/limit and cursor (keyset) pagination, and the choice has correctness and performance consequences."},
+        {"type": "heading", "text": "Offset pagination"},
+        {"type": "paragraph", "text": "?offset=10000&limit=20 maps to SQL OFFSET 10000 LIMIT 20. It is simple and supports jumping to an arbitrary page, but it has two fatal flaws at scale."},
+        {"type": "list", "items": [
+          "Performance: OFFSET N still scans and discards N rows. Deep pages (offset 1,000,000) get linearly slower; it cannot use an index to skip ahead.",
+          "Correctness: if rows are inserted or deleted between page fetches, the offset shifts. Inserting a row before your window pushes one record onto the next page (you see a duplicate); deleting one pulls a record up (you skip it)."
+        ]},
+        {"type": "heading", "text": "Cursor (keyset) pagination"},
+        {"type": "paragraph", "text": "Instead of an offset, the client passes an opaque cursor encoding the last item's sort key. The query becomes WHERE (created_at, id) < (:lastTs, :lastId) ORDER BY created_at DESC, id DESC LIMIT 20. This is index-friendly (a range seek, constant time per page) and stable under concurrent inserts."},
+        {"type": "code", "language": "sql", "code": "-- Cursor pagination on a composite, total-ordering key.\n-- The (created_at, id) tuple breaks ties so the order is deterministic.\nSELECT id, created_at, amount\nFROM payments\nWHERE tenant_id = $1\n  AND (created_at, id) < ($2, $3)   -- decoded from the cursor\nORDER BY created_at DESC, id DESC\nLIMIT 20;\n-- Index that makes this an O(log n) seek + sequential read:\n-- CREATE INDEX ON payments (tenant_id, created_at DESC, id DESC);"},
+        {"type": "table", "headers": ["Property", "Offset/Limit", "Cursor/Keyset"], "rows": [
+          ["Deep-page performance", "Degrades linearly", "Constant per page"],
+          ["Stable under writes", "No (skips/dupes)", "Yes"],
+          ["Jump to arbitrary page", "Yes", "No (only next/prev)"],
+          ["Total count available", "Easy", "Expensive/avoided"],
+          ["Best for", "Small, static admin tables", "Large, live feeds and exports"]
+        ]},
+        {"type": "callout", "variant": "warning", "text": "The cursor must encode a UNIQUE, total-ordering key. Paginating on created_at alone breaks when two rows share a timestamp — you'll skip or duplicate at the boundary. Always tiebreak with the primary key. Also make cursors opaque (base64 a signed blob) so clients can't construct arbitrary ones and you can change the encoding later."}
+      ]
+    },
+    {
+      "id": "filtering-versioning-negotiation",
+      "heading": "Filtering, Versioning, and Content Negotiation",
+      "kind": "concept",
+      "blocks": [
+        {"type": "heading", "text": "Filtering and sorting"},
+        {"type": "list", "items": [
+          "Filter via query params: /orders?status=paid&created_after=2026-01-01. Whitelist filterable fields; never interpolate them into SQL.",
+          "Sort with an explicit param: ?sort=-created_at (leading minus = descending). Validate against an allow-list.",
+          "Sparse fieldsets: ?fields=id,amount,status let clients reduce payload size; useful for mobile."
+        ]},
+        {"type": "heading", "text": "Versioning strategies"},
+        {"type": "table", "headers": ["Strategy", "Example", "Trade-off"], "rows": [
+          ["URI versioning", "/v1/orders", "Most explicit and cache-friendly; pollutes URLs and violates 'one resource one URI' purism."],
+          ["Header versioning", "Accept: application/vnd.acme.v2+json", "Clean URLs, true content negotiation; harder to test in a browser and easy to forget."],
+          ["Query param", "/orders?version=2", "Simple but mixes versioning with filtering; messy for caching."],
+          ["Date-based", "Stripe-Version: 2026-03-31", "Pins client to a frozen behavior set; excellent for long-lived APIs but needs a translation layer."]
+        ]},
+        {"type": "paragraph", "text": "Prefer additive, non-breaking changes so you rarely need a new major version: adding fields and optional params is safe; removing fields, renaming, changing types, or tightening validation is breaking. When you must break, version the major and run old + new in parallel with a clear deprecation window and Sunset/Deprecation headers."},
+        {"type": "heading", "text": "Content negotiation"},
+        {"type": "paragraph", "text": "Clients declare what they want via Accept (media type), Accept-Language, and Accept-Encoding; the server responds with the matching Content-Type and a Vary header so caches key correctly. If you serialize the same resource as both JSON and CSV, Vary: Accept is mandatory or a cache will serve CSV to a JSON client."},
+        {"type": "callout", "variant": "danger", "text": "Forgetting Vary on a negotiated response is a real production incident: a shared cache stores the first variant (say gzipped CSV) and serves it to every subsequent client regardless of their Accept header. Always set Vary to the headers your response branches on."}
+      ]
+    },
+    {
+      "id": "errors-and-hateoas",
+      "heading": "Error Responses (RFC 7807) and HATEOAS",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "RFC 7807 (now superseded by RFC 9457, same shape) standardizes error bodies as 'problem+json'. A machine-readable, consistent error contract means clients branch on a stable 'type' URI instead of regex-matching human prose."},
+        {"type": "code", "language": "json", "code": "HTTP/1.1 422 Unprocessable Entity\nContent-Type: application/problem+json\n\n{\n  \"type\": \"https://api.acme.com/problems/insufficient-funds\",\n  \"title\": \"Insufficient funds\",\n  \"status\": 422,\n  \"detail\": \"The source account balance 1200 is below the requested amount 5000.\",\n  \"instance\": \"/payments/pay_9f2\",\n  \"balanceCents\": 1200,\n  \"requestedCents\": 5000,\n  \"traceId\": \"c1a2-...\"\n}"},
+        {"type": "list", "items": [
+          "type: a stable, dereferenceable URI identifying the problem class — the field clients should switch on.",
+          "title: short human-readable summary; should not change per occurrence.",
+          "status: the HTTP status, duplicated for convenience.",
+          "detail: occurrence-specific human explanation; safe to reword.",
+          "instance: URI of the specific occurrence; great place to put a trace/request id.",
+          "Extension members (balanceCents, errors[]) carry structured, actionable data."
+        ]},
+        {"type": "heading", "text": "HATEOAS in practice"},
+        {"type": "paragraph", "text": "Hypermedia (Level 3) embeds the available state transitions as links in the representation, so the client discovers what it can do next rather than hardcoding URLs. The pragmatic value is decoupling: the server can move endpoints or gate transitions by state, and a hypermedia-aware client follows along."},
+        {"type": "code", "language": "json", "code": "{\n  \"id\": \"ord_123\",\n  \"status\": \"pending\",\n  \"amountCents\": 5000,\n  \"_links\": {\n    \"self\":    { \"href\": \"/v1/orders/ord_123\" },\n    \"cancel\":  { \"href\": \"/v1/orders/ord_123/cancel\", \"method\": \"POST\" },\n    \"pay\":     { \"href\": \"/v1/orders/ord_123/payments\", \"method\": \"POST\" }\n  }\n}"},
+        {"type": "callout", "variant": "info", "text": "When an order moves to 'shipped', the server simply stops emitting the 'cancel' link. A hypermedia client never has to encode the business rule 'shipped orders can't be cancelled' — the absence of the link is the rule."}
+      ]
+    },
+    {
+      "id": "caching-and-rate-limiting",
+      "heading": "Caching, ETags, and Rate Limiting",
+      "kind": "concept",
+      "blocks": [
+        {"type": "heading", "text": "Cache-Control and freshness"},
+        {"type": "paragraph", "text": "Cache-Control tells intermediaries and clients how long a representation is fresh and who may store it. The interesting directives in practice are max-age, s-maxage (for shared caches only), private vs public, no-cache (revalidate before use), and stale-while-revalidate (serve stale while fetching fresh in the background)."},
+        {"type": "code", "language": "bash", "code": "# Public, CDN-cacheable for 60s, allow serving stale up to 5m while revalidating\nCache-Control: public, max-age=60, stale-while-revalidate=300\n\n# Per-user data: cacheable in the browser only, never in shared caches\nCache-Control: private, max-age=0, must-revalidate"},
+        {"type": "heading", "text": "ETags and conditional requests"},
+        {"type": "paragraph", "text": "An ETag is an opaque version identifier for a representation. It powers two things: efficient revalidation (304 Not Modified, no body re-sent) and optimistic concurrency control on writes via If-Match. The latter prevents lost updates."},
+        {"type": "code", "language": "bash", "code": "# 1) Read returns a version tag\nGET /v1/orders/ord_123\n200 OK\nETag: \"a7f3c9\"\n\n# 2) Conditional read: server returns 304 with no body if unchanged\nGET /v1/orders/ord_123\nIf-None-Match: \"a7f3c9\"\n304 Not Modified\n\n# 3) Optimistic write: update ONLY if the version still matches\nPUT /v1/orders/ord_123\nIf-Match: \"a7f3c9\"\n# -> 200 if current ETag matches, 412 Precondition Failed if someone else wrote first"},
+        {"type": "callout", "variant": "warning", "text": "Use a strong ETag (content hash or row version) for If-Match concurrency. A weak ETag (W/\"...\") only guarantees semantic equivalence and must NOT be used for write preconditions — you can lose updates between two representations a weak ETag considers 'equal'."},
+        {"type": "heading", "text": "Rate limiting"},
+        {"type": "paragraph", "text": "Rate limiting protects the service and ensures fairness. Communicate limits with standard headers and return 429 with a Retry-After when exceeded. Token-bucket is the usual algorithm: it allows short bursts up to the bucket size while enforcing a steady refill rate."},
+        {"type": "code", "language": "bash", "code": "HTTP/1.1 429 Too Many Requests\nRetry-After: 12\nRateLimit-Limit: 100\nRateLimit-Remaining: 0\nRateLimit-Reset: 12\nContent-Type: application/problem+json\n\n{ \"type\": \"https://api.acme.com/problems/rate-limited\", \"title\": \"Rate limit exceeded\", \"status\": 429 }"}
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: The Double-Charge Incident",
+      "kind": "example",
+      "blocks": [
+        {"type": "paragraph", "text": "Scenario from a payments platform. The mobile checkout called POST /v1/payments. During a regional network blip, the request reached the server, the charge succeeded at the PSP, but the 201 response was lost on the way back. The mobile client's HTTP layer treated the timeout as a failure and automatically retried. With no idempotency protection, the second POST created a second charge. Support tickets for double charges spiked within the hour."},
+        {"type": "heading", "text": "Root cause"},
+        {"type": "list", "items": [
+          "POST is non-idempotent and the endpoint had no idempotency key.",
+          "The mobile networking library retried on timeout by default — correct behavior for a GET, dangerous for an unprotected POST.",
+          "The team had assumed 'a timeout means it didn't happen', which is the classic distributed-systems fallacy: a timeout tells you nothing about whether the server acted."
+        ]},
+        {"type": "heading", "text": "The fix"},
+        {"type": "code", "language": "typescript", "code": "// Client: generate the key ONCE per logical payment attempt, reuse on retry.\nconst idempotencyKey = uuidv4(); // created before the first try, not per retry\nasync function charge(payload) {\n  return httpPostWithRetry('/v1/payments', payload, {\n    headers: { 'Idempotency-Key': idempotencyKey },\n    retry: { attempts: 3, on: ['timeout', 502, 503, 504] }\n  });\n}\n// Server stores (key -> first result). The retried POST replays the stored\n// 201 and the SAME payment id, so the PSP is never charged twice."},
+        {"type": "callout", "variant": "success", "text": "After shipping idempotency keys, duplicate-charge tickets dropped to zero. The crucial client-side detail: the key is generated once for the logical attempt and reused across retries. Generating a fresh key per retry reintroduces the bug."}
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {"type": "list", "items": [
+          "Tunneling everything through POST /api with an action field — Level 0 RPC that throws away caching, status codes, and HTTP semantics.",
+          "Returning HTTP 200 for errors with an error body — breaks retry logic, monitoring, and client libraries that branch on status.",
+          "Offset pagination on a large live table — deep pages time out and concurrent inserts cause skipped/duplicated rows.",
+          "Non-atomic idempotency checks (SELECT-then-INSERT) — a race between two retries double-executes the work.",
+          "GET endpoints with side effects — a prefetching proxy or a crawler hits your /orders/123/cancel?confirm=true GET link and cancels orders.",
+          "Breaking response shapes without a new version — old mobile clients crash on a missing field for months.",
+          "Forgetting Vary on content-negotiated responses — a shared cache serves the wrong representation to everyone.",
+          "Putting secrets or PII in URLs (query strings) — they end up in access logs, proxies, and browser history.",
+          "Using weak ETags for If-Match concurrency control — silently allows lost updates."
+        ]},
+        {"type": "callout", "variant": "danger", "text": "The 'GET with side effects' mistake is especially insidious: Google's web accelerator once prefetched 'delete' links on admin panels and wiped data. GET and HEAD must be safe — no observable state change, ever."}
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {"type": "list", "items": [
+          "Model resources as nouns; express actions through HTTP methods and resource state, not path verbs.",
+          "Make GET/HEAD safe and PUT/DELETE idempotent; protect POST with idempotency keys, claimed atomically.",
+          "Use cursor pagination for large or live datasets; reserve offset for small, static admin tables.",
+          "Default to additive, non-breaking changes; version only on real breaks, with Deprecation/Sunset headers and an overlap window.",
+          "Return errors as application/problem+json with a stable 'type' URI and a trace id in 'instance'.",
+          "Set Cache-Control deliberately on every response; use private for per-user data and ETags for revalidation and concurrency.",
+          "Rate limit with token buckets and communicate state via RateLimit-* and Retry-After headers.",
+          "Validate and allow-list every filter/sort field; never interpolate client input into queries.",
+          "Document with OpenAPI and generate clients/contracts from it so the spec and implementation can't drift.",
+          "Always set Vary on negotiated responses; never put secrets or PII in URLs."
+        ]},
+        {"type": "callout", "variant": "info", "text": "A useful design heuristic: design the contract as if you can never change it, then make every change additive. The endpoints you can't break are the ones you designed carefully before the first client shipped."}
+      ]
+    },
+    {
+      "id": "security-note",
+      "heading": "API Security Essentials",
+      "kind": "note",
+      "blocks": [
+        {"type": "list", "items": [
+          "Authenticate with short-lived bearer tokens (OAuth2/OIDC JWTs) or signed API keys; never roll your own crypto.",
+          "Authorize per resource and per object — broken object-level authorization (BOLA/IDOR) is the #1 API risk: always check that the caller owns /orders/123, don't trust the id alone.",
+          "Enforce TLS everywhere; reject plaintext. Use HSTS.",
+          "Validate and bound all input: max page size, max body size, strict schemas — reject unknown fields if your threat model needs it.",
+          "Rate limit and quota per principal to blunt credential stuffing and scraping.",
+          "Return 404 instead of 403 for resources the caller can't see, to avoid leaking existence.",
+          "Scope tokens narrowly and rotate keys; log with trace ids but never log tokens, secrets, or full card data."
+        ]},
+        {"type": "callout", "variant": "danger", "text": "BOLA/IDOR is the most common serious API vulnerability: an endpoint authenticates the user but then trusts a resource id from the request without checking ownership. GET /v1/invoices/99 must verify the invoice belongs to the caller's tenant, every time."}
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "idempotency-sequence",
+      "title": "Idempotency Key Flow Under Retry",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n    participant C as Client\n    participant A as API\n    participant K as Key Store\n    participant P as Payment Service\n    C->>A: POST /payments Idempotency-Key K1\n    A->>K: claim K1 atomic\n    K-->>A: claimed\n    A->>P: charge once\n    P-->>A: payment pay_9\n    A->>K: finalize K1 store 201\n    A--xC: 201 response lost\n    C->>A: retry POST same Key K1\n    A->>K: claim K1 atomic\n    K-->>A: already exists replay\n    A-->>C: 201 same pay_9"
+    },
+    {
+      "id": "request-cache-flow",
+      "title": "Request Path Through Cache, Gateway, and Origin",
+      "type": "mermaid",
+      "content": "flowchart TD\n    A[Client] -->|GET with If-None-Match| B[CDN Shared Cache]\n    B -->|fresh hit| A\n    B -->|stale or miss| C[API Gateway]\n    C -->|auth and rate limit| D[Origin Service]\n    D -->|304 or 200 plus ETag| C\n    C --> B\n    B --> A"
+    },
+    {
+      "id": "pagination-layers",
+      "title": "Cursor Pagination Data Flow",
+      "type": "ascii",
+      "content": "+-------------+      cursor=base64(ts,id)      +------------------+\n|   Client    | ------------------------------> |   API Endpoint   |\n+-------------+                                 +------------------+\n      ^                                                  |\n      |  page items + nextCursor                         | decode + validate\n      |                                                  v\n+-------------+                                 +------------------+\n|  Response   | <------------------------------ |  WHERE (ts,id) <  |\n| items[20]   |   ORDER BY ts DESC, id DESC      |   (lastTs,lastId)|\n| nextCursor  |   LIMIT 20  (index range seek)  +------------------+\n+-------------+                                          |\n                                                         v\n                                              +---------------------+\n                                              | idx(tenant,ts,id)   |\n                                              | O(log n) seek       |\n                                              +---------------------+"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-safe-vs-idempotent",
+      "question": "What is the difference between a safe method and an idempotent method? Give an example of each.",
+      "answer": "Safe means the method has no observable effect on server state — it is read-only. GET and HEAD are safe. Idempotent means performing the operation N times has the same effect on state as performing it once. All safe methods are idempotent, but not vice versa: DELETE is idempotent (deleting twice still leaves the resource gone) but not safe (it changes state). POST is neither. The distinction matters because safe methods can be freely cached and prefetched, while idempotent methods can be safely retried after a timeout.",
+      "difficulty": "junior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["http", "idempotency"],
+      "followUps": ["Why is it dangerous for a GET to have side effects?", "Is DELETE returning 404 on the second call a violation of idempotency?"]
+    },
+    {
+      "id": "q-status-401-403",
+      "question": "When do you return 401 versus 403?",
+      "answer": "401 Unauthorized means the request lacks valid authentication credentials — the server doesn't know who you are, so it can't proceed; respond with a WWW-Authenticate header. 403 Forbidden means the server knows who you are (authentication succeeded) but you are not permitted to perform this action on this resource. Mnemonic: 401 is 'unauthenticated', 403 is 'unauthorized'. A subtlety: for resources a user shouldn't even know exist, returning 404 instead of 403 avoids leaking existence.",
+      "difficulty": "junior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["http", "security", "status-codes"],
+      "followUps": ["When would you deliberately return 404 instead of 403?", "What is the 428 Precondition Required status for?"]
+    },
+    {
+      "id": "q-put-vs-post-vs-patch",
+      "question": "Compare the idempotency of PUT, POST, and PATCH for an interview.",
+      "answer": "PUT is idempotent: it replaces the resource at a known URI with the supplied representation, so repeating it lands on the same state. POST is not idempotent: each call creates a new resource (server assigns the id), so retries create duplicates — this is why POST needs an idempotency key to be retry-safe. PATCH is the nuanced one: it is not inherently idempotent. Whether a PATCH is idempotent depends on its semantics — a PATCH that sets a field to an absolute value is idempotent, but a PATCH that applies a relative operation (e.g. {op:'increment', value:1}) is not, because each application changes the result.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["http", "idempotency", "verbs"],
+      "followUps": ["How would you make a POST idempotent?", "Does PUT require sending the complete representation?"]
+    },
+    {
+      "id": "q-offset-vs-cursor",
+      "question": "How would you design pagination for a feed of 50 million rows that is constantly being written to?",
+      "answer": "Use cursor (keyset) pagination, not offset. Offset has two problems here: OFFSET N scans and discards N rows so deep pages get linearly slower and eventually time out; and concurrent inserts/deletes shift the offset window, causing skipped or duplicated rows. Cursor pagination passes an opaque cursor encoding the last item's sort key, and the query becomes WHERE (sort_key, id) < (lastKey, lastId) ORDER BY sort_key DESC, id DESC LIMIT n, backed by a composite index — an O(log n) seek per page that is stable under concurrent writes. The cursor must encode a unique, total-ordering key (tiebreak with the primary key) and should be opaque so clients can't fabricate it and you can change the encoding.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["pagination", "scalability", "database"],
+      "followUps": ["How do you support 'jump to page 500' with cursor pagination?", "How do you return a total count cheaply, or do you avoid it?"]
+    },
+    {
+      "id": "q-versioning-strategy",
+      "question": "What versioning strategy would you choose for a public API and why?",
+      "answer": "I default to URI major versioning (/v1/) because it is explicit, trivially cacheable and routable, and easy for clients to test in a browser or curl. I combine it with a strong policy of additive, non-breaking changes so new majors are rare: adding fields and optional params is non-breaking; removing/renaming fields, changing types, or tightening validation is breaking. For breaking changes I run old and new in parallel with a deprecation window communicated via Deprecation and Sunset headers. For long-lived APIs with many subtle behavior changes (like Stripe), date-based versioning pinned by a header plus a server-side translation layer is superior, but it carries real maintenance cost.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["versioning", "api-design", "evolution"],
+      "followUps": ["What changes are non-breaking versus breaking?", "How do date-based versions like Stripe's work under the hood?"]
+    },
+    {
+      "id": "q-rfc7807",
+      "question": "What is RFC 7807 / 9457 and why use it over a custom error shape?",
+      "answer": "RFC 7807 (updated by RFC 9457) defines 'problem+json', a standard media type (application/problem+json) for HTTP error bodies with members: type (a stable URI identifying the problem class), title, status, detail, and instance, plus arbitrary extension members. The win is a consistent, machine-readable contract: clients branch on the stable 'type' URI rather than regex-matching human-readable messages that you might reword. It standardizes errors across every endpoint, plays well with tooling, and lets you attach structured, actionable data (like a validation errors array or a balance) as extensions. Using a standard means client libraries and gateways can understand your errors without bespoke parsing.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["errors", "rfc7807", "api-design"],
+      "followUps": ["Which field should a client switch on, and which is safe to change?", "Where would you put a trace id?"]
+    },
+    {
+      "id": "q-etag-caching",
+      "question": "Explain how ETags enable both efficient caching and optimistic concurrency control.",
+      "answer": "An ETag is an opaque version identifier for a representation. For caching: the server sends ETag on a response; the client revalidates later with If-None-Match: <etag>, and if unchanged the server returns 304 Not Modified with no body, saving bandwidth. For concurrency: on a write the client sends If-Match: <etag>; the server applies the write only if the current ETag still matches, otherwise it returns 412 Precondition Failed — this prevents the lost-update problem where two clients read the same version and overwrite each other. The catch is you must use a strong ETag (content hash or row version) for If-Match; weak ETags only guarantee semantic equivalence and can mask a real difference, allowing a lost update.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["caching", "etag", "concurrency"],
+      "followUps": ["What is the difference between a strong and weak ETag?", "What does Cache-Control: no-cache actually do?"]
+    },
+    {
+      "id": "q-richardson",
+      "question": "Describe the Richardson Maturity Model and where most real APIs sit.",
+      "answer": "It grades how RESTful an API is across four levels. Level 0 is RPC-over-HTTP through a single endpoint/verb (the 'swamp of POX'). Level 1 introduces distinct resource URIs. Level 2 uses HTTP verbs and status codes correctly — proper GET/POST/PUT/PATCH/DELETE and meaningful 2xx/4xx/5xx. Level 3 adds hypermedia (HATEOAS): responses embed links describing available state transitions so clients navigate by link rather than hardcoded URLs. Most excellent production APIs, including Stripe and GitHub, live solidly at Level 2 with selective hypermedia, because full HATEOAS rarely pays off when clients are hand-written and hardcode URLs anyway. The model is a diagnostic, not a score to maximize blindly.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["rest", "rmm", "hateoas"],
+      "followUps": ["What concrete benefit does HATEOAS provide?", "Why don't most teams go to Level 3?"]
+    },
+    {
+      "id": "q-patch-idempotent-tricky",
+      "question": "Is PATCH idempotent?",
+      "answer": "Trick question — the honest answer is 'it depends, and by default no'. The HTTP spec does not define PATCH as idempotent; idempotency depends entirely on the patch document's semantics. A PATCH that sets fields to absolute values, e.g. {\"status\":\"shipped\"}, is idempotent because reapplying it yields the same state. But a PATCH expressing a relative operation, e.g. JSON Patch [{\"op\":\"add\",\"path\":\"/tags/-\",\"value\":\"vip\"}] which appends, or {\"op\":\"increment\",\"value\":1}, is NOT idempotent because each application changes the result. You can make any PATCH safe to retry by attaching an idempotency key or an If-Match precondition, but you cannot assume the verb itself guarantees idempotency the way PUT does.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["patch", "idempotency", "http"],
+      "followUps": ["Give a concrete idempotent and non-idempotent PATCH example.", "How would If-Match make a relative PATCH safe to retry?"]
+    },
+    {
+      "id": "q-toctou-idempotency-tricky",
+      "question": "You implement idempotency keys by checking 'does this key exist? if not, do the work and store the key.' A code review flags it. Why?",
+      "answer": "It has a time-of-check-to-time-of-use (TOCTOU) race. Two concurrent retries with the same key both run the SELECT, both see no existing key, both proceed to execute the work, and you double-charge — exactly the bug idempotency was meant to prevent. The fix is to make the claim atomic: use a unique constraint on the key column and INSERT ... ON CONFLICT DO NOTHING (or Redis SETNX), so exactly one writer wins the claim and the other gets a conflict and replays. You also need a state field (in_progress vs completed) so a retry that arrives while the first is still running returns 409 rather than racing or replaying an incomplete result.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["idempotency", "concurrency", "race-condition"],
+      "followUps": ["What status do you return for a retry that arrives mid-flight?", "What if the same key arrives with a different request body?"]
+    },
+    {
+      "id": "q-timeout-fallacy-tricky",
+      "question": "A client POSTs to create an order, the request times out, and the client wants to retry. Is it safe to retry?",
+      "answer": "Not without idempotency protection, and the subtle point is why: a timeout tells you nothing about whether the server processed the request. The request may have failed before reaching the server, or it may have fully succeeded and only the response was lost. Treating a timeout as 'it didn't happen' is the classic distributed-systems fallacy and causes duplicate orders. The correct design is to make creation idempotent with a client-generated idempotency key sent on the first attempt and reused on every retry, so the server replays the original result instead of creating a second order. A frequent secondary bug: generating a fresh key per retry, which silently reintroduces the duplication.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["idempotency", "retries", "distributed-systems"],
+      "followUps": ["When should the client generate the idempotency key?", "How long should the server retain idempotency keys?"]
+    },
+    {
+      "id": "q-vary-header-tricky",
+      "question": "Your API serves the same /reports/42 resource as JSON or CSV based on the Accept header. A user reports getting CSV when they asked for JSON. What happened?",
+      "answer": "The response is content-negotiated but is missing the Vary: Accept header, so a shared cache (CDN/proxy) stored the first variant it saw — say the CSV response — keyed only by the URL, and then served that cached CSV to every subsequent client regardless of their Accept header. The fix is to set Vary to every request header the response branches on (Vary: Accept, and Accept-Encoding/Accept-Language if you negotiate those), so the cache keys on those headers and stores separate entries per representation. This is a textbook caching footgun: negotiation without Vary equals cache poisoning for whichever variant lands first.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["caching", "content-negotiation", "vary"],
+      "followUps": ["What other headers commonly need to be in Vary?", "How does Vary interact with CDN cache hit rates?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-idempotent-payment",
+      "title": "Design a Versioned, Idempotent Payment-Create Endpoint",
+      "difficulty": "senior",
+      "category": "Backend",
+      "prompt": "Implement POST /v1/payments that creates a payment exactly once even under client retries. Requirements: (1) require an Idempotency-Key header; (2) claim the key atomically so concurrent retries cannot double-charge; (3) if the same key arrives again, replay the original response with the same payment id; (4) if the same key arrives with a different request body, reject with 422; (5) if a retry arrives while the first is still processing, return 409; (6) return RFC 7807 problem+json for all errors and 201 with a Location header on success.",
+      "hints": [
+        "Use a unique constraint on the idempotency key plus INSERT ... ON CONFLICT DO NOTHING to make the claim atomic — never SELECT-then-INSERT.",
+        "Store a hash of the request body with the key so you can detect key reuse with a different payload.",
+        "Track a status on the key row: 'in_progress' then 'completed', so a mid-flight retry can return 409 rather than replaying an incomplete result.",
+        "Persist the final HTTP status and response body so replays return the byte-identical original."
+      ],
+      "solutionCode": "import { createHash } from 'crypto';\n\ntype KeyRow = {\n  key: string; userId: string; requestHash: string;\n  status: 'in_progress' | 'completed';\n  httpStatus?: number; responseBody?: unknown; paymentId?: string;\n};\n\nfunction problem(type: string, title: string, status: number, detail?: string) {\n  return { type: `https://api.acme.com/problems/${type}`, title, status, detail };\n}\nconst hashBody = (b: unknown) => createHash('sha256').update(JSON.stringify(b)).digest('hex');\n\nexport async function createPayment(req, res, db, psp) {\n  const key = req.header('Idempotency-Key');\n  if (!key) {\n    return res.status(400).type('application/problem+json')\n      .json(problem('idempotency-key-required', 'Idempotency-Key header is required', 400));\n  }\n  const bodyHash = hashBody(req.body);\n\n  // (1) Atomic claim. Returns the new row only if WE won the insert race.\n  const claimed: KeyRow | null = await db.query(\n    `INSERT INTO idempotency_keys (key, user_id, request_hash, status)\n     VALUES ($1, $2, $3, 'in_progress')\n     ON CONFLICT (key) DO NOTHING\n     RETURNING *`, [key, req.userId, bodyHash]\n  ).then(r => r.rows[0] ?? null);\n\n  if (!claimed) {\n    // Key already exists: someone else owns it. Inspect and replay/reject.\n    const existing: KeyRow = (await db.query(\n      `SELECT * FROM idempotency_keys WHERE key = $1`, [key])).rows[0];\n    if (existing.request_hash !== bodyHash) {\n      return res.status(422).type('application/problem+json').json(\n        problem('idempotency-key-reuse', 'Key reused with a different request body', 422));\n    }\n    if (existing.status === 'in_progress') {\n      return res.status(409).type('application/problem+json').json(\n        problem('request-in-flight', 'A request with this key is still processing', 409));\n    }\n    return res.status(existing.http_status).json(existing.response_body); // (3) replay\n  }\n\n  // (2) We won the claim -> do the real charge EXACTLY once.\n  try {\n    const payment = await psp.charge({\n      amountCents: req.body.amountCents, currency: req.body.currency,\n      source: req.body.source, idempotencyKey: key, // pass through to PSP too\n    });\n    const body = { id: payment.id, status: payment.status,\n                   amountCents: payment.amountCents, currency: payment.currency };\n    await db.query(\n      `UPDATE idempotency_keys\n         SET status='completed', http_status=201, response_body=$2, payment_id=$3\n       WHERE key=$1`, [key, body, payment.id]);\n    return res.status(201).location(`/v1/payments/${payment.id}`).json(body);\n  } catch (err) {\n    // Release the claim so a legitimate retry can try again.\n    await db.query(`DELETE FROM idempotency_keys WHERE key=$1 AND status='in_progress'`, [key]);\n    return res.status(502).type('application/problem+json').json(\n      problem('payment-provider-error', 'Upstream payment provider failed', 502, String(err)));\n  }\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "The correctness hinges on a single atomic operation: INSERT ... ON CONFLICT (key) DO NOTHING with a UNIQUE constraint on key. Exactly one of any number of concurrent retries gets a RETURNING row (the winner); all others get null and fall into the replay/reject branch. This eliminates the TOCTOU race that a SELECT-then-INSERT would have. The winner sets status to 'in_progress', performs the charge once (passing the same key down to the PSP for defense in depth), then atomically flips to 'completed' while persisting the exact 201 body so future replays are byte-identical. The request_hash guards against the same key being reused for a different payload (422). A retry arriving while the first is still in flight sees 'in_progress' and gets a 409 rather than racing or replaying a half-finished result. On PSP failure we delete the in_progress claim so a genuine retry isn't permanently blocked. Versioning is handled by the /v1/ URI prefix, errors are RFC 7807 problem+json, and success returns 201 with a Location header per HTTP semantics. In production you would also expire keys after, say, 24 hours via a TTL, and wrap the charge + finalize in care so a crash between charge and finalize is reconciled (e.g. a sweeper that queries the PSP by the idempotency key).",
+      "relatedTopic": "rest-apis"
+    },
+    {
+      "id": "ch-cursor-pagination",
+      "title": "Implement Stable Cursor Pagination",
+      "difficulty": "mid",
+      "category": "Backend",
+      "prompt": "Implement a paginated list endpoint GET /v1/payments?limit=20&cursor=... over a large, frequently written table. Pagination must be stable under concurrent inserts (no skipped or duplicated rows) and must perform in constant time per page regardless of depth. Return the page items plus a nextCursor that is opaque to clients. Use (created_at, id) as the ordering key, descending.",
+      "hints": [
+        "Order by a UNIQUE, total-ordering key: (created_at DESC, id DESC). The id tiebreaker is what prevents boundary skips when timestamps collide.",
+        "Encode the cursor opaquely (base64 of the last row's created_at and id) so clients can't fabricate it and you can change the encoding later.",
+        "Build the WHERE clause as a tuple comparison: (created_at, id) < (lastTs, lastId).",
+        "Fetch limit + 1 rows to determine whether a next page exists without a separate COUNT."
+      ],
+      "solutionCode": "type Cursor = { ts: string; id: string };\n\nconst encodeCursor = (c: Cursor): string =>\n  Buffer.from(JSON.stringify(c)).toString('base64url');\n\nfunction decodeCursor(raw?: string): Cursor | null {\n  if (!raw) return null;\n  try {\n    const c = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));\n    if (typeof c.ts === 'string' && typeof c.id === 'string') return c;\n    return null;\n  } catch { return null; }\n}\n\nexport async function listPayments(req, res, db) {\n  const limit = Math.min(Math.max(parseInt(req.query.limit ?? '20', 10), 1), 100);\n  const cursor = decodeCursor(req.query.cursor);\n  if (req.query.cursor && !cursor) {\n    return res.status(400).type('application/problem+json').json({\n      type: 'https://api.acme.com/problems/invalid-cursor',\n      title: 'Invalid cursor', status: 400,\n    });\n  }\n\n  // Fetch limit + 1 to detect whether another page exists.\n  const params: any[] = [req.tenantId];\n  let where = 'tenant_id = $1';\n  if (cursor) {\n    // Tuple comparison gives a clean, index-friendly keyset predicate.\n    where += ' AND (created_at, id) < ($2, $3)';\n    params.push(cursor.ts, cursor.id);\n  }\n  const rows = (await db.query(\n    `SELECT id, created_at, amount_cents, currency, status\n       FROM payments\n      WHERE ${where}\n      ORDER BY created_at DESC, id DESC\n      LIMIT ${limit + 1}`, params)).rows;\n\n  const hasMore = rows.length > limit;\n  const items = hasMore ? rows.slice(0, limit) : rows;\n  const last = items[items.length - 1];\n  const nextCursor = hasMore && last\n    ? encodeCursor({ ts: last.created_at.toISOString(), id: last.id })\n    : null;\n\n  return res.status(200)\n    .set('Cache-Control', 'private, max-age=0, must-revalidate')\n    .json({ items, nextCursor });\n}\n\n// Required index for O(log n) seek + sequential scan:\n// CREATE INDEX idx_payments_keyset ON payments (tenant_id, created_at DESC, id DESC);",
+      "solutionLanguage": "typescript",
+      "explanation": "Stability and performance both come from paginating on a unique, total-ordering key — (created_at DESC, id DESC) — rather than an offset. Because we filter with the tuple comparison (created_at, id) < (lastTs, lastId), inserts that happen between page fetches simply appear (or not) according to their key position; they never shift a window the way OFFSET does, so no row is skipped or duplicated. The id tiebreaker is essential: without it, two rows sharing a created_at timestamp at a page boundary would be ambiguously ordered and could be skipped or repeated. The supporting composite index lets the database seek directly to the cursor position in O(log n) and then read sequentially, so page 1 and page 100,000 cost the same — unlike OFFSET, which must scan and discard all preceding rows. We fetch limit + 1 rows to know whether a next page exists without an expensive COUNT, and we slice back to limit for the response. The cursor is base64url-encoded JSON so it is opaque to clients (they can't construct arbitrary cursors, and we can change the internal encoding later), and we validate/reject malformed cursors with RFC 7807. The trade-off, which a senior candidate should call out, is that keyset pagination only supports next/prev traversal, not jumping to an arbitrary page number; if the product genuinely needs 'go to page 500', that's a signal the access pattern (or the feature) should be reconsidered.",
+      "relatedTopic": "rest-apis"
+    }
+  ],
+  "references": [
+    {"label": "Roy Fielding — Architectural Styles and the Design of Network-based Software Architectures (Ch. 5: REST)", "url": "https://ics.uci.edu/~fielding/pubs/dissertation/rest_arch_style.htm"},
+    {"label": "RFC 9457 — Problem Details for HTTP APIs (updates RFC 7807)", "url": "https://www.rfc-editor.org/rfc/rfc9457"},
+    {"label": "RFC 9110 — HTTP Semantics (methods, status codes, conditional requests)", "url": "https://www.rfc-editor.org/rfc/rfc9110"},
+    {"label": "Martin Fowler — Richardson Maturity Model", "url": "https://martinfowler.com/articles/richardsonMaturityModel.html"},
+    {"label": "Stripe API — Idempotent Requests", "url": "https://docs.stripe.com/api/idempotent_requests"},
+    {"label": "MDN — HTTP Caching (Cache-Control, ETag, Vary)", "url": "https://developer.mozilla.org/en-US/docs/Web/HTTP/Caching"}
+  ]
+}

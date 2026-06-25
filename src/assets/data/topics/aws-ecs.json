@@ -1,0 +1,566 @@
+{
+  "id": "aws-ecs",
+  "title": "AWS ECS",
+  "category": "Cloud",
+  "subcategory": "Containers",
+  "difficulty": "mid",
+  "tags": ["aws", "ecs", "fargate", "containers", "alb", "iam", "autoscaling"],
+  "description": "A deep, production-grade tour of Amazon ECS: task definitions, services, launch types, awsvpc networking, IAM roles, secrets, autoscaling, and ALB integration — from first principles to incident war stories.",
+  "estReadMinutes": 28,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction to Amazon ECS",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Amazon Elastic Container Service (ECS) is AWS's native container orchestrator. It schedules and runs Docker containers across a fleet of compute, handles placement, health checking, rolling deployments, and integrates tightly with the rest of the AWS control plane — IAM, VPC networking, CloudWatch, ALB/NLB, Secrets Manager, and Auto Scaling. Unlike Kubernetes, ECS has no control plane for you to operate: AWS runs the scheduler, and you describe what you want to run declaratively."
+        },
+        {
+          "type": "paragraph",
+          "text": "ECS has two distinct compute models. With the EC2 launch type, you own and manage a cluster of EC2 instances (the data plane) on which the ECS agent places tasks. With Fargate, AWS provisions right-sized, isolated micro-VMs on demand for each task — you never see or patch a host. The same task definition can usually run on either, which makes ECS approachable for teams that want containers without becoming Kubernetes operators."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Cluster: a logical grouping of capacity (EC2 instances and/or Fargate capacity) and the tasks/services running on it.",
+            "Task definition: an immutable, versioned blueprint (JSON) describing one or more containers, CPU/memory, networking mode, IAM roles, and secrets.",
+            "Task: a running instantiation of a task definition — one or more containers scheduled together as a unit.",
+            "Service: a controller that keeps a desired number of tasks running, replaces unhealthy ones, registers them with a load balancer, and orchestrates rolling deploys."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Mental model: a task definition is to a task what a Docker image is to a container, and a Docker image is to a container what a class is to an object. The service is the long-running controller that reconciles desired vs. actual task count."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why ECS Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Most teams don't need the full power (and operational tax) of Kubernetes. ECS lets you ship containerized services in production with deep AWS integration and almost no orchestration overhead. With Fargate, there are no EC2 hosts to patch, no AMIs to rotate, no kubelet to debug, and no cluster autoscaler to tune — you pay per vCPU-second and GB-second of running tasks."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Operational simplicity: no control plane to run, upgrade, or secure — a huge reduction in toil versus self-managed k8s.",
+            "Native IAM down to the task: each task assumes its own role, so per-service least-privilege is trivial — no third-party IRSA-style add-ons required.",
+            "Tight AWS-native integration: ALB target groups, CloudWatch logs/metrics, Secrets Manager, App Mesh, ECS Exec, and Service Connect all work out of the box.",
+            "Cost flexibility: mix Fargate, Fargate Spot, and EC2 (including Spot) capacity providers within one cluster to balance cost and reliability.",
+            "Fast onboarding: a developer can go from Dockerfile to a load-balanced HTTPS service in an afternoon."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The senior framing: ECS optimizes for time-to-production and low operational surface area at the cost of cross-cloud portability. If you are all-in on AWS and your team is small, ECS is frequently the correct boring choice."
+        }
+      ]
+    },
+    {
+      "id": "core-building-blocks",
+      "heading": "Core Building Blocks: Clusters, Task Definitions, Tasks, Services",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The task definition is the heart of ECS. It is immutable and versioned: every time you change it you register a new revision (my-api:42 → my-api:43). A service references a task definition revision, and updating that reference triggers a deployment. This immutability is what makes rollbacks trivial — point the service back at the previous revision."
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "code": "{\n  \"family\": \"checkout-api\",\n  \"networkMode\": \"awsvpc\",\n  \"requiresCompatibilities\": [\"FARGATE\"],\n  \"cpu\": \"512\",\n  \"memory\": \"1024\",\n  \"executionRoleArn\": \"arn:aws:iam::111122223333:role/checkout-execution\",\n  \"taskRoleArn\": \"arn:aws:iam::111122223333:role/checkout-task\",\n  \"containerDefinitions\": [\n    {\n      \"name\": \"app\",\n      \"image\": \"111122223333.dkr.ecr.eu-west-1.amazonaws.com/checkout:1.8.0\",\n      \"portMappings\": [{ \"containerPort\": 8080, \"protocol\": \"tcp\" }],\n      \"essential\": true,\n      \"secrets\": [\n        { \"name\": \"DB_PASSWORD\", \"valueFrom\": \"arn:aws:secretsmanager:eu-west-1:111122223333:secret:checkout/db-AbCdEf\" }\n      ],\n      \"healthCheck\": {\n        \"command\": [\"CMD-SHELL\", \"curl -f http://localhost:8080/healthz || exit 1\"],\n        \"interval\": 15, \"timeout\": 3, \"retries\": 3, \"startPeriod\": 30\n      },\n      \"logConfiguration\": {\n        \"logDriver\": \"awslogs\",\n        \"options\": {\n          \"awslogs-group\": \"/ecs/checkout-api\",\n          \"awslogs-region\": \"eu-west-1\",\n          \"awslogs-stream-prefix\": \"app\"\n        }\n      }\n    }\n  ]\n}"
+        },
+        {
+          "type": "heading",
+          "text": "Services and the reconciliation loop"
+        },
+        {
+          "type": "paragraph",
+          "text": "A service holds a desired count. The ECS service scheduler continuously reconciles: if a task dies (crash, failed health check, AZ event), it launches a replacement; if you bump desiredCount, it scales out. During a deployment the service spins up tasks from the new revision, waits for them to pass ALB target-group health checks, drains and stops old tasks, all governed by minimumHealthyPercent and maximumPercent."
+        },
+        {
+          "type": "table",
+          "headers": ["Concept", "Lifetime", "Mutable?", "Analogy"],
+          "rows": [
+            ["Cluster", "Long-lived", "Yes", "Namespace / capacity pool"],
+            ["Task definition", "Permanent revision", "No (new revision)", "Class / image manifest"],
+            ["Task", "Ephemeral", "No", "Object / running container group"],
+            ["Service", "Long-lived", "Yes", "Deployment controller"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Tasks launched directly with RunTask (not via a service) are NOT replaced if they die. Use them for one-off jobs and batch work; use services for anything that must stay up."
+        }
+      ]
+    },
+    {
+      "id": "launch-types",
+      "heading": "EC2 Launch Type vs Fargate",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The launch type (more precisely, the capacity provider) determines where tasks run. With EC2 you operate the hosts; with Fargate AWS gives each task its own micro-VM. The choice is a classic control-vs-convenience tradeoff and is one of the most common ECS interview discussions."
+        },
+        {
+          "type": "table",
+          "headers": ["Dimension", "EC2 launch type", "Fargate"],
+          "rows": [
+            ["Host management", "You patch AMIs, scale instances", "None — fully managed"],
+            ["Pricing", "Per EC2 instance (pay for idle headroom)", "Per vCPU-second + GB-second of the task"],
+            ["Density", "Bin-pack many tasks per instance", "One micro-VM per task (no bin-packing)"],
+            ["Cold start", "Fast if instance has capacity", "~10-40s to provision the micro-VM"],
+            ["GPU / special instances", "Supported", "Limited (no GPU on standard Fargate)"],
+            ["Daemon-style workloads", "DAEMON scheduling supported", "Not supported"],
+            ["Best for", "Steady high utilization, custom hardware", "Spiky/low-traffic services, ops-light teams"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "A common cost insight: Fargate's per-task pricing is more expensive per vCPU-hour than a fully utilized EC2 instance, but you stop paying the moment a task stops and you eliminate idle headroom and patching labor. For bursty or low-traffic workloads Fargate is often cheaper in total cost of ownership; for large, steadily-utilized fleets, EC2 (especially with Spot and Compute Savings Plans) usually wins on raw compute cost."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "You don't have to choose globally. A single cluster can attach multiple capacity providers (FARGATE, FARGATE_SPOT, and EC2 Auto Scaling groups) with a weighted strategy — e.g. run a baseline on Fargate and burst onto FARGATE_SPOT."
+        }
+      ]
+    },
+    {
+      "id": "awsvpc-networking",
+      "heading": "Task Networking: awsvpc Mode",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "In awsvpc networking mode (mandatory for Fargate, recommended for EC2), each task gets its own elastic network interface (ENI) with a private IP from your subnet and its own security group. Containers in the task share that network namespace and reach each other over localhost. This gives every task first-class VPC networking — no port-mapping gymnastics, no shared host network, and per-task security groups for fine-grained access control."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Each task = one ENI = one private IP + its own security group(s).",
+            "Containers within a task communicate over localhost (shared network namespace).",
+            "No dynamic host port mapping needed — the container port IS reachable on the task's ENI.",
+            "On EC2, the number of ENIs per instance is capped by instance type, which limits task density (mitigated by ENI trunking)."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "code": "{\n  \"networkConfiguration\": {\n    \"awsvpcConfiguration\": {\n      \"subnets\": [\"subnet-0aaa\", \"subnet-0bbb\"],\n      \"securityGroups\": [\"sg-app-task\"],\n      \"assignPublicIp\": \"DISABLED\"\n    }\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Footgun: a Fargate task in a private subnet with assignPublicIp=DISABLED cannot pull an image from ECR or reach Secrets Manager unless you have a NAT gateway or (cheaper) VPC interface endpoints for ecr.api, ecr.dkr, secretsmanager, logs, and a gateway endpoint for S3. Forgetting these produces the classic 'CannotPullContainerError' on task startup."
+        }
+      ]
+    },
+    {
+      "id": "iam-roles",
+      "heading": "Task Role vs Execution Role",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "This is the single most confused topic in ECS, and a favorite interview trap. There are TWO IAM roles in a task definition and they are used by completely different actors at completely different times."
+        },
+        {
+          "type": "table",
+          "headers": ["", "Execution role (executionRoleArn)", "Task role (taskRoleArn)"],
+          "rows": [
+            ["Who assumes it", "The ECS agent / Fargate infrastructure", "Your application code inside the container"],
+            ["When", "At task launch / startup", "At runtime, for every AWS API call your app makes"],
+            ["Used for", "Pull ECR image, fetch Secrets Manager/SSM secrets, write logs to CloudWatch", "Read S3, write DynamoDB, publish SNS, call SQS, etc."],
+            ["Typical policy", "AmazonECSTaskExecutionRolePolicy + secret read", "Least-privilege app permissions"],
+            ["Required?", "Required to pull from private ECR or inject secrets", "Optional (only if app calls AWS APIs)"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The mnemonic: the EXECUTION role lets the platform EXECUTE the task (set it up — pull image, inject secrets, ship logs). The TASK role is what the TASK (your code) uses while it runs. If your container can't pull its image or read a secret, suspect the execution role. If your code gets AccessDenied calling DynamoDB, suspect the task role."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "# Inside a container, the task role is reachable via the ECS credentials endpoint.\n# The AWS SDK does this automatically; you can verify it manually:\ncurl 169.254.170.2$AWS_CONTAINER_CREDENTIALS_RELATIVE_URI\n# -> { \"AccessKeyId\": ..., \"SecretAccessKey\": ..., \"Token\": ..., \"Expiration\": ... }\n# These are the TASK ROLE credentials, auto-rotated by the agent."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "A subtle gotcha: secrets are injected by the EXECUTION role, not the task role. If you put the secretsmanager:GetSecretValue permission on the task role and not the execution role, task startup fails with ResourceInitializationError even though your app would have had access at runtime."
+        }
+      ]
+    },
+    {
+      "id": "secrets-injection",
+      "heading": "Secrets Injection",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Never bake secrets into images or pass them as plaintext environment in the task definition (they show up in the console, CloudTrail, and describe-task-definition output). ECS natively integrates with Secrets Manager and SSM Parameter Store via the secrets block. At launch, the execution role fetches the value and the agent injects it as an environment variable into the container."
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "code": "\"secrets\": [\n  { \"name\": \"DB_PASSWORD\",\n    \"valueFrom\": \"arn:aws:secretsmanager:eu-west-1:111122223333:secret:checkout/db-AbCdEf:password::\" },\n  { \"name\": \"STRIPE_KEY\",\n    \"valueFrom\": \"arn:aws:ssm:eu-west-1:111122223333:parameter/checkout/stripe-key\" }\n]"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Secrets Manager JSON keys: append :jsonkey:: to the ARN to pull a single field (the :password:: above).",
+            "The execution role needs secretsmanager:GetSecretValue (and kms:Decrypt if a CMK encrypts the secret).",
+            "Values are resolved once at task start — rotating the secret does NOT update running tasks; you must redeploy (force a new deployment) to pick up new values.",
+            "Prefer secrets over environment for anything sensitive; plain environment is fine for non-secret config like LOG_LEVEL."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Because secrets resolve at launch, a forced rotation that invalidates the old credential will break already-running tasks the moment the old value stops working. Coordinate rotation with a rolling deployment (or use the SDK to read the secret at runtime via the task role for true rotation support)."
+        }
+      ]
+    },
+    {
+      "id": "alb-autoscaling",
+      "heading": "ALB Integration and Service Auto Scaling",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "An ECS service can register its tasks into an ALB target group. With awsvpc networking the target group is of type 'ip' (it targets the task ENI's private IP, not an instance + port). As tasks start, the service registers them; as they stop, it deregisters and waits for connection draining. The ALB health check is independent from the container health check, and both must pass for a task to receive traffic and survive a deployment."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "aws ecs create-service \\\n  --cluster prod \\\n  --service-name checkout-api \\\n  --task-definition checkout-api:43 \\\n  --desired-count 3 \\\n  --launch-type FARGATE \\\n  --network-configuration 'awsvpcConfiguration={subnets=[subnet-0aaa,subnet-0bbb],securityGroups=[sg-app-task],assignPublicIp=DISABLED}' \\\n  --load-balancers 'targetGroupArn=arn:aws:elasticloadbalancing:eu-west-1:111122223333:targetgroup/checkout-tg/abc,containerName=app,containerPort=8080' \\\n  --health-check-grace-period-seconds 60 \\\n  --deployment-configuration 'minimumHealthyPercent=100,maximumPercent=200'"
+        },
+        {
+          "type": "heading",
+          "text": "Application Auto Scaling"
+        },
+        {
+          "type": "paragraph",
+          "text": "ECS service autoscaling is implemented by AWS Application Auto Scaling adjusting the service's desiredCount. The most robust pattern is target tracking: pick a metric and a target value, and AWS computes the desired count to hold the metric at target. Common metrics are ECSServiceAverageCPUUtilization, ECSServiceAverageMemoryUtilization, and — best for request-driven services — ALBRequestCountPerTarget."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "aws application-autoscaling register-scalable-target \\\n  --service-namespace ecs --resource-id service/prod/checkout-api \\\n  --scalable-dimension ecs:service:DesiredCount --min-capacity 3 --max-capacity 30\n\naws application-autoscaling put-scaling-policy \\\n  --service-namespace ecs --resource-id service/prod/checkout-api \\\n  --scalable-dimension ecs:service:DesiredCount \\\n  --policy-name cpu-target --policy-type TargetTrackingScaling \\\n  --target-tracking-scaling-policy-configuration '{\n    \"TargetValue\": 60.0,\n    \"PredefinedMetricSpecification\": {\"PredefinedMetricType\": \"ECSServiceAverageCPUUtilization\"},\n    \"ScaleInCooldown\": 300, \"ScaleOutCooldown\": 60\n  }'"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Asymmetric cooldowns matter: scale OUT fast (short cooldown) to absorb spikes, scale IN slow (long cooldown) to avoid thrashing and flapping during noisy traffic."
+        }
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: A Black Friday Scaling Incident",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Scenario: a checkout API runs as a Fargate service behind an ALB, autoscaled on CPU at 60% with min 3, max 30. At the Black Friday traffic peak, p99 latency spiked and the service started returning 503s — even though CPU never crossed 60% and autoscaling barely added tasks. The team paged in."
+        },
+        {
+          "type": "paragraph",
+          "text": "Root cause: the bottleneck was the downstream Postgres connection pool, not CPU. Each task held a fixed pool of 20 connections; the database maxed out at ~400 connections. CPU-based autoscaling kept tasks lightly loaded (they were blocked waiting on the DB, not burning CPU), so the scaler never triggered. Worse, the 503s came from the ALB because tasks were failing health checks under connection starvation, causing the service to recycle healthy tasks — a feedback loop."
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "code": "{\n  \"TargetValue\": 800.0,\n  \"PredefinedMetricSpecification\": {\n    \"PredefinedMetricType\": \"ALBRequestCountPerTarget\",\n    \"ResourceLabel\": \"app/prod-alb/abc/targetgroup/checkout-tg/def\"\n  },\n  \"ScaleOutCooldown\": 30,\n  \"ScaleInCooldown\": 300\n}"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Switched the primary scaling metric from CPU to ALBRequestCountPerTarget (target 800 req/task) so scaling tracked actual load, not CPU.",
+            "Capped per-task DB connections and put RDS Proxy in front of Postgres to multiplex connections and survive task churn.",
+            "Raised the health-check grace period and made /healthz a shallow liveness check that did NOT hit the database, so DB pressure stopped cascading into task recycling.",
+            "Pre-scaled (raised min-capacity) ahead of the known event window using a scheduled scaling action."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Lesson: autoscale on the resource that is actually the bottleneck. CPU is a poor proxy for I/O-bound services. Request-per-target or a custom queue-depth metric is usually closer to the truth."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Confusing task vs execution role: secret/image-pull failures at startup are execution-role problems; AccessDenied at runtime is a task-role problem. Mixing these up wastes hours.",
+            "Deep health checks: pointing the ALB health check at an endpoint that queries the DB means a slow DB marks all tasks unhealthy and the ALB pulls the whole service out of rotation. Keep liveness shallow.",
+            "Private subnet without endpoints/NAT: CannotPullContainerError because the task can't reach ECR. Add VPC endpoints (ecr.api, ecr.dkr, s3 gateway, logs, secretsmanager) or a NAT gateway.",
+            "Autoscaling on CPU for I/O-bound services: the scaler never fires because tasks are blocked, not busy.",
+            "Forgetting health-check-grace-period: the service kills slow-starting tasks before they finish booting, producing a crash loop that looks like a bad image.",
+            "Assuming secret rotation propagates: secrets are injected at launch; rotating without redeploying leaves tasks on stale values (or breaks them when the old value is revoked).",
+            "Setting memory too low: the Linux OOM killer terminates the container with exit code 137 and ECS restarts it — a silent, hard-to-debug crash loop.",
+            "minimumHealthyPercent=100 with a single task and maximumPercent=100: the deployment deadlocks because it can neither stop the old task nor add a new one."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Exit code 137 = SIGKILL, almost always the cgroup OOM killer hitting your memory limit. Exit 139 = SIGSEGV. Exit 143 = SIGTERM (graceful stop). Memorize 137 — it is the most common 'mystery restart' in ECS."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Pin image tags to immutable digests or version tags (never :latest) so a redeploy is deterministic and rollbacks are exact.",
+            "One least-privilege task role per service; keep the execution role minimal (image pull + this service's secrets only).",
+            "Use VPC interface endpoints instead of NAT for ECR/Secrets/Logs traffic — cheaper at scale and keeps traffic off the public internet.",
+            "Shallow liveness health checks; do dependency checks in a separate readiness probe or out-of-band monitoring.",
+            "Set CPU/memory deliberately and watch CloudWatch Container Insights; right-size to avoid both OOM kills and paying for idle.",
+            "Scale on the true bottleneck metric (ALBRequestCountPerTarget or a custom SQS depth) rather than blindly on CPU.",
+            "Enable deployment circuit breaker with rollback so a bad revision auto-reverts instead of leaving you in a degraded state.",
+            "Handle SIGTERM gracefully and drain in-flight requests; tune stopTimeout and ALB deregistration delay together.",
+            "Use Fargate Spot (with FARGATE baseline) for fault-tolerant, stateless workloads to cut cost ~70%.",
+            "Manage everything as code (Terraform/CDK/CloudFormation); never click-ops a production service."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "code": "// Deployment circuit breaker: auto-rollback on a failed rollout\n\"deploymentConfiguration\": {\n  \"minimumHealthyPercent\": 100,\n  \"maximumPercent\": 200,\n  \"deploymentCircuitBreaker\": { \"enable\": true, \"rollback\": true }\n}"
+        }
+      ]
+    },
+    {
+      "id": "ecs-vs-eks-note",
+      "heading": "ECS vs EKS: Choosing the Orchestrator",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "ECS and EKS solve the same problem with different philosophies. ECS is AWS-proprietary, simpler, and has zero control-plane operational burden — ideal when you are committed to AWS and value velocity. EKS is managed Kubernetes: portable across clouds and on-prem, with a vast ecosystem (Helm, operators, CRDs, service meshes) but a steeper learning curve and a real operational surface even when 'managed'."
+        },
+        {
+          "type": "table",
+          "headers": ["Factor", "ECS", "EKS"],
+          "rows": [
+            ["Portability", "AWS-only", "Runs anywhere k8s runs"],
+            ["Operational complexity", "Low", "Moderate-to-high"],
+            ["Ecosystem", "AWS-native services", "Huge CNCF/Kubernetes ecosystem"],
+            ["Per-pod IAM", "Built-in task roles", "Needs IRSA / Pod Identity"],
+            ["Control plane cost", "Free", "~$0.10/hr per cluster"],
+            ["Best for", "AWS-committed, small ops teams", "Multi-cloud, k8s skills, complex platforms"]
+          ]
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "ecs-request-flow",
+      "title": "Request Flow: Client to Fargate Task behind ALB",
+      "type": "mermaid",
+      "content": "flowchart TD\n    Client[Client] --> R53[Route 53]\n    R53 --> ALB[Application Load Balancer]\n    ALB --> TG[Target Group type ip]\n    TG --> T1[Fargate Task 1 ENI]\n    TG --> T2[Fargate Task 2 ENI]\n    TG --> T3[Fargate Task 3 ENI]\n    T1 --> RDS[(RDS Postgres via RDS Proxy)]\n    T2 --> RDS\n    T3 --> RDS\n    Svc[ECS Service Scheduler] -.registers/drains.-> TG\n    AAS[Application Auto Scaling] -.adjusts desiredCount.-> Svc"
+    },
+    {
+      "id": "task-lifecycle",
+      "title": "Task Startup Lifecycle and the Two IAM Roles",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n    participant Sched as ECS Scheduler\n    participant Infra as Fargate Infra\n    participant ECR as ECR\n    participant SM as Secrets Manager\n    participant App as Container App\n    participant DDB as DynamoDB\n    Sched->>Infra: Launch task revision 43\n    Note over Infra,SM: Uses EXECUTION role\n    Infra->>ECR: Pull image\n    Infra->>SM: GetSecretValue DB_PASSWORD\n    Infra->>App: Start container with secrets injected\n    Note over App,DDB: Uses TASK role\n    App->>DDB: PutItem order\n    DDB-->>App: 200 OK\n    App-->>Infra: Health check passing"
+    },
+    {
+      "id": "capacity-providers",
+      "title": "Cluster Capacity Providers (ASCII)",
+      "type": "ascii",
+      "content": "+-------------------------------------------------------------+\n|                       ECS Cluster: prod                     |\n|                                                             |\n|   +---------------------+   +---------------------------+   |\n|   |  Capacity Provider  |   |    Capacity Provider      |   |\n|   |      FARGATE        |   |     FARGATE_SPOT          |   |\n|   |  weight=1 base=3    |   |     weight=4 base=0       |   |\n|   +----------+----------+   +-------------+-------------+   |\n|              |                            |                 |\n|              v                            v                 |\n|   +----------------------+   +-------------------------+    |\n|   | baseline tasks (3)   |   | burst tasks (spot)      |    |\n|   | on-demand micro-VMs  |   | interruptible micro-VMs |    |\n|   +----------------------+   +-------------------------+    |\n|                                                             |\n|   Strategy: 3 guaranteed on FARGATE, then 4:1 onto SPOT     |\n+-------------------------------------------------------------+"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-cluster-task-service",
+      "question": "Explain the relationship between a cluster, task definition, task, and service in ECS.",
+      "answer": "A cluster is a logical pool of compute capacity. A task definition is an immutable, versioned JSON blueprint describing one or more containers (image, CPU/memory, networking, IAM roles, secrets). A task is a running instantiation of a task definition — the containers scheduled together as a unit. A service is a long-running controller that maintains a desired number of tasks from a given task-definition revision, replaces unhealthy tasks, registers them with a load balancer, and orchestrates rolling deployments. In short: task definition is the blueprint, task is the running instance, service is the controller that keeps the right number of instances alive.",
+      "difficulty": "junior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["ecs", "fundamentals"],
+      "followUps": ["What happens if a task in a service crashes?", "How do you roll back a deployment?"]
+    },
+    {
+      "id": "q-ec2-vs-fargate",
+      "question": "When would you choose the EC2 launch type over Fargate, and vice versa?",
+      "answer": "Choose Fargate when you want zero host management, have spiky or low-traffic workloads, value ops simplicity, and your tasks fit standard CPU/memory and need no GPU or daemon scheduling — you pay per vCPU-second/GB-second and stop paying when tasks stop. Choose EC2 when you have large, steadily-utilized fleets where bin-packing many tasks per instance and Spot/Savings Plans make raw compute cheaper, when you need GPUs or specialized instance types, when you require DAEMON-style placement, or when you need control over the host (kernel modules, special networking). Many teams mix both via capacity providers: a Fargate baseline plus EC2 or Fargate Spot for burst.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["fargate", "ec2", "cost"],
+      "followUps": ["How does Fargate pricing compare to a fully-utilized EC2 instance?", "Can one cluster use both?"]
+    },
+    {
+      "id": "q-awsvpc",
+      "question": "What does awsvpc networking mode give you, and what is its main constraint on EC2?",
+      "answer": "In awsvpc mode each task receives its own elastic network interface (ENI) with a private IP from your subnet and its own security group(s). Containers in the task share that namespace and talk over localhost. Benefits: first-class VPC networking, per-task security groups for fine-grained access control, no dynamic host port mapping, and ALB target groups of type 'ip'. The main constraint on the EC2 launch type is ENI density: each instance type supports a limited number of ENIs, capping how many awsvpc tasks fit per instance. ENI trunking raises that limit on supported instance types. Fargate sidesteps this since each task is its own micro-VM.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["networking", "awsvpc", "eni"],
+      "followUps": ["How do containers in the same task communicate?", "What is ENI trunking?"]
+    },
+    {
+      "id": "q-task-vs-execution-role",
+      "question": "What is the difference between the task role and the execution role?",
+      "answer": "The execution role is assumed by the ECS/Fargate platform at task launch to set the task up: pull the image from ECR, fetch values from Secrets Manager/SSM for secret injection, and ship logs to CloudWatch. The task role is assumed by your application code at runtime, supplying credentials (via the container credentials endpoint) for any AWS API calls your app makes — reading S3, writing DynamoDB, publishing to SNS, etc. Mnemonic: the execution role lets the platform EXECUTE (set up) the task; the task role is what the running TASK uses. Image-pull or secret-injection failures at startup are execution-role issues; runtime AccessDenied is a task-role issue.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["iam", "security"],
+      "followUps": ["Which role needs secretsmanager:GetSecretValue?", "How does the app obtain task-role credentials?"]
+    },
+    {
+      "id": "q-secrets",
+      "question": "How do you inject secrets into an ECS task securely, and what is the rotation caveat?",
+      "answer": "Use the container 'secrets' block referencing Secrets Manager or SSM Parameter Store ARNs (optionally appending :jsonkey:: to extract a single field). At launch the execution role calls GetSecretValue and the agent injects the value as an environment variable — never bake secrets into images or use plaintext environment for sensitive values. The caveat: secrets are resolved ONCE at task start. Rotating the secret does not update already-running tasks, so you must force a new deployment to pick up new values. If a rotation revokes the old credential, running tasks break until redeployed. For true live rotation, read the secret at runtime via the SDK using the task role instead.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["secrets", "security"],
+      "followUps": ["Which IAM role fetches the secret?", "How do you decrypt a secret encrypted with a customer-managed KMS key?"]
+    },
+    {
+      "id": "q-autoscaling-metric",
+      "question": "Your request-driven service is overloaded but CPU-based autoscaling isn't firing. Why, and what do you change?",
+      "answer": "CPU is a poor proxy for I/O-bound services. If tasks are blocked waiting on a slow downstream (DB, external API), they consume little CPU even while saturated on connections or latency, so CPU stays under target and the scaler never triggers. Switch the primary scaling metric to one that tracks actual demand — ALBRequestCountPerTarget (target tracking) or a custom metric like queue depth or in-flight requests per task. Also address the real bottleneck (e.g., connection pooling via RDS Proxy) and pre-scale via scheduled actions for known events.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["autoscaling", "performance"],
+      "followUps": ["Why use asymmetric scale-in/scale-out cooldowns?", "How would you autoscale a queue worker?"]
+    },
+    {
+      "id": "q-deployment-config",
+      "question": "How do minimumHealthyPercent and maximumPercent control a rolling deployment, and how can they deadlock?",
+      "answer": "minimumHealthyPercent is the floor of healthy tasks (relative to desiredCount) ECS must keep during a deploy; maximumPercent is the ceiling of total tasks it may run. With desiredCount=4, min=100/max=200 means it never drops below 4 healthy and may temporarily run up to 8 — it adds new-revision tasks first, waits for health, then drains old ones (zero-downtime). Deadlock case: desiredCount=1 with min=100 and max=100 — ECS may neither stop the single old task (would breach the 100% floor) nor add a new one (would breach the 100% ceiling), so the deployment stalls. Fix by allowing max>100 or, for singletons, min<100.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["deployments", "gotcha"],
+      "followUps": ["What does the deployment circuit breaker do?", "How does ALB connection draining interact with this?"]
+    },
+    {
+      "id": "q-secret-role-trap",
+      "question": "You added secretsmanager:GetSecretValue to the task role, but tasks still fail to start with ResourceInitializationError. Why?",
+      "answer": "Because secrets are injected by the EXECUTION role, not the task role. The secret fetch happens at launch, performed by the platform before your container runs, using the execution role's credentials. Putting the permission on the task role (used only at runtime by your code) has no effect on injection. Add secretsmanager:GetSecretValue (and kms:Decrypt if a customer-managed key encrypts the secret) to the EXECUTION role to fix startup.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["iam", "secrets", "gotcha"],
+      "followUps": ["What if the secret uses a customer-managed KMS key?", "Where would the task role's permissions matter instead?"]
+    },
+    {
+      "id": "q-exit-137",
+      "question": "An ECS task keeps restarting with exit code 137 and no application error logs. What is happening?",
+      "answer": "Exit code 137 = 128 + 9 (SIGKILL), and in ECS that almost always means the container exceeded its memory limit and the cgroup OOM killer terminated it. Because the kill is external (SIGKILL, not a graceful crash), the app often logs nothing before dying, which makes it look like a mystery restart. Fixes: raise the container/task memory, find and fix the leak or unbounded buffer, set a memoryReservation soft limit appropriately, and watch CloudWatch Container Insights memory utilization. Contrast: 143 = SIGTERM (graceful stop), 139 = SIGSEGV. 137 specifically signals OOM in the vast majority of cases.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["debugging", "memory", "gotcha"],
+      "followUps": ["What's the difference between memory hard limit and memoryReservation?", "How would you confirm it's OOM vs an external SIGKILL?"]
+    },
+    {
+      "id": "q-fargate-cold-start",
+      "question": "Does Fargate have cold starts, and how does that affect autoscaling and pricing decisions?",
+      "answer": "Fargate has a 'cold-ish' start: provisioning the micro-VM, pulling the image, attaching the ENI, and passing health checks typically takes ~10-40+ seconds before a new task serves traffic (image size and health-check grace period dominate this). It's not Lambda-style sub-second, but it's not instantaneous either. Implications: configure scale-out cooldowns and min-capacity so you provision ahead of demand rather than reacting too late; keep images small (slim base, fewer layers) to shorten pulls; and for predictable spikes use scheduled scaling to pre-warm. On pricing, you pay per-vCPU-second and GB-second only while tasks run with a 1-minute minimum, so idle capacity costs nothing — making Fargate cost-effective for bursty/low-traffic workloads but pricier per vCPU-hour than a fully-utilized EC2 host.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["fargate", "performance", "cost", "gotcha"],
+      "followUps": ["How do you reduce Fargate startup time?", "When is the per-vCPU premium worth it?"]
+    },
+    {
+      "id": "q-ecs-vs-eks",
+      "question": "How would you decide between ECS and EKS for a new platform?",
+      "answer": "Decide on portability, team skills, ecosystem needs, and operational appetite. ECS is AWS-proprietary, has a free control plane, built-in per-task IAM, and near-zero orchestration ops — ideal when you're committed to AWS, the team is small, and you value velocity. EKS gives you portable, standards-based Kubernetes with the entire CNCF ecosystem (Helm, operators, CRDs, meshes) but costs ~$0.10/hr per cluster, needs IRSA/Pod Identity for per-pod IAM, and carries real operational surface even when managed. Pick ECS for AWS-committed teams wanting simplicity; pick EKS for multi-cloud/hybrid requirements, existing Kubernetes expertise, or complex platform needs that benefit from the k8s ecosystem.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["ecs", "eks", "architecture"],
+      "followUps": ["How does per-pod IAM differ between the two?", "What does ECS lack that you'd miss coming from k8s?"]
+    },
+    {
+      "id": "q-health-check-cascade",
+      "question": "Why can a deep (DB-querying) ALB health check take down your entire service, and how do you prevent it?",
+      "answer": "If the ALB health check hits an endpoint that queries the database, a slow or degraded DB makes every task fail the health check simultaneously. The ALB then deregisters all tasks (no healthy targets → 503s), and the ECS service may start recycling 'unhealthy' tasks, amplifying the outage even though the tasks themselves are fine. Prevent it by keeping the liveness/health-check endpoint shallow — it should verify the process can serve requests, not the health of downstreams. Do dependency checks via a separate readiness signal or out-of-band monitoring, set an adequate health-check grace period, and add circuit breakers/timeouts so a slow DB degrades gracefully instead of cascading.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["reliability", "alb", "gotcha"],
+      "followUps": ["What's the difference between liveness and readiness here?", "How does health-check-grace-period help during deploys?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-fargate-alb-deploy",
+      "title": "Deploy a Containerized API on Fargate behind an ALB",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "prompt": "Using Terraform, deploy a containerized HTTP API (listening on port 8080, image in ECR) as an ECS Fargate service behind an internet-facing ALB. Requirements: 2 desired tasks across two AZs in private subnets, an ip target group with an HTTP health check on /healthz, a task that injects a database password from Secrets Manager, distinct task and execution roles, and the service registered to the ALB. Assume VPC, subnets, and the ECR image already exist. Wire the security groups so only the ALB can reach the tasks on 8080.",
+      "hints": [
+        "The target group type must be 'ip' because awsvpc tasks register by ENI private IP, not instance+port.",
+        "Secrets are fetched by the EXECUTION role at launch — grant it secretsmanager:GetSecretValue, not the task role.",
+        "Use aws_ecs_service.load_balancer to bind container_name + container_port to the target group ARN.",
+        "Set health_check_grace_period_seconds so slow-starting tasks aren't killed before they boot.",
+        "Lock the task security group ingress to the ALB security group as the source, not a CIDR."
+      ],
+      "solutionCode": "data \"aws_iam_policy_document\" \"assume\" {\n  statement {\n    actions = [\"sts:AssumeRole\"]\n    principals { type = \"Service\" identifiers = [\"ecs-tasks.amazonaws.com\"] }\n  }\n}\n\nresource \"aws_iam_role\" \"execution\" {\n  name               = \"checkout-execution\"\n  assume_role_policy = data.aws_iam_policy_document.assume.json\n}\nresource \"aws_iam_role_policy_attachment\" \"exec_managed\" {\n  role       = aws_iam_role.execution.name\n  policy_arn = \"arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy\"\n}\nresource \"aws_iam_role_policy\" \"exec_secrets\" {\n  role   = aws_iam_role.execution.id\n  policy = jsonencode({\n    Version = \"2012-10-17\",\n    Statement = [{ Effect = \"Allow\", Action = \"secretsmanager:GetSecretValue\", Resource = var.db_secret_arn }]\n  })\n}\n\nresource \"aws_iam_role\" \"task\" {\n  name               = \"checkout-task\"\n  assume_role_policy = data.aws_iam_policy_document.assume.json\n}\n\nresource \"aws_security_group\" \"alb\" {\n  name = \"checkout-alb\" vpc_id = var.vpc_id\n  ingress { from_port = 443 to_port = 443 protocol = \"tcp\" cidr_blocks = [\"0.0.0.0/0\"] }\n  egress  { from_port = 0 to_port = 0 protocol = \"-1\" cidr_blocks = [\"0.0.0.0/0\"] }\n}\nresource \"aws_security_group\" \"task\" {\n  name = \"checkout-task\" vpc_id = var.vpc_id\n  ingress { from_port = 8080 to_port = 8080 protocol = \"tcp\" security_groups = [aws_security_group.alb.id] }\n  egress  { from_port = 0 to_port = 0 protocol = \"-1\" cidr_blocks = [\"0.0.0.0/0\"] }\n}\n\nresource \"aws_lb\" \"this\" {\n  name = \"checkout-alb\" load_balancer_type = \"application\"\n  subnets = var.public_subnet_ids security_groups = [aws_security_group.alb.id]\n}\nresource \"aws_lb_target_group\" \"this\" {\n  name = \"checkout-tg\" port = 8080 protocol = \"HTTP\" vpc_id = var.vpc_id\n  target_type = \"ip\"\n  health_check { path = \"/healthz\" matcher = \"200\" interval = 15 healthy_threshold = 2 unhealthy_threshold = 3 }\n}\nresource \"aws_lb_listener\" \"https\" {\n  load_balancer_arn = aws_lb.this.arn port = 443 protocol = \"HTTPS\"\n  certificate_arn = var.cert_arn\n  default_action { type = \"forward\" target_group_arn = aws_lb_target_group.this.arn }\n}\n\nresource \"aws_ecs_cluster\" \"this\" { name = \"prod\" }\n\nresource \"aws_ecs_task_definition\" \"this\" {\n  family                   = \"checkout-api\"\n  requires_compatibilities = [\"FARGATE\"]\n  network_mode             = \"awsvpc\"\n  cpu                      = \"512\"\n  memory                   = \"1024\"\n  execution_role_arn       = aws_iam_role.execution.arn\n  task_role_arn            = aws_iam_role.task.arn\n  container_definitions = jsonencode([{\n    name      = \"app\"\n    image     = var.image_uri\n    essential = true\n    portMappings = [{ containerPort = 8080, protocol = \"tcp\" }]\n    secrets   = [{ name = \"DB_PASSWORD\", valueFrom = \"${var.db_secret_arn}:password::\" }]\n    healthCheck = {\n      command  = [\"CMD-SHELL\", \"curl -f http://localhost:8080/healthz || exit 1\"]\n      interval = 15, timeout = 3, retries = 3, startPeriod = 30\n    }\n    logConfiguration = {\n      logDriver = \"awslogs\"\n      options = { \"awslogs-group\" = \"/ecs/checkout-api\", \"awslogs-region\" = var.region, \"awslogs-stream-prefix\" = \"app\" }\n    }\n  }])\n}\n\nresource \"aws_ecs_service\" \"this\" {\n  name            = \"checkout-api\"\n  cluster         = aws_ecs_cluster.this.id\n  task_definition = aws_ecs_task_definition.this.arn\n  desired_count   = 2\n  launch_type     = \"FARGATE\"\n  health_check_grace_period_seconds = 60\n  network_configuration {\n    subnets          = var.private_subnet_ids\n    security_groups  = [aws_security_group.task.id]\n    assign_public_ip = false\n  }\n  load_balancer {\n    target_group_arn = aws_lb_target_group.this.arn\n    container_name   = \"app\"\n    container_port   = 8080\n  }\n  deployment_circuit_breaker { enable = true rollback = true }\n  depends_on = [aws_lb_listener.https]\n}",
+      "solutionLanguage": "hcl",
+      "explanation": "The solution wires every required piece. Two IAM roles are created from the same ecs-tasks.amazonaws.com trust policy but used differently: the execution role gets the managed AmazonECSTaskExecutionRolePolicy (image pull + logs) plus an inline secretsmanager:GetSecretValue on the specific secret ARN, because secret injection happens at launch under the execution role — this is the most common gotcha. The task role is left empty here (the API makes no AWS calls in this minimal example) but exists for least-privilege runtime access. The target group is target_type='ip' because awsvpc tasks register their ENI private IP, not an instance+port. Security groups enforce least privilege: the ALB SG allows 443 from the internet, and the task SG allows 8080 ONLY from the ALB SG (referenced as a source, not a CIDR), so tasks in private subnets are unreachable except through the load balancer. The service binds to the target group via load_balancer with container_name/port, sets a 60s health-check grace period so slow-starting Fargate tasks aren't prematurely killed, and enables the deployment circuit breaker with rollback for safe deploys. assign_public_ip=false keeps tasks private — in a real deployment you'd add VPC endpoints (ecr.api, ecr.dkr, s3, logs, secretsmanager) or a NAT gateway so the task can still pull the image and fetch the secret. The :password:: suffix on the secret ARN extracts a single JSON field from a Secrets Manager secret.",
+      "relatedTopic": "aws-ecs"
+    },
+    {
+      "id": "ch-request-autoscaling",
+      "title": "Configure Request-Based Auto Scaling for an ECS Service",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "prompt": "Write a script (AWS CLI) that configures Application Auto Scaling for the ECS service 'checkout-api' in cluster 'prod'. Requirements: min 3, max 30 tasks; scale on ALBRequestCountPerTarget with a target of 800 requests per task; scale out fast (30s cooldown) and scale in slowly (300s cooldown). Also add a scheduled action that raises min-capacity to 10 every Friday at 17:00 UTC to pre-warm before peak. Explain why request-based scaling beats CPU here.",
+      "hints": [
+        "Register the service as a scalable target on the ecs:service:DesiredCount dimension first.",
+        "The ALBRequestCountPerTarget predefined metric needs a ResourceLabel of the form app/<alb>/<id>/targetgroup/<tg>/<id>.",
+        "Asymmetric cooldowns live inside the target-tracking policy configuration (ScaleOutCooldown vs ScaleInCooldown).",
+        "Scheduled scaling uses put-scheduled-action with a cron() schedule and a ScalableTargetAction min/max.",
+        "Target-tracking and scheduled actions coexist: the schedule sets the floor, target-tracking moves within min/max."
+      ],
+      "solutionCode": "#!/usr/bin/env bash\nset -euo pipefail\n\nRESOURCE_ID=\"service/prod/checkout-api\"\nDIM=\"ecs:service:DesiredCount\"\nNS=\"ecs\"\n# Format: app/<alb-name>/<alb-id>/targetgroup/<tg-name>/<tg-id>\nTG_LABEL=\"app/prod-alb/50dc6c495c0c9188/targetgroup/checkout-tg/73e2d6bc24d8a067\"\n\n# 1. Register the ECS service as a scalable target\naws application-autoscaling register-scalable-target \\\n  --service-namespace \"$NS\" \\\n  --resource-id \"$RESOURCE_ID\" \\\n  --scalable-dimension \"$DIM\" \\\n  --min-capacity 3 \\\n  --max-capacity 30\n\n# 2. Target-tracking policy on ALBRequestCountPerTarget (800 req/task)\naws application-autoscaling put-scaling-policy \\\n  --service-namespace \"$NS\" \\\n  --resource-id \"$RESOURCE_ID\" \\\n  --scalable-dimension \"$DIM\" \\\n  --policy-name \"req-per-target\" \\\n  --policy-type TargetTrackingScaling \\\n  --target-tracking-scaling-policy-configuration \"{\n    \\\"TargetValue\\\": 800.0,\n    \\\"PredefinedMetricSpecification\\\": {\n      \\\"PredefinedMetricType\\\": \\\"ALBRequestCountPerTarget\\\",\n      \\\"ResourceLabel\\\": \\\"$TG_LABEL\\\"\n    },\n    \\\"ScaleOutCooldown\\\": 30,\n    \\\"ScaleInCooldown\\\": 300\n  }\"\n\n# 3. Scheduled pre-warm: raise the floor to 10 every Friday 17:00 UTC\naws application-autoscaling put-scheduled-action \\\n  --service-namespace \"$NS\" \\\n  --resource-id \"$RESOURCE_ID\" \\\n  --scalable-dimension \"$DIM\" \\\n  --scheduled-action-name \"friday-prewarm\" \\\n  --schedule \"cron(0 17 ? * FRI *)\" \\\n  --timezone \"UTC\" \\\n  --scalable-target-action \"MinCapacity=10,MaxCapacity=30\"\n\necho \"Auto scaling configured for $RESOURCE_ID\"",
+      "solutionLanguage": "bash",
+      "explanation": "Step 1 registers the service as a scalable target on the ecs:service:DesiredCount dimension with a 3-30 task envelope — every scaling policy or scheduled action operates within this min/max. Step 2 attaches a target-tracking policy on the ALBRequestCountPerTarget predefined metric; AWS continuously computes the desiredCount needed to hold ~800 requests per task. The ResourceLabel must follow the exact app/<alb>/<id>/targetgroup/<tg>/<id> format so Auto Scaling can locate the right CloudWatch metric. The asymmetric cooldowns are the key production detail: ScaleOutCooldown=30 lets the service react quickly to spikes (absorbing load before latency degrades), while ScaleInCooldown=300 removes capacity slowly to avoid flapping when traffic is noisy. Step 3 adds a scheduled action with a cron() expression that raises MinCapacity to 10 every Friday at 17:00 UTC, pre-warming the service ahead of a known peak so users don't pay the Fargate cold-start penalty during the ramp; target-tracking still scales above 10 as needed because the two mechanisms compose (the schedule sets the floor, target-tracking moves within the envelope). Why request-based over CPU: this is an I/O-bound service whose tasks block on downstream calls rather than burning CPU, so under load CPU stays low and a CPU policy would never fire. Request-per-target tracks actual demand directly, making it the correct bottleneck signal — exactly the failure mode behind many ECS scaling incidents.",
+      "relatedTopic": "aws-ecs"
+    }
+  ],
+  "references": [
+    { "label": "Amazon ECS Developer Guide", "url": "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/Welcome.html" },
+    { "label": "ECS Task Definition Parameters", "url": "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html" },
+    { "label": "Task IAM Role vs Execution Role", "url": "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-iam-roles.html" },
+    { "label": "ECS Service Auto Scaling", "url": "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-auto-scaling.html" },
+    { "label": "AWS Fargate Pricing", "url": "https://aws.amazon.com/fargate/pricing/" },
+    { "label": "ECS Capacity Providers", "url": "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/cluster-capacity-providers.html" }
+  ]
+}

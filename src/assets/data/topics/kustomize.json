@@ -1,0 +1,404 @@
+{
+  "id": "kustomize",
+  "title": "Kustomize",
+  "category": "DevOps",
+  "subcategory": "K8s Packaging",
+  "difficulty": "mid",
+  "tags": ["kubernetes", "kustomize", "gitops", "overlays", "configmap", "patches"],
+  "description": "Master template-free Kubernetes configuration management with Kustomize's base-plus-overlay model, strategic and JSON6902 patches, and generator hashing.",
+  "estReadMinutes": 26,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {"type": "paragraph", "text": "Kustomize is a template-free way to customize Kubernetes manifests. Instead of embedding a templating language into your YAML, you keep plain, valid Kubernetes resources as a 'base' and apply declarative transformations ('overlays') on top of them. Kustomize has been built directly into kubectl since v1.14, so `kubectl apply -k ./overlays/production` works with no extra binary."},
+        {"type": "paragraph", "text": "The core idea: your manifests stay valid YAML that any tool can parse, and the differences between environments (dev, staging, production) live as small, reviewable patches rather than a forest of `{{ if .Values.prod }}` conditionals. A `kustomization.yaml` file drives the build, listing resources, generators, and transformers."},
+        {"type": "callout", "variant": "info", "text": "Kustomize is purely additive and declarative: `kustomize build` reads inputs and emits a final stream of YAML. It never mutates files on disk and never talks to a cluster — that separation makes it ideal for GitOps pipelines."}
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why Kustomize Matters",
+      "kind": "why",
+      "blocks": [
+        {"type": "paragraph", "text": "Multi-environment Kubernetes deployments are where configuration drift and copy-paste errors are born. A team running dev, staging, and three regional production clusters quickly accumulates five near-identical copies of every Deployment, each diverging silently over time. Kustomize solves this by making the base the single source of truth and forcing every environment difference to be an explicit, version-controlled patch."},
+        {"type": "list", "items": [
+          "No new language: manifests remain plain Kubernetes YAML, so kubeval, conftest, IDE schema validation, and `kubectl explain` all keep working.",
+          "Native to kubectl: `kubectl apply -k` and `kubectl kustomize` need no extra install in modern clusters.",
+          "GitOps-first: Argo CD and Flux render Kustomize natively, making it the default packaging tool for declarative delivery.",
+          "Auditable diffs: a reviewer sees exactly which fields differ per environment instead of mentally evaluating template branches.",
+          "Composability: overlays can stack (component layering), and remote bases let you pull shared platform manifests from a Git ref."
+        ]},
+        {"type": "callout", "variant": "success", "text": "The biggest operational win is reviewability. When a production overlay's diff shows only `replicas: 3 -> 10` and a memory limit bump, on-call reviewers can approve in seconds instead of decoding template logic."}
+      ]
+    },
+    {
+      "id": "base-and-overlays",
+      "heading": "Core Concept: Base + Overlays Model",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "A Kustomize project is organized into a base and one or more overlays. The base contains complete, deployable manifests representing the common configuration. Each overlay references the base and layers environment-specific changes on top via patches, name prefixes/suffixes, replica counts, and generators."},
+        {"type": "code", "language": "bash", "code": "app/\n├── base/\n│   ├── kustomization.yaml\n│   ├── deployment.yaml\n│   ├── service.yaml\n│   └── configmap.yaml\n└── overlays/\n    ├── dev/\n    │   ├── kustomization.yaml\n    │   └── replicas-patch.yaml\n    ├── staging/\n    │   ├── kustomization.yaml\n    │   └── resources-patch.yaml\n    └── production/\n        ├── kustomization.yaml\n        ├── replicas-patch.yaml\n        └── hpa.yaml"},
+        {"type": "paragraph", "text": "The base kustomization.yaml simply lists the resources it owns and any transformers that apply everywhere:"},
+        {"type": "code", "language": "yaml", "code": "# base/kustomization.yaml\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\n\nresources:\n  - deployment.yaml\n  - service.yaml\n  - configmap.yaml\n\nlabels:\n  - pairs:\n      app.kubernetes.io/name: checkout\n    includeSelectors: true"},
+        {"type": "callout", "variant": "warning", "text": "Prefer the newer `labels:` field over the legacy `commonLabels:`. `commonLabels` injects labels into selectors AND pod templates unconditionally, which can produce immutable-selector errors when you later add a label. `labels:` with `includeSelectors` lets you control whether selectors are touched."}
+      ]
+    },
+    {
+      "id": "kustomization-file",
+      "heading": "Core Concept: The kustomization.yaml Contract",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Every directory that Kustomize builds must contain a `kustomization.yaml`. It is the manifest of manifests. The most-used fields fall into three buckets: inputs, generators, and transformers."},
+        {"type": "table", "headers": ["Field", "Bucket", "Purpose"], "rows": [
+          ["resources", "input", "List of manifest files or directories (bases) to include"],
+          ["components", "input", "Reusable, parameterized overlay fragments shared across overlays"],
+          ["configMapGenerator", "generator", "Build ConfigMaps from files/literals with a content hash suffix"],
+          ["secretGenerator", "generator", "Build Secrets from files/literals with a content hash suffix"],
+          ["namePrefix / nameSuffix", "transformer", "Prepend/append to all resource names"],
+          ["namespace", "transformer", "Force all resources into one namespace"],
+          ["labels / commonAnnotations", "transformer", "Inject labels/annotations across resources"],
+          ["images", "transformer", "Override image name/tag/digest without editing the Deployment"],
+          ["replicas", "transformer", "Override replica count by resource name"],
+          ["patches", "transformer", "Strategic-merge or JSON6902 patches against matched targets"]
+        ]},
+        {"type": "code", "language": "yaml", "code": "# overlays/staging/kustomization.yaml\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nnamespace: checkout-staging\nnamePrefix: staging-\n\nresources:\n  - ../../base\n\nimages:\n  - name: registry.internal/checkout\n    newTag: 1.42.0\n\nreplicas:\n  - name: checkout\n    count: 2\n\npatches:\n  - path: resources-patch.yaml"},
+        {"type": "callout", "variant": "info", "text": "The `images` transformer is one of the most valuable features for CI: your pipeline can bump just the tag/digest with `kustomize edit set image registry.internal/checkout=registry.internal/checkout@sha256:...` and commit, keeping the Deployment YAML pristine."}
+      ]
+    },
+    {
+      "id": "patches",
+      "heading": "Core Concept: Strategic Merge vs JSON6902 Patches",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Patches are how overlays modify base resources. Kustomize supports two styles, and choosing correctly avoids a lot of pain."},
+        {"type": "heading", "text": "Strategic Merge Patch"},
+        {"type": "paragraph", "text": "A strategic merge patch is a partial Kubernetes resource. You provide just enough identifying fields (apiVersion, kind, metadata.name) plus the fields you want to change. Kustomize merges it into the matching base resource using Kubernetes' strategic-merge semantics, which understand that lists like `containers` are keyed by `name`."},
+        {"type": "code", "language": "yaml", "code": "# overlays/production/resources-patch.yaml\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: checkout\nspec:\n  template:\n    spec:\n      containers:\n        - name: checkout        # the merge key — matches by name\n          resources:\n            requests:\n              cpu: \"500m\"\n              memory: \"512Mi\"\n            limits:\n              memory: \"1Gi\""},
+        {"type": "heading", "text": "JSON6902 Patch"},
+        {"type": "paragraph", "text": "A JSON6902 patch (RFC 6902 JSON Patch) is a precise sequence of operations — add, replace, remove — addressing fields by JSON pointer path. Use it when strategic merge can't express the change: deleting an element, inserting at a list index, or editing a field on a resource type Kustomize has no merge strategy for (most CRDs)."},
+        {"type": "code", "language": "yaml", "code": "# overlays/production/kustomization.yaml (inline JSON6902)\npatches:\n  - target:\n      kind: Deployment\n      name: checkout\n    patch: |-\n      - op: replace\n        path: /spec/template/spec/containers/0/imagePullPolicy\n        value: Always\n      - op: add\n        path: /spec/template/spec/tolerations/-\n        value:\n          key: dedicated\n          operator: Equal\n          value: checkout\n          effect: NoSchedule"},
+        {"type": "callout", "variant": "warning", "text": "JSON6902 paths are positional (containers/0). If someone reorders containers in the base, the patch silently edits the wrong one. Prefer strategic merge (keyed by name) whenever the change is expressible that way."}
+      ]
+    },
+    {
+      "id": "patch-targets",
+      "heading": "Core Concept: Patch Target Matching",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Unified `patches` entries (the modern field, replacing the older `patchesStrategicMerge` and `patchesJson6902`) let you decouple a patch from the resource it modifies using a `target` selector. This is powerful and is also where most surprising bugs live."},
+        {"type": "code", "language": "yaml", "code": "patches:\n  - path: add-sidecar.yaml\n    target:\n      kind: Deployment\n      labelSelector: \"tier=backend\"     # applies to ALL matching Deployments\n      annotationSelector: \"inject=true\"\n      # name, namespace, group, version are also valid matchers"},
+        {"type": "paragraph", "text": "Target matching rules every senior engineer should internalize:"},
+        {"type": "list", "items": [
+          "When you supply a `target`, the patch's own metadata.name is ignored for matching — the target selector decides which resources are patched. This means one patch file can fan out across many resources.",
+          "A patch with a target that matches NOTHING is silently a no-op by default. Set `options.allowNameChange` and related flags carefully, and validate the rendered output in CI.",
+          "When you do NOT supply a target (strategic merge patch with a `path` only), matching is by group/version/kind + name from the patch body itself — and a missing match is an error, which is the safer default.",
+          "namePrefix/nameSuffix transformers run, but patch target name matching uses the ORIGINAL base name, not the prefixed name. Forgetting this is a classic 'why isn't my patch applying' bug."
+        ]},
+        {"type": "callout", "variant": "danger", "text": "The most common production incident: a `target` selector that quietly matches zero resources after a refactor (a label was renamed). The build still succeeds and emits unpatched manifests, so production deploys without the security sidecar or resource limits you thought you added. Always `kustomize build | diff` or run a conftest policy that asserts the expected field exists."}
+      ]
+    },
+    {
+      "id": "generators",
+      "heading": "Core Concept: ConfigMap and Secret Generators with Hash Suffixes",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Generators build ConfigMaps and Secrets from literals, files, or env files. Their defining behavior is the content hash suffix: Kustomize appends a deterministic hash (e.g. `app-config-7d9f8gk2m4`) derived from the content. When the content changes, the name changes, and Kustomize rewrites every reference to that name throughout your manifests."},
+        {"type": "code", "language": "yaml", "code": "configMapGenerator:\n  - name: app-config\n    literals:\n      - LOG_LEVEL=info\n      - FEATURE_X=true\n    files:\n      - application.properties\n\nsecretGenerator:\n  - name: db-credentials\n    envs:\n      - db.env\n    type: Opaque\n\ngeneratorOptions:\n  labels:\n    managed-by: kustomize\n  # disableNameSuffixHash: true   # turns OFF the hash — see warning below"},
+        {"type": "paragraph", "text": "Why the hash matters: a vanilla `kubectl apply` of an updated ConfigMap does NOT restart Pods consuming it as env vars or mounted volumes — Pods keep the stale data until something else triggers a rollout. The hash suffix turns a config change into a new object name, which changes the Deployment's pod spec (the volume/envFrom reference), which triggers a normal rolling update automatically."},
+        {"type": "callout", "variant": "success", "text": "This automatic-rollout-on-config-change is arguably Kustomize's killer feature. It eliminates the entire class of bugs where 'I updated the ConfigMap but the app didn't pick it up.'"},
+        {"type": "callout", "variant": "danger", "text": "Footgun: setting `disableNameSuffixHash: true` (or referencing a generated ConfigMap by its base name from a hand-written Deployment instead of the generator) silently disables the rollout behavior. Pods will run stale config after the next deploy. Only disable the hash when an external controller (or a shared, intentionally-stable name) requires it — and then plan your own rollout trigger."}
+      ]
+    },
+    {
+      "id": "naming-and-labels",
+      "heading": "Core Concept: Name Prefixes, Suffixes, and Common Labels",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Kustomize can systematically rename and label resources, and crucially it propagates those changes through references. If you set `namePrefix: prod-`, a Service named `checkout` becomes `prod-checkout`, and any reference to that Service (in an Ingress backend, a Deployment env var generated from it, etc.) is rewritten too — Kustomize understands the Kubernetes reference graph."},
+        {"type": "table", "headers": ["Transformer", "Effect", "Reference rewriting"], "rows": [
+          ["namePrefix", "Prepends string to metadata.name", "Yes — services, configmaps, secrets refs updated"],
+          ["nameSuffix", "Appends string to metadata.name", "Yes"],
+          ["labels (includeSelectors:true)", "Adds labels to metadata + selectors + pod template", "Selectors updated to match"],
+          ["commonAnnotations", "Adds annotations to metadata only", "N/A (annotations are not selectors)"]
+        ]},
+        {"type": "callout", "variant": "warning", "text": "Adding a label with `includeSelectors: true` to an EXISTING Deployment that is already running will fail to apply, because spec.selector is immutable. For brownfield resources, add labels only to metadata (includeSelectors:false) or roll out via a new Deployment name."}
+      ]
+    },
+    {
+      "id": "helm-vs-kustomize",
+      "heading": "Core Concept: Helm vs Kustomize",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Helm and Kustomize solve overlapping problems with opposite philosophies. Helm is a package manager built on Go templating: charts contain `{{ }}` placeholders filled from a values file, plus release lifecycle management (install/upgrade/rollback, revision history, hooks). Kustomize is a template-free overlay engine: it transforms plain YAML and has no runtime, no release state, and no templating language."},
+        {"type": "table", "headers": ["Dimension", "Helm", "Kustomize"], "rows": [
+          ["Mechanism", "Go templating + values.yaml", "Patch/overlay plain YAML"],
+          ["Source manifests valid YAML?", "No — contains template syntax", "Yes — always parseable"],
+          ["Distribution", "Packaged, versioned charts in repos", "Git directories / remote bases"],
+          ["Release lifecycle", "Yes — revisions, rollback, hooks", "No — stateless render only"],
+          ["Logic / conditionals", "Rich (loops, if, functions)", "None by design"],
+          ["Built into kubectl", "No", "Yes (apply -k)"],
+          ["Best for", "Distributing reusable apps to others", "Customizing manifests you own per env"]
+        ]},
+        {"type": "paragraph", "text": "The pragmatic senior answer is 'both, layered.' A common pattern is to consume third-party software via Helm (you don't own it, you want the maintainer's logic) and then post-render or wrap your own services in Kustomize. Kustomize can even inflate a Helm chart via `helmCharts:` and then patch the rendered output, giving you Helm's distribution plus Kustomize's surgical edits without forking the chart."},
+        {"type": "code", "language": "yaml", "code": "# kustomization.yaml inflating a Helm chart, then patching it\nhelmCharts:\n  - name: redis\n    repo: https://charts.bitnami.com/bitnami\n    version: 18.6.1\n    releaseName: cache\n    valuesInline:\n      auth:\n        enabled: true\n\npatches:\n  - target:\n      kind: StatefulSet\n      name: cache-redis-master\n    patch: |-\n      - op: add\n        path: /spec/template/spec/priorityClassName\n        value: high-priority"},
+        {"type": "callout", "variant": "info", "text": "Running `helmCharts:` requires `kustomize build --enable-helm` (and a local helm binary). Argo CD and Flux both support this flag through their config."}
+      ]
+    },
+    {
+      "id": "three-overlays-example",
+      "heading": "Production Example: One Base, Three Overlays",
+      "kind": "example",
+      "blocks": [
+        {"type": "paragraph", "text": "Scenario: the 'checkout' service runs in dev (1 replica, debug logging, no resource limits), staging (2 replicas, info logging, modest limits, namespaced and name-prefixed), and production (10 replicas via HPA, warn logging, strict limits, pinned image digest, anti-affinity). Here is the base Deployment and the three overlays that differentiate it."},
+        {"type": "code", "language": "yaml", "code": "# base/deployment.yaml\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: checkout\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app.kubernetes.io/name: checkout\n  template:\n    metadata:\n      labels:\n        app.kubernetes.io/name: checkout\n    spec:\n      containers:\n        - name: checkout\n          image: registry.internal/checkout:latest\n          ports:\n            - containerPort: 8080\n          envFrom:\n            - configMapRef:\n                name: app-config"},
+        {"type": "code", "language": "yaml", "code": "# overlays/dev/kustomization.yaml\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nnamespace: checkout-dev\nresources:\n  - ../../base\nconfigMapGenerator:\n  - name: app-config\n    behavior: create\n    literals:\n      - LOG_LEVEL=debug\nimages:\n  - name: registry.internal/checkout\n    newTag: dev-latest"},
+        {"type": "code", "language": "yaml", "code": "# overlays/production/kustomization.yaml\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nnamespace: checkout-prod\nnamePrefix: prod-\nresources:\n  - ../../base\n  - hpa.yaml\nconfigMapGenerator:\n  - name: app-config\n    behavior: create\n    literals:\n      - LOG_LEVEL=warn\nimages:\n  - name: registry.internal/checkout\n    digest: sha256:9b2c7e1f0a4d6b8e3c5a7f9d1b2e4c6a8f0d2b4e6c8a0f2d4b6e8c0a2f4d6b8e\npatches:\n  - path: resources-patch.yaml\n  - target:\n      kind: Deployment\n      name: checkout\n    patch: |-\n      - op: add\n        path: /spec/template/spec/affinity\n        value:\n          podAntiAffinity:\n            preferredDuringSchedulingIgnoredDuringExecution:\n              - weight: 100\n                podAffinityTerm:\n                  topologyKey: kubernetes.io/hostname\n                  labelSelector:\n                    matchLabels:\n                      app.kubernetes.io/name: checkout"},
+        {"type": "paragraph", "text": "Real incident this design prevented: a previous copy-paste setup had production silently running 1 replica because an engineer cloned the dev manifest and forgot to bump replicas. With this layout, replicas-and-HPA only exist in the production overlay, and the base default of 1 is overridden explicitly — the diff makes the intent unmissable in review."},
+        {"type": "code", "language": "bash", "code": "# Render and inspect any environment before applying\nkustomize build overlays/production | kubectl diff -f -\n\n# Apply directly via kubectl\nkubectl apply -k overlays/production\n\n# CI guard: fail the build if prod has no resource limits\nkustomize build overlays/production \\\n  | conftest test -p policy/limits.rego -"}
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {"type": "list", "items": [
+          "Patch target matches zero resources after a label/name refactor — build succeeds, security sidecar or limits silently dropped. Always diff rendered output and gate with policy tests.",
+          "Disabling the generator hash suffix and then wondering why config changes don't restart Pods. Stale config runs until an unrelated rollout happens.",
+          "Referencing a generated ConfigMap by its base name from a hand-written resource instead of letting the generator rewrite the reference — the hash suffix never reaches the consumer, breaking auto-rollout.",
+          "Using legacy `commonLabels` and later adding a label, hitting immutable-selector apply failures on existing Deployments.",
+          "JSON6902 patches addressing containers/0 break silently when the base reorders containers; the wrong container gets edited.",
+          "Overusing overlays to express logic that really wants Helm conditionals — deeply nested patches that are harder to read than templates would have been.",
+          "Forgetting that `namePrefix` rewrites references, then hardcoding the prefixed name somewhere external (an Ingress in another repo) that does not get rewritten."
+        ]},
+        {"type": "callout", "variant": "danger", "text": "Postmortem pattern: a team set `disableNameSuffixHash: true` to keep a stable ConfigMap name for an external operator. Months later a feature-flag change to that ConfigMap deployed cleanly but never took effect in production because no Pod restarted. The fix was a deliberate `kubectl rollout restart` in the pipeline plus a checksum annotation on the pod template to restore the auto-rollout signal."}
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {"type": "list", "items": [
+          "Keep the base fully deployable on its own — it should apply to a sandbox without any overlay. This keeps it honest and testable.",
+          "Make every environment difference an explicit patch; never fork the base. If two overlays share a difference, promote it to a reusable Component.",
+          "Prefer strategic merge patches (keyed by name) over positional JSON6902; reserve JSON6902 for deletes, list inserts, and CRDs.",
+          "Let generators own ConfigMaps/Secrets and keep the hash suffix ON so config changes trigger rollouts automatically.",
+          "Pin images by digest in production via the `images` transformer; let CI run `kustomize edit set image` so Deployment YAML stays untouched.",
+          "Use the newer `labels` field with explicit `includeSelectors` instead of legacy `commonLabels`/`commonAnnotations` aliases.",
+          "Gate every overlay in CI: `kustomize build | kubeconform` for schema, `| conftest` for policy (limits set, no :latest in prod, no privileged).",
+          "Render and store the final YAML diff in pull requests so reviewers approve the actual cluster delta, not the inputs."
+        ]},
+        {"type": "callout", "variant": "success", "text": "A mature pipeline treats `kustomize build` output as a build artifact: render, validate, diff against the live cluster, and only then apply (or hand off to Argo CD/Flux for continuous reconciliation)."}
+      ]
+    },
+    {
+      "id": "gitops-note",
+      "heading": "Note: Kustomize in GitOps",
+      "kind": "note",
+      "blocks": [
+        {"type": "paragraph", "text": "Both Argo CD and Flux render Kustomize natively. In Argo CD an Application points at a path containing a kustomization.yaml; Argo runs the build internally and reconciles the result. This is why Kustomize is the de facto packaging tool for GitOps: the Git repository IS the desired state, and overlays map cleanly to clusters/environments."},
+        {"type": "callout", "variant": "info", "text": "When using `helmCharts:` or remote bases under Argo CD or Flux, you must enable the corresponding build options (e.g. `--enable-helm`) in the controller's repo-server configuration, otherwise the render fails with a disabled-plugin error."}
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "base-overlay-flow",
+      "title": "Base + Overlays Build Flow",
+      "type": "mermaid",
+      "content": "flowchart TD\n  Base[Base manifests deployment service configmap] --> Build{kustomize build}\n  Dev[Dev overlay] --> Build\n  Stg[Staging overlay] --> Build\n  Prod[Prod overlay] --> Build\n  Build --> OutDev[Rendered dev YAML]\n  Build --> OutStg[Rendered staging YAML]\n  Build --> OutProd[Rendered prod YAML]\n  OutDev --> Cluster1[Dev cluster]\n  OutStg --> Cluster2[Staging cluster]\n  OutProd --> Cluster3[Prod cluster]"
+    },
+    {
+      "id": "generator-rollout-seq",
+      "title": "ConfigMap Hash Suffix Triggering a Rollout",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n  participant Dev as Engineer\n  participant K as kustomize build\n  participant API as Kube API\n  participant RS as ReplicaSet\n  Dev->>K: Change LOG_LEVEL in generator\n  K->>K: Recompute content hash\n  K->>K: Rename app-config to app-config-NEWHASH\n  K->>K: Rewrite Deployment envFrom reference\n  K->>API: apply Deployment with new pod spec\n  API->>RS: Pod template changed\n  RS->>RS: Rolling update new Pods\n  Note over RS: Pods now read fresh config"
+    },
+    {
+      "id": "cicd-pipeline-ascii",
+      "title": "Kustomize CI/CD Validation Pipeline",
+      "type": "ascii",
+      "content": "+-----------+    +------------------+    +-------------+    +-----------+    +-----------+\n|  git push | -> | kustomize build  | -> | kubeconform | -> | conftest  | -> | kubectl   |\n|  overlay  |    | overlays/prod    |    | schema chk  |    | policy    |    | apply -k  |\n+-----------+    +------------------+    +-------------+    +-----------+    +-----------+\n                         |                      |                 |               |\n                         v                      v                 v               v\n                   rendered YAML          fail on bad        fail if no       reconcile to\n                   artifact               apiVersion         limits / :latest  cluster"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-what-is-kustomize",
+      "question": "What is Kustomize and how does it differ fundamentally from a templating tool?",
+      "answer": "Kustomize is a template-free configuration management tool for Kubernetes. It keeps manifests as plain, valid YAML (the base) and applies declarative transformations and patches (overlays) to produce environment-specific output. Unlike templating tools, it introduces no new language — there are no placeholders or conditionals in the source. It is built into kubectl (apply -k) and runs as a pure render step that reads inputs and emits final YAML without touching the cluster.",
+      "difficulty": "junior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["kustomize", "basics"],
+      "followUps": ["Why is keeping manifests as valid YAML an advantage?", "What command builds a Kustomize overlay?"]
+    },
+    {
+      "id": "q-base-overlay",
+      "question": "Explain the base + overlay model and how an overlay references a base.",
+      "answer": "The base contains complete, deployable manifests representing common configuration plus a kustomization.yaml listing those resources. An overlay is a directory with its own kustomization.yaml that includes the base via `resources: [../../base]` (a relative path or remote ref) and then layers changes: patches, namePrefix/nameSuffix, namespace, replicas, images, and generators. Overlays can stack, and a base can itself reference other bases, allowing composition.",
+      "difficulty": "junior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["overlays", "base"],
+      "followUps": ["Can a base be deployed on its own?", "How do you share a difference between two overlays?"]
+    },
+    {
+      "id": "q-strategic-vs-json6902",
+      "question": "When would you choose a JSON6902 patch over a strategic merge patch?",
+      "answer": "Use a strategic merge patch by default — it's a partial resource merged with Kubernetes-aware list semantics (e.g. containers keyed by name), so it's readable and resilient to reordering. Choose JSON6902 when the change can't be expressed by merge: removing a list element, inserting at a specific index, or editing a CRD that has no registered merge strategy (strategic merge falls back to replacing whole lists for unknown types). JSON6902 gives precise add/replace/remove operations addressed by JSON pointer.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["patches", "json6902"],
+      "followUps": ["What is the risk of JSON6902 positional paths?", "How does strategic merge know to merge containers by name?"]
+    },
+    {
+      "id": "q-generator-hash",
+      "question": "Why do configMapGenerator and secretGenerator append a hash suffix to names?",
+      "answer": "The hash is computed from the generated content, so any change to the ConfigMap/Secret produces a new name (e.g. app-config-7d9f8gk2m4). Kustomize rewrites all references to that name throughout the manifests, so the consuming Deployment's pod spec changes, which triggers a normal rolling update. This solves the classic problem that a plain `kubectl apply` of an updated ConfigMap does not restart Pods consuming it — they would otherwise keep stale config.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["generators", "rollout"],
+      "followUps": ["What happens if you set disableNameSuffixHash: true?", "Does this work if you reference the ConfigMap from a hand-written Deployment?"]
+    },
+    {
+      "id": "q-helm-vs-kustomize",
+      "question": "Compare Helm and Kustomize. When would you use each, or both together?",
+      "answer": "Helm is a package manager using Go templating plus values files, with release lifecycle (install/upgrade/rollback, revisions, hooks) — ideal for distributing reusable applications to others. Kustomize is a stateless, template-free overlay engine that patches plain YAML — ideal for customizing manifests you own across environments. Use both layered: consume third-party software via Helm (you want the maintainer's logic) and wrap or post-render with Kustomize for your edits. Kustomize can even inflate a chart via helmCharts: and patch the rendered output, avoiding a fork.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["helm", "comparison"],
+      "followUps": ["What flag enables helmCharts in kustomize build?", "Why might deeply nested overlays be a sign you wanted Helm?"]
+    },
+    {
+      "id": "q-images-transformer",
+      "question": "How do you update a container image tag across an environment without editing the Deployment?",
+      "answer": "Use the `images` transformer in the overlay's kustomization.yaml: match by the original image name and supply newName, newTag, or digest. In CI, run `kustomize edit set image registry.internal/checkout=registry.internal/checkout@sha256:...` to update it programmatically and commit. The base Deployment YAML stays pristine, and production can be pinned by digest while dev uses a moving tag.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["images", "ci"],
+      "followUps": ["Why pin by digest in production?", "How does this fit a GitOps promotion flow?"]
+    },
+    {
+      "id": "q-labels-field",
+      "question": "What is the difference between the legacy commonLabels and the newer labels field?",
+      "answer": "commonLabels injects labels into resource metadata, pod templates, AND selectors unconditionally. Because spec.selector is immutable, adding a label later can break `apply` on existing Deployments. The newer `labels:` field lets you specify `includeSelectors: true|false`, so you can add labels to metadata and pod templates without touching immutable selectors. Best practice is to use `labels` with explicit selector control.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["labels", "selectors"],
+      "followUps": ["Why is spec.selector immutable?", "How do you add a label to an existing Deployment safely?"]
+    },
+    {
+      "id": "q-components",
+      "question": "What are Kustomize Components and when are they useful?",
+      "answer": "Components (kind: Component) are reusable, optional overlay fragments that can be included by multiple kustomizations via the `components:` field. Unlike a base, a component is designed to be layered onto an existing set of resources and can itself add resources, patches, and generators. They are ideal for opt-in features shared across environments — for example a 'monitoring' component that adds a ServiceMonitor and sidecar, pulled into staging and production but not dev.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["components", "reuse"],
+      "followUps": ["How does a component differ from a base?", "Can components be conditionally included?"]
+    },
+    {
+      "id": "q-tricky-patch-target",
+      "question": "Tricky: A patch with a target selector silently stops applying after a refactor, yet the build succeeds. What happened and how do you prevent it?",
+      "answer": "Patches that use a `target` selector (e.g. labelSelector or name) are matched against the rendered resources. If a refactor renames the label or resource, the selector matches zero resources and the patch becomes a silent no-op — kustomize build still succeeds and emits unpatched manifests. (By contrast, a strategic-merge patch with only a `path` and no target errors when its name doesn't match.) Prevention: render and diff the output in CI, and add policy tests (conftest/OPA) that assert the patched field exists — e.g. fail if any prod Deployment lacks resource limits or the security sidecar the patch was supposed to add.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": ["patches", "gotcha", "ci"],
+      "followUps": ["Why does a targeted patch no-op while an untargeted one errors?", "What CI check catches this?"]
+    },
+    {
+      "id": "q-tricky-stale-config",
+      "question": "Tricky: You updated a ConfigMap's value and deployed, but the app still runs old config. Kustomize is involved. What likely went wrong?",
+      "answer": "Most likely the hash suffix was disabled (disableNameSuffixHash: true) or the Deployment references the ConfigMap by a fixed base name rather than the generated, hash-suffixed name. Without the changing name, the Deployment's pod spec is unchanged, so no rolling update occurs and Pods keep the old config mounted/env. The fix is to keep the generator hash on (let Kustomize rewrite the reference), or if a stable name is required, add a deliberate rollout trigger such as a checksum annotation on the pod template or a `kubectl rollout restart` in the pipeline.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": ["generators", "gotcha", "rollout"],
+      "followUps": ["Why might someone disable the hash suffix?", "How does a checksum annotation restore rollout-on-change?"]
+    },
+    {
+      "id": "q-tricky-json6902-index",
+      "question": "Tricky: A JSON6902 patch that sets imagePullPolicy on containers/0 starts editing the wrong container after an unrelated change. Why?",
+      "answer": "JSON6902 paths are positional. `/spec/template/spec/containers/0` addresses the first container by index, not by name. If someone adds a sidecar at position 0 or reorders the base's container list, the patch now targets a different container — silently. Strategic merge patches avoid this because Kubernetes treats the containers list as keyed by `name`, so the merge targets the right container regardless of order. Prefer strategic merge for any change expressible that way; reserve JSON6902 for operations strategic merge can't do.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": ["json6902", "gotcha", "patches"],
+      "followUps": ["How does strategic merge identify list elements?", "When is positional addressing unavoidable?"]
+    },
+    {
+      "id": "q-tricky-prefix-references",
+      "question": "Tricky: After adding namePrefix: prod-, an Ingress in a separate repo can no longer reach your Service. Why?",
+      "answer": "namePrefix renames resources AND rewrites references that Kustomize knows about within the same build (Service backends inside this kustomization, configMap/secret refs, etc.). But Kustomize cannot rewrite references that live outside its build graph — like an Ingress defined in another repository or another kustomization that hardcodes the Service name `checkout`. After prefixing, the Service is `prod-checkout`, and the external Ingress still points at `checkout`, which no longer exists. Either bring that reference into the same Kustomize build or avoid prefixing resources that external systems address by name.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": ["namePrefix", "gotcha", "references"],
+      "followUps": ["Which references does Kustomize rewrite automatically?", "How would you make the cross-repo reference resilient?"]
+    },
+    {
+      "id": "q-apply-k",
+      "question": "What does kubectl apply -k do, and how does it relate to kustomize build?",
+      "answer": "`kubectl apply -k <dir>` runs Kustomize's build internally on the directory (which must contain a kustomization.yaml), producing the rendered YAML, and then applies that stream to the cluster — equivalent to `kustomize build <dir> | kubectl apply -f -`. `kubectl kustomize <dir>` renders without applying. The standalone `kustomize` CLI may be newer than the version embedded in kubectl, so for advanced features pipe the standalone binary's output into kubectl.",
+      "difficulty": "junior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["kubectl", "build"],
+      "followUps": ["Why might the embedded kustomize lag the standalone CLI?", "How do you render without applying?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-three-overlays",
+      "title": "Build a Base with Dev and Production Overlays",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "prompt": "Create a Kustomize project for a service called 'api'. The base has a Deployment (1 replica, image registry.internal/api:latest, port 8080) and a Service. Add a dev overlay (namespace api-dev, 1 replica, LOG_LEVEL=debug via a generated ConfigMap consumed with envFrom) and a production overlay (namespace api-prod, namePrefix prod-, 5 replicas, image pinned by tag 2.0.0, LOG_LEVEL=warn, and resource requests/limits added via a strategic merge patch). Provide all kustomization.yaml and manifest files.",
+      "hints": [
+        "Put deployment.yaml, service.yaml, and kustomization.yaml in base/. List both manifests under resources.",
+        "Reference the base from each overlay with resources: [../../base].",
+        "Use configMapGenerator for LOG_LEVEL so the hash suffix triggers rollouts, and have the Deployment use envFrom configMapRef name: api-config.",
+        "Use the replicas: and images: transformers in production; use a strategic merge patch keyed by container name: api for resources."
+      ],
+      "solutionCode": "# base/deployment.yaml\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app.kubernetes.io/name: api\n  template:\n    metadata:\n      labels:\n        app.kubernetes.io/name: api\n    spec:\n      containers:\n        - name: api\n          image: registry.internal/api:latest\n          ports:\n            - containerPort: 8080\n          envFrom:\n            - configMapRef:\n                name: api-config\n---\n# base/service.yaml\napiVersion: v1\nkind: Service\nmetadata:\n  name: api\nspec:\n  selector:\n    app.kubernetes.io/name: api\n  ports:\n    - port: 80\n      targetPort: 8080\n---\n# base/kustomization.yaml\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - deployment.yaml\n  - service.yaml\n---\n# overlays/dev/kustomization.yaml\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nnamespace: api-dev\nresources:\n  - ../../base\nconfigMapGenerator:\n  - name: api-config\n    literals:\n      - LOG_LEVEL=debug\n---\n# overlays/production/kustomization.yaml\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nnamespace: api-prod\nnamePrefix: prod-\nresources:\n  - ../../base\nconfigMapGenerator:\n  - name: api-config\n    literals:\n      - LOG_LEVEL=warn\nimages:\n  - name: registry.internal/api\n    newTag: \"2.0.0\"\nreplicas:\n  - name: api\n    count: 5\npatches:\n  - path: resources-patch.yaml\n---\n# overlays/production/resources-patch.yaml\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\nspec:\n  template:\n    spec:\n      containers:\n        - name: api\n          resources:\n            requests:\n              cpu: \"250m\"\n              memory: \"256Mi\"\n            limits:\n              cpu: \"1\"\n              memory: \"512Mi\"",
+      "solutionLanguage": "yaml",
+      "explanation": "The base holds complete, deployable manifests and a kustomization listing them. Each overlay references the base via a relative path. Dev only changes namespace and the generated ConfigMap (LOG_LEVEL=debug); because the Deployment consumes it via envFrom configMapRef name: api-config, the generator rewrites that reference to the hash-suffixed name, so any future LOG_LEVEL change auto-triggers a rollout. Production adds namespace, a prod- name prefix (which also rewrites the Service reference if anything pointed at it), pins the image with the images transformer instead of editing the Deployment, sets 5 replicas via the replicas transformer, and applies a strategic merge patch keyed by container name 'api' to add resource requests/limits. The patch matches by name (not index), so it survives container reordering. Validate with `kustomize build overlays/production` and confirm the ConfigMap name carries a hash, the image is api:2.0.0, replicas is 5, and limits are present.",
+      "relatedTopic": "kustomize"
+    },
+    {
+      "id": "ch-add-sidecar-component",
+      "title": "Inject a Logging Sidecar via a Targeted Patch and Component",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "prompt": "You must add a fluent-bit logging sidecar to every Deployment labeled tier=backend, but only in staging and production, not dev. The sidecar should be defined once and reused. Implement this as a Kustomize Component containing a patch that targets by labelSelector, and show how staging includes it. Also explain why a labelSelector target is risky and how you'd guard it in CI.",
+      "hints": [
+        "Create components/logging-sidecar/kustomization.yaml with kind: Component.",
+        "Use patches with a target labelSelector: tier=backend and a strategic merge patch that adds the sidecar container.",
+        "Strategic merge appends a container when its name is new; the merge key for containers is name.",
+        "In the staging overlay add components: [../../components/logging-sidecar]. Dev simply omits it.",
+        "Guard against zero-match targets with a conftest/OPA policy asserting the fluent-bit container exists in matched Deployments."
+      ],
+      "solutionCode": "# components/logging-sidecar/kustomization.yaml\napiVersion: kustomize.config.k8s.io/v1alpha1\nkind: Component\npatches:\n  - target:\n      kind: Deployment\n      labelSelector: \"tier=backend\"\n    patch: |-\n      apiVersion: apps/v1\n      kind: Deployment\n      metadata:\n        name: ignored-when-target-is-set\n      spec:\n        template:\n          spec:\n            containers:\n              - name: fluent-bit\n                image: cr.fluentbit.io/fluent/fluent-bit:3.0\n                resources:\n                  requests:\n                    cpu: \"50m\"\n                    memory: \"64Mi\"\n                  limits:\n                    memory: \"128Mi\"\n                volumeMounts:\n                  - name: varlog\n                    mountPath: /var/log\n            volumes:\n              - name: varlog\n                emptyDir: {}\n---\n# overlays/staging/kustomization.yaml\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nnamespace: api-staging\nresources:\n  - ../../base\ncomponents:\n  - ../../components/logging-sidecar\n---\n# overlays/dev/kustomization.yaml  (no component -> no sidecar)\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nnamespace: api-dev\nresources:\n  - ../../base\n---\n# policy/sidecar.rego  (conftest guard)\npackage main\n\ndeny[msg] {\n  input.kind == \"Deployment\"\n  input.metadata.labels.tier == \"backend\"\n  not has_fluentbit\n  msg := sprintf(\"Deployment %s is tier=backend but missing fluent-bit sidecar\", [input.metadata.name])\n}\n\nhas_fluentbit {\n  some i\n  input.spec.template.spec.containers[i].name == \"fluent-bit\"\n}",
+      "solutionLanguage": "yaml",
+      "explanation": "A Component (kind: Component, v1alpha1) is an opt-in overlay fragment that other kustomizations pull in via the components field. Here the component carries a strategic merge patch whose target is a labelSelector tier=backend, so a single definition fans out to every matching backend Deployment. Because the containers list merges by name, the new fluent-bit container is appended rather than replacing existing containers, and the emptyDir volume is merged in too. The patch body's metadata.name is ignored because a target is set — matching is driven by the selector. Dev simply omits the component, so it gets no sidecar; staging and production include it. The risk: a labelSelector that matches zero resources (someone renames the label) is a silent no-op — kustomize build succeeds and emits Deployments with no sidecar. The conftest/OPA policy closes that gap by failing CI whenever a tier=backend Deployment lacks a fluent-bit container, so the misconfiguration is caught before deploy instead of in production. Run it as `kustomize build overlays/staging | conftest test -p policy -`.",
+      "relatedTopic": "kustomize"
+    }
+  ],
+  "references": [
+    {"label": "Kustomize Official Documentation", "url": "https://kubectl.docs.kubernetes.io/references/kustomize/"},
+    {"label": "Kustomize GitHub Repository", "url": "https://github.com/kubernetes-sigs/kustomize"},
+    {"label": "Declarative Management of Kubernetes Objects Using Kustomize", "url": "https://kubernetes.io/docs/tasks/manage-kubernetes-objects/kustomization/"},
+    {"label": "Argo CD Kustomize Support", "url": "https://argo-cd.readthedocs.io/en/stable/user-guide/kustomize/"},
+    {"label": "RFC 6902 JSON Patch", "url": "https://datatracker.ietf.org/doc/html/rfc6902"}
+  ]
+}

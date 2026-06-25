@@ -1,0 +1,413 @@
+{
+  "id": "web-security-owasp",
+  "title": "Web Security (OWASP)",
+  "category": "Engineering",
+  "subcategory": "Security",
+  "difficulty": "senior",
+  "tags": ["owasp", "security", "xss", "sql-injection", "ssrf", "csp", "authentication", "access-control"],
+  "description": "A staff-engineer's guide to the OWASP Top 10 — understanding the real attack mechanics behind injection, broken access control, SSRF, and cryptographic failures, and the defenses that actually hold up in production.",
+  "estReadMinutes": 30,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction: What OWASP Actually Is",
+      "kind": "intro",
+      "blocks": [
+        {"type": "paragraph", "text": "The OWASP Top 10 is a periodically-updated, community-driven awareness document published by the Open Worldwide Application Security Project. It is not a checklist, a compliance standard, or an exhaustive taxonomy of vulnerabilities — it is a ranked list of the broad categories of risk that cause the most damage in real web applications, derived from data contributed across hundreds of organizations plus an industry survey."},
+        {"type": "paragraph", "text": "The 2021 edition is structured around risk categories rather than individual bugs. For example, 'A03: Injection' folds in SQL injection, NoSQL injection, OS command injection, and cross-site scripting (XSS), because they share the same root cause: untrusted data being interpreted as code or markup. Understanding the root cause is what separates a senior engineer from someone who memorizes a list of 'don'ts'."},
+        {"type": "list", "items": [
+          "A01 — Broken Access Control (moved to #1; the most common serious flaw)",
+          "A02 — Cryptographic Failures (formerly 'Sensitive Data Exposure')",
+          "A03 — Injection (now includes XSS)",
+          "A04 — Insecure Design (new category — flaws in the design, not the code)",
+          "A05 — Security Misconfiguration",
+          "A06 — Vulnerable and Outdated Components",
+          "A07 — Identification and Authentication Failures",
+          "A08 — Software and Data Integrity Failures (supply chain, insecure deserialization)",
+          "A09 — Security Logging and Monitoring Failures",
+          "A10 — Server-Side Request Forgery (SSRF)"
+        ]},
+        {"type": "callout", "variant": "info", "text": "OWASP also publishes the ASVS (Application Security Verification Standard) and Cheat Sheet Series — those are the 'how to fix it precisely' references. The Top 10 is the 'what to worry about' map."}
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {"type": "paragraph", "text": "Security defects are uniquely expensive because their cost is asymmetric and deferred. A logic bug ships, gets noticed by a user, and gets a ticket. A security bug ships, gets noticed by an attacker, and you find out via a breach notification, a regulator, or a researcher's bug bounty report — often months later, after the data is already exfiltrated."},
+        {"type": "list", "items": [
+          "Breach economics: the average cost of a data breach runs into the millions once you account for incident response, forensics, customer notification, legal exposure, and churn — far more than the engineering cost of preventing it.",
+          "Regulatory teeth: GDPR fines reach up to 4% of global annual revenue; HIPAA, PCI-DSS, and SOC 2 all map controls directly onto OWASP categories.",
+          "Trust is non-recoverable: a single credential-stuffing breach or stored-XSS worm can permanently damage a product's reputation.",
+          "Shift-left is cheaper: a vulnerability caught in code review costs minutes; the same bug caught in production costs an incident bridge, a postmortem, and possibly disclosure."
+        ]},
+        {"type": "paragraph", "text": "As a senior engineer you own this. Security is not a separate team's job that bolts on at the end — it is a property of the design and the code you write, the same way correctness and performance are. The most valuable thing you bring is the instinct to ask 'where does untrusted input enter, and what does it get to control?' on every feature."}
+      ]
+    },
+    {
+      "id": "trust-boundaries",
+      "heading": "Core Concept: Trust Boundaries and the Confused Deputy",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Almost every entry in the Top 10 is a specific instance of one general failure: data crosses a trust boundary without being re-validated or re-encoded for the context it lands in. A trust boundary is any line where data moves from a less-trusted zone (the browser, a third-party API, a query parameter) into a more-trusted one (your database, your shell, another user's browser, your cloud control plane)."},
+        {"type": "heading", "text": "The two foundational defenses"},
+        {"type": "list", "items": [
+          "Input validation: reject data that doesn't match an expected shape AT the boundary it enters. This is allow-listing (positive validation) — 'a username is 3-32 chars of [a-z0-9_]' — not deny-listing dangerous characters, which always leaks.",
+          "Context-aware output encoding: transform data to be inert FOR the specific interpreter that will consume it, AT the boundary it exits. The same string is encoded differently for HTML body, HTML attribute, JavaScript, URL, and SQL contexts."
+        ]},
+        {"type": "callout", "variant": "warning", "text": "A common senior-level mistake is treating validation as a substitute for encoding. They solve different problems. Validation reduces the attack surface; encoding neutralizes whatever gets through. You need both, applied at the right boundaries."},
+        {"type": "paragraph", "text": "The 'confused deputy' framing explains injection and SSRF cleanly: your server is a privileged deputy. An attacker can't reach your database or the cloud metadata endpoint directly, but they can trick your trusted server into doing it on their behalf by smuggling control characters or URLs through input the server then acts on."}
+      ]
+    },
+    {
+      "id": "injection",
+      "heading": "Core Concept: Injection (SQLi, Command, XSS)",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Injection occurs whenever a string built partly from untrusted input is handed to an interpreter (SQL engine, OS shell, HTML parser) that cannot tell the difference between the code you intended and the data the attacker supplied. The fix is structural: keep the code and the data on separate channels so the interpreter never has to guess."},
+        {"type": "heading", "text": "SQL Injection — use parameterized queries, always"},
+        {"type": "paragraph", "text": "String concatenation is the disease; parameterized queries (prepared statements) are the cure. With parameters, the query template is compiled first and the values are bound separately — the value 'Robert'); DROP TABLE students;--' can never escape the data channel because the engine already knows the SQL structure."},
+        {"type": "code", "language": "typescript", "code": "// VULNERABLE — string concatenation\nconst q = `SELECT * FROM users WHERE email = '${email}'`;\nawait db.query(q); // email = \"' OR '1'='1\" returns every row\n\n// SAFE — parameterized query, value travels on a separate channel\nawait db.query(\n  'SELECT * FROM users WHERE email = $1',\n  [email]\n);\n\n// SAFE — identifiers can't be parameterized, so allow-list them\nconst ALLOWED_SORT = { name: 'name', created: 'created_at' } as const;\nconst col = ALLOWED_SORT[sortKey] ?? 'created_at';\nawait db.query(`SELECT * FROM users ORDER BY ${col} LIMIT $1`, [limit]);"},
+        {"type": "callout", "variant": "danger", "text": "ORMs are NOT automatically safe. Raw query escape hatches (knex.raw, sequelize.literal, JPA native queries, repository.query) re-open the door. Column/table names cannot be bound as parameters — those MUST be allow-listed against a fixed map, never interpolated from user input."},
+        {"type": "heading", "text": "OS Command Injection — avoid the shell"},
+        {"type": "code", "language": "typescript", "code": "import { execFile } from 'node:child_process';\n\n// VULNERABLE — exec() spawns a shell; metacharacters are interpreted\n// exec(`convert ${userFile} out.png`)  ->  userFile = 'a.png; rm -rf /'\n\n// SAFE — execFile passes args as an array; no shell, no metachar parsing\nexecFile('convert', [userFile, 'out.png'], (err) => { /* ... */ });"},
+        {"type": "heading", "text": "XSS — context-aware output encoding + CSP"},
+        {"type": "paragraph", "text": "XSS is injection into the HTML/JS interpreter running in another user's browser. The defense is encoding output for its destination context and never feeding untrusted strings to dangerous DOM sinks. Modern frameworks (React, Angular, Vue) auto-escape interpolated text — the danger is the escape hatches: dangerouslySetInnerHTML, v-html, [innerHTML], and bypassSecurityTrust*."},
+        {"type": "code", "language": "typescript", "code": "// VULNERABLE — raw HTML sink\nelement.innerHTML = userBio; // <img src=x onerror=alert(document.cookie)>\n\n// SAFE — textContent treats input as text, never markup\nelement.textContent = userBio;\n\n// If you MUST render user HTML, sanitize with an allow-list library\nimport DOMPurify from 'dompurify';\nelement.innerHTML = DOMPurify.sanitize(userBio);"}
+      ]
+    },
+    {
+      "id": "access-control",
+      "heading": "Core Concept: Broken Access Control (A01)",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Access control is enforcing that an authenticated user can only do what their policy permits. It is the #1 category because it is invisible to functional testing — the feature works perfectly for the developer, who has access to everything. The classic flavor is IDOR (Insecure Direct Object Reference): the server trusts an ID in the request without checking that the caller owns the referenced object."},
+        {"type": "code", "language": "typescript", "code": "// VULNERABLE — IDOR. Any logged-in user can read any invoice by ID.\napp.get('/invoices/:id', auth, async (req, res) => {\n  const inv = await db.invoice.findById(req.params.id);\n  res.json(inv);\n});\n\n// SAFE — scope every query by the authenticated principal\napp.get('/invoices/:id', auth, async (req, res) => {\n  const inv = await db.invoice.findOne({\n    id: req.params.id,\n    ownerId: req.user.id,        // ownership check in the query itself\n  });\n  if (!inv) return res.sendStatus(404); // 404, not 403, to avoid leaking existence\n  res.json(inv);\n});"},
+        {"type": "list", "items": [
+          "Deny by default: every route requires an explicit grant. New endpoints should be inaccessible until access is consciously added.",
+          "Enforce on the server, every time: client-side hiding of a button is UX, not security. Never trust a role claim the client could forge.",
+          "Check ownership in the data layer: bake the tenant/owner filter into the query so you can't forget it in a handler.",
+          "Principle of least privilege: the DB user the app connects with should not be a superuser; service accounts get the narrowest IAM scope that works."
+        ]},
+        {"type": "callout", "variant": "warning", "text": "Returning 403 for an object that exists but you can't see still leaks that the object exists (an enumeration oracle). For sensitive resources, return 404 uniformly whether the object is missing or merely forbidden."}
+      ]
+    },
+    {
+      "id": "crypto-auth",
+      "heading": "Core Concept: Cryptographic & Authentication Failures (A02, A07)",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Cryptographic failures are usually not broken algorithms — they are misuse: data in transit without TLS, secrets in source control, passwords stored with fast or reversible hashing, weak randomness for tokens, or hand-rolled crypto. The rule is: don't invent it, use vetted primitives correctly."},
+        {"type": "table", "headers": ["Concern", "Wrong", "Right"], "rows": [
+          ["Password storage", "MD5/SHA-256, or encryption", "argon2id (or bcrypt/scrypt) with per-user salt — slow, memory-hard, one-way"],
+          ["Token generation", "Math.random()", "crypto.randomBytes / a CSPRNG"],
+          ["Data in transit", "Plain HTTP, mixed content", "TLS 1.2+ everywhere, HSTS"],
+          ["Secrets", "Hardcoded / in .env in git", "Secret manager (Vault, AWS Secrets Manager, KMS-backed)"],
+          ["Comparing secrets", "a === b (timing leak)", "crypto.timingSafeEqual"]
+        ]},
+        {"type": "code", "language": "typescript", "code": "import argon2 from 'argon2';\n\n// Registration: hash, never store the plaintext\nconst hash = await argon2.hash(password, { type: argon2.argon2id });\n\n// Login: verify is constant-time and re-derives with the embedded params\nconst ok = await argon2.verify(hash, attempt);"},
+        {"type": "paragraph", "text": "Authentication failures (A07) cover credential stuffing, weak password policies, missing MFA, and broken session management. Senior-level controls: rate-limit and lock out on repeated failures, support MFA, invalidate sessions server-side on logout and password change, use HttpOnly + Secure + SameSite cookies for session tokens, and rotate session IDs on privilege change to prevent session fixation."},
+        {"type": "callout", "variant": "danger", "text": "Storing JWTs in localStorage makes them readable by any XSS payload. Prefer HttpOnly cookies for session tokens so script can't exfiltrate them; pair with anti-CSRF (SameSite=Lax/Strict or a CSRF token)."}
+      ]
+    },
+    {
+      "id": "ssrf-misconfig",
+      "heading": "Core Concept: SSRF, Misconfiguration & Vulnerable Components (A10, A05, A06)",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Server-Side Request Forgery (A10) is the confused-deputy attack on outbound requests. If your server fetches a URL the user controls (webhooks, image proxies, link previews, PDF renderers, 'import from URL'), an attacker supplies an internal URL and your server — which sits inside the trusted network — fetches it for them."},
+        {"type": "paragraph", "text": "The crown-jewel SSRF target in the cloud is the instance metadata service at 169.254.169.254. On a misconfigured EC2 instance (IMDSv1), a single SSRF can read temporary IAM credentials and hand the attacker your server's cloud permissions — this is exactly how the 2019 Capital One breach exfiltrated over 100 million records."},
+        {"type": "code", "language": "typescript", "code": "import { lookup } from 'node:dns/promises';\nimport net from 'node:net';\n\nasync function assertPublicUrl(raw: string): Promise<URL> {\n  const url = new URL(raw);\n  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('bad scheme');\n  const { address } = await lookup(url.hostname); // resolve, then validate the IP\n  if (isPrivate(address)) throw new Error('blocked internal target');\n  return url;\n}\n\nfunction isPrivate(ip: string): boolean {\n  if (net.isIPv4(ip)) {\n    const [a, b] = ip.split('.').map(Number);\n    return a === 10 || a === 127 || (a === 169 && b === 254) || // 169.254.x = metadata/link-local\n      (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);\n  }\n  return ip === '::1' || ip.startsWith('fc') || ip.startsWith('fe80');\n}"},
+        {"type": "list", "items": [
+          "SSRF defenses: allow-list destination hosts where possible; validate the resolved IP (not just the hostname string); disable redirects or re-validate each hop; block link-local/private ranges; enforce IMDSv2 (token-required) on AWS so a basic GET can't steal credentials.",
+          "Misconfiguration (A05): disable directory listings and verbose stack traces in prod, remove default accounts, lock down CORS, set security headers, and treat infra-as-code as reviewable security surface.",
+          "Vulnerable components (A06): you ship your dependencies' bugs. Run SCA (Dependabot, Snyk, npm audit) in CI, pin versions, and have a patch SLA for criticals — Log4Shell proved a transitive dependency can own your fleet."
+        ]},
+        {"type": "callout", "variant": "danger", "text": "Validating the hostname string is NOT enough for SSRF. Attackers bypass it with DNS rebinding (a name that resolves to a public IP at check time and an internal IP at fetch time) and decimal/octal/IPv6-mapped IP encodings. Resolve the name and validate the actual IP you will connect to, and pin that IP for the request."}
+      ]
+    },
+    {
+      "id": "secure-headers-csp",
+      "heading": "Core Concept: Secure Headers & Content Security Policy",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Security headers are cheap, high-leverage defense-in-depth. CSP in particular is the most effective second line against XSS: even if a payload gets injected, a strict CSP can prevent it from executing inline script or loading attacker-controlled origins."},
+        {"type": "code", "language": "typescript", "code": "import helmet from 'helmet';\n\napp.use(helmet({\n  contentSecurityPolicy: {\n    directives: {\n      defaultSrc: [\"'self'\"],\n      scriptSrc: [\"'self'\", \"'nonce-RANDOM_PER_REQUEST'\"], // no unsafe-inline\n      objectSrc: [\"'none'\"],\n      baseUri: [\"'self'\"],\n      frameAncestors: [\"'none'\"], // clickjacking protection\n    },\n  },\n  hsts: { maxAge: 63072000, includeSubDomains: true, preload: true },\n}));"},
+        {"type": "table", "headers": ["Header", "Protects against"], "rows": [
+          ["Content-Security-Policy", "XSS execution, data exfiltration"],
+          ["Strict-Transport-Security", "Protocol-downgrade / SSL-strip"],
+          ["X-Content-Type-Options: nosniff", "MIME confusion attacks"],
+          ["X-Frame-Options / frame-ancestors", "Clickjacking"],
+          ["Set-Cookie: HttpOnly; Secure; SameSite", "Cookie theft via XSS, CSRF"]
+        ]},
+        {"type": "callout", "variant": "warning", "text": "A CSP with 'unsafe-inline' in script-src provides almost no XSS protection — it's the exact thing XSS abuses. Use per-request nonces or hashes instead, and adopt 'strict-dynamic' for modern bundlers."}
+      ]
+    },
+    {
+      "id": "production-incident",
+      "heading": "Production Example: The Image-Proxy SSRF Incident",
+      "kind": "example",
+      "blocks": [
+        {"type": "paragraph", "text": "Scenario: a SaaS platform shipped a 'profile avatar by URL' feature — users paste an image URL, the backend fetches it server-side to re-host on the CDN (to avoid hotlinking and mixed content). It passed code review and worked flawlessly. Three weeks later a bug-bounty researcher submitted a critical."},
+        {"type": "paragraph", "text": "The original handler fetched whatever URL the user supplied:"},
+        {"type": "code", "language": "typescript", "code": "// The shipped (vulnerable) code\napp.post('/avatar/import', auth, async (req, res) => {\n  const resp = await fetch(req.body.url);          // user-controlled URL\n  const buf = Buffer.from(await resp.arrayBuffer());\n  const cdnUrl = await cdn.put(`avatars/${req.user.id}`, buf);\n  res.json({ url: cdnUrl });\n});"},
+        {"type": "paragraph", "text": "The researcher submitted url = 'http://169.254.169.254/latest/meta-data/iam/security-credentials/app-role'. The server (an EC2 instance running IMDSv1) dutifully fetched the metadata endpoint, retrieved temporary IAM credentials, and re-hosted them to the CDN — where they could be read back as the 'avatar'. The credentials granted S3 read access to a customer-data bucket."},
+        {"type": "heading", "text": "The fix (defense in depth)"},
+        {"type": "list", "items": [
+          "Immediate: enforced IMDSv2 fleet-wide (HttpTokens=required) so a plain GET can no longer reach credentials, and rotated the exposed role.",
+          "Code: added resolve-then-validate IP filtering (block 169.254/16, RFC1918, loopback), disabled redirects, restricted scheme to https, and capped response size and content-type to image/*.",
+          "Network: moved outbound fetches through an egress proxy that allow-lists destinations.",
+          "Detection: added an alert on any outbound request to link-local ranges from app subnets (the logging gap that delayed discovery)."
+        ]},
+        {"type": "code", "language": "typescript", "code": "app.post('/avatar/import', auth, async (req, res) => {\n  const url = await assertPublicUrl(req.body.url); // resolve + validate IP\n  const resp = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(5000) });\n  if (!/^image\\//.test(resp.headers.get('content-type') ?? '')) return res.sendStatus(400);\n  const buf = Buffer.from(await resp.arrayBuffer());\n  if (buf.byteLength > 5_000_000) return res.sendStatus(413);\n  const cdnUrl = await cdn.put(`avatars/${req.user.id}`, buf);\n  res.json({ url: cdnUrl });\n});"},
+        {"type": "callout", "variant": "success", "text": "Postmortem takeaway: the single most impactful control was IMDSv2, because it neutralizes an entire class of SSRF-to-credential-theft regardless of app-layer bugs. Layered defenses meant no single mistake was catastrophic."}
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes & Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {"type": "list", "items": [
+          "Deny-listing instead of allow-listing input. Blocking '<script>' is trivially bypassed with '<img onerror>', SVG, or case/encoding tricks. Define what is valid, reject everything else.",
+          "Trusting the ORM blindly. Native-query escape hatches and dynamic ORDER BY / column interpolation re-introduce SQLi under a safe-looking API.",
+          "Validating the SSRF hostname string but connecting to the resolved IP — broken by DNS rebinding. Validate the IP you actually dial.",
+          "Encoding once for the wrong context. HTML-escaping a value that lands inside a <script> block or an href='javascript:' attribute still executes; encoding is context-specific.",
+          "Client-side authorization. Hiding admin buttons in the SPA while the API endpoint has no server-side role check — every mobile/Postman user bypasses it.",
+          "Logging secrets. Dumping full request bodies or Authorization headers into logs turns your observability stack into a credential leak (and a compliance violation).",
+          "Verbose error pages in production exposing stack traces, framework versions, and SQL — free reconnaissance for attackers.",
+          "Catch-and-swallow on auth/access failures with no alerting (A09): the breach is happening and nobody is paged."
+        ]},
+        {"type": "callout", "variant": "danger", "text": "The most dangerous mistake is believing a single control is sufficient. WAFs, frameworks, and ORMs reduce risk but each has bypasses. Real security is layered: validation AND encoding AND least privilege AND monitoring."}
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {"type": "list", "items": [
+          "Parameterize every query; allow-list any dynamic identifier (table/column/sort direction) against a fixed map.",
+          "Encode output for its exact context; lean on framework auto-escaping and treat every escape hatch (dangerouslySetInnerHTML, v-html, raw SQL) as a code-review red flag.",
+          "Deploy a strict, nonce-based CSP plus the standard security headers (HSTS, nosniff, frame-ancestors).",
+          "Enforce access control server-side, deny-by-default, with ownership baked into the data-access layer.",
+          "Apply least privilege everywhere: scoped DB users, narrow IAM roles, IMDSv2, egress allow-lists.",
+          "Hash passwords with argon2id/bcrypt; generate tokens with a CSPRNG; never roll your own crypto; store secrets in a manager, not in code.",
+          "Validate and IP-pin all server-side outbound fetches to defend against SSRF; block link-local and private ranges.",
+          "Automate security in CI: SCA/dependency scanning, SAST, secret scanning, and a patch SLA for critical CVEs.",
+          "Log security-relevant events (authn/authz failures, input rejections) with alerting — you cannot respond to what you cannot see.",
+          "Threat-model new designs (A04 Insecure Design): ask 'how would I abuse this?' before writing code, not after the breach."
+        ]},
+        {"type": "callout", "variant": "info", "text": "Adopt the OWASP ASVS as your verification baseline and the OWASP Cheat Sheet Series as your per-control reference. They turn the abstract Top 10 into concrete, testable requirements."}
+      ]
+    },
+    {
+      "id": "note-tooling",
+      "heading": "Note: Where Automation Helps and Where It Doesn't",
+      "kind": "note",
+      "blocks": [
+        {"type": "paragraph", "text": "Tooling is necessary but not sufficient. SAST and DAST scanners are excellent at finding pattern-matchable injection and known-CVE components; they are poor at finding broken access control and business-logic flaws, which require understanding intent. SCA and secret scanning have high ROI and should gate every merge. Manual threat modeling and code review remain irreplaceable for A01 and A04. Budget for both: automate the mechanical classes, and reserve human review for the judgment-heavy ones."}
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "trust-boundary-flow",
+      "title": "Where Injection Happens: Trust Boundaries in a Request",
+      "type": "mermaid",
+      "content": "flowchart LR\n  A[Untrusted Browser Input] -->|validate| B[App Server]\n  B -->|parameterized query| C[(Database)]\n  B -->|encode for HTML| D[Other Users Browser]\n  B -->|execFile no shell| E[OS / Shell]\n  B -->|validate resolved IP| F[Outbound Fetch]\n  F -.SSRF risk.-> G[169.254.169.254 Metadata]\n  classDef danger fill:#fdd,stroke:#c00\n  class G danger"
+    },
+    {
+      "id": "ssrf-credential-theft",
+      "title": "SSRF to Cloud Metadata Credential Theft",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n  participant Atk as Attacker\n  participant Srv as App Server EC2\n  participant Meta as IMDS 169.254.169.254\n  participant Cloud as AWS S3\n  Atk->>Srv: POST avatar url = metadata endpoint\n  Srv->>Meta: GET iam security-credentials\n  Meta-->>Srv: temporary IAM keys\n  Srv-->>Atk: re-hosts keys as avatar\n  Atk->>Cloud: use stolen keys\n  Cloud-->>Atk: customer data"
+    },
+    {
+      "id": "defense-layers",
+      "title": "Defense-in-Depth Layers for a Web Request",
+      "type": "ascii",
+      "content": "+-------------------------------------------------------------+\n|  EDGE      | TLS / HSTS | WAF | Rate limit | CSP headers     |\n+-------------------------------------------------------------+\n|  AUTHN     | Session cookie HttpOnly+Secure | MFA | CSRF     |\n+-------------------------------------------------------------+\n|  AUTHZ     | Deny-by-default | ownership check in query        |\n+-------------------------------------------------------------+\n|  INPUT     | Allow-list validation at the boundary            |\n+-------------------------------------------------------------+\n|  DATA      | Parameterized queries | least-priv DB user        |\n+-------------------------------------------------------------+\n|  OUTPUT    | Context-aware encoding | sanitize HTML            |\n+-------------------------------------------------------------+\n|  EGRESS    | SSRF IP validation | allow-list | IMDSv2         |\n+-------------------------------------------------------------+\n|  OBSERVE   | Security logging | alerting | SCA in CI           |\n+-------------------------------------------------------------+"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-prevent-sqli",
+      "question": "How do you prevent SQL injection? Why are parameterized queries better than escaping input?",
+      "answer": "Use parameterized queries (prepared statements): the SQL template is sent to the engine and compiled first, then values are bound on a separate channel — so user data is never parsed as SQL structure. Escaping is inferior because it's a deny-list that depends on getting every edge case right across dialects, encodings, and quoting modes; one missed case is an exploit. Parameters make the data/code separation structural rather than relying on correct escaping. For dynamic identifiers (table/column/sort) that can't be bound, allow-list against a fixed map. Also apply least privilege so the DB user can't DROP or read tables the feature doesn't need.",
+      "difficulty": "junior",
+      "category": "Security",
+      "tricky": false,
+      "tags": ["sql-injection", "parameterized-queries"],
+      "followUps": ["How would you handle a dynamic ORDER BY column safely?", "Does an ORM fully protect you?"]
+    },
+    {
+      "id": "q-prevent-xss",
+      "question": "How do you prevent XSS in a modern web application?",
+      "answer": "Primary defense is context-aware output encoding — escape data for the exact sink (HTML body, attribute, JS, URL, CSS). Modern frameworks auto-escape interpolated text, so the practical rule is: never use escape hatches (dangerouslySetInnerHTML, v-html, innerHTML, bypassSecurityTrust) with untrusted data, and if you must render user HTML, sanitize with an allow-list library like DOMPurify. Defense-in-depth: a strict nonce-based Content-Security-Policy (no unsafe-inline) so even an injected payload can't execute, plus HttpOnly cookies so a successful XSS still can't read the session token, and X-Content-Type-Options: nosniff.",
+      "difficulty": "mid",
+      "category": "Security",
+      "tricky": false,
+      "tags": ["xss", "csp", "encoding"],
+      "followUps": ["What does a nonce-based CSP add beyond encoding?", "Why HttpOnly cookies over localStorage for tokens?"]
+    },
+    {
+      "id": "q-access-control",
+      "question": "What is IDOR and how do you prevent broken access control?",
+      "answer": "IDOR (Insecure Direct Object Reference) is when the server acts on an object ID from the request without verifying the caller is authorized for that object — e.g. GET /invoices/123 returns invoice 123 to anyone logged in. Prevention: enforce authorization server-side on every request, deny-by-default, and scope every data query by the authenticated principal (WHERE owner_id = current_user) so ownership is checked in the data layer and can't be forgotten in a handler. Don't rely on unguessable IDs as security (security through obscurity). For sensitive resources return 404 for both missing and forbidden to avoid leaking existence.",
+      "difficulty": "mid",
+      "category": "Security",
+      "tricky": false,
+      "tags": ["access-control", "idor", "authorization"],
+      "followUps": ["Why 404 instead of 403?", "How does this interact with multi-tenancy?"]
+    },
+    {
+      "id": "q-password-storage",
+      "question": "How should passwords be stored, and why not SHA-256?",
+      "answer": "Use a slow, memory-hard, salted, one-way password hashing function: argon2id (preferred), bcrypt, or scrypt, with a unique per-user salt (these embed the salt and cost parameters in the output). SHA-256 is wrong because it's a fast general-purpose hash — an attacker with the dump can compute billions of guesses per second on a GPU. The deliberate slowness and memory cost of argon2/bcrypt make offline brute-force and rainbow tables economically infeasible. Never encrypt passwords (reversible) and never store them in plaintext. Compare via the library's constant-time verify.",
+      "difficulty": "junior",
+      "category": "Security",
+      "tricky": false,
+      "tags": ["cryptography", "passwords", "argon2"],
+      "followUps": ["What is a pepper and where does it live?", "How do you migrate from bcrypt to argon2 without forcing resets?"]
+    },
+    {
+      "id": "q-ssrf-basics",
+      "question": "What is SSRF and which features tend to introduce it?",
+      "answer": "Server-Side Request Forgery is when an attacker causes your server to make HTTP (or other protocol) requests to a destination of the attacker's choosing. It's dangerous because the server sits inside the trusted network and can reach internal services, admin panels, and the cloud metadata endpoint the attacker can't reach directly. It typically appears in any feature that fetches a user-supplied URL: webhooks, link previews, image/avatar import, PDF/HTML renderers, 'import from URL', and document fetchers. Defense: allow-list destinations, resolve and validate the IP (block private/link-local ranges), disable or re-validate redirects, and enforce IMDSv2 on AWS.",
+      "difficulty": "mid",
+      "category": "Security",
+      "tricky": false,
+      "tags": ["ssrf", "a10"],
+      "followUps": ["Why isn't blocking the hostname string enough?", "How does IMDSv2 mitigate SSRF?"]
+    },
+    {
+      "id": "q-csp-value",
+      "question": "What does a Content-Security-Policy actually buy you if you already encode output correctly?",
+      "answer": "CSP is defense-in-depth: it doesn't replace encoding, it limits the blast radius when encoding (or a third-party script, or a DOM sink) fails. A strict policy with script-src 'self' plus per-request nonces blocks inline script execution and disallows loading attacker-controlled origins, so an injected <script> simply won't run and exfiltration to evil.com is blocked. It also mitigates some clickjacking (frame-ancestors) and base-tag hijacking (base-uri). The catch: CSP with 'unsafe-inline' provides almost nothing, because inline execution is exactly what XSS uses — you need nonces/hashes and ideally strict-dynamic.",
+      "difficulty": "senior",
+      "category": "Security",
+      "tricky": false,
+      "tags": ["csp", "xss", "defense-in-depth"],
+      "followUps": ["How do nonces work with a server-rendered app vs an SPA?", "What is strict-dynamic?"]
+    },
+    {
+      "id": "q-insecure-design",
+      "question": "A04 'Insecure Design' was added in 2021. How does it differ from a security bug, and how do you address it?",
+      "answer": "Insecure Design is a flaw in the requirements or architecture, not in the implementation — the code can be bug-free and still insecure because the design itself permits abuse. Examples: a password-reset flow with no rate limiting or anti-automation, allowing credential-stuffing; a 'gift card' feature with no protection against generation/enumeration. You can't patch your way out of a missing control; you have to add it to the design. Address it with threat modeling (STRIDE / abuse cases) during design, secure design patterns and guardrails, and a library of reusable secure components. The mindset shift is asking 'how would an adversary abuse this flow?' before writing code.",
+      "difficulty": "senior",
+      "category": "Security",
+      "tricky": false,
+      "tags": ["insecure-design", "threat-modeling", "a04"],
+      "followUps": ["What is STRIDE?", "Give an example of a design flaw that no amount of code review would catch."]
+    },
+    {
+      "id": "q-logging-failures",
+      "question": "Why is 'Security Logging and Monitoring Failures' (A09) in the Top 10, and what should you log?",
+      "answer": "Because undetected breaches are the most expensive ones — industry data shows attackers dwell for months when monitoring is weak, and you often learn of the breach from a third party. Log security-relevant events: authentication successes/failures, access-control denials, input-validation rejections, server-side errors, and high-value actions (privilege changes, exports). Critically, route them to alerting with thresholds so a spike in 401s or a request to a link-local IP pages someone. Pitfalls: don't log secrets/PII (the log store becomes a breach target), ensure logs are tamper-resistant and time-synced, and make sure they survive long enough for forensic timelines.",
+      "difficulty": "senior",
+      "category": "Security",
+      "tricky": false,
+      "tags": ["logging", "monitoring", "a09"],
+      "followUps": ["How do you log auth failures without logging the attempted password?", "What's the risk of logging full request bodies?"]
+    },
+    {
+      "id": "q-components",
+      "question": "How do you manage the risk of vulnerable and outdated components (A06)?",
+      "answer": "Treat dependencies as code you own the liability for. Maintain an inventory/SBOM, run Software Composition Analysis (Dependabot, Snyk, npm audit) in CI to flag known CVEs, pin versions with a lockfile for reproducible builds, and define a patch SLA (e.g. criticals within 48h). Reduce surface by removing unused dependencies and preferring well-maintained ones. Watch transitive dependencies specifically — Log4Shell (CVE-2021-44228) was a transitive logging library that gave RCE to anyone who could get a string logged, and most victims didn't know they depended on it. Combine automated scanning with monitoring security advisories for your critical libs.",
+      "difficulty": "mid",
+      "category": "Security",
+      "tricky": false,
+      "tags": ["dependencies", "sca", "supply-chain", "a06"],
+      "followUps": ["What's the difference between SCA and SAST?", "How do you handle a CVE in a dependency with no patch available?"]
+    },
+    {
+      "id": "q-tricky-xss-types",
+      "question": "TRICKY: Explain the difference between stored, reflected, and DOM-based XSS — and why DOM XSS can bypass a server-side CSP or sanitizer.",
+      "answer": "Stored (persistent) XSS: the payload is saved server-side (a comment, profile bio) and served to every viewer — highest impact, can self-propagate (worm). Reflected XSS: the payload is in the request (a query param) and echoed back in the immediate response — requires luring a victim to a crafted link. DOM-based XSS: the vulnerability is entirely client-side — JavaScript reads attacker-controlled input from a source (location.hash, document.URL, postMessage) and writes it to a dangerous sink (innerHTML, eval, document.write) WITHOUT the payload ever going to the server. That's the gotcha: server-side sanitization and even some CSP configs never see the payload because, for fragment-based (#) input, the browser doesn't send the fragment to the server at all. DOM XSS must be fixed client-side: avoid dangerous sinks, use textContent/safe DOM APIs, and rely on Trusted Types plus a CSP that constrains script execution.",
+      "difficulty": "senior",
+      "category": "Security",
+      "tricky": true,
+      "tags": ["xss", "dom-xss", "csp"],
+      "followUps": ["What are Trusted Types?", "Why doesn't the URL fragment reach the server?"]
+    },
+    {
+      "id": "q-tricky-ssrf-metadata",
+      "question": "TRICKY: An SSRF lets an attacker hit 169.254.169.254. Walk through exactly how that becomes full cloud credential theft, and why blocking the literal IP string isn't enough.",
+      "answer": "169.254.169.254 is the cloud instance metadata service (IMDS). On AWS with IMDSv1, a single unauthenticated GET to /latest/meta-data/iam/security-credentials/<role> returns the instance's temporary IAM credentials (AccessKeyId, SecretAccessKey, Token). Via SSRF the attacker makes your server fetch that path and reflect the body back, then uses those keys with the instance's full IAM permissions — exactly the Capital One 2019 breach pattern. Why blocking the string '169.254.169.254' fails: attackers bypass naive filters with alternate encodings (decimal 2852039166, octal, IPv6-mapped ::ffff:169.254.169.254, the shorthand 169.254.169.254 vs 0x...), DNS rebinding (a hostname that resolves to a public IP when you validate and to 169.254.169.254 when you fetch), and open redirects on an allowed host. Robust defense: resolve the hostname to its IP, validate THAT IP against blocked ranges (link-local 169.254/16, RFC1918, loopback), pin the connection to the validated IP, disable redirects, and — most importantly — enforce IMDSv2, which requires a PUT to obtain a session token first; a simple GET-only SSRF can no longer reach credentials.",
+      "difficulty": "senior",
+      "category": "Security",
+      "tricky": true,
+      "tags": ["ssrf", "imds", "dns-rebinding", "cloud"],
+      "followUps": ["How does IMDSv2's token requirement block a GET-based SSRF?", "How does DNS rebinding defeat resolve-time validation if you don't pin the IP?"]
+    },
+    {
+      "id": "q-tricky-orm-safe",
+      "question": "TRICKY: 'We use an ORM, so we're safe from SQL injection.' Where is this wrong?",
+      "answer": "An ORM parameterizes its generated queries, but it's not a guarantee. Injection re-enters through: (1) raw-query escape hatches — knex.raw, sequelize.literal, TypeORM query(), JPA createNativeQuery, Django .extra()/RawSQL — where developers concatenate strings; (2) dynamic identifiers — ORDER BY column, table name, or sort direction, which CANNOT be bound as parameters, so people interpolate user input directly; (3) operator/structure injection in query builders that accept user-shaped objects (NoSQL '$where', MongoDB operator injection where {price: req.query.price} lets an attacker pass {\"$gt\": 0}); and (4) LIKE clauses where unescaped % / _ enable wildcard abuse, and IN-lists built by concatenation. The senior answer: ORMs handle the common case, but treat every raw escape hatch as a review red flag, allow-list dynamic identifiers against a fixed map, and validate the TYPE/shape of query inputs to prevent operator injection.",
+      "difficulty": "senior",
+      "category": "Security",
+      "tricky": true,
+      "tags": ["sql-injection", "orm", "nosql-injection"],
+      "followUps": ["Show a safe dynamic ORDER BY.", "What is MongoDB operator injection and how do you prevent it?"]
+    },
+    {
+      "id": "q-tricky-timing",
+      "question": "TRICKY: Why can comparing a secret with == introduce a vulnerability, and where else do timing side channels bite?",
+      "answer": "String/array equality typically short-circuits on the first differing byte, so the comparison takes slightly longer the more leading bytes match. An attacker who can measure response time can recover a secret (HMAC signature, API token, password-reset token) byte-by-byte across many requests — a timing side channel. Use a constant-time comparison: crypto.timingSafeEqual (Node), hmac.compare_digest (Python), MessageDigest.isEqual with care (Java). Timing leaks also appear in: username-enumeration via differing login response times (hash a dummy password even when the user doesn't exist so both paths take equal time), and 'user not found' vs 'wrong password' messages (an explicit oracle). The general principle: any code path whose duration or output depends on a secret can leak it.",
+      "difficulty": "senior",
+      "category": "Security",
+      "tricky": true,
+      "tags": ["cryptography", "timing-attack", "side-channel"],
+      "followUps": ["Why hash a dummy password for non-existent users?", "Does HTTPS prevent timing attacks?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-fix-vulns",
+      "title": "Find and Fix the Vulnerabilities",
+      "difficulty": "senior",
+      "category": "Security",
+      "prompt": "The Express handler below lets a logged-in user search their own documents and open one by ID. It contains at least four distinct security vulnerabilities spanning multiple OWASP categories. Identify each vulnerability, name the OWASP category, and rewrite the handler to fix all of them.\n\n```typescript\napp.get('/docs/search', auth, async (req, res) => {\n  const { q, sort, id } = req.query;\n  if (id) {\n    const doc = await db.query(\n      `SELECT * FROM docs WHERE id = ${id}`\n    );\n    res.send(`<h1>${doc[0].title}</h1><div>${doc[0].body}</div>`);\n    return;\n  }\n  const rows = await db.query(\n    `SELECT id, title FROM docs WHERE title LIKE '%${q}%' ORDER BY ${sort}`\n  );\n  res.json(rows);\n});\n```",
+      "hints": [
+        "Look at how every query is constructed — what is concatenated directly into SQL?",
+        "ORDER BY takes a column name. Can you bind that as a parameter? If not, how do you make it safe?",
+        "The document is rendered straight into HTML. What context is that, and what could doc.body contain?",
+        "The query fetches a doc by ID — but does it ever check WHO owns that document?",
+        "Should the % and _ characters inside a LIKE pattern be treated as user data or as wildcards?"
+      ],
+      "solutionCode": "import { escape as escapeHtml } from 'lodash';\n\n// Allow-list for the only dynamic identifier we accept (A03 / SQLi via ORDER BY)\nconst SORT_COLUMNS = { title: 'title', created: 'created_at' } as const;\ntype SortKey = keyof typeof SORT_COLUMNS;\n\napp.get('/docs/search', auth, async (req, res) => {\n  const q = typeof req.query.q === 'string' ? req.query.q : '';\n  const id = typeof req.query.id === 'string' ? req.query.id : undefined;\n  const sortKey = (req.query.sort as string) in SORT_COLUMNS\n    ? (req.query.sort as SortKey) : 'created';\n  const sortCol = SORT_COLUMNS[sortKey];\n\n  if (id) {\n    // FIX A01 Broken Access Control: scope by owner; FIX A03 SQLi: parameterize\n    const doc = await db.query(\n      'SELECT title, body FROM docs WHERE id = $1 AND owner_id = $2',\n      [id, req.user.id]\n    );\n    if (doc.length === 0) return res.sendStatus(404); // 404, don't leak existence\n    // FIX A03 XSS: encode for HTML context (or sanitize if body is rich HTML)\n    res.send(\n      `<h1>${escapeHtml(doc[0].title)}</h1>` +\n      `<div>${escapeHtml(doc[0].body)}</div>`\n    );\n    return;\n  }\n\n  // FIX A03 SQLi: parameterize the LIKE value; escape LIKE wildcards so % and _\n  // are treated as literal characters, not user-controlled wildcards.\n  const pattern = '%' + q.replace(/[%_\\\\]/g, '\\\\$&') + '%';\n  const rows = await db.query(\n    `SELECT id, title FROM docs\n       WHERE title LIKE $1 ESCAPE '\\\\' AND owner_id = $2\n       ORDER BY ${sortCol}`, // sortCol is from a fixed allow-list, never user input\n    [pattern, req.user.id]\n  );\n  res.json(rows);\n});",
+      "solutionLanguage": "typescript",
+      "explanation": "The original handler has at least four distinct flaws:\n\n1) SQL Injection (A03) in the id branch — `WHERE id = ${id}` concatenates a query parameter directly. An attacker sends id='1 OR 1=1' to dump all rows, or '1; DROP TABLE docs--'. Fix: parameterized query with `$1`.\n\n2) SQL Injection via ORDER BY (A03) — `ORDER BY ${sort}` interpolates user input. Column/identifier positions cannot be bound as parameters, so the fix is to allow-list the value against a fixed map (SORT_COLUMNS) and only ever interpolate the mapped, known-safe column name. Defaulting on miss prevents injection and avoids 500s.\n\n3) Broken Access Control / IDOR (A01) — the id lookup never checks ownership, so any authenticated user can read any document by guessing IDs. Fix: add `AND owner_id = $2` bound to req.user.id so the ownership check is enforced in the query itself, and return 404 (not 403) so we don't leak which IDs exist.\n\n4) Cross-Site Scripting (A03) — `${doc.title}` and `${doc.body}` are rendered into raw HTML. If body contains `<script>` or `<img onerror=...>`, it executes in the viewer's browser (stored XSS). Fix: HTML-encode the output (escapeHtml). If body is legitimately rich HTML, sanitize with an allow-list library like DOMPurify instead, and add a strict CSP as defense-in-depth.\n\nBonus hardening: the LIKE pattern in the search branch concatenated q, which is both an injection vector (fixed by parameterizing) and a wildcard-injection issue — even when parameterized, raw % and _ from the user are interpreted as wildcards, letting a user craft expensive or overly-broad scans. Escaping those characters with an ESCAPE clause treats them as literals. Each fix maps to a different defense: parameterization (data/code separation), allow-listing (for non-bindable identifiers), ownership scoping (least privilege), and output encoding (context-aware neutralization).",
+      "relatedTopic": "web-security-owasp"
+    },
+    {
+      "id": "ch-ssrf-guard",
+      "title": "Build an SSRF-Safe URL Fetcher",
+      "difficulty": "senior",
+      "category": "Security",
+      "prompt": "Implement a function `safeFetch(rawUrl: string)` for a 'link preview' feature that fetches user-supplied URLs server-side. It must defend against SSRF: only http/https, never connect to private/loopback/link-local IPs (including the cloud metadata endpoint 169.254.169.254), resist DNS-rebinding, and not blindly follow redirects into internal targets. Explain why each control is necessary.",
+      "hints": [
+        "Validating the hostname string is not enough — what does an attacker do with DNS rebinding? You must validate the resolved IP.",
+        "169.254.0.0/16 is link-local and includes the cloud metadata service. RFC1918 ranges are 10/8, 172.16/12, 192.168/16. Don't forget 127/8 and IPv6 ::1 / fc00::/7 / fe80::/10.",
+        "There is a TOCTOU gap between resolving the IP and the HTTP client resolving it again — pin the connection to the IP you validated.",
+        "A redirect (3xx) to http://169.254.169.254 bypasses your initial check — disable auto-redirects or re-validate each hop."
+      ],
+      "solutionCode": "import { lookup } from 'node:dns/promises';\nimport net from 'node:net';\nimport http from 'node:http';\nimport https from 'node:https';\n\nfunction isBlockedIp(ip: string): boolean {\n  if (net.isIPv4(ip)) {\n    const [a, b] = ip.split('.').map(Number);\n    return (\n      a === 0 || a === 127 ||                       // this-host / loopback\n      a === 10 ||                                    // RFC1918\n      (a === 172 && b >= 16 && b <= 31) ||           // RFC1918\n      (a === 192 && b === 168) ||                    // RFC1918\n      (a === 169 && b === 254) ||                    // link-local incl. metadata\n      (a === 100 && b >= 64 && b <= 127)             // CGNAT 100.64/10\n    );\n  }\n  const lower = ip.toLowerCase();\n  return (\n    lower === '::1' ||                               // loopback\n    lower.startsWith('fc') || lower.startsWith('fd') || // unique-local fc00::/7\n    lower.startsWith('fe80') ||                       // link-local\n    lower.startsWith('::ffff:')                       // IPv4-mapped: re-check below\n  );\n}\n\nexport async function safeFetch(rawUrl: string): Promise<string> {\n  const url = new URL(rawUrl);\n  if (url.protocol !== 'http:' && url.protocol !== 'https:') {\n    throw new Error('blocked scheme'); // no file:, gopher:, ftp:, etc.\n  }\n\n  // Resolve the hostname ourselves and validate the actual IP.\n  const { address, family } = await lookup(url.hostname);\n  if (isBlockedIp(address)) throw new Error('blocked internal address');\n\n  // Pin the request to the validated IP to defeat DNS rebinding (TOCTOU):\n  // the HTTP client will connect to `address`, not re-resolve the name.\n  const lib = url.protocol === 'https:' ? https : http;\n  return new Promise<string>((resolve, reject) => {\n    const req = lib.request(\n      {\n        host: address,                 // connect to the IP we validated\n        servername: url.hostname,      // keep TLS SNI/cert validation correct\n        headers: { Host: url.hostname },\n        path: url.pathname + url.search,\n        port: url.port || (url.protocol === 'https:' ? 443 : 80),\n        timeout: 5000,\n      },\n      (res) => {\n        // Do NOT auto-follow redirects into internal targets.\n        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400) {\n          res.resume();\n          return reject(new Error('redirects disabled')); // or re-run safeFetch on Location\n        }\n        let size = 0;\n        const chunks: Buffer[] = [];\n        res.on('data', (c: Buffer) => {\n          size += c.length;\n          if (size > 2_000_000) { req.destroy(); reject(new Error('too large')); return; }\n          chunks.push(c);\n        });\n        res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));\n      }\n    );\n    req.on('timeout', () => req.destroy(new Error('timeout')));\n    req.on('error', reject);\n    req.end();\n  });\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "Each control closes a specific bypass:\n\n- Scheme allow-list: rejecting everything but http/https blocks file:// (local file read), gopher://, dict://, and ftp:// which SSRF chains use to reach non-HTTP internal services.\n\n- Resolve-then-validate-the-IP: validating only the hostname STRING is the classic mistake. Attackers register a name that resolves to a private IP, or use IP encodings. We do our own DNS lookup and check the resulting address against blocked ranges (loopback 127/8 and ::1, RFC1918 10/172.16/192.168, link-local 169.254/16 which contains the cloud metadata service, IPv6 ULA/link-local, and CGNAT). This is what stops the 169.254.169.254 credential-theft attack.\n\n- IP pinning to defeat DNS rebinding (TOCTOU): there is a gap between when we resolve+validate and when the HTTP client would resolve again. With rebinding, the name returns a public IP during validation and 169.254.169.254 at connect time. We eliminate the gap by connecting to the exact IP we validated (host: address) while preserving the original Host header and TLS servername so virtual hosting and certificate validation still work.\n\n- Redirect handling: a server can return 302 -> http://169.254.169.254/... and a naive client follows it, bypassing the initial check entirely. We disable auto-redirects; a production version would re-run safeFetch on each Location to validate every hop.\n\n- Resource limits: timeout and a response-size cap prevent SSRF from being used for denial-of-service or to slurp large internal responses.\n\nFinally, this is app-layer defense in depth — the network/infra layer should ALSO enforce IMDSv2 and an egress allow-list so a single coding mistake here can't reach credentials. No single control is trusted alone.",
+      "relatedTopic": "web-security-owasp"
+    }
+  ],
+  "references": [
+    {"label": "OWASP Top 10 (2021)", "url": "https://owasp.org/Top10/"},
+    {"label": "OWASP Cheat Sheet Series", "url": "https://cheatsheetseries.owasp.org/"},
+    {"label": "OWASP SQL Injection Prevention Cheat Sheet", "url": "https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html"},
+    {"label": "OWASP XSS Prevention Cheat Sheet", "url": "https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html"},
+    {"label": "OWASP SSRF Prevention Cheat Sheet", "url": "https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html"},
+    {"label": "OWASP Application Security Verification Standard (ASVS)", "url": "https://owasp.org/www-project-application-security-verification-standard/"},
+    {"label": "MDN: Content Security Policy", "url": "https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP"},
+    {"label": "AWS: Use IMDSv2", "url": "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html"}
+  ]
+}

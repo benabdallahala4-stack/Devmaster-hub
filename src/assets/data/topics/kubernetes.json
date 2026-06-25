@@ -1,0 +1,372 @@
+{
+  "id": "kubernetes",
+  "title": "Kubernetes",
+  "category": "DevOps",
+  "subcategory": "Orchestration",
+  "difficulty": "senior",
+  "tags": ["kubernetes", "orchestration", "containers", "devops", "scheduling", "reliability", "scaling"],
+  "description": "A staff-level deep dive into how Kubernetes schedules, runs, and self-heals containerized workloads — from etcd and the control plane to probes, resource limits, and the failure modes that page you at 3am.",
+  "estReadMinutes": 30,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {"type": "paragraph", "text": "Kubernetes is a declarative container orchestration platform. You describe the desired state of your workloads as API objects, and a set of control loops continuously reconciles the actual state of the cluster toward that desired state. You never tell Kubernetes how to do something step by step — you tell it what you want, and controllers do the rest."},
+        {"type": "paragraph", "text": "This reconciliation model is the single most important mental shift for engineers coming from imperative deployment tooling. A Deployment is not a script that runs once; it is a record of intent that a controller defends forever. If a node dies, pods are rescheduled. If a process crashes, the kubelet restarts it. If someone deletes a pod by hand, the ReplicaSet recreates it. Understanding which loop owns which piece of state is the key to debugging Kubernetes effectively."},
+        {"type": "callout", "variant": "info", "text": "The whole system reduces to one sentence: store desired state in etcd, observe actual state, and run controllers that close the gap. Everything else is detail."}
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {"type": "paragraph", "text": "Kubernetes has become the de facto substrate for running services at scale because it solves problems that previously required bespoke tooling per company: bin-packing workloads onto machines, rolling out new versions without downtime, self-healing on failure, horizontal autoscaling, service discovery, and secret distribution. It standardizes the operational contract between developers and infrastructure."},
+        {"type": "list", "items": [
+          "Portability: the same manifests run on AWS EKS, GCP GKE, on-prem, or a laptop via kind, decoupling your app from a specific cloud's primitives.",
+          "Density and cost: the scheduler bin-packs many pods onto fewer nodes using requests, directly reducing compute spend.",
+          "Self-healing: failed containers, unhealthy pods, and dead nodes are recovered automatically without a human in the loop.",
+          "Zero-downtime deploys: rolling updates with readiness gating let you ship continuously.",
+          "A common API: HPA, RBAC, NetworkPolicy, and CRDs give platform teams a single extensible control surface."
+        ]},
+        {"type": "paragraph", "text": "The flip side is operational complexity. The failure modes — CrashLoopBackOff, OOMKilled, CPU throttling, cascading restarts from a bad liveness probe — are subtle and routinely misdiagnosed. Senior engineers are expected to reason about them precisely, which is exactly what interviews probe."}
+      ]
+    },
+    {
+      "id": "control-plane",
+      "heading": "Core Concepts: The Control Plane",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "The control plane is the brain of the cluster. It does not run your application containers (in a properly configured cluster); it makes decisions and stores state. It is composed of four components."},
+        {"type": "table", "headers": ["Component", "Responsibility", "Notes"], "rows": [
+          ["kube-apiserver", "The only component that talks to etcd. Validates and persists every object, serves the REST API, enforces authn/authz and admission control.", "Stateless and horizontally scalable behind a load balancer."],
+          ["etcd", "Distributed, consistent key-value store holding the entire cluster state (desired and observed).", "Raft-based; quorum (majority) required for writes. The most precious data in the cluster — back it up."],
+          ["kube-scheduler", "Watches for unscheduled pods and binds each to a node based on filters (predicates) and scoring (priorities).", "Considers requests, affinity, taints/tolerations, topology spread."],
+          ["kube-controller-manager", "Runs the built-in control loops: Deployment, ReplicaSet, Node, Job, Endpoints, ServiceAccount controllers, and more.", "Each controller watches the API and drives actual state toward desired."]
+        ]},
+        {"type": "paragraph", "text": "A critical architectural invariant: nothing reads or writes etcd directly except the API server. Controllers, the scheduler, and kubelets all communicate through the API server, typically via watch streams that push incremental changes. This single chokepoint is what makes RBAC, auditing, and admission webhooks possible."},
+        {"type": "callout", "variant": "warning", "text": "etcd is the source of truth and the most common cause of full-cluster outages. It needs low-latency disks, an odd number of members for quorum (3 or 5), and frequent snapshots. Lose etcd quorum and your control plane goes read-only."}
+      ]
+    },
+    {
+      "id": "worker-node",
+      "heading": "Core Concepts: Worker Nodes",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Worker nodes run your workloads. Each node runs three things that matter for interviews."},
+        {"type": "list", "items": [
+          "kubelet: the node agent. It watches the API server for pods assigned to its node, talks to the container runtime to start/stop containers, and reports pod and node status back. It also runs liveness, readiness, and startup probes.",
+          "kube-proxy: programs the node's networking (iptables or IPVS rules, or is replaced by a CNI's eBPF dataplane) so that traffic to a Service's virtual IP is load-balanced to healthy backing pods.",
+          "Container runtime: the software that actually runs containers via the CRI (Container Runtime Interface) — containerd or CRI-O in modern clusters. Docker's dockershim was removed in v1.24."
+        ]},
+        {"type": "paragraph", "text": "A Pod is the smallest deployable unit — one or more containers that share a network namespace (same IP and port space), can share volumes, and are always co-scheduled on the same node. You rarely create bare Pods; you create higher-level controllers that manage them."},
+        {"type": "code", "language": "yaml", "code": "apiVersion: v1\nkind: Pod\nmetadata:\n  name: web\nspec:\n  containers:\n    - name: app\n      image: ghcr.io/acme/web:1.4.2\n      ports:\n        - containerPort: 8080\n    - name: log-shipper        # sidecar, shares the network namespace\n      image: ghcr.io/acme/fluentbit:2.1\n      volumeMounts:\n        - name: varlog\n          mountPath: /var/log\n  volumes:\n    - name: varlog\n      emptyDir: {}"},
+        {"type": "callout", "variant": "info", "text": "Because containers in a Pod share localhost, the app can reach the sidecar on 127.0.0.1 — but two containers cannot both bind the same port."}
+      ]
+    },
+    {
+      "id": "workload-objects",
+      "heading": "Core Concepts: Workload & Networking Objects",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Kubernetes layers controllers on top of Pods. The canonical chain is Deployment -> ReplicaSet -> Pod."},
+        {"type": "table", "headers": ["Object", "Purpose"], "rows": [
+          ["ReplicaSet", "Guarantees N identical pod replicas exist. Recreates pods that are deleted or lost. You rarely manage it directly."],
+          ["Deployment", "Manages ReplicaSets to provide declarative rolling updates and rollbacks. The default for stateless services."],
+          ["Service: ClusterIP", "Stable virtual IP + DNS name load-balancing to a set of pods, reachable only inside the cluster."],
+          ["Service: NodePort", "Exposes the Service on a static port on every node's IP. Mostly a building block for external load balancers."],
+          ["Service: LoadBalancer", "Provisions a cloud load balancer that routes to the NodePort. The typical L4 ingress on managed clouds."],
+          ["Ingress", "L7 HTTP routing (host/path) to Services, terminated by an Ingress controller (nginx, Traefik, cloud ALB)."],
+          ["ConfigMap / Secret", "Inject non-sensitive / sensitive configuration as env vars or mounted files. Secrets are base64-encoded, not encrypted at rest unless you enable encryption providers."],
+          ["HorizontalPodAutoscaler", "Scales replica count based on observed CPU/memory or custom metrics."]
+        ]},
+        {"type": "heading", "text": "Rolling updates"},
+        {"type": "paragraph", "text": "When you change a Deployment's pod template (e.g., bump the image), the Deployment controller creates a new ReplicaSet and scales it up while scaling the old one down, governed by maxSurge and maxUnavailable. Readiness probes gate the rollout: a new pod does not count as available, and the old pod is not removed, until the new pod reports Ready. This is what makes deploys zero-downtime — and why a broken readiness probe silently stalls a rollout."},
+        {"type": "code", "language": "yaml", "code": "spec:\n  strategy:\n    type: RollingUpdate\n    rollingUpdate:\n      maxSurge: 25%          # how many extra pods above desired during rollout\n      maxUnavailable: 0      # never drop below desired ready count"},
+        {"type": "heading", "text": "Namespaces & RBAC"},
+        {"type": "paragraph", "text": "Namespaces partition a cluster into virtual sub-clusters for multi-tenancy, quota, and naming scope. RBAC (Role/RoleBinding for namespaced, ClusterRole/ClusterRoleBinding for cluster-wide) governs which subjects can perform which verbs on which resources. RBAC is additive and deny-by-default: there are no deny rules, only grants."},
+        {"type": "code", "language": "yaml", "code": "apiVersion: rbac.authorization.k8s.io/v1\nkind: Role\nmetadata:\n  namespace: payments\n  name: pod-reader\nrules:\n  - apiGroups: [\"\"]\n    resources: [\"pods\", \"pods/log\"]\n    verbs: [\"get\", \"list\", \"watch\"]"}
+      ]
+    },
+    {
+      "id": "probes-resources",
+      "heading": "Core Concepts: Probes, Requests & Limits",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Two configuration areas cause the majority of production incidents: health probes and resource specs. Getting them right separates reliable clusters from flapping ones."},
+        {"type": "heading", "text": "The three probes"},
+        {"type": "table", "headers": ["Probe", "Question it answers", "Action on failure"], "rows": [
+          ["liveness", "Is this container wedged and needs a restart?", "kubelet kills and restarts the container."],
+          ["readiness", "Can this pod serve traffic right now?", "Pod is removed from Service endpoints (no restart)."],
+          ["startup", "Has this slow-starting app finished booting yet?", "Disables liveness/readiness until it passes, then they take over."]
+        ]},
+        {"type": "paragraph", "text": "The distinction is the single most-tested probe concept: liveness restarts, readiness only gates traffic. Using a liveness probe to test a dependency (like a database) is an anti-pattern — if the DB blips, every replica fails liveness simultaneously and the kubelet restarts them all, turning a transient dependency hiccup into a full outage."},
+        {"type": "heading", "text": "Requests vs limits"},
+        {"type": "list", "items": [
+          "requests: what the scheduler reserves. The scheduler only places a pod on a node with enough unreserved capacity. Requests determine bin-packing and QoS class.",
+          "limits: the hard ceiling enforced at runtime. Exceeding the memory limit gets the container OOMKilled. Exceeding the CPU limit gets the container CPU-throttled (CFS), not killed.",
+          "QoS classes: Guaranteed (requests == limits for all resources), Burstable (requests < limits), BestEffort (neither set). Under node memory pressure, the kubelet evicts BestEffort first, then Burstable, then Guaranteed."
+        ]},
+        {"type": "code", "language": "yaml", "code": "resources:\n  requests:\n    cpu: \"250m\"      # 0.25 of a core reserved for scheduling\n    memory: \"256Mi\"\n  limits:\n    memory: \"512Mi\"  # OOMKilled if exceeded\n    # NOTE: deliberately no cpu limit -> avoid CFS throttling latency spikes"},
+        {"type": "callout", "variant": "danger", "text": "A CPU limit is enforced by the Linux CFS quota over 100ms periods. A latency-sensitive app that briefly bursts above its quota gets throttled mid-request, causing p99 spikes even though average CPU looks low. Many teams set CPU requests but omit CPU limits for this reason. Memory limits, however, you almost always want."}
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: A Rollout That Looked Healthy But Wasn't",
+      "kind": "example",
+      "blocks": [
+        {"type": "paragraph", "text": "Scenario: A payments team ships a new version of their checkout API. Traffic immediately starts erroring with 503s even though every pod shows Running and the Deployment reports the new ReplicaSet at full count. On-call is paged."},
+        {"type": "paragraph", "text": "Root cause: the readiness probe pointed at /healthz, which only checked that the HTTP server was up — not that the app had loaded its currency-conversion cache, which takes ~20 seconds. Pods reported Ready in 2 seconds, the rollout completed, the old ReplicaSet was scaled to zero, and traffic hit pods that were accepting connections but not actually ready to serve. With maxUnavailable: 25%, a chunk of the new fleet was live before any of it was truly ready."},
+        {"type": "code", "language": "yaml", "code": "# BEFORE (the bug): readiness lies about being ready\nreadinessProbe:\n  httpGet:\n    path: /healthz       # only checks the HTTP listener\n    port: 8080\n  initialDelaySeconds: 1\n  periodSeconds: 5\n\n# AFTER (the fix): a deep readiness check + a startup probe for the slow boot\nstartupProbe:\n  httpGet: { path: /ready, port: 8080 }\n  failureThreshold: 30   # allow up to 30 * 5s = 150s to warm up\n  periodSeconds: 5\nreadinessProbe:\n  httpGet:\n    path: /ready          # returns 200 only once the cache is loaded\n    port: 8080\n  periodSeconds: 5\nlivenessProbe:\n  httpGet: { path: /livez, port: 8080 }  # shallow: process not wedged\n  periodSeconds: 10\n  failureThreshold: 3"},
+        {"type": "paragraph", "text": "The fix: split shallow liveness (/livez, just 'am I wedged') from deep readiness (/ready, 'is my cache loaded'), add a startupProbe so the slow boot doesn't trip liveness, and set maxUnavailable: 0 so a pod is only retired once a replacement is genuinely Ready. After the change, rollouts gated correctly and the 503s disappeared. The incident is a textbook case of conflating 'process is up' with 'pod can serve'."},
+        {"type": "callout", "variant": "success", "text": "Postmortem action item adopted org-wide: every service must expose distinct /livez, /readyz, and /startupz endpoints with documented semantics, and readiness must check critical dependencies' warm state — but liveness must never depend on external services."}
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes & Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {"type": "heading", "text": "Why containers restart: the three usual suspects"},
+        {"type": "list", "items": [
+          "Failed liveness probe: the kubelet decided the container was wedged and killed it. Look for 'Liveness probe failed' events. Often a misconfigured probe (too-tight timeout, probe hitting a slow endpoint), not a real bug.",
+          "OOMKilled: the container exceeded its memory limit and the kernel OOM killer terminated it. kubectl describe pod shows 'Reason: OOMKilled' and 'Last State: Terminated, Exit Code 137'. Fix by raising the limit or fixing the leak.",
+          "Application crash: the process exited non-zero on its own (panic, unhandled exception, missing config, failed migration). Exit code is the app's, and logs from the previous instance (kubectl logs --previous) tell the story."
+        ]},
+        {"type": "heading", "text": "CrashLoopBackOff"},
+        {"type": "paragraph", "text": "CrashLoopBackOff is not an error type — it is a state. It means a container keeps starting and then exiting/being-killed, so the kubelet is applying exponential backoff (10s, 20s, 40s ... capped at 5m) before each restart attempt. The pod isn't broken by Kubernetes; Kubernetes is throttling a container that won't stay up. Diagnose the underlying exit (crash vs liveness vs OOM), don't 'fix' the backoff."},
+        {"type": "table", "headers": ["Symptom", "Likely cause", "First command"], "rows": [
+          ["Exit code 137, Reason OOMKilled", "Memory limit too low or a leak", "kubectl describe pod / check memory limit"],
+          ["Exit code 1/2, app stack trace", "Bad config, failed migration, panic", "kubectl logs <pod> --previous"],
+          ["'Liveness probe failed' events", "Probe too aggressive or app slow to warm", "kubectl get events / review probe timing"],
+          ["Pending forever, never schedules", "Insufficient requests fit / taint / no node", "kubectl describe pod (FailedScheduling)"],
+          ["Rollout stuck, new pods not Ready", "Readiness probe never passes", "kubectl describe deploy / rollout status"]
+        ]},
+        {"type": "callout", "variant": "danger", "text": "Cascading restart anti-pattern: a liveness probe that calls a shared dependency (DB, Redis, another service). When that dependency degrades, every replica fails liveness at once, the kubelet restarts the entire fleet, the restarts hammer the recovering dependency, and you get a self-reinforcing outage. Liveness must be self-contained; dependency health belongs in readiness."},
+        {"type": "list", "items": [
+          "Setting CPU limits equal to requests on latency-sensitive services, then being surprised by CFS throttling and p99 spikes.",
+          "Mounting Secrets and assuming they're encrypted — base64 is encoding, not encryption; enable etcd encryption-at-rest and tighten RBAC.",
+          "No PodDisruptionBudget, so a node drain during cluster upgrade evicts all replicas at once.",
+          "Using :latest image tags, making rollbacks non-deterministic and breaking the new-ReplicaSet detection.",
+          "Forgetting that deleting a Deployment without --cascade leaves orphaned ReplicaSets/Pods running."
+        ]}
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {"type": "list", "items": [
+          "Always set memory limits and CPU/memory requests; be deliberate about whether to set CPU limits (often skip them for latency-sensitive services to avoid throttling).",
+          "Distinct, correct probes: shallow self-contained liveness, dependency-aware readiness, and a startup probe for slow boots. Never let liveness depend on an external service.",
+          "Use maxUnavailable: 0 (or small) plus readiness gating for true zero-downtime rollouts; define a PodDisruptionBudget so voluntary disruptions respect availability.",
+          "Pin immutable image tags or digests; never deploy :latest. Treat manifests as code in Git and apply via GitOps (Argo CD / Flux).",
+          "Enforce least-privilege RBAC and per-namespace ResourceQuota/LimitRange; turn on etcd encryption-at-rest and use a real secrets manager for sensitive data.",
+          "Set requests from observed usage (VPA recommendations or profiling), not guesses, to keep bin-packing efficient without OOMs.",
+          "Add topologySpreadConstraints / pod anti-affinity so replicas don't all land on one node or AZ.",
+          "Run graceful shutdown: handle SIGTERM, honor terminationGracePeriodSeconds, and use a preStop hook to drain connections before the pod leaves the Service."
+        ]},
+        {"type": "callout", "variant": "info", "text": "A useful heuristic: requests are a promise to the scheduler about what you need; limits are a threat from the kernel about what happens if you exceed them. Tune them separately and intentionally."}
+      ]
+    },
+    {
+      "id": "note-debugging",
+      "heading": "Note: A Fast Debugging Playbook",
+      "kind": "note",
+      "blocks": [
+        {"type": "paragraph", "text": "When a workload misbehaves, walk the chain from the outside in: is the Service routing? are pods Ready? are pods Running? are containers restarting? why did they exit?"},
+        {"type": "code", "language": "bash", "code": "kubectl get pods -o wide                 # status, restarts, node\nkubectl describe pod <pod>               # events, probe failures, OOM, scheduling\nkubectl logs <pod> -c <ctr> --previous   # logs from the crashed instance\nkubectl get events --sort-by=.lastTimestamp\nkubectl rollout status deploy/<name>     # is a rollout stuck?\nkubectl get endpoints <svc>              # are any pods actually backing the Service?\nkubectl top pod                          # live CPU/mem vs limits"},
+        {"type": "callout", "variant": "info", "text": "'kubectl describe pod' is the highest-leverage command in the toolkit. The Events section at the bottom explains scheduling failures, image pull errors, probe failures, and OOM kills in plain language."}
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "control-plane-arch",
+      "title": "Kubernetes Control Plane and Node Architecture",
+      "type": "mermaid",
+      "content": "flowchart TD\n  subgraph CP[Control Plane]\n    API[kube-apiserver]\n    ETCD[(etcd)]\n    SCHED[kube-scheduler]\n    CM[controller-manager]\n  end\n  subgraph N1[Worker Node]\n    KUBELET[kubelet]\n    PROXY[kube-proxy]\n    RT[container runtime]\n    POD[Pods]\n  end\n  USER[kubectl / clients] --> API\n  API <--> ETCD\n  SCHED --> API\n  CM --> API\n  KUBELET --> API\n  KUBELET --> RT\n  RT --> POD\n  PROXY --> POD"
+    },
+    {
+      "id": "rolling-update-seq",
+      "title": "Rolling Update with Readiness Gating",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n  participant U as User\n  participant API as API Server\n  participant DC as Deployment Controller\n  participant K as kubelet\n  U->>API: kubectl set image deploy v2\n  API->>DC: Deployment spec changed\n  DC->>API: Create new ReplicaSet scale up by maxSurge\n  API->>K: Schedule new pod\n  K->>K: Start container run startup then readiness\n  K-->>API: Pod Ready\n  DC->>API: Scale down old ReplicaSet by one\n  Note over DC,K: Repeat until new RS full and old RS at zero"
+    },
+    {
+      "id": "restart-decision",
+      "title": "Why a Container Restarts (Decision Flow)",
+      "type": "ascii",
+      "content": "        +----------------------------+\n        | Container terminated        |\n        +-------------+--------------+\n                      |\n        +-------------v--------------+\n        | Exit code 137 / OOMKilled? |--yes--> Raise memory limit / fix leak\n        +-------------+--------------+\n                      | no\n        +-------------v--------------+\n        | Liveness probe failed?     |--yes--> Fix probe timing / wedge bug\n        +-------------+--------------+\n                      | no\n        +-------------v--------------+\n        | App exited non-zero        |--yes--> Read logs --previous, fix config/crash\n        +-------------+--------------+\n                      |\n        +-------------v--------------+\n        | Repeated fast restarts?    |--yes--> CrashLoopBackOff (kubelet backoff)\n        +----------------------------+"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-pod-vs-container",
+      "question": "What is a Pod, and why is it the unit of scheduling rather than a container?",
+      "answer": "A Pod is one or more containers that share a network namespace (one IP, shared localhost and port space), can share volumes, and are always co-scheduled on the same node and started/stopped together. Kubernetes schedules Pods, not containers, because tightly-coupled helpers (a sidecar log shipper, a service-mesh proxy, an init container) need to share networking and storage and live and die with the main container. The container is a runtime detail; the Pod is the atomic deployment and scheduling unit.",
+      "difficulty": "junior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["pod", "scheduling"],
+      "followUps": ["What's the difference between an init container and a sidecar?", "Can two containers in a Pod listen on the same port?"]
+    },
+    {
+      "id": "q-control-plane",
+      "question": "Walk me through what happens, component by component, when you run kubectl apply for a new Deployment.",
+      "answer": "kubectl sends the manifest to the kube-apiserver. The apiserver runs authentication, authorization (RBAC), and admission controllers, then persists the Deployment object to etcd. The Deployment controller (in controller-manager) watches Deployments, sees the new one, and creates a ReplicaSet. The ReplicaSet controller sees it has zero pods against a desired count and creates Pod objects. Those Pods are unscheduled, so the kube-scheduler picks them up, filters and scores nodes, and binds each Pod to a node by writing nodeName back through the apiserver. The kubelet on that node sees a Pod assigned to it, pulls the image via the container runtime (CRI), starts the containers, runs probes, and reports status back to the apiserver, which stores it in etcd. Note every component talks only to the apiserver, never to etcd directly.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["control-plane", "scheduler", "reconciliation"],
+      "followUps": ["Which component writes nodeName?", "What if no node satisfies the pod's requests?"]
+    },
+    {
+      "id": "q-liveness-readiness",
+      "question": "Explain the difference between liveness, readiness, and startup probes.",
+      "answer": "Liveness answers 'is the container wedged and in need of a restart' — on failure the kubelet kills and restarts the container. Readiness answers 'can this pod serve traffic right now' — on failure the pod is removed from Service endpoints but is NOT restarted. Startup answers 'has a slow-booting app finished initializing' — while it runs, liveness and readiness are disabled, and once it passes they take over; this prevents a slow boot from tripping liveness and looping. The cardinal rule: liveness restarts, readiness gates traffic, and liveness must never check external dependencies.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["probes", "reliability"],
+      "followUps": ["Why is a startup probe better than just a large initialDelaySeconds on liveness?", "What happens to in-flight requests when readiness flips to failing?"]
+    },
+    {
+      "id": "q-requests-limits",
+      "question": "What's the difference between resource requests and limits, and how do they affect scheduling and QoS?",
+      "answer": "Requests are what the scheduler reserves: a pod is only placed on a node that has enough unreserved capacity for its requests, so requests drive bin-packing. Limits are runtime ceilings: exceeding a memory limit gets the container OOMKilled, exceeding a CPU limit gets it CFS-throttled (never killed). The relationship between them sets the QoS class: Guaranteed (requests == limits for every resource), Burstable (requests set, less than limits), or BestEffort (nothing set). Under node memory pressure the kubelet evicts BestEffort first, then Burstable exceeding requests, then Guaranteed last.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["resources", "qos", "scheduling"],
+      "followUps": ["Which QoS class is evicted first under memory pressure?", "Why might you set a memory limit but not a CPU limit?"]
+    },
+    {
+      "id": "q-crashloop",
+      "question": "A pod is in CrashLoopBackOff. What does that actually mean and how do you debug it?",
+      "answer": "CrashLoopBackOff is a state, not an error: a container keeps starting and then exiting or being killed, so the kubelet applies exponential backoff (10s, 20s, 40s... capped at 5m) between restart attempts. It tells you the container won't stay up, not why. To debug: run kubectl describe pod to read the Events and the Last State (look for OOMKilled / exit code 137, or 'Liveness probe failed'), then kubectl logs <pod> --previous to see the crashed instance's output. The three root causes are an application crash (non-zero exit), OOMKilled (memory limit exceeded), or a failing liveness probe. Fix the underlying exit; the backoff itself is just throttling.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["crashloopbackoff", "debugging"],
+      "followUps": ["Why does --previous matter here?", "How is CrashLoopBackOff different from a pod stuck Pending?"]
+    },
+    {
+      "id": "q-service-types",
+      "question": "Compare ClusterIP, NodePort, and LoadBalancer Services, and where Ingress fits.",
+      "answer": "ClusterIP gives a stable virtual IP and DNS name reachable only inside the cluster; it's the default and the building block for everything else. NodePort opens a static port on every node's IP that forwards to the Service, used as a primitive for external access. LoadBalancer asks the cloud provider to provision an L4 load balancer that targets the NodePort, giving an external IP. All three are L4. Ingress is L7: an Ingress object plus an Ingress controller (nginx, Traefik, cloud ALB) provides host- and path-based HTTP routing, TLS termination, and lets many services share one external load balancer instead of one LB per service.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["service", "ingress", "networking"],
+      "followUps": ["How does kube-proxy implement Service load balancing?", "Why is Ingress cheaper than a LoadBalancer per service?"]
+    },
+    {
+      "id": "q-rolling-update",
+      "question": "How does a Deployment perform a zero-downtime rolling update, and what role do maxSurge and maxUnavailable play?",
+      "answer": "On a pod-template change the Deployment controller creates a new ReplicaSet and gradually scales it up while scaling the old one down. maxSurge caps how many pods can exist above the desired count during the rollout (speed), and maxUnavailable caps how many desired pods can be unavailable at once (safety). Crucially, a new pod only counts as available once its readiness probe passes, and the controller won't remove old pods faster than new ones become Ready. Setting maxUnavailable: 0 guarantees you never drop below the desired ready count. This readiness gating is exactly what makes the update zero-downtime — and why a broken readiness probe stalls the rollout.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["deployment", "rolling-update"],
+      "followUps": ["What happens if the new pods never become Ready?", "How do you roll back, and what does it do under the hood?"]
+    },
+    {
+      "id": "q-liveness-cascade",
+      "question": "TRICKY: Your team adds a liveness probe that checks database connectivity 'to be safe.' What can go wrong?",
+      "answer": "This creates a cascading-restart outage. Liveness failure makes the kubelet restart the container. If the database has a transient blip, every replica's liveness probe fails at the same time, so the kubelet restarts the entire fleet simultaneously. The mass restarts hammer the recovering database with reconnects and cold caches, deepening the outage, and the now-empty service can't serve any traffic. A transient dependency hiccup is amplified into a total, self-reinforcing outage. The fix: liveness must be self-contained (only 'is my process wedged'); dependency health belongs in the readiness probe, which removes the pod from endpoints without restarting it, so pods recover gracefully when the DB returns.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": ["probes", "incident", "cascading-failure"],
+      "followUps": ["Why doesn't putting the same check in readiness cause a restart storm?", "How would you make the DB dependency degrade gracefully instead?"]
+    },
+    {
+      "id": "q-cpu-throttling",
+      "question": "TRICKY: A service has plenty of headroom — average CPU is 30% of its limit — yet p99 latency is terrible and metrics show throttling. Why?",
+      "answer": "CPU limits are enforced by the Linux CFS scheduler as a quota over fixed periods (default 100ms). A limit of, say, 1 core means the container gets 100ms of CPU time per 100ms period; if a request needs a burst of parallel CPU it can exhaust the quota partway through a period and be throttled until the next period begins, stalling the request for up to ~100ms. Averaged over a minute, utilization looks low (30%), but the bursty workload is repeatedly hitting the ceiling at sub-second granularity. The container_cpu_cfs_throttled metric reveals it. Fixes: raise or remove the CPU limit for latency-sensitive services (keep the request for scheduling), reduce parallelism, or tune the CFS period. This is why many teams set CPU requests but omit CPU limits.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": ["cpu", "throttling", "performance"],
+      "followUps": ["What metric confirms CFS throttling?", "Why doesn't removing the limit hurt scheduling fairness?"]
+    },
+    {
+      "id": "q-secret-security",
+      "question": "TRICKY: A teammate says 'Secrets are safe because they're encrypted.' Are they right?",
+      "answer": "No. By default a Secret is only base64-encoded, which is encoding, not encryption — anyone with read access to the Secret or to etcd can trivially decode it. Two separate protections are needed. First, encryption-at-rest: configure the apiserver's EncryptionConfiguration with a KMS provider so Secret values are encrypted before being written to etcd (otherwise they sit in plaintext-equivalent form on etcd's disk). Second, RBAC: restrict get/list/watch on secrets so only the workloads and humans that need a given Secret can read it, since cluster-wide secret read access is effectively cluster-admin. For higher assurance, use an external secrets manager (Vault, cloud Secrets Manager) via CSI driver or External Secrets Operator so the source of truth never lives unencrypted in etcd.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": ["secrets", "security", "rbac"],
+      "followUps": ["How does etcd encryption-at-rest actually work?", "Why is broad secret read access equivalent to cluster-admin?"]
+    },
+    {
+      "id": "q-oom-vs-throttle",
+      "question": "Why does exceeding a memory limit kill the container while exceeding a CPU limit does not?",
+      "answer": "Memory is a non-compressible resource: once allocated it can't be instantly reclaimed, so the only way to enforce a memory limit is to terminate the process — the kernel's OOM killer kills the container (exit code 137, Reason OOMKilled), and the kubelet restarts it. CPU is a compressible resource: you can simply give the process less of it. So the CPU limit is enforced by throttling — the CFS scheduler caps how much CPU time the container gets per period, slowing it down rather than killing it. That asymmetry is why memory limits are dangerous to set too low (instant kills) but CPU limits are dangerous to set at all on latency-sensitive paths (silent throttling).",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["oom", "resources", "kernel"],
+      "followUps": ["What is exit code 137?", "What does compressible vs non-compressible mean for eviction order?"]
+    },
+    {
+      "id": "q-stuck-pending",
+      "question": "A pod has been Pending for ten minutes. How do you find out why?",
+      "answer": "Pending means the pod hasn't been bound to a node, so it's almost always a scheduling problem. Run kubectl describe pod and read the Events for a FailedScheduling message. Common reasons: no node has enough unreserved CPU/memory to satisfy the pod's requests; every candidate node has a taint the pod doesn't tolerate; affinity/anti-affinity or topology spread constraints can't be satisfied; a required PVC can't bind to a volume; or the cluster is simply at capacity and the cluster-autoscaler hasn't (or can't) add a node. The fix depends on the message — lower requests, add a toleration, relax constraints, or add capacity. Note this is distinct from CrashLoopBackOff, where the pod did schedule but the container won't stay up.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["scheduling", "pending", "debugging"],
+      "followUps": ["How do taints and tolerations interact with scheduling?", "How does cluster-autoscaler decide to add a node?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-deploy-svc-hpa",
+      "title": "Production Deployment + Service + HPA",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "prompt": "Write production-grade manifests for a stateless HTTP API called 'orders-api' (image ghcr.io/acme/orders-api:1.8.0, listening on port 8080). Requirements: 3 baseline replicas; zero-downtime rolling updates; correct startup, readiness, and liveness probes; sane requests and a memory limit but deliberately no CPU limit; a ClusterIP Service; and a HorizontalPodAutoscaler that scales 3 to 20 replicas targeting 70% CPU. Inject a config value from a ConfigMap. Add a PodDisruptionBudget so cluster maintenance never takes everything down.",
+      "hints": [
+        "Set maxUnavailable: 0 and maxSurge: 25% on the RollingUpdate strategy for true zero-downtime.",
+        "Use a startupProbe with a generous failureThreshold so a slow boot doesn't trip liveness; keep liveness shallow and readiness dependency-aware.",
+        "HPA needs CPU requests set on the pod or it cannot compute a utilization percentage.",
+        "PodDisruptionBudget with minAvailable: 2 keeps a quorum during node drains."
+      ],
+      "solutionCode": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: orders-api-config\ndata:\n  LOG_LEVEL: \"info\"\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: orders-api\n  labels: { app: orders-api }\nspec:\n  replicas: 3\n  selector:\n    matchLabels: { app: orders-api }\n  strategy:\n    type: RollingUpdate\n    rollingUpdate:\n      maxSurge: 25%\n      maxUnavailable: 0\n  template:\n    metadata:\n      labels: { app: orders-api }\n    spec:\n      terminationGracePeriodSeconds: 30\n      containers:\n        - name: orders-api\n          image: ghcr.io/acme/orders-api:1.8.0\n          ports:\n            - containerPort: 8080\n          envFrom:\n            - configMapRef: { name: orders-api-config }\n          resources:\n            requests:\n              cpu: \"250m\"\n              memory: \"256Mi\"\n            limits:\n              memory: \"512Mi\"   # no cpu limit: avoid CFS throttling\n          startupProbe:\n            httpGet: { path: /startupz, port: 8080 }\n            periodSeconds: 5\n            failureThreshold: 30  # up to 150s to warm up\n          readinessProbe:\n            httpGet: { path: /readyz, port: 8080 }\n            periodSeconds: 5\n            failureThreshold: 3\n          livenessProbe:\n            httpGet: { path: /livez, port: 8080 }\n            periodSeconds: 10\n            failureThreshold: 3\n          lifecycle:\n            preStop:\n              exec: { command: [\"sleep\", \"5\"] }  # drain before SIGTERM\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: orders-api\nspec:\n  type: ClusterIP\n  selector: { app: orders-api }\n  ports:\n    - port: 80\n      targetPort: 8080\n---\napiVersion: autoscaling/v2\nkind: HorizontalPodAutoscaler\nmetadata:\n  name: orders-api\nspec:\n  scaleTargetRef:\n    apiVersion: apps/v1\n    kind: Deployment\n    name: orders-api\n  minReplicas: 3\n  maxReplicas: 20\n  metrics:\n    - type: Resource\n      resource:\n        name: cpu\n        target:\n          type: Utilization\n          averageUtilization: 70\n---\napiVersion: policy/v1\nkind: PodDisruptionBudget\nmetadata:\n  name: orders-api\nspec:\n  minAvailable: 2\n  selector:\n    matchLabels: { app: orders-api }",
+      "solutionLanguage": "yaml",
+      "explanation": "The Deployment runs 3 replicas with a RollingUpdate of maxUnavailable: 0 / maxSurge: 25%, so a new pod must become Ready before any old pod is retired — true zero-downtime. The three probes are split correctly: startupProbe gives the app up to 150s to warm up while suppressing liveness/readiness, readinessProbe (deep, dependency-aware) gates traffic and rollouts, and livenessProbe (shallow) only restarts a wedged process — none of them depend on external services, avoiding cascading restarts. Requests reserve 250m CPU / 256Mi memory for the scheduler; a 512Mi memory limit caps the blast radius of a leak while CPU is intentionally left unlimited to avoid CFS throttling on the request path. The HPA needs the CPU request to compute utilization and scales 3-20 at a 70% target. The ConfigMap supplies non-secret config via envFrom. The preStop sleep plus terminationGracePeriodSeconds gives kube-proxy time to remove the pod from endpoints before SIGTERM, preventing dropped in-flight requests. Finally the PodDisruptionBudget (minAvailable: 2) ensures a node drain during a cluster upgrade can never evict more than one pod at a time, preserving availability during voluntary disruptions.",
+      "relatedTopic": "kubernetes"
+    },
+    {
+      "id": "ch-diagnose-restarts",
+      "title": "Diagnose Why a Pod Keeps Restarting",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "prompt": "You're on call. Pod orders-api-7c9f-xkb2 shows 14 restarts and status CrashLoopBackOff. Write the sequence of kubectl commands you'd run to determine whether this is an OOMKill, a failing liveness probe, or an application crash, and write a short bash snippet that programmatically classifies the cause from the pod's last terminated state.",
+      "hints": [
+        "kubectl describe pod surfaces Events and the container's Last State / Reason.",
+        "Exit code 137 with Reason OOMKilled means memory limit exceeded.",
+        "kubectl logs --previous shows the output of the instance that just died.",
+        "kubectl get pod -o jsonpath can extract lastState.terminated.reason and exitCode for scripting."
+      ],
+      "solutionCode": "#!/usr/bin/env bash\nset -euo pipefail\nNS=\"${1:-default}\"\nPOD=\"${2:?usage: classify.sh <namespace> <pod>}\"\n\n# 1) Human triage\nkubectl -n \"$NS\" describe pod \"$POD\"\nkubectl -n \"$NS\" logs \"$POD\" --previous --tail=100 || true\nkubectl -n \"$NS\" get events --field-selector involvedObject.name=\"$POD\" \\\n  --sort-by=.lastTimestamp\n\n# 2) Programmatic classification from the last terminated state\nread_state() {\n  kubectl -n \"$NS\" get pod \"$POD\" \\\n    -o jsonpath=\"{.status.containerStatuses[0].lastState.terminated.$1}\"\n}\nREASON=$(read_state reason || true)\nCODE=$(read_state exitCode || true)\n\n# Did the kubelet report a liveness probe failure recently?\nLIVENESS_FAIL=$(kubectl -n \"$NS\" get events \\\n  --field-selector involvedObject.name=\"$POD\" -o json \\\n  | grep -c \"Liveness probe failed\" || true)\n\nif [[ \"$REASON\" == \"OOMKilled\" || \"$CODE\" == \"137\" && \"$LIVENESS_FAIL\" == \"0\" ]]; then\n  echo \"CAUSE: OOMKilled -> raise memory limit or fix the leak\"\nelif [[ \"$LIVENESS_FAIL\" -gt 0 ]]; then\n  echo \"CAUSE: Liveness probe failing -> review probe timing / app wedge\"\nelif [[ -n \"$CODE\" && \"$CODE\" != \"0\" ]]; then\n  echo \"CAUSE: Application crash (exit $CODE) -> read logs --previous, fix config/code\"\nelse\n  echo \"CAUSE: Inconclusive -> inspect describe output and events above\"\nfi",
+      "solutionLanguage": "bash",
+      "explanation": "The script encodes the on-call decision tree. First it runs the three triage commands a human would: describe (Events + Last State), logs --previous (the dead instance's output — without --previous you'd see the freshly-started container, which is useless here), and the event stream sorted by time. Then it classifies programmatically. It extracts lastState.terminated.reason and exitCode via jsonpath. OOMKilled is identified by Reason == OOMKilled or exit code 137 (128 + SIGKILL 9) when there's no liveness failure. A liveness-induced restart is identified by 'Liveness probe failed' events, because the kubelet kills the container itself rather than the app exiting. A plain application crash is any other non-zero exit code, pointing you to the previous logs. The ordering matters: 137 alone is ambiguous (a liveness kill also uses SIGKILL), so the script checks for liveness events before concluding OOM. This mirrors how a senior engineer separates the three canonical restart causes instead of just 'restarting the pod' and hoping.",
+      "relatedTopic": "kubernetes"
+    }
+  ],
+  "references": [
+    {"label": "Kubernetes Documentation: Concepts", "url": "https://kubernetes.io/docs/concepts/"},
+    {"label": "Configure Liveness, Readiness and Startup Probes", "url": "https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/"},
+    {"label": "Managing Resources for Containers (requests/limits/QoS)", "url": "https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/"},
+    {"label": "Horizontal Pod Autoscaling", "url": "https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/"},
+    {"label": "For the Love of God, Stop Using CPU Limits on Kubernetes", "url": "https://home.robusta.dev/blog/stop-using-cpu-limits"}
+  ]
+}

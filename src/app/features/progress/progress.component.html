@@ -1,0 +1,79 @@
+<div class="page">
+  <header class="page__head">
+    <span class="page__eyebrow"><app-icon name="progress" [size]="15" /> Your Journey</span>
+    <h1 class="page__title">Progress & achievements</h1>
+    <p class="page__subtitle">Everything you've mastered so far — tracked locally on this device.</p>
+  </header>
+
+  <section class="pr__top">
+    <div class="card pr__ring">
+      <app-progress-ring [value]="overallRatio()" [size]="140" caption="mastered" />
+      <div>
+        <h2>{{ progress.completedCount() }} / {{ totalTopics() }}</h2>
+        <p class="muted">topics completed</p>
+      </div>
+    </div>
+    <div class="pr__metrics">
+      <div class="card pr__metric">
+        <span class="pr__metric-num">{{ progress.solvedCount() }}</span>
+        <span class="muted">Challenges solved</span>
+      </div>
+      <div class="card pr__metric">
+        <span class="pr__metric-num">{{ interview.history().length }}</span>
+        <span class="muted">Interview sessions</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="card pr__cats">
+    <h3 class="section-title"><app-icon name="layers" [size]="18" /> Completion by category</h3>
+    <div class="pr__cat-grid">
+      @for (c of categoryProgress(); track c.name) {
+        <div class="pr__cat">
+          <div class="pr__cat-row"><span>{{ c.name }}</span><span class="mono">{{ c.done }}/{{ c.total }}</span></div>
+          <div class="pr__cat-bar"><span [style.width.%]="c.ratio * 100"></span></div>
+        </div>
+      }
+    </div>
+  </section>
+
+  <div class="pr__lists">
+    <section class="card">
+      <h3 class="section-title"><app-icon name="check" [size]="18" /> Completed topics</h3>
+      @if (completedTopics().length) {
+        <div class="pr__chips">
+          @for (t of completedTopics(); track t.id) {
+            <a class="pr__topic-chip" [routerLink]="['/topics', t.id]">{{ t.title }} <app-icon name="arrow-right" [size]="13" /></a>
+          }
+        </div>
+      } @else {
+        <app-empty-state icon="topics" title="No topics completed yet" message="Open a topic and hit “Mark complete”." />
+      }
+    </section>
+
+    <section class="card">
+      <h3 class="section-title"><app-icon name="clock" [size]="18" /> Interview history</h3>
+      @if (interview.history().length) {
+        <div class="pr__history">
+          @for (h of interview.history(); track h.date) {
+            <div class="pr__hist-row">
+              <span class="pr__hist-date">{{ fmtDate(h.date) }}</span>
+              <div class="pr__hist-bar">
+                <span class="is-got" [style.width.%]="(h.got / h.total) * 100"></span>
+                <span class="is-partial" [style.width.%]="(h.partial / h.total) * 100"></span>
+                <span class="is-missed" [style.width.%]="(h.missed / h.total) * 100"></span>
+              </div>
+              <span class="pr__hist-score mono">{{ h.got }}/{{ h.total }}</span>
+            </div>
+          }
+        </div>
+      } @else {
+        <app-empty-state icon="brain" title="No sessions yet" message="Run a mock interview to track your scores." />
+      }
+    </section>
+  </div>
+
+  <div class="pr__danger">
+    <button class="btn pr__reset" (click)="confirmReset()"><app-icon name="refresh" [size]="16" /> Reset all progress</button>
+  </div>
+</div>

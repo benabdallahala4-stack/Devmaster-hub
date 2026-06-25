@@ -1,0 +1,588 @@
+{
+  "id": "aws-s3",
+  "title": "AWS S3",
+  "category": "Cloud",
+  "subcategory": "Storage",
+  "difficulty": "mid",
+  "tags": ["aws", "s3", "object-storage", "security", "presigned-urls", "lifecycle", "encryption"],
+  "description": "Master Amazon S3 from buckets and storage classes to secure direct-to-S3 uploads, lifecycle policies, and the encryption and access-control footguns that cause real-world data leaks.",
+  "estReadMinutes": 28,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction to Amazon S3",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Amazon Simple Storage Service (S3) is an object storage service that stores data as objects inside containers called buckets. Unlike a file system with a hierarchical tree of directories, S3 is a flat key-value store: every object is identified by a globally-scoped bucket name and a key (a UTF-8 string up to 1024 bytes). The 'folders' you see in the console are a UI convenience derived from common key prefixes — there is no real directory structure underneath."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Bucket: a namespace for objects, tied to a single AWS region, with a globally unique name.",
+            "Object: the data itself (up to 5 TB) plus metadata, a version ID, and an entity tag (ETag).",
+            "Key: the full path-like name of an object, e.g. users/42/avatar.png.",
+            "Prefix: a leading portion of a key (users/42/) used for listing, lifecycle scoping, and IAM conditions.",
+            "Region: where the bucket physically lives; affects latency, data residency, and cost."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "S3 advertises 99.999999999% (eleven nines) of durability for objects, achieved by redundantly storing each object across multiple devices and Availability Zones within a region."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why S3 Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "S3 is the storage substrate of the modern cloud. Data lakes, static websites, log archives, backups, ML training datasets, container image layers, and CDN origins almost all bottom out in S3. Because it is effectively infinitely scalable and pay-per-use, teams treat it as a default for anything that is fundamentally a blob. That ubiquity is exactly why understanding its access-control and consistency model is a senior-level responsibility."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Durability and scale: eleven nines of durability means you almost never lose data, and there is no capacity to provision.",
+            "Cost control: choosing the right storage class and lifecycle policy can cut a multi-petabyte bill by 60-80%.",
+            "Security blast radius: a single misconfigured bucket policy can expose millions of records publicly — S3 leaks are a recurring headline.",
+            "Offload from your servers: presigned URLs let clients upload and download directly from S3, removing your application from the data path."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "S3 misconfiguration is one of the most common causes of large public data breaches. Treat bucket access as a security-critical design decision, not an afterthought."
+        }
+      ]
+    },
+    {
+      "id": "storage-classes",
+      "heading": "Storage Classes and Durability vs Availability",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Every object is stored in a storage class. All classes share the same eleven-nines durability (except One Zone-IA), but they differ in availability SLA, retrieval latency, minimum storage duration, and per-GB cost. The key mental model: you pay less for storage in exchange for paying more (in money or latency) to retrieve the data, plus accepting lower availability."
+        },
+        {
+          "type": "table",
+          "headers": ["Class", "Use case", "Availability SLA", "Retrieval", "Notes"],
+          "rows": [
+            ["Standard", "Hot, frequently accessed data", "99.9%", "Milliseconds", "No minimum duration, highest storage cost"],
+            ["Standard-IA", "Infrequent but needs fast access", "99.9%", "Milliseconds", "Cheaper storage, per-GB retrieval fee, 30-day minimum"],
+            ["One Zone-IA", "Re-creatable infrequent data", "99.5%", "Milliseconds", "Single AZ, lower durability, cheapest IA"],
+            ["Intelligent-Tiering", "Unknown or changing access patterns", "99.9%", "Milliseconds", "Auto-moves objects between tiers, small monitoring fee"],
+            ["Glacier Instant Retrieval", "Archive needing instant access", "99.9%", "Milliseconds", "Very cheap storage, higher retrieval cost"],
+            ["Glacier Flexible Retrieval", "Archive, minutes-to-hours OK", "99.99% (after restore)", "Minutes to 12h", "Bulk/standard/expedited restore tiers"],
+            ["Glacier Deep Archive", "Compliance, rarely accessed", "99.99% (after restore)", "12-48 hours", "Cheapest storage of all"]
+          ]
+        },
+        {
+          "type": "heading",
+          "text": "Durability vs Availability"
+        },
+        {
+          "type": "paragraph",
+          "text": "Durability is the probability that an object is not lost over a year — it is about data not disappearing. Availability is the probability that you can access the object right now — it is about the service being reachable. Standard offers both high durability and high availability. One Zone-IA keeps the same logical durability guarantee for the device redundancy but stores in a single AZ, so an AZ loss can lose data; never use it for anything you cannot regenerate."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "If you do not know the access pattern, Intelligent-Tiering is usually the safe default: it automatically demotes cold objects and promotes them on access, with no retrieval fees for the frequent/infrequent tiers."
+        }
+      ]
+    },
+    {
+      "id": "consistency-model",
+      "heading": "Consistency: Strong Read-After-Write",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Since December 2020, S3 provides strong read-after-write consistency for all GET, PUT, LIST, and metadata operations, in all regions, at no additional cost and with no performance penalty. After a successful write (PUT or DELETE) returns, any subsequent read is guaranteed to see the latest version. This was a major change: the old model gave eventual consistency for overwrite PUTs and DELETEs, which forced developers to build retry-and-poll workarounds."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Read-after-new-write: PUT a brand new object, immediately GET it — you get the data.",
+            "Read-after-overwrite: PUT over an existing key, immediately GET it — you get the new bytes, never a stale version.",
+            "Read-after-delete: DELETE a key, immediately GET it — you get a 404, not a phantom object.",
+            "LIST is also strongly consistent: after a PUT, the key appears in a subsequent LIST."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Strong consistency applies to a single object's data and metadata. It does NOT make S3 transactional across multiple objects, and it does NOT eliminate caching layers you put in front of S3 (CloudFront, app caches). A stale CDN edge can still serve old content even though S3 itself is consistent."
+        },
+        {
+          "type": "paragraph",
+          "text": "A subtle trap: if you used to negative-cache 404s (cache the fact an object does not exist) to work around the old eventual-consistency window, that workaround can now mask a freshly written object. Audit such caches when you rely on strong consistency."
+        }
+      ]
+    },
+    {
+      "id": "versioning-lifecycle",
+      "heading": "Versioning and Lifecycle Policies",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Versioning, once enabled on a bucket, keeps every version of an object. An overwrite creates a new version with a fresh version ID and pushes the old one back; a delete inserts a zero-byte delete marker rather than removing data, so you can recover from accidental deletes and overwrites. Versioning can be suspended but never fully disabled once enabled."
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "code": "{\n  \"Rules\": [\n    {\n      \"ID\": \"archive-then-expire-logs\",\n      \"Filter\": { \"Prefix\": \"logs/\" },\n      \"Status\": \"Enabled\",\n      \"Transitions\": [\n        { \"Days\": 30, \"StorageClass\": \"STANDARD_IA\" },\n        { \"Days\": 90, \"StorageClass\": \"GLACIER\" }\n      ],\n      \"Expiration\": { \"Days\": 365 },\n      \"NoncurrentVersionExpiration\": { \"NoncurrentDays\": 30 },\n      \"AbortIncompleteMultipartUpload\": { \"DaysAfterInitiation\": 7 }\n    }\n  ]\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Lifecycle policies automate transitions between storage classes and expiration. The rule above moves logs to Standard-IA after 30 days, to Glacier after 90, deletes current versions after a year, expires noncurrent (old) versions 30 days after they become noncurrent, and crucially aborts incomplete multipart uploads after 7 days — orphaned multipart parts are a classic source of silent, growing cost."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Without versioning, a malicious or buggy overwrite is unrecoverable. Combine versioning with MFA Delete and a NoncurrentVersionExpiration rule so you get recoverability without paying to keep every version forever."
+        }
+      ]
+    },
+    {
+      "id": "access-control",
+      "heading": "Access Control: Bucket Policies vs IAM vs ACLs",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "S3 has three overlapping access-control mechanisms, and confusing them is the root cause of most leaks. Effective permission is the union of all 'allow' grants minus any explicit 'deny' — a deny anywhere wins. Block Public Access (BPA) sits above all of them as a guardrail that overrides policies and ACLs that would grant public access."
+        },
+        {
+          "type": "table",
+          "headers": ["Mechanism", "Attached to", "Best for"],
+          "rows": [
+            ["IAM policy", "A user, group, or role", "Granting your own principals access to many buckets"],
+            ["Bucket policy", "The bucket (resource)", "Cross-account access, conditions like aws:SourceVpce or TLS-only"],
+            ["ACL (legacy)", "Bucket or object", "Avoid; disable via Object Ownership = Bucket owner enforced"],
+            ["Block Public Access", "Account and bucket", "A hard guardrail that should be ON everywhere by default"]
+          ]
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "code": "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [\n    {\n      \"Sid\": \"DenyInsecureTransport\",\n      \"Effect\": \"Deny\",\n      \"Principal\": \"*\",\n      \"Action\": \"s3:*\",\n      \"Resource\": [\n        \"arn:aws:s3:::acme-reports\",\n        \"arn:aws:s3:::acme-reports/*\"\n      ],\n      \"Condition\": { \"Bool\": { \"aws:SecureTransport\": \"false\" } }\n    }\n  ]\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "A common hardening pattern is the explicit deny above: it rejects any request that does not use TLS, regardless of what else grants access. Modern guidance is to disable ACLs entirely (set Object Ownership to 'Bucket owner enforced'), keep Block Public Access on, and express all intent through IAM and bucket policies, which are far easier to audit."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "An explicit Deny in any policy (IAM, bucket, SCP, VPC endpoint, session policy) overrides every Allow. If access mysteriously fails, hunt for a Deny before adding more Allows."
+        }
+      ]
+    },
+    {
+      "id": "encryption",
+      "heading": "Encryption: SSE-S3 vs SSE-KMS vs SSE-C",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "S3 encrypts all new objects at rest by default. The question is who manages the keys. Server-side encryption (SSE) means S3 decrypts on read for any caller with object access; the encryption is transparent. The variants differ in key custody, auditability, and cost."
+        },
+        {
+          "type": "list",
+          "items": [
+            "SSE-S3 (AES256): AWS manages the keys entirely. Zero config, free, but no per-request access control on the key and limited audit granularity.",
+            "SSE-KMS: keys live in AWS KMS. You get CloudTrail logs of every decrypt, IAM control over who can use the key, and key rotation — at the cost of KMS API charges and request quotas.",
+            "SSE-C: you supply the key on every request; S3 never stores it. Maximum control, maximum operational burden, and you lose the key means you lose the data.",
+            "Bucket Keys: an SSE-KMS optimization that uses a short-lived bucket-level key to cut KMS request volume (and cost) by orders of magnitude for high-throughput buckets."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "# Upload with SSE-KMS using a specific customer-managed key\naws s3api put-object \\\n  --bucket acme-reports \\\n  --key 2026/q2/financials.parquet \\\n  --body financials.parquet \\\n  --server-side-encryption aws:kms \\\n  --ssekms-key-id arn:aws:kms:us-east-1:111122223333:key/abcd-1234"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "With SSE-KMS, a caller needs BOTH s3:GetObject AND kms:Decrypt on the key. A correct S3 policy with a missing KMS grant produces a confusing AccessDenied that is not about S3 at all — a frequent debugging trap."
+        }
+      ]
+    },
+    {
+      "id": "presigned-and-uploads",
+      "heading": "Presigned URLs, Multipart Upload, and Transfer Acceleration",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A presigned URL embeds a temporary, scoped signature so an unauthenticated client can perform a single S3 operation (typically GET or PUT) on a specific key. Your backend signs the URL using its own credentials; the client never sees those credentials and can only do exactly what the URL permits, until it expires. This is the standard way to let browsers and mobile apps upload/download directly to S3 without routing bytes through your servers."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { S3Client, PutObjectCommand } from \"@aws-sdk/client-s3\";\nimport { getSignedUrl } from \"@aws-sdk/s3-request-presigner\";\n\nconst s3 = new S3Client({ region: \"us-east-1\" });\n\nexport async function presignUpload(userId: string, fileId: string) {\n  const cmd = new PutObjectCommand({\n    Bucket: \"acme-uploads\",\n    Key: `users/${userId}/${fileId}`,\n    ContentType: \"image/jpeg\",\n    ServerSideEncryption: \"aws:kms\",\n  });\n  // URL is valid for 5 minutes and only for this exact key + content type\n  return getSignedUrl(s3, cmd, { expiresIn: 300 });\n}"
+        },
+        {
+          "type": "heading",
+          "text": "Multipart Upload"
+        },
+        {
+          "type": "paragraph",
+          "text": "Objects larger than 100 MB should use multipart upload: the file is split into parts (5 MB to 5 GB each, up to 10,000 parts), uploaded in parallel, and reassembled by S3 on completion. It gives resumability (retry only the failed part), better throughput, and is mandatory above 5 GB. Always pair it with a lifecycle rule to abort incomplete uploads, or abandoned parts accrue cost forever."
+        },
+        {
+          "type": "heading",
+          "text": "Transfer Acceleration"
+        },
+        {
+          "type": "paragraph",
+          "text": "Transfer Acceleration routes uploads through the nearest CloudFront edge location and over AWS's backbone to the bucket's region, reducing latency for geographically distant or high-loss clients. It costs extra per GB and only helps when the network path is the bottleneck — measure with the AWS speed comparison tool before enabling it."
+        }
+      ]
+    },
+    {
+      "id": "static-hosting-events",
+      "heading": "Static Hosting and Event Notifications",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "S3 can serve a static website directly, but the modern production pattern is S3 as a private origin behind CloudFront, using Origin Access Control (OAC) so the bucket stays fully private and only CloudFront can read it. This gives you TLS, caching, a custom domain, and Block Public Access all on — the native S3 website endpoint, by contrast, is HTTP-only and requires a public bucket."
+        },
+        {
+          "type": "paragraph",
+          "text": "Event notifications let S3 publish events (ObjectCreated, ObjectRemoved, etc.) to SNS, SQS, Lambda, or EventBridge. This powers serverless pipelines: upload an image, trigger a Lambda that generates thumbnails; drop a file in a landing prefix, trigger ETL. Prefer EventBridge for richer filtering and multiple targets."
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "code": "{\n  \"LambdaFunctionConfigurations\": [\n    {\n      \"LambdaFunctionArn\": \"arn:aws:lambda:us-east-1:111122223333:function:thumbnailer\",\n      \"Events\": [\"s3:ObjectCreated:*\"],\n      \"Filter\": {\n        \"Key\": {\n          \"FilterRules\": [\n            { \"Name\": \"prefix\", \"Value\": \"uploads/\" },\n            { \"Name\": \"suffix\", \"Value\": \".jpg\" }\n          ]\n        }\n      }\n    }\n  ]\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "S3 event delivery is at-least-once, not exactly-once. Your consumer must be idempotent — the same ObjectCreated event can be delivered more than once."
+        }
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: The Avatar Pipeline Incident",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A real-world scenario: a social app let users upload avatars by POSTing the image bytes to the API server, which then forwarded them to S3. Under a traffic spike the API instances ran out of memory buffering large uploads and started OOM-crashing, taking down unrelated endpoints. The fix was to remove the server from the data path entirely using presigned PUT URLs plus an S3 event that triggered post-processing."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// 1. Client asks backend for a presigned URL (auth happens here)\napp.post(\"/uploads\", authMiddleware, async (req, res) => {\n  const fileId = crypto.randomUUID();\n  const key = `uploads/${req.user.id}/${fileId}.jpg`;\n  const cmd = new PutObjectCommand({\n    Bucket: \"acme-uploads\",\n    Key: key,\n    ContentType: \"image/jpeg\",\n    ContentLength: req.body.size,           // pin the size\n    ServerSideEncryption: \"aws:kms\",\n  });\n  const url = await getSignedUrl(s3, cmd, { expiresIn: 120 });\n  res.json({ url, key });\n});\n\n// 2. Browser PUTs bytes straight to S3 using the URL (no server in path)\n// 3. S3 ObjectCreated event triggers the thumbnailer Lambda asynchronously"
+        },
+        {
+          "type": "paragraph",
+          "text": "After the change, the API servers handled only tiny JSON sign requests; the heavy bytes flowed browser-to-S3. The OOM crashes vanished, throughput rose, and the thumbnailer Lambda scaled independently of the API tier. The lesson: keep large binary data out of your application's memory and request lifecycle whenever S3 can carry it directly."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Pinning ContentType and ContentLength in the presigned PutObjectCommand makes the URL refuse mismatched uploads — a client cannot swap a 2 KB jpg request for a 5 GB video."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "heading",
+          "text": "1. The public bucket data leak"
+        },
+        {
+          "type": "paragraph",
+          "text": "The classic incident: someone sets a bucket policy with Principal '*' or an old all-users ACL grant to 'make the demo work', Block Public Access is off, and suddenly customer PII is crawlable by anyone. These leaks are routinely discovered by security researchers scanning for open buckets. The fix is layered: keep account-level Block Public Access on, disable ACLs, and require explicit security review for any policy with a wildcard principal."
+        },
+        {
+          "type": "heading",
+          "text": "2. Relying on old eventual-consistency assumptions"
+        },
+        {
+          "type": "paragraph",
+          "text": "Teams that built poll-and-retry loops or negative caches for the pre-2020 eventual-consistency model sometimes carry that code forward. Now that S3 is strongly consistent, a 404 negative cache can mask a just-written object, producing 'the file uploaded but the app says it doesn't exist' bugs that are actually caused by your own cache, not S3."
+        },
+        {
+          "type": "heading",
+          "text": "3. Orphaned multipart uploads"
+        },
+        {
+          "type": "paragraph",
+          "text": "An upload that fails partway leaves uploaded parts that are billed but invisible in normal LIST operations. Without an AbortIncompleteMultipartUpload lifecycle rule, a buggy client can silently grow your bill for months."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Long-lived presigned URLs: a 7-day URL leaked in a log file is a 7-day open door. Keep expiry minutes, not days.",
+            "SSE-KMS without kms:Decrypt: correct S3 policy, missing KMS grant, confusing AccessDenied.",
+            "Hot-partition throttling: thousands of keys sharing one prefix can hit per-prefix request limits; spread the prefix space.",
+            "Forgetting CloudFront invalidation: S3 is consistent but your CDN edge still serves the old object until TTL or invalidation.",
+            "Using One Zone-IA for irreplaceable data: an AZ loss permanently destroys it."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Enable Block Public Access at the ACCOUNT level, not just per bucket. This catches the new bucket someone creates next quarter without thinking about access control."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Turn on account-level Block Public Access and disable ACLs (Object Ownership = Bucket owner enforced) as your baseline.",
+            "Express access with IAM and bucket policies only; add a DenyInsecureTransport statement to force TLS.",
+            "Use SSE-KMS with a customer-managed key plus S3 Bucket Keys for auditability without crippling KMS cost.",
+            "Enable versioning plus a NoncurrentVersionExpiration lifecycle rule for recoverability without unbounded cost.",
+            "Always add AbortIncompleteMultipartUpload to lifecycle config to kill orphaned-part billing.",
+            "Use presigned URLs with the shortest workable expiry and pin ContentType/ContentLength to keep big bytes out of your servers.",
+            "Serve static content via CloudFront + Origin Access Control with the bucket private, never the public website endpoint.",
+            "Pick Intelligent-Tiering when access patterns are unknown; use explicit Glacier classes when they are well understood.",
+            "Make all S3-event consumers idempotent because delivery is at-least-once.",
+            "Enable S3 server access logging or CloudTrail data events to a separate, locked-down bucket for audit and incident response."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "A good S3 security posture is boring: BPA on, ACLs off, KMS encryption, versioning with lifecycle, TLS-only deny, and presigned URLs with tight expiry. If your buckets look like that, you have eliminated the vast majority of S3 incident classes."
+        }
+      ]
+    },
+    {
+      "id": "note-cost",
+      "heading": "Note: The Hidden Costs of S3",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Storage per GB is often the smallest part of an S3 bill. Watch for: request costs (millions of tiny GETs/PUTs add up), data transfer OUT to the internet, cross-region replication transfer, KMS request charges on high-throughput SSE-KMS buckets, early-deletion fees on IA/Glacier classes, and Intelligent-Tiering monitoring fees on huge numbers of small objects. Use S3 Storage Lens and cost allocation tags to attribute and control spend."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Storing billions of tiny objects in Intelligent-Tiering can cost more in monitoring fees than you save in tiering. For many tiny objects, aggregate them or use Standard."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "presigned-upload-flow",
+      "title": "Secure Direct-to-S3 Upload with Presigned URLs",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n    participant Client\n    participant API as App Server\n    participant S3\n    participant Lambda as Thumbnailer\n    Client->>API: POST /uploads with auth token\n    API->>API: Authorize and build object key\n    API->>S3: Sign PutObject for key\n    API-->>Client: Presigned URL plus key\n    Client->>S3: PUT bytes using presigned URL\n    S3-->>Client: 200 OK\n    S3->>Lambda: ObjectCreated event\n    Lambda->>S3: GET original, PUT thumbnail"
+    },
+    {
+      "id": "access-control-eval",
+      "title": "How S3 Evaluates an Access Request",
+      "type": "mermaid",
+      "content": "flowchart TD\n    A[Incoming request] --> B{Block Public Access blocks it?}\n    B -- Yes --> D[Deny]\n    B -- No --> C{Any explicit Deny in IAM bucket SCP or VPCe?}\n    C -- Yes --> D\n    C -- No --> E{Any Allow grant present?}\n    E -- Yes --> F[Allow]\n    E -- No --> D"
+    },
+    {
+      "id": "storage-class-lifecycle",
+      "title": "Object Lifecycle Across Storage Classes",
+      "type": "ascii",
+      "content": "  PUT\n   |\n   v\n+-----------+   30d   +-------------+   90d   +-----------+   365d\n| STANDARD  | ------> | STANDARD-IA | ------> |  GLACIER  | ------> [ EXPIRE ]\n+-----------+         +-------------+         +-----------+\n   ^                                                |\n   |  promote on access (Intelligent-Tiering)       | restore (mins-hours)\n   +------------------------------------------------+"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-bucket-vs-key",
+      "question": "What is the difference between a bucket, an object, a key, and a prefix in S3?",
+      "answer": "A bucket is a regionally-scoped, globally-unique-named container for objects. An object is the stored data plus its metadata, version ID, and ETag. A key is the full UTF-8 string (up to 1024 bytes) that uniquely identifies an object within its bucket. A prefix is a leading substring of keys, like users/42/, used for listing, lifecycle scoping, and IAM conditions. S3 is a flat key-value store; 'folders' in the console are just shared prefixes, not real directories.",
+      "difficulty": "junior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["fundamentals", "keys", "prefixes"],
+      "followUps": ["Why can listing under a deeply nested prefix still be fast?", "Does the order of characters in a key prefix affect performance?"]
+    },
+    {
+      "id": "q-durability-availability",
+      "question": "Explain the difference between durability and availability in S3, and where they diverge across storage classes.",
+      "answer": "Durability is the probability an object is not lost over a year (S3 Standard advertises eleven nines) — it is about data persistence. Availability is the probability you can access the object at a given moment, expressed as an SLA like 99.9%. Most classes share the same durability design but offer lower availability SLAs (e.g. One Zone-IA at 99.5%). One Zone-IA is the real divergence: it stores in a single AZ, so an AZ loss can actually lose data, making it suitable only for re-creatable content despite its nominal durability.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["durability", "availability", "storage-classes"],
+      "followUps": ["When is One Zone-IA an acceptable risk?", "How does S3 achieve eleven nines of durability?"]
+    },
+    {
+      "id": "q-secure-bucket",
+      "question": "How would you secure an S3 bucket holding sensitive customer data?",
+      "answer": "Layered defense: (1) Enable Block Public Access at the account and bucket level. (2) Disable ACLs via Object Ownership = Bucket owner enforced. (3) Express access only through IAM and bucket policies, scoped to specific principals and prefixes. (4) Add a bucket-policy Deny for aws:SecureTransport false to force TLS. (5) Encrypt with SSE-KMS using a customer-managed key and restrict kms:Decrypt. (6) Enable versioning plus MFA Delete. (7) Turn on CloudTrail data events / server access logging to a separate locked bucket. (8) Optionally restrict access to a VPC endpoint via aws:SourceVpce. The principle is least privilege plus auditability, with Block Public Access as a non-negotiable guardrail.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["security", "bucket-policy", "encryption", "iam"],
+      "followUps": ["How do you detect a regression that opens the bucket?", "How would you enforce this across hundreds of accounts?"]
+    },
+    {
+      "id": "q-presigned-url",
+      "question": "What is a presigned URL and when would you use one?",
+      "answer": "A presigned URL is a URL that embeds a temporary, scoped AWS signature, allowing an otherwise-unauthenticated client to perform one specific S3 operation (e.g. PutObject or GetObject) on one key until the URL expires. Your backend, which holds credentials, generates it; the client never sees the credentials. Use it to let browsers/mobile apps upload or download directly to/from S3 without routing bytes through your servers, to share a private object temporarily, or to grant time-limited access without creating IAM users.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["presigned-urls", "security", "uploads"],
+      "followUps": ["What is the maximum expiry of a presigned URL?", "How do you constrain what a client can upload?"]
+    },
+    {
+      "id": "q-storage-class-choice",
+      "question": "How do you choose between Standard, Standard-IA, Glacier, and Intelligent-Tiering?",
+      "answer": "Decide by access frequency, latency tolerance, and predictability. Use Standard for hot, frequently-accessed data. Use Standard-IA when access is infrequent but must be instant and you can tolerate a per-GB retrieval fee and 30-day minimum. Use Glacier classes for archives: Instant Retrieval for rare-but-instant, Flexible Retrieval for minutes-to-hours, Deep Archive for compliance data you almost never touch. Use Intelligent-Tiering when the access pattern is unknown or shifting — it auto-tiers objects with no retrieval fees on the frequent/infrequent tiers, at the cost of a small monitoring fee per object.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["storage-classes", "cost", "lifecycle"],
+      "followUps": ["When does Intelligent-Tiering become uneconomical?", "What is the early-deletion penalty on Standard-IA?"]
+    },
+    {
+      "id": "q-lifecycle-versioning",
+      "question": "How do lifecycle policies interact with versioning?",
+      "answer": "With versioning on, overwrites and deletes create noncurrent versions and delete markers rather than removing data. Lifecycle rules can target current versions (Transitions, Expiration) and noncurrent versions separately (NoncurrentVersionTransitions, NoncurrentVersionExpiration). A best-practice rule keeps recoverability while bounding cost: expire noncurrent versions after, say, 30 days and clean up expired delete markers. You should also add AbortIncompleteMultipartUpload so failed multipart uploads do not accrue cost. Forgetting noncurrent-version rules on a versioned bucket is a common cause of runaway storage bills.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["versioning", "lifecycle", "cost"],
+      "followUps": ["What is a delete marker and how do you clean expired ones?", "Can you transition noncurrent versions to Glacier?"]
+    },
+    {
+      "id": "q-encryption-types",
+      "question": "Compare SSE-S3, SSE-KMS, and SSE-C.",
+      "answer": "All three are server-side encryption at rest. SSE-S3 (AES256): AWS owns and manages the keys; zero config and free but minimal per-key access control and audit granularity. SSE-KMS: keys live in KMS; you get IAM control over key usage, CloudTrail audit of every decrypt, and rotation, at the cost of KMS request charges (mitigated by S3 Bucket Keys). SSE-C: you supply the key on every request and S3 never stores it; maximum control but you manage and protect the key yourself, and losing it means losing the data. SSE-KMS is the typical choice for sensitive data needing auditability.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["encryption", "kms", "security"],
+      "followUps": ["What does an S3 Bucket Key optimize?", "What two permissions does a caller need to read an SSE-KMS object?"]
+    },
+    {
+      "id": "q-multipart",
+      "question": "When and why would you use multipart upload?",
+      "answer": "Use multipart upload for large objects: it is recommended above ~100 MB and mandatory above 5 GB. The object is split into parts (5 MB to 5 GB, up to 10,000 parts) uploaded in parallel and reassembled by S3 on completion. Benefits: higher throughput via parallelism, resumability (retry only the failed part), and the ability to begin uploading before knowing the final size. Critically, always pair it with an AbortIncompleteMultipartUpload lifecycle rule, because failed uploads leave billed-but-invisible parts behind.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["multipart", "uploads", "performance"],
+      "followUps": ["How does S3 reassemble parts into one object?", "What happens to parts if you never call CompleteMultipartUpload?"]
+    },
+    {
+      "id": "q-event-notifications",
+      "question": "How do S3 event notifications work and what delivery guarantees do they provide?",
+      "answer": "S3 can publish events (ObjectCreated, ObjectRemoved, lifecycle transitions, etc.) to SNS, SQS, Lambda, or EventBridge, optionally filtered by key prefix and suffix. This enables serverless pipelines such as thumbnail generation or ETL triggering. The key guarantee to remember is at-least-once delivery: the same event can arrive more than once and ordering is not guaranteed, so consumers must be idempotent. EventBridge is preferred when you need richer filtering, multiple targets, or cross-account routing.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["events", "lambda", "eventbridge", "serverless"],
+      "followUps": ["How would you make a thumbnail Lambda idempotent?", "Why might an event not fire at all?"]
+    },
+    {
+      "id": "q-consistency-tricky",
+      "question": "S3 is now strongly consistent — so does that mean two clients writing the same key get transactional behavior?",
+      "answer": "No, and this is a common misconception. Strong read-after-write consistency means that after a single write succeeds, any subsequent read sees that write — it is per-object consistency of data and metadata. It does NOT give you transactions, conditional atomicity across multiple objects, or last-writer-wins arbitration semantics. If two clients PUT the same key concurrently, one of them wins and the other's data is simply overwritten; there is no locking or merge. For concurrency control you need application-level coordination, conditional writes (If-Match / If-None-Match ETag preconditions, now supported), or a separate lock service. Strong consistency removed the stale-read window, not the need to manage concurrent writers.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["consistency", "concurrency", "gotcha"],
+      "followUps": ["How do If-None-Match conditional PUTs help here?", "What still serves stale data even though S3 is consistent?"]
+    },
+    {
+      "id": "q-public-misconfig-tricky",
+      "question": "Block Public Access is ON, yet a user reports they can reach an object via a URL. How is that possible?",
+      "answer": "Block Public Access prevents POLICY/ACL-based public grants, but it does not block legitimately-signed access. The 'URL' the user has is almost certainly a presigned URL — it carries a valid signature, so it is authenticated access, not public access, and BPA does not apply to it. Other explanations: the object is served through CloudFront with Origin Access Control (the request to S3 is authenticated as CloudFront, not public), or the user is authenticated via IAM/SSO in the browser. The trap is assuming 'reachable via URL' equals 'publicly exposed'. To audit true public exposure, use IAM Access Analyzer for S3, not just the presence of a URL.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["security", "presigned-urls", "block-public-access", "gotcha"],
+      "followUps": ["How does Access Analyzer determine a bucket is public?", "Can BPA revoke an already-issued presigned URL?"]
+    },
+    {
+      "id": "q-kms-denied-tricky",
+      "question": "A role has s3:GetObject allowed on the bucket but still gets AccessDenied reading objects. What is the likely cause?",
+      "answer": "The objects are encrypted with SSE-KMS using a customer-managed key, and the role lacks kms:Decrypt on that key. Reading an SSE-KMS object requires BOTH s3:GetObject on the object AND kms:Decrypt (and often kms:GenerateDataKey for writes) on the CMK. The AccessDenied surfaces from the KMS layer, so engineers waste time auditing the S3 policy, which is correct. The fix is to grant the role kms:Decrypt either via the key policy or an IAM policy referencing the key ARN. A second possibility is an explicit Deny elsewhere (SCP, VPC endpoint policy, or a bucket-policy condition the request fails, such as TLS-only or a SourceVpce restriction).",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["kms", "encryption", "iam", "gotcha"],
+      "followUps": ["Where do you grant kms:Decrypt — key policy or IAM policy?", "How does S3 Bucket Key change the KMS permission requirements?"]
+    },
+    {
+      "id": "q-hot-prefix-tricky",
+      "question": "Your batch job suddenly gets 503 SlowDown errors from S3 even though the bucket is far from any size limit. Why?",
+      "answer": "You are hitting S3's per-prefix request rate scaling. S3 scales request throughput per key prefix (around 3,500 writes and 5,500 reads per second per prefix), and it partitions automatically based on key patterns. If your job writes thousands of objects under one narrow, sequential prefix (e.g. a date-stamped path or a monotonic counter), all requests funnel through a single partition and you get throttled with 503 SlowDown. The fix is to spread entropy across the prefix space — e.g. add a hashed or random prefix segment early in the key — so S3 partitions across many prefixes. The bucket's total size is irrelevant; this is purely a request-rate-per-prefix concern.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["performance", "throttling", "prefixes", "gotcha"],
+      "followUps": ["How does adding a hash prefix change partitioning?", "Should you implement client-side exponential backoff regardless?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-presigned-upload",
+      "title": "Design Secure Direct-to-S3 Uploads with Presigned URLs",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "prompt": "Implement a backend endpoint that issues a presigned PUT URL so an authenticated user can upload a profile image directly to S3 without the bytes passing through your server. Constrain the upload: it must go to a per-user key namespace, be limited to image/jpeg, expire quickly, be encrypted with SSE-KMS, and reject files larger than 5 MB. Then describe how downstream processing is triggered.",
+      "hints": [
+        "Use PutObjectCommand and getSignedUrl from the AWS SDK v3 s3-request-presigner.",
+        "Pin ContentType and ContentLength so the signature refuses a mismatched upload.",
+        "Namespace the key by user id to prevent one user overwriting another's object.",
+        "Keep expiresIn small (e.g. 120 seconds) to limit the leaked-URL blast radius.",
+        "Use an S3 ObjectCreated event filtered by prefix to trigger async processing — keep the consumer idempotent."
+      ],
+      "solutionCode": "import express from \"express\";\nimport crypto from \"crypto\";\nimport { S3Client, PutObjectCommand } from \"@aws-sdk/client-s3\";\nimport { getSignedUrl } from \"@aws-sdk/s3-request-presigner\";\n\nconst s3 = new S3Client({ region: \"us-east-1\" });\nconst BUCKET = \"acme-uploads\";\nconst MAX_BYTES = 5 * 1024 * 1024;\n\nconst app = express();\napp.use(express.json());\n\n// authMiddleware sets req.user.id from a verified token\napp.post(\"/uploads/avatar\", authMiddleware, async (req, res) => {\n  const { contentLength } = req.body as { contentLength: number };\n\n  if (!Number.isInteger(contentLength) || contentLength <= 0 || contentLength > MAX_BYTES) {\n    return res.status(400).json({ error: \"invalid or oversized file\" });\n  }\n\n  const fileId = crypto.randomUUID();\n  const key = `avatars/${req.user.id}/${fileId}.jpg`;\n\n  const cmd = new PutObjectCommand({\n    Bucket: BUCKET,\n    Key: key,\n    ContentType: \"image/jpeg\",      // signature binds the type\n    ContentLength: contentLength,    // signature binds the exact size\n    ServerSideEncryption: \"aws:kms\",\n    SSEKMSKeyId: process.env.AVATAR_KMS_KEY_ARN,\n  });\n\n  // URL valid for 120s, usable only for this exact key/type/size\n  const url = await getSignedUrl(s3, cmd, { expiresIn: 120 });\n  return res.json({ uploadUrl: url, key });\n});\n\n// Client then does: PUT uploadUrl with headers\n//   Content-Type: image/jpeg\n//   Content-Length: <contentLength>\n// Any mismatch => 403 SignatureDoesNotMatch from S3.\n\nfunction authMiddleware(req: any, res: any, next: any) {\n  // verify token, set req.user; omitted for brevity\n  next();\n}\n\napp.listen(3000);",
+      "solutionLanguage": "typescript",
+      "explanation": "The endpoint keeps your server out of the data path: it only signs a short-lived URL, and the browser PUTs bytes straight to S3, eliminating the memory/throughput bottleneck of proxying uploads. Security is enforced by what the signature binds. Because ContentType and ContentLength are included in PutObjectCommand, they become part of the signed request — if the client PUTs a different type or size, S3 returns 403 SignatureDoesNotMatch, so the 5 MB and image/jpeg constraints are enforced by S3 itself, not just trusted from the client. The key is namespaced under avatars/<userId>/ so an authenticated user cannot target another user's path, and a random fileId prevents collisions and guessable keys. SSE-KMS encrypts at rest with a customer-managed key, giving CloudTrail auditability of decrypts. The 120-second expiry bounds the damage if a URL leaks into a log. Downstream processing is decoupled: an S3 ObjectCreated:* notification filtered to the avatars/ prefix triggers a thumbnailer Lambda asynchronously. Because S3 event delivery is at-least-once, the Lambda must be idempotent — e.g. derive the thumbnail key deterministically from the source key and skip if it already exists. Note the server still validates contentLength up front to fail fast and to set the bound the signature will enforce.",
+      "relatedTopic": "aws-s3"
+    },
+    {
+      "id": "ch-secure-bucket-policy",
+      "title": "Write a Hardened Bucket Policy and Lifecycle Configuration",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "prompt": "Produce a bucket policy that (a) denies any non-TLS request and (b) denies any PutObject that is not encrypted with SSE-KMS, plus a lifecycle configuration that transitions logs/ objects to Standard-IA after 30 days and Glacier after 90, expires them after 365 days, cleans up noncurrent versions after 30 days, and aborts incomplete multipart uploads after 7 days. Assume the bucket is named acme-logs.",
+      "hints": [
+        "Use two Deny statements: one keyed on aws:SecureTransport, one on s3:x-amz-server-side-encryption.",
+        "Deny statements need both the bucket ARN and the bucket/* ARN where appropriate.",
+        "For the encryption deny, use a StringNotEquals condition on the x-amz-server-side-encryption header.",
+        "Lifecycle Transitions and NoncurrentVersionExpiration are separate keys in the rule.",
+        "Always include AbortIncompleteMultipartUpload to stop orphaned-part billing."
+      ],
+      "solutionCode": "// ---- Bucket policy (acme-logs) ----\n{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [\n    {\n      \"Sid\": \"DenyInsecureTransport\",\n      \"Effect\": \"Deny\",\n      \"Principal\": \"*\",\n      \"Action\": \"s3:*\",\n      \"Resource\": [\n        \"arn:aws:s3:::acme-logs\",\n        \"arn:aws:s3:::acme-logs/*\"\n      ],\n      \"Condition\": {\n        \"Bool\": { \"aws:SecureTransport\": \"false\" }\n      }\n    },\n    {\n      \"Sid\": \"DenyUnencryptedPuts\",\n      \"Effect\": \"Deny\",\n      \"Principal\": \"*\",\n      \"Action\": \"s3:PutObject\",\n      \"Resource\": \"arn:aws:s3:::acme-logs/*\",\n      \"Condition\": {\n        \"StringNotEquals\": {\n          \"s3:x-amz-server-side-encryption\": \"aws:kms\"\n        }\n      }\n    }\n  ]\n}\n\n// ---- Lifecycle configuration (acme-logs) ----\n{\n  \"Rules\": [\n    {\n      \"ID\": \"logs-tiering-and-cleanup\",\n      \"Filter\": { \"Prefix\": \"logs/\" },\n      \"Status\": \"Enabled\",\n      \"Transitions\": [\n        { \"Days\": 30, \"StorageClass\": \"STANDARD_IA\" },\n        { \"Days\": 90, \"StorageClass\": \"GLACIER\" }\n      ],\n      \"Expiration\": { \"Days\": 365 },\n      \"NoncurrentVersionExpiration\": { \"NoncurrentDays\": 30 },\n      \"AbortIncompleteMultipartUpload\": { \"DaysAfterInitiation\": 7 }\n    }\n  ]\n}",
+      "solutionLanguage": "json",
+      "explanation": "The bucket policy uses two explicit Deny statements, which override any Allow no matter where it comes from. DenyInsecureTransport rejects every request where aws:SecureTransport is false, forcing TLS for both bucket-level and object-level operations (hence both ARNs). DenyUnencryptedPuts inspects the x-amz-server-side-encryption header on PutObject and denies anything that is not aws:kms, so even a misconfigured client cannot land plaintext-at-rest objects; this complements default bucket encryption by making the intent explicit and auditable. Using Deny rather than relying solely on default encryption guarantees the rule cannot be bypassed by a client specifying a weaker encryption header. The lifecycle rule scopes to the logs/ prefix and chains transitions: Standard to Standard-IA at 30 days (cheaper storage once access drops), to Glacier at 90 days (archive tier), then full Expiration at 365 days to stop paying entirely. NoncurrentVersionExpiration trims old versions 30 days after they become noncurrent, giving short-window recoverability without unbounded version sprawl on a versioned bucket. AbortIncompleteMultipartUpload after 7 days is the cost-safety net: failed multipart uploads leave billed parts that are invisible to ordinary LIST, and without this rule they accumulate indefinitely. Together this is a production-grade baseline: TLS-only, KMS-enforced, automatically tiered, and self-cleaning.",
+      "relatedTopic": "aws-s3"
+    }
+  ],
+  "references": [
+    { "label": "Amazon S3 User Guide", "url": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html" },
+    { "label": "S3 Strong Consistency Announcement", "url": "https://aws.amazon.com/s3/consistency/" },
+    { "label": "S3 Storage Classes", "url": "https://aws.amazon.com/s3/storage-classes/" },
+    { "label": "S3 Security Best Practices", "url": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/security-best-practices.html" },
+    { "label": "Presigned URLs", "url": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/ShareObjectPreSignedURL.html" },
+    { "label": "S3 Lifecycle Management", "url": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lifecycle-mgmt.html" }
+  ]
+}

@@ -1,0 +1,27 @@
+.cl__filters { display: flex; flex-direction: column; gap: 12px; margin-bottom: 26px; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chipbtn { padding: 7px 14px; border-radius: 99px; border: 1px solid var(--border); background: var(--surface);
+  color: var(--text-muted); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; transition: all .16s; }
+.chipbtn:hover { border-color: var(--border-strong); color: var(--text); }
+.chipbtn.is-active { background: var(--accent-grad); border-color: transparent; color: #fff; }
+.chipbtn--sm { padding: 5px 12px; font-size: 12.5px; text-transform: capitalize; }
+
+.cl__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
+.cl__card { display: flex; flex-direction: column; gap: 11px; padding: 22px; border-radius: var(--radius-lg);
+  border: 1px solid var(--border); background: var(--surface); box-shadow: var(--shadow-sm);
+  transition: transform .2s var(--ease), border-color .2s, box-shadow .2s; animation: fade-up .4s var(--ease) both; }
+.cl__card:hover { transform: translateY(-3px); border-color: var(--border-strong); box-shadow: var(--shadow-lg); }
+.cl__card-top { display: flex; align-items: center; justify-content: space-between; }
+.cl__solved { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; font-weight: 700;
+  color: var(--success); background: var(--success-soft); padding: 3px 9px; border-radius: 99px; }
+.cl__title { font-size: 18px; }
+.cl__prompt { color: var(--text-muted); font-size: 14px; line-height: 1.65; flex: 1;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.cl__foot { display: flex; align-items: center; justify-content: space-between; padding-top: 12px; border-top: 1px solid var(--border); }
+.cl__cta { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; font-weight: 700; color: var(--accent-2); }
+
+.cl__skel { height: 210px; border-radius: var(--radius-lg); background: var(--surface); border: 1px solid var(--border);
+  position: relative; overflow: hidden; }
+.cl__skel::after { content: ''; position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent, var(--surface-2), transparent); transform: translateX(-100%); animation: shimmer 1.4s infinite; }
+@keyframes shimmer { 100% { transform: translateX(100%); } }

@@ -1,0 +1,142 @@
+<div class="page iv">
+  <header class="page__head">
+    <span class="page__eyebrow"><app-icon name="brain" [size]="15" /> Interview Mode</span>
+    <h1 class="page__title">Mock interview generator</h1>
+    <p class="page__subtitle">Drill randomized questions under time pressure, reveal model answers, and score yourself — just like the real thing.</p>
+  </header>
+
+  <!-- SETUP -->
+  @if (phase() === 'setup') {
+    <div class="iv__setup">
+      <div class="card iv__config">
+        <div class="iv__field">
+          <label>Seniority level</label>
+          <div class="chips">
+            @for (l of levels; track l.id) {
+              <button class="chipbtn" [class.is-active]="svc.filters().level === l.id" (click)="setLevel(l.id)">{{ l.label }}</button>
+            }
+          </div>
+        </div>
+        <div class="iv__field">
+          <label>Category</label>
+          <div class="chips">
+            @for (c of categories(); track c) {
+              <button class="chipbtn chipbtn--sm" [class.is-active]="svc.filters().category === c" (click)="setCategory(c)">
+                {{ c === 'all' ? 'All' : c }}
+              </button>
+            }
+          </div>
+        </div>
+        <div class="iv__start-row">
+          <span class="iv__pool">
+            <strong>{{ availableCount() }}</strong> questions match
+          </span>
+          <button class="btn btn--primary" [disabled]="!availableCount() || !svc.loaded()" (click)="start()">
+            <app-icon name="bolt" [size]="17" /> Start interview
+          </button>
+        </div>
+        @if (!svc.loaded()) { <p class="iv__loading muted">Loading question bank…</p> }
+      </div>
+
+      @if (svc.history().length) {
+        <div class="card iv__history">
+          <h3 class="dash__card-title"><app-icon name="clock" [size]="16" /> Recent sessions</h3>
+          @for (h of svc.history().slice(0, 5); track h.date) {
+            <div class="iv__hist-row">
+              <span class="iv__hist-score">{{ h.got }}/{{ h.total }}</span>
+              <div class="iv__hist-bar">
+                <span class="is-got" [style.width.%]="(h.got / h.total) * 100"></span>
+                <span class="is-partial" [style.width.%]="(h.partial / h.total) * 100"></span>
+              </div>
+              <span class="iv__hist-date">{{ h.total }} Qs</span>
+            </div>
+          }
+        </div>
+      }
+    </div>
+  }
+
+  <!-- ACTIVE -->
+  @if (phase() === 'active') {
+    @if (svc.current(); as q) {
+      <div class="iv__session">
+        <div class="iv__bar">
+          <div class="iv__bar-left">
+            <span class="iv__timer"><app-icon name="clock" [size]="16" /> {{ fmt(elapsed()) }}</span>
+            <span class="iv__count">Q{{ svc.score().total + 1 }}</span>
+          </div>
+          <div class="iv__bar-right">
+            <span class="iv__tally iv__tally--got">{{ svc.score().got }}</span>
+            <span class="iv__tally iv__tally--partial">{{ svc.score().partial }}</span>
+            <span class="iv__tally iv__tally--missed">{{ svc.score().missed }}</span>
+            <button class="btn btn--sm" (click)="finish()">End</button>
+          </div>
+        </div>
+
+        <div class="card iv__qcard">
+          <div class="iv__qmeta">
+            <app-difficulty-badge [level]="q.difficulty" />
+            <span class="chip">{{ q.category }}</span>
+            @if (q.tricky) { <span class="chip iv__trick"><app-icon name="flame" [size]="13" /> Tricky</span> }
+            @if (q.topicTitle) { <a class="iv__qtopic" [routerLink]="['/topics', q.topicId]">{{ q.topicTitle }}</a> }
+          </div>
+          <h2 class="iv__question">{{ q.question }}</h2>
+
+          @if (svc.revealed()) {
+            <div class="iv__answer">
+              <div class="iv__answer-label"><app-icon name="check" [size]="15" /> Model answer</div>
+              <p>{{ q.answer }}</p>
+              @if (q.followUps?.length) {
+                <div class="iv__follow">
+                  <span>Follow-ups</span>
+                  <ul>@for (f of q.followUps; track f) { <li>{{ f }}</li> }</ul>
+                </div>
+              }
+            </div>
+            <div class="iv__rate">
+              <span class="iv__rate-label">How did you do?</span>
+              <div class="iv__rate-btns">
+                <button class="iv__rate-btn is-missed" (click)="rate('missed')"><app-icon name="close" [size]="16" /> Missed</button>
+                <button class="iv__rate-btn is-partial" (click)="rate('partial')"><app-icon name="warning" [size]="16" /> Partial</button>
+                <button class="iv__rate-btn is-got" (click)="rate('got')"><app-icon name="check" [size]="16" /> Got it</button>
+              </div>
+            </div>
+          } @else {
+            <div class="iv__actions">
+              <button class="btn btn--primary" (click)="reveal()"><app-icon name="bolt" [size]="16" /> Reveal answer</button>
+              <button class="btn btn--ghost" (click)="skip()">Skip <app-icon name="arrow-right" [size]="15" /></button>
+            </div>
+          }
+        </div>
+      </div>
+    } @else {
+      <div class="card iv__exhausted">
+        <app-icon name="trophy" [size]="30" />
+        <h2>You've answered every question!</h2>
+        <button class="btn btn--primary" (click)="finish()">See your results</button>
+      </div>
+    }
+  }
+
+  <!-- SUMMARY -->
+  @if (phase() === 'summary') {
+    <div class="iv__summary">
+      <div class="card iv__summary-card">
+        <div class="iv__summary-score">
+          <span class="iv__summary-pct">{{ accuracy() }}<small>%</small></span>
+          <span class="muted">accuracy</span>
+        </div>
+        <div class="iv__summary-stats">
+          <div class="iv__sstat"><span class="iv__sstat-num is-got">{{ svc.score().got }}</span><span>Got it</span></div>
+          <div class="iv__sstat"><span class="iv__sstat-num is-partial">{{ svc.score().partial }}</span><span>Partial</span></div>
+          <div class="iv__sstat"><span class="iv__sstat-num is-missed">{{ svc.score().missed }}</span><span>Missed</span></div>
+          <div class="iv__sstat"><span class="iv__sstat-num">{{ svc.score().total }}</span><span>Total</span></div>
+        </div>
+      </div>
+      <div class="iv__summary-actions">
+        <button class="btn btn--primary" (click)="restart()"><app-icon name="refresh" [size]="16" /> New session</button>
+        <a class="btn" routerLink="/dashboard">Back to dashboard</a>
+      </div>
+    </div>
+  }
+</div>

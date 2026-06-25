@@ -1,0 +1,497 @@
+{
+  "id": "clean-architecture",
+  "title": "Clean Architecture",
+  "category": "Architecture",
+  "subcategory": "Architecture",
+  "difficulty": "senior",
+  "tags": ["clean-architecture", "dependency-rule", "hexagonal", "domain-driven", "boundaries", "use-cases", "ports-and-adapters"],
+  "description": "A disciplined approach to structuring software so that business rules stay independent of frameworks, databases, and delivery mechanisms by enforcing a strict inward-pointing dependency rule.",
+  "estReadMinutes": 28,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Clean Architecture, popularized by Robert C. Martin (Uncle Bob), is a way of organizing a codebase into concentric layers where the most stable, most valuable code — your business rules — sits at the center and knows nothing about the volatile machinery around it: HTTP frameworks, ORMs, message brokers, or UI toolkits. It is not a folder convention; it is a set of constraints on where dependencies are allowed to point."
+        },
+        {
+          "type": "paragraph",
+          "text": "The single rule that makes everything else fall into place is the Dependency Rule: source code dependencies may only point inward. An inner circle may never name, import, or know about anything in an outer circle. Outer circles depend on inner circles through interfaces that the inner circle owns. Get this rule right and your domain becomes testable in isolation, your framework choices become reversible, and your system's structure starts to reflect what it does rather than what it is built with."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Entities — enterprise-wide business rules and invariants",
+            "Use Cases — application-specific business rules that orchestrate entities",
+            "Interface Adapters — controllers, presenters, gateways, DTO mappers",
+            "Frameworks & Drivers — the web framework, database, message queue, external SDKs"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Most production codebases rot because business logic gets tangled with infrastructure. A pricing rule ends up inside a JPA entity annotated with @Table; a fraud check lives in a REST controller; a tax calculation is glued to a specific SDK's response object. When that happens, you cannot test the rule without spinning up the framework, you cannot reuse it across delivery channels, and you cannot swap the database without a rewrite. Clean Architecture exists to keep the expensive-to-get-right parts insulated from the cheap-to-change parts."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Testability: use cases run in milliseconds with in-memory fakes, no Spring context, no Testcontainers needed for the bulk of business-logic tests.",
+            "Replaceability: Postgres to DynamoDB, REST to gRPC, or Hibernate to jOOQ become edge changes, not surgery on the core.",
+            "Independent deployability and team boundaries: clear seams make it natural to split a module or extract a service later.",
+            "Longevity: frameworks have a half-life of a few years; well-modeled business rules outlive three or four of them."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The economic argument: the cost of software is dominated by change over its lifetime. Clean Architecture trades a modest up-front cost in indirection for a large reduction in the cost of the changes you cannot predict today."
+        }
+      ]
+    },
+    {
+      "id": "the-dependency-rule",
+      "heading": "The Dependency Rule",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The Dependency Rule states that source-code dependencies point only inward, toward higher-level policy. Nothing in an inner circle can know anything about an outer circle — not a class name, not a function, not a data structure. This is the entire architecture in one sentence; the four layers are just a useful default partitioning of that rule."
+        },
+        {
+          "type": "paragraph",
+          "text": "The mechanism that makes inward-only dependencies possible while still letting the core trigger outward effects is Dependency Inversion. The use case needs to save an order, but it must not depend on Hibernate. So the use case declares an interface it owns — a port — and the infrastructure layer implements it. At runtime control flows outward; at compile time the dependency arrow points inward, from the adapter to the port the core defined."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// CORE (use-case layer) owns the contract\nexport interface OrderRepository {\n  save(order: Order): Promise<void>;\n  findById(id: OrderId): Promise<Order | null>;\n}\n\n// CORE depends only on its own interface, never on the DB\nexport class PlaceOrder {\n  constructor(private readonly orders: OrderRepository) {}\n  async execute(cmd: PlaceOrderCommand): Promise<OrderId> {\n    const order = Order.create(cmd.customerId, cmd.lines);\n    await this.orders.save(order);   // calls outward via the port\n    return order.id;\n  }\n}\n\n// OUTER layer implements the inward-defined contract\nexport class PostgresOrderRepository implements OrderRepository {\n  constructor(private readonly pool: Pool) {}\n  async save(order: Order): Promise<void> { /* SQL here */ }\n  async findById(id: OrderId) { /* SQL here */ return null; }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Litmus test: open any file in your domain or use-case layer. If you see an import of a web framework, an ORM annotation, or a vendor SDK, the Dependency Rule is broken. The core should compile and run with only the standard library and its own abstractions."
+        }
+      ]
+    },
+    {
+      "id": "the-four-layers",
+      "heading": "The Four Layers in Detail",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "heading",
+          "text": "Entities"
+        },
+        {
+          "type": "paragraph",
+          "text": "Entities encapsulate enterprise-wide business rules — invariants that would be true even if the application did not exist. An Order that must never have a negative total, a Money value object that refuses to add two different currencies. They are plain objects with behavior, no persistence annotations, no serialization concerns."
+        },
+        {
+          "type": "heading",
+          "text": "Use Cases"
+        },
+        {
+          "type": "paragraph",
+          "text": "Use cases (a.k.a. interactors) hold application-specific rules: the orchestration of entities to fulfill one user intent — PlaceOrder, CancelSubscription, TransferFunds. They define input and output ports and depend on repository/gateway interfaces. A use case knows nothing about HTTP or SQL; it knows that 'placing an order' means validate, reserve stock, persist, and emit an event."
+        },
+        {
+          "type": "heading",
+          "text": "Interface Adapters"
+        },
+        {
+          "type": "paragraph",
+          "text": "This layer converts between the format convenient for use cases and entities, and the format convenient for the outside world. Controllers translate HTTP requests into command objects; presenters shape use-case output into view models; repository implementations map entities to and from rows. DTOs live here and at the boundary — the core never leaks entities across a process boundary."
+        },
+        {
+          "type": "heading",
+          "text": "Frameworks & Drivers"
+        },
+        {
+          "type": "paragraph",
+          "text": "The outermost circle is glue code for the tools you happen to use: Spring, Express, Hibernate, the Postgres driver, Kafka clients. Ideally you write very little code here — mostly configuration and wiring that plugs concrete adapters into the ports the core defined."
+        },
+        {
+          "type": "table",
+          "headers": ["Layer", "Knows about", "Must NOT know about", "Changes when"],
+          "rows": [
+            ["Entities", "Other entities, value objects", "Use cases, DB, framework", "Core business invariants change"],
+            ["Use Cases", "Entities, port interfaces", "Controllers, DB, framework", "Application behavior changes"],
+            ["Interface Adapters", "Use cases, entities, DTOs", "Specific framework internals", "API shape or persistence mapping changes"],
+            ["Frameworks & Drivers", "Everything inward", "Nothing depends on it", "You swap a library or tool"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "boundaries-dtos-screaming",
+      "heading": "Boundaries, DTOs, and Screaming Architecture",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A boundary is a line across which dependencies are inverted and data is crossed only as simple, isolated structures. The classic rule: do not pass an entity across a boundary; pass a DTO. If a use case returns its OrderEntity straight to a controller that serializes it to JSON, you have coupled your wire format to your domain model, and a refactor of the domain becomes a breaking API change. Map to an OrderResponse DTO at the adapter."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Output boundary DTO — owned by the use-case layer, framework-free\nexport interface OrderView {\n  id: string;\n  status: 'PENDING' | 'CONFIRMED' | 'CANCELLED';\n  totalCents: number;\n  currency: string;\n}\n\n// Adapter maps entity -> DTO. Entity never crosses the boundary.\nexport function toOrderView(o: Order): OrderView {\n  return {\n    id: o.id.value,\n    status: o.status,\n    totalCents: o.total.amountCents,\n    currency: o.total.currency,\n  };\n}"
+        },
+        {
+          "type": "heading",
+          "text": "Screaming Architecture"
+        },
+        {
+          "type": "paragraph",
+          "text": "Uncle Bob's complementary idea: your top-level package structure should scream what the system does, not what framework it uses. A folder tree of controllers/, services/, repositories/ tells you it is an MVC app; it says nothing about the business. A tree of ordering/, billing/, inventory/ screams that this is a commerce system. The framework should be a detail you discover later, not the organizing principle."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "DTOs at boundaries are not bureaucracy. The day a mobile client needs a different field set than the web client, or you version your API, you will be grateful the wire model is decoupled from the domain model. Skipping DTOs is a debt you pay with interest during the first breaking change."
+        }
+      ]
+    },
+    {
+      "id": "clean-vs-hexagonal",
+      "heading": "Clean vs. Hexagonal Architecture",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "This comes up in nearly every senior interview. Clean Architecture (Martin), Hexagonal / Ports and Adapters (Alistair Cockburn), and Onion Architecture (Jeffrey Palermo) are three expressions of the same core principle: isolate business logic from infrastructure via dependency inversion. They differ in emphasis and vocabulary, not in goal."
+        },
+        {
+          "type": "table",
+          "headers": ["Aspect", "Clean Architecture", "Hexagonal (Ports & Adapters)"],
+          "rows": [
+            ["Mental model", "Concentric circles, inward dependency rule", "A core with ports on its edge, adapters plugged in"],
+            ["Layering", "Explicit 4 layers (entities, use cases, adapters, frameworks)", "Two regions: inside (application) and outside (adapters)"],
+            ["Vocabulary", "Use cases, interactors, presenters, gateways", "Ports (driving/driven), adapters (primary/secondary)"],
+            ["Emphasis", "Granular separation of enterprise vs application rules", "Symmetry: UI and DB are both just adapters"],
+            ["Shared idea", "Dependency Inversion, testable core", "Dependency Inversion, testable core"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Practically: Hexagonal emphasizes the symmetry that the UI side (driving/primary adapters) and the database side (driven/secondary adapters) are architecturally equivalent — both are just things plugged into ports. Clean Architecture adds a finer internal taxonomy by splitting the core into entities (enterprise rules) and use cases (application rules), and it names the presenter/controller split explicitly. Most teams blend them: hexagonal ports for the boundaries, Clean's use-case granularity inside."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Strong interview answer: 'Same dependency-inversion goal, different emphasis. Hexagonal is symmetric ports-and-adapters with two regions; Clean is concentric with four explicit layers that further separate enterprise entities from application use cases. I'd never argue they conflict — I'd pick the vocabulary the team already uses.'"
+        }
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: Refunds Service Incident",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Scenario: a payments team ran a refunds service where the RefundController called Stripe's SDK directly and persisted via a Hibernate entity annotated with business logic in lifecycle callbacks (@PreUpdate). When Stripe deprecated an API version, the change rippled into the controller, the entity, and 40 tests that each booted the Spring context. A single SDK bump took two weeks and caused a production incident: a mapping change silently double-refunded a batch of orders because the refund-amount invariant lived in the SDK response handling, not in the domain."
+        },
+        {
+          "type": "paragraph",
+          "text": "The fix was to push the invariant into a Refund entity and hide Stripe behind a PaymentGateway port owned by the use case. After the refactor the same SDK upgrade was a one-file change in the adapter, the invariant was unit-tested without any framework, and the double-refund regression was caught by a fast domain test."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// Use-case layer: port owned by the core, no Stripe types leak in\npublic interface PaymentGateway {\n    RefundResult refund(PaymentId paymentId, Money amount);\n}\n\n// Use case enforces the invariant itself - not the SDK, not the controller\npublic class IssueRefund {\n    private final RefundRepository refunds;\n    private final PaymentGateway gateway;\n\n    public IssueRefund(RefundRepository refunds, PaymentGateway gateway) {\n        this.refunds = refunds;\n        this.gateway = gateway;\n    }\n\n    public RefundId execute(IssueRefundCommand cmd) {\n        Order order = refunds.requireSettledOrder(cmd.orderId());\n        Refund refund = order.refund(cmd.amount());      // invariant lives here\n        RefundResult res = gateway.refund(order.paymentId(), refund.amount());\n        refund.markCompleted(res.providerRef());\n        refunds.save(refund);\n        return refund.id();\n    }\n}"
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// Outer adapter: the ONLY place Stripe types appear\npublic class StripePaymentGateway implements PaymentGateway {\n    private final RefundCreateClient stripe;\n\n    @Override\n    public RefundResult refund(PaymentId paymentId, Money amount) {\n        RefundCreateParams params = RefundCreateParams.builder()\n            .setPaymentIntent(paymentId.value())\n            .setAmount(amount.amountInMinorUnits())\n            .build();\n        com.stripe.model.Refund r = stripe.create(params);\n        return new RefundResult(r.getId(), r.getStatus());\n    }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Root cause of the incident: a business invariant (never refund more than the captured amount) had escaped the domain and lived in infrastructure mapping code. When the infrastructure changed, the invariant silently changed with it. Invariants belong in entities, full stop."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Anemic domain + fat services: entities become bags of getters/setters and all logic lives in 'services', which quietly recreates a transaction-script architecture wearing a Clean costume.",
+            "Leaking the ORM entity as the domain entity: @Entity classes with @ManyToOne all over the core means Hibernate's lazy-loading, dirty-checking, and identity semantics now drive your business rules.",
+            "Returning entities from controllers: couples your JSON contract to your domain shape; the first field rename becomes a breaking API change.",
+            "Ports defined in the wrong layer: an interface placed in the infrastructure package and imported by the core inverts nothing — the dependency arrow still points outward.",
+            "Over-engineering CRUD: wrapping a trivial read-only lookup in a use case, a port, a presenter, and three DTOs. Clean Architecture is for systems with real business rules, not every endpoint.",
+            "Mapping fatigue ignored: refusing any mapping leads to leaks; obsessive mapping leads to five identical-looking classes. The discipline is to map at boundaries only."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Smell", "Symptom", "Fix"],
+          "rows": [
+            ["Domain imports framework", "import org.springframework... in core", "Move it to an adapter behind a port"],
+            ["Entity == JPA entity", "@Table on your aggregate root", "Separate persistence model from domain model"],
+            ["No DTO at the edge", "Controller serializes the entity", "Map to a response DTO in the adapter"],
+            ["Port owned by infra", "Core depends on infra interface", "Relocate the interface into the use-case layer"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The most expensive mistake is using a single JPA @Entity as both the persistence row and the domain object 'to avoid mapping'. It works on day one and traps you by month six, when persistence concerns (lazy collections, detached entities, cascade rules) start dictating business behavior."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Keep the core framework-free: enforce it with an ArchUnit / dependency-cruiser rule that fails the build if the domain package imports infrastructure.",
+            "Define ports in the layer that needs them (the use-case layer), and let outer layers implement them — this is what keeps dependencies pointing inward.",
+            "Use a separate persistence model when the ORM's needs and the domain's needs diverge; share one class only for genuinely trivial entities.",
+            "Map at boundaries with explicit, tested mappers; do not let entities or DTOs cross more than one layer.",
+            "Apply pragmatism: not every layer needs every endpoint. A read-only report query can bypass use-case ceremony via a thin query service (CQRS read side) without violating the spirit of the architecture.",
+            "Make structure scream the domain: top-level packages by feature/bounded-context, not by technical role.",
+            "Inject dependencies through constructors so use cases are trivially testable with fakes and never reach for a static factory or service locator."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// dependency-cruiser rule: forbid the core from importing infrastructure\nmodule.exports = {\n  forbidden: [\n    {\n      name: 'no-core-to-infra',\n      severity: 'error',\n      comment: 'Domain/use-cases must not depend on frameworks or adapters',\n      from: { path: '^src/(domain|usecases)' },\n      to:   { path: '^src/(infrastructure|adapters|frameworks)' },\n    },\n  ],\n};"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Automate the Dependency Rule. Architecture that is only enforced by code review erodes within a quarter; architecture enforced by a failing build survives team turnover."
+        }
+      ]
+    },
+    {
+      "id": "testing-strategy",
+      "heading": "Testing Strategy Across the Layers",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The payoff of the Dependency Rule is a testing pyramid that practically writes itself. The vast majority of your business logic lives in entities and use cases that have no framework dependencies, so they are tested as fast, deterministic unit tests with in-memory fakes. Integration tests then verify that adapters correctly fulfill their ports against real infrastructure."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Entity tests: pure, no mocks, assert invariants directly.",
+            "Use-case tests: construct the use case with in-memory fake repositories and stub gateways; assert orchestration and emitted events.",
+            "Adapter/integration tests: drive the real Postgres adapter via Testcontainers to verify the SQL and the entity<->row mapping.",
+            "Contract tests at boundaries: ensure the controller's DTO mapping and the gateway's external-API mapping stay correct."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Fast use-case test: no DB, no HTTP, no framework\nclass InMemoryOrders implements OrderRepository {\n  private store = new Map<string, Order>();\n  async save(o: Order) { this.store.set(o.id.value, o); }\n  async findById(id: OrderId) { return this.store.get(id.value) ?? null; }\n}\n\ntest('PlaceOrder persists a pending order', async () => {\n  const repo = new InMemoryOrders();\n  const id = await new PlaceOrder(repo).execute({\n    customerId: 'c1', lines: [{ sku: 'A', qty: 2 }],\n  });\n  const saved = await repo.findById(id);\n  expect(saved?.status).toBe('PENDING');\n});"
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "concentric-layers",
+      "title": "Clean Architecture Concentric Layers and the Dependency Rule",
+      "type": "mermaid",
+      "content": "flowchart TD\n    FD[Frameworks and Drivers] --> IA[Interface Adapters]\n    IA --> UC[Use Cases]\n    UC --> EN[Entities]\n    classDef core fill:#dff,stroke:#077\n    class EN,UC core\n    note[Dependencies point inward only]"
+    },
+    {
+      "id": "control-vs-dependency-flow",
+      "title": "Control Flow Outward vs Dependency Direction Inward",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n    participant C as Controller\n    participant U as PlaceOrder UseCase\n    participant P as OrderRepository Port\n    participant R as PostgresRepository Adapter\n    C->>U: execute command\n    U->>P: save order\n    Note over U,P: Core depends on the port it owns\n    P-->>R: implemented by adapter\n    R-->>U: ack\n    U-->>C: order id"
+    },
+    {
+      "id": "spring-mapping-ascii",
+      "title": "Mapping a Spring CRUD App onto the Four Layers",
+      "type": "ascii",
+      "content": "+--------------------------------------------------------------+\n|  Frameworks & Drivers                                        |\n|  Spring Boot | Hibernate | Postgres driver | Jackson         |\n|   +--------------------------------------------------------+ |\n|   | Interface Adapters                                     | |\n|   |  @RestController  ->  Presenter/DTO  ->  RepoImpl(JPA)  | |\n|   |   +------------------------------------------------+   | |\n|   |   | Use Cases                                      |   | |\n|   |   |  PlaceOrder  |  CancelOrder  |  ports(ifaces)   |   | |\n|   |   |   +----------------------------------------+   |   | |\n|   |   |   | Entities                               |   |   | |\n|   |   |   |  Order  |  Money  |  OrderLine          |   |   | |\n|   |   |   +----------------------------------------+   |   | |\n|   |   +------------------------------------------------+   | |\n|   +--------------------------------------------------------+ |\n+--------------------------------------------------------------+\n        dependencies ----------------> point inward only"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-dependency-rule",
+      "question": "State the Dependency Rule and explain why it is the heart of Clean Architecture.",
+      "answer": "Source-code dependencies must point only inward, toward higher-level policy. An inner layer may never reference a name, class, function, or data structure declared in an outer layer. It is the heart of the architecture because every other benefit — testability, replaceable frameworks, isolated business rules — is a direct consequence of it. The four layers are just a convenient default partitioning of this one rule.",
+      "difficulty": "junior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["dependency-rule", "fundamentals"],
+      "followUps": ["How do you trigger an outward effect like a DB write without an outward dependency?", "What tool would you use to enforce it in CI?"]
+    },
+    {
+      "id": "q-four-layers",
+      "question": "Name the four layers and give a concrete example of code that belongs in each.",
+      "answer": "Entities: a Money value object that refuses to add two currencies. Use Cases: a PlaceOrder interactor orchestrating validation, stock reservation, and persistence. Interface Adapters: a REST controller mapping a request to a command, plus a JPA repository implementation mapping entities to rows. Frameworks & Drivers: Spring Boot wiring, the Hibernate session factory, the Postgres JDBC driver. Inner layers hold policy; outer layers hold mechanism.",
+      "difficulty": "junior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["layers", "fundamentals"],
+      "followUps": ["Which layer owns the repository interface?", "Where do DTOs live?"]
+    },
+    {
+      "id": "q-clean-vs-hex",
+      "question": "What is the difference between Clean Architecture and Hexagonal Architecture?",
+      "answer": "They share the same goal — isolate business logic from infrastructure via dependency inversion — but differ in emphasis. Hexagonal (Ports and Adapters) is symmetric: it frames everything as a core with ports on its edge and adapters plugged in, treating the UI and the database as architecturally equal (driving vs driven adapters). Clean Architecture is concentric and adds a finer internal taxonomy, explicitly splitting the core into Entities (enterprise rules) and Use Cases (application rules) and naming controllers/presenters. They do not conflict; most teams blend hexagonal ports with Clean's use-case granularity.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["hexagonal", "comparison"],
+      "followUps": ["Where does Onion Architecture fit?", "When would the symmetry emphasis of hexagonal actually change your design?"]
+    },
+    {
+      "id": "q-screaming",
+      "question": "What is Screaming Architecture and how does it change your package structure?",
+      "answer": "Screaming Architecture means the top-level structure should scream what the system does, not what framework it is built with. Instead of organizing by technical role (controllers/, services/, repositories/), you organize by business capability or bounded context (ordering/, billing/, inventory/). The framework becomes a detail you discover deeper in the tree. The test: a newcomer reading the top-level folders should learn the business domain, not the tech stack.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["screaming-architecture", "structure"],
+      "followUps": ["How does this interact with a future service extraction?", "Does it conflict with framework conventions like Spring's component scanning?"]
+    },
+    {
+      "id": "q-dto-boundary",
+      "question": "Why should you not return a domain entity directly from a controller, and what do you use instead?",
+      "answer": "Returning an entity couples your external contract (JSON shape, API version) to your internal domain model. Any refactor of the domain — renaming a field, splitting an object — becomes a breaking API change, and you risk leaking internal fields. Instead you map the entity to a response DTO in the interface-adapters layer. The DTO is owned at the boundary, can evolve independently per client, and keeps the wire format decoupled from the domain.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["dto", "boundaries"],
+      "followUps": ["What about input? Where does the request DTO map to a command?", "How do you avoid mapping fatigue?"]
+    },
+    {
+      "id": "q-port-ownership",
+      "question": "A teammate puts the OrderRepository interface in the infrastructure package and the use case imports it. Is the Dependency Rule satisfied?",
+      "answer": "No. The interface must be owned by the layer that depends on it — the use-case layer. If the interface lives in infrastructure and the core imports it, the source-code dependency still points outward from core to infrastructure, which is exactly what the rule forbids. The fix is to move the interface (the port) into the use-case layer; the infrastructure adapter then implements it, so the only compile-time arrow runs inward, from adapter to port.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["ports", "dependency-inversion"],
+      "followUps": ["What is this principle called?", "How would ArchUnit catch this automatically?"]
+    },
+    {
+      "id": "q-where-does-db-belong",
+      "question": "TRICKY: Where does the database belong in Clean Architecture, and why must the domain never import it?",
+      "answer": "The database is a detail in the outermost Frameworks & Drivers layer; the SQL/ORM code lives in an interface-adapter repository that implements a port the use-case layer defined. The domain must never import it because the database is volatile and substitutable while business rules are stable and valuable. If the domain depended on the DB, you could not test rules without it, could not swap stores, and persistence concerns (lazy loading, transaction boundaries, identity semantics) would start driving business behavior. The whole point is that the database serves the domain, never the reverse.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["database", "dependency-rule", "tricky"],
+      "followUps": ["Is it ever acceptable to share a JPA entity as the domain entity?", "How do transactions cross the boundary cleanly?"]
+    },
+    {
+      "id": "q-jpa-entity-trap",
+      "question": "TRICKY: Why is using a single JPA @Entity as both the persistence row and the domain object a trap, even though it 'removes boilerplate'?",
+      "answer": "It conflates two models with different lifecycles and constraints. The ORM imposes a no-arg constructor, mutable fields, lazy-loaded collections, identity-by-database-id, and detached/managed states — none of which your domain should care about. Over time those persistence concerns leak into business behavior: an invariant breaks because a collection was lazily uninitialized, or dirty-checking persists a half-built object. It also forces a framework dependency into the core, breaking the Dependency Rule. For trivial entities sharing is acceptable pragmatism; for aggregates with real invariants, keep a separate persistence model and map between them.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["orm", "persistence", "tricky"],
+      "followUps": ["How do you map a rich aggregate to a flat row?", "Doesn't a separate model double the classes?"]
+    },
+    {
+      "id": "q-control-vs-dependency",
+      "question": "TRICKY: At runtime, control flows from the use case out to the database adapter. How can dependencies still point inward?",
+      "answer": "Because control flow and source-code dependency direction are independent. The use case calls repository.save() — control flows outward at runtime. But the use case depends only on the OrderRepository interface that it owns; the concrete PostgresRepository in the outer layer depends on (implements) that inner interface. So the compile-time arrow points inward (adapter to port) even though the call goes outward. This inversion of the dependency relative to the flow of control is exactly Dependency Inversion, and it is what makes inward-only dependencies compatible with outward effects.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["dependency-inversion", "control-flow", "tricky"],
+      "followUps": ["Draw the arrows for a controller-to-presenter flow.", "How does this relate to the Open/Closed Principle?"]
+    },
+    {
+      "id": "q-overengineering",
+      "question": "When is Clean Architecture the wrong choice or over-engineering?",
+      "answer": "When there is little or no business logic to protect: a thin CRUD app, a glue service that mostly forwards calls, a short-lived prototype, or a read-heavy reporting endpoint. The architecture's cost is indirection — ports, mappers, DTOs — which only pays off when business rules are complex and long-lived. A pragmatic compromise is to apply it where the logic is rich and use a thin query service (CQRS read side) for simple reads, rather than forcing every endpoint through full use-case ceremony.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["pragmatism", "tradeoffs"],
+      "followUps": ["How do you avoid a slippery slope where everything becomes 'just CRUD'?", "Can you mix CQRS reads with Clean writes in one module?"]
+    },
+    {
+      "id": "q-cross-cutting",
+      "question": "Where do cross-cutting concerns like transactions, authorization, and logging belong?",
+      "answer": "Authorization that is a business rule (can this user cancel this order) belongs in the use case or entity; authentication and coarse endpoint-level checks belong in the adapter layer. Transactions are an infrastructure concern but their boundary is usually one use-case execution, so they are typically applied by a decorator/interceptor in the adapter layer that wraps the use case, keeping the use case itself transaction-agnostic. Logging and metrics are framework details and belong in the outer layers or in decorators around ports, never scattered through the domain.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["cross-cutting", "transactions"],
+      "followUps": ["How do you keep the use case transaction-agnostic while still controlling the boundary?", "Where does input validation split between adapter and domain?"]
+    },
+    {
+      "id": "q-presenter",
+      "question": "What problem does the Presenter / output port solve, and when do you actually need it?",
+      "answer": "An output port plus presenter decouples the use case from how its result is rendered. The use case pushes a result through an output-port interface instead of returning a framework-specific view object; the presenter (an adapter) formats it for the delivery mechanism. It matters when the same use case feeds multiple presentations (JSON API, server-rendered HTML, CLI) or when you want the use case to have no return-type knowledge of the outer layer. In many services a simple returned DTO is enough; the formal presenter pays off mainly with multiple output formats or strict screaming-architecture discipline.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["presenter", "output-port"],
+      "followUps": ["Is a returned DTO a violation of the output-port idea?", "How does this map to hexagonal driving adapters?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-map-spring-crud",
+      "title": "Map a CRUD Spring App onto the Four Layers",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "prompt": "You inherit a Spring Boot service with a single ProductController that injects a ProductJpaRepository, uses the @Entity Product (annotated with @Table) as both the persistence row and the domain object, and returns it straight as JSON. Restructure it to honor Clean Architecture: separate the domain Product entity, a CreateProduct use case with a repository port, a JPA-based adapter implementing the port, and a controller that maps a request DTO in and a response DTO out. Show the key types and the wiring.",
+      "hints": [
+        "The repository interface (port) must live in the use-case layer, not the infrastructure package.",
+        "Keep the domain Product free of any JPA annotation; create a separate ProductJpaEntity for persistence.",
+        "Enforce an invariant in the domain entity (e.g., price must be positive) rather than in the controller or the DB.",
+        "Map entity <-> JPA row in the adapter, and entity <-> DTO in the controller. Nothing crosses two boundaries."
+      ],
+      "solutionCode": "// ---------- Entities layer (framework-free) ----------\npublic final class Product {\n    private final ProductId id;\n    private final String name;\n    private final Money price;\n\n    private Product(ProductId id, String name, Money price) {\n        if (price.isNegativeOrZero())\n            throw new IllegalArgumentException(\"price must be positive\");\n        this.id = id; this.name = name; this.price = price;\n    }\n    public static Product create(String name, Money price) {\n        return new Product(ProductId.newId(), name, price);\n    }\n    public static Product rehydrate(ProductId id, String name, Money price) {\n        return new Product(id, name, price);\n    }\n    public ProductId id() { return id; }\n    public String name() { return name; }\n    public Money price() { return price; }\n}\n\n// ---------- Use-case layer ----------\npublic interface ProductRepository {            // PORT, owned by the core\n    void save(Product product);\n    Optional<Product> findById(ProductId id);\n}\n\npublic class CreateProduct {\n    private final ProductRepository products;\n    public CreateProduct(ProductRepository products) { this.products = products; }\n    public ProductId execute(CreateProductCommand cmd) {\n        Product p = Product.create(cmd.name(), Money.of(cmd.priceCents(), cmd.currency()));\n        products.save(p);\n        return p.id();\n    }\n}\npublic record CreateProductCommand(String name, long priceCents, String currency) {}\n\n// ---------- Interface Adapters: persistence ----------\n@Entity @Table(name = \"products\")\nclass ProductJpaEntity {\n    @Id String id; String name; long priceCents; String currency;\n    protected ProductJpaEntity() {}\n    ProductJpaEntity(String id, String name, long priceCents, String currency) {\n        this.id = id; this.name = name; this.priceCents = priceCents; this.currency = currency;\n    }\n}\ninterface ProductJpaRepository extends JpaRepository<ProductJpaEntity, String> {}\n\n@Component\nclass JpaProductRepository implements ProductRepository {   // implements inward port\n    private final ProductJpaRepository jpa;\n    JpaProductRepository(ProductJpaRepository jpa) { this.jpa = jpa; }\n    public void save(Product p) {\n        jpa.save(new ProductJpaEntity(p.id().value(), p.name(),\n                 p.price().amountCents(), p.price().currency()));\n    }\n    public Optional<Product> findById(ProductId id) {\n        return jpa.findById(id.value()).map(e ->\n            Product.rehydrate(new ProductId(e.id), e.name, Money.of(e.priceCents, e.currency)));\n    }\n}\n\n// ---------- Interface Adapters: web ----------\n@RestController\n@RequestMapping(\"/products\")\nclass ProductController {\n    private final CreateProduct createProduct;\n    ProductController(CreateProduct createProduct) { this.createProduct = createProduct; }\n\n    @PostMapping\n    ResponseEntity<ProductResponse> create(@RequestBody @Valid CreateProductRequest req) {\n        ProductId id = createProduct.execute(\n            new CreateProductCommand(req.name(), req.priceCents(), req.currency()));\n        return ResponseEntity.status(201).body(new ProductResponse(id.value()));\n    }\n}\nrecord CreateProductRequest(@NotBlank String name, @Positive long priceCents, String currency) {}\nrecord ProductResponse(String id) {}\n\n// ---------- Frameworks & Drivers ----------\n@Configuration\nclass UseCaseConfig {\n    @Bean CreateProduct createProduct(ProductRepository repo) { return new CreateProduct(repo); }\n}",
+      "solutionLanguage": "java",
+      "explanation": "The restructuring separates four concerns that the original conflated. (1) Domain Product is a plain final class with no JPA annotations; it enforces the price-positive invariant in its constructor, so the rule cannot be bypassed by any caller and is unit-testable in microseconds. (2) The use-case layer owns CreateProduct and, crucially, the ProductRepository port — the interface lives next to the code that depends on it, so the compile-time arrow points inward. (3) The interface-adapters layer holds two mappers: JpaProductRepository maps domain Product to and from a separate ProductJpaEntity (persistence model distinct from domain model, so Hibernate's lazy-loading and identity semantics never touch business rules), and ProductController maps a CreateProductRequest DTO inward to a command and a ProductId outward to a ProductResponse DTO — entities never cross the HTTP boundary. (4) Frameworks & Drivers is just wiring: a @Configuration that constructs the framework-free use case with the injected adapter. Now a database swap is isolated to JpaProductRepository, an API change is isolated to the DTOs, and the SDK/framework can be upgraded without touching the domain. The original single-@Entity-returned-as-JSON design had no such seams.",
+      "relatedTopic": "clean-architecture"
+    },
+    {
+      "id": "ch-invert-stripe-port",
+      "title": "Invert a Direct SDK Dependency Behind a Port",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "prompt": "A NotifyCustomer use case currently constructs a Twilio client inline and calls twilio.messages.create(...). This makes the use case impossible to unit-test without network access and couples the core to a vendor SDK, breaking the Dependency Rule. Introduce a port so the use case depends only on an interface it owns, move the Twilio code to an adapter, and write a fast unit test using a fake. Use TypeScript.",
+      "hints": [
+        "Define an SmsSender interface in the use-case layer with a single send method that takes plain primitives, no Twilio types.",
+        "The use case receives the SmsSender through its constructor.",
+        "Put all Twilio imports and types in a TwilioSmsSender adapter that implements SmsSender.",
+        "Test with an in-memory fake that records sent messages; assert without any network call."
+      ],
+      "solutionCode": "// ---------- Use-case layer: the port (framework-free) ----------\nexport interface SmsSender {\n  send(to: string, body: string): Promise<void>;\n}\n\nexport interface CustomerLookup {\n  phoneFor(customerId: string): Promise<string | null>;\n}\n\nexport class NotifyCustomer {\n  constructor(\n    private readonly customers: CustomerLookup,\n    private readonly sms: SmsSender,\n  ) {}\n\n  async execute(customerId: string, message: string): Promise<void> {\n    const phone = await this.customers.phoneFor(customerId);\n    if (!phone) throw new Error(`no phone for customer ${customerId}`);\n    if (message.trim().length === 0) throw new Error('message must not be empty');\n    await this.sms.send(phone, message);\n  }\n}\n\n// ---------- Adapter: the ONLY place Twilio appears ----------\nimport twilio from 'twilio';\n\nexport class TwilioSmsSender implements SmsSender {\n  private readonly client = twilio(process.env.TWILIO_SID!, process.env.TWILIO_TOKEN!);\n  constructor(private readonly from: string) {}\n  async send(to: string, body: string): Promise<void> {\n    await this.client.messages.create({ to, from: this.from, body });\n  }\n}\n\n// ---------- Fast unit test: no network, no SDK ----------\nclass FakeSmsSender implements SmsSender {\n  public sent: Array<{ to: string; body: string }> = [];\n  async send(to: string, body: string) { this.sent.push({ to, body }); }\n}\nclass StubCustomers implements CustomerLookup {\n  async phoneFor(id: string) { return id === 'c1' ? '+15550001111' : null; }\n}\n\ntest('NotifyCustomer sends an SMS to the customer phone', async () => {\n  const sms = new FakeSmsSender();\n  const useCase = new NotifyCustomer(new StubCustomers(), sms);\n  await useCase.execute('c1', 'Your order shipped');\n  expect(sms.sent).toEqual([{ to: '+15550001111', body: 'Your order shipped' }]);\n});\n\ntest('NotifyCustomer rejects an unknown customer', async () => {\n  const useCase = new NotifyCustomer(new StubCustomers(), new FakeSmsSender());\n  await expect(useCase.execute('nope', 'hi')).rejects.toThrow(/no phone/);\n});",
+      "solutionLanguage": "typescript",
+      "explanation": "The original code violated the Dependency Rule twice: the use case imported the Twilio SDK (an outer-layer detail) and constructed it inline, so the core could not compile or run without the vendor library, and every test required network access or heavy mocking of Twilio internals. The refactor applies Dependency Inversion. The use case now declares an SmsSender port whose method takes only primitives (to, body) — no Twilio types leak inward — and receives an implementation through its constructor. All Twilio code moves to TwilioSmsSender in the adapter layer, the one place the SDK is allowed. At runtime control still flows outward into Twilio, but the source-code dependency points inward: TwilioSmsSender depends on the SmsSender interface owned by the core, not the reverse. The payoff is visible in the tests: a FakeSmsSender records calls in memory, so the business logic (look up phone, validate message, send) is verified in microseconds with zero network, and a vendor swap to AWS SNS would touch only a single adapter class. This is the same pattern as the refunds/Stripe production example, applied to outbound messaging.",
+      "relatedTopic": "clean-architecture"
+    }
+  ],
+  "references": [
+    {"label": "Robert C. Martin — The Clean Architecture (blog)", "url": "https://blog.cleancoder.com/uncle-bob/2012/08/13/the-clean-architecture.html"},
+    {"label": "Alistair Cockburn — Hexagonal Architecture (Ports and Adapters)", "url": "https://alistair.cockburn.us/hexagonal-architecture/"},
+    {"label": "Robert C. Martin — Screaming Architecture", "url": "https://blog.cleancoder.com/uncle-bob/2011/09/30/Screaming-Architecture.html"},
+    {"label": "Jeffrey Palermo — The Onion Architecture", "url": "https://jeffreypalermo.com/2008/07/the-onion-architecture-part-1/"},
+    {"label": "ArchUnit — Enforcing architecture rules in tests", "url": "https://www.archunit.org/"}
+  ]
+}

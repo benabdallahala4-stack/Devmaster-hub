@@ -1,0 +1,57 @@
+<aside class="sb">
+  <div class="sb__top">
+    <a routerLink="/dashboard" class="sb__brand" (click)="onNavigate()">
+      <app-logo [size]="34" />
+    </a>
+  </div>
+
+  <nav class="sb__nav" aria-label="Primary">
+    @for (item of primaryNav; track item.path) {
+      <a class="sb__link" [routerLink]="item.path" routerLinkActive="is-active"
+         (click)="onNavigate()">
+        <app-icon [name]="item.icon" [size]="19" />
+        <span>{{ item.label }}</span>
+      </a>
+    }
+  </nav>
+
+  <div class="sb__section-label">Knowledge Base</div>
+
+  <div class="sb__groups">
+    @for (group of groups(); track group.name) {
+      <div class="sb__group" [class.is-collapsed]="isCollapsed(group.name)">
+        <button class="sb__group-head" type="button" (click)="toggleGroup(group.name)">
+          <app-icon [name]="categoryIcon(group.name)" [size]="17" class="sb__group-icon" />
+          <span class="sb__group-name">{{ group.name }}</span>
+          <span class="sb__group-count">{{ group.topics.length }}</span>
+          <app-icon name="chevron-down" [size]="15" class="sb__group-chev" />
+        </button>
+        <div class="sb__group-bar">
+          <span [style.width.%]="groupRatio(group.topics) * 100"></span>
+        </div>
+        @if (!isCollapsed(group.name)) {
+          <div class="sb__sublinks">
+            @for (topic of group.topics; track topic.id) {
+              <a class="sb__sublink" [routerLink]="['/topics', topic.id]" routerLinkActive="is-active"
+                 (click)="onNavigate()">
+                <span class="sb__dot" [class.is-done]="isTopicDone(topic.id)"></span>
+                <span class="sb__sublabel">{{ topic.title }}</span>
+              </a>
+            }
+          </div>
+        }
+      </div>
+    } @empty {
+      <div class="sb__loading">
+        @for (s of [1,2,3,4,5]; track s) { <div class="sb__skel"></div> }
+      </div>
+    }
+  </div>
+
+  <div class="sb__foot">
+    <a class="sb__link" routerLink="/settings" routerLinkActive="is-active" (click)="onNavigate()">
+      <app-icon name="settings" [size]="19" />
+      <span>Settings</span>
+    </a>
+  </div>
+</aside>

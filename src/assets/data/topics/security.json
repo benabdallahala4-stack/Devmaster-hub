@@ -1,0 +1,622 @@
+{
+  "id": "security",
+  "title": "Application Security: AuthN & AuthZ",
+  "category": "Backend",
+  "subcategory": "AuthN/AuthZ",
+  "difficulty": "senior",
+  "tags": ["security", "authentication", "authorization", "jwt", "oauth2", "csrf", "cors"],
+  "description": "A staff-level walkthrough of authentication, authorization, tokens, OAuth2/OIDC, and the real-world tradeoffs that decide whether your auth layer holds up under attack.",
+  "estReadMinutes": 28,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Application security at the auth layer is about answering two distinct questions on every request: who is the caller (authentication), and what are they allowed to do (authorization). Most production breaches do not come from broken cryptography — they come from confusing those two questions, trusting client-supplied identity, or leaking long-lived credentials. This topic covers the mechanisms (sessions, JWTs, OAuth2, OIDC), the storage decisions (cookies vs localStorage), and the password and token hygiene that separate a system that survives an XSS bug from one that gets fully compromised by it."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Authentication (AuthN): proving identity — 'you are user 42'.",
+            "Authorization (AuthZ): proving entitlement — 'user 42 may delete invoice 99'.",
+            "Session vs token: where does state live, and who can revoke it?",
+            "Transport and storage: secure cookies, CSRF, CORS, XSS exposure surface."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Rule of thumb: AuthN happens once per session/token; AuthZ happens on every single protected operation, at the resource boundary, server-side."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Broken authentication and broken access control sit at the top of the OWASP Top 10 year after year for one reason: the blast radius is total. A SQL injection might leak one table; a broken authorization check leaks every user's data, and a leaked signing key forges every identity in the system. Unlike a performance bug, an auth bug is silently exploited — you find out from a breach disclosure, not a dashboard."
+        },
+        {
+          "type": "table",
+          "headers": ["Failure", "Typical cause", "Blast radius"],
+          "rows": [
+            ["Broken access control", "Missing server-side AuthZ check, IDOR", "Cross-tenant data exposure"],
+            ["Identity spoofing", "Trusting client-set user id / unsigned token", "Full account takeover"],
+            ["Token theft", "JWT in localStorage + XSS", "Session hijack until expiry"],
+            ["Credential leak", "Fast/unsalted password hash + DB dump", "Mass account compromise"],
+            ["Key compromise", "Shared HS256 secret in many services", "Forge any token, no revocation"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The economic argument is also blunt: the engineering cost of doing auth correctly (a well-reviewed library, httpOnly cookies, argon2, short access tokens, rotating refresh tokens) is a few weeks. The cost of getting it wrong is regulatory fines, mandatory breach notification, and permanent loss of trust."
+        }
+      ]
+    },
+    {
+      "id": "authn-vs-authz",
+      "heading": "Authentication vs Authorization",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "These are routinely conflated, and the conflation is itself a vulnerability. Authentication establishes a verified principal. Authorization is a policy decision about that principal against a specific resource and action. A correct system can authenticate you perfectly and still must deny most of what you ask for."
+        },
+        {
+          "type": "table",
+          "headers": ["Dimension", "Authentication", "Authorization"],
+          "rows": [
+            ["Question", "Who are you?", "What can you do?"],
+            ["When", "Login / token validation", "Every protected operation"],
+            ["Mechanism", "Passwords, OAuth, OIDC, mTLS", "RBAC, ABAC, ACLs, policy engine"],
+            ["Output", "A trusted principal/claims", "Permit or deny on a resource"],
+            ["Failure mode", "Impersonation", "Privilege escalation / IDOR"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The classic IDOR (Insecure Direct Object Reference) bug: GET /invoices/99 authenticates the caller, returns the invoice, but never checks that invoice 99 belongs to the caller's tenant. AuthN passed; AuthZ was skipped."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// WRONG: authenticated but not authorized\napp.get('/invoices/:id', requireAuth, async (req, res) => {\n  const invoice = await db.invoices.findById(req.params.id);\n  return res.json(invoice); // any logged-in user reads any invoice\n});\n\n// RIGHT: scope the query to the principal's tenant\napp.get('/invoices/:id', requireAuth, async (req, res) => {\n  const invoice = await db.invoices.findOne({\n    id: req.params.id,\n    tenantId: req.user.tenantId, // AuthZ enforced in the query itself\n  });\n  if (!invoice) return res.sendStatus(404); // 404, not 403, to avoid leaking existence\n  return res.json(invoice);\n});"
+        }
+      ]
+    },
+    {
+      "id": "sessions-vs-jwt",
+      "heading": "Sessions vs JWT",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "There are two dominant models for carrying identity across requests. Server-side sessions store state on the server (memory, Redis, DB) and hand the client an opaque session id. Stateless tokens (JWTs) put signed claims in the token itself, so the server can validate without a lookup. The choice is fundamentally about where you put state and how you revoke."
+        },
+        {
+          "type": "table",
+          "headers": ["Property", "Server session", "Stateless JWT"],
+          "rows": [
+            ["State location", "Server (Redis/DB)", "Inside the token"],
+            ["Revocation", "Instant — delete server record", "Hard — valid until expiry"],
+            ["Horizontal scale", "Needs shared store", "No lookup needed"],
+            ["Token size", "Small opaque id", "Larger, grows with claims"],
+            ["Leak window", "Until you revoke", "Until exp"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The honest staff-engineer take: stateless JWTs are oversold. The moment you need real revocation (logout-everywhere, ban a compromised account, rotate on password change), you reintroduce server state — a denylist or a per-user token version — and you've lost the property you adopted JWTs for. The pragmatic pattern most large systems converge on is short-lived JWT access tokens (5-15 min) plus a stateful, revocable refresh token stored server-side."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "If your answer to 'how do you log a user out everywhere immediately?' is 'we can't until the token expires', you have a revocation gap. Acceptable only if access-token TTL is small and refresh tokens are revocable."
+        }
+      ]
+    },
+    {
+      "id": "jwt-anatomy",
+      "heading": "JWT Structure, Signing and Validation",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A JWT is three base64url segments joined by dots: header.payload.signature. The header declares the algorithm; the payload holds claims; the signature is computed over header+payload with either a shared secret (HS256) or a private key (RS256/ES256). Validation is not optional plumbing — every field below is a known attack surface."
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "code": "// Header\n{ \"alg\": \"RS256\", \"typ\": \"JWT\", \"kid\": \"2026-q2\" }\n// Payload (claims)\n{\n  \"iss\": \"https://auth.example.com\",\n  \"sub\": \"user_42\",\n  \"aud\": \"api://invoices\",\n  \"exp\": 1750000900,   // expiry (epoch seconds)\n  \"iat\": 1750000000,\n  \"scope\": \"invoices:read\",\n  \"ver\": 7              // token version for invalidation\n}\n// Signature = RS256(base64url(header) + '.' + base64url(payload), privateKey)"
+        },
+        {
+          "type": "heading",
+          "text": "What correct validation actually checks"
+        },
+        {
+          "type": "list",
+          "items": [
+            "alg is the one you expect — never trust the token's alg field; pin it server-side.",
+            "Signature verifies against the right key (resolve by kid against your JWKS).",
+            "exp is in the future and nbf (if present) is in the past, with small clock skew.",
+            "iss matches your issuer and aud matches this specific API.",
+            "For revocation-sensitive systems: ver matches the user's current token version."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The 'alg:none' attack: an attacker sets the header to {\"alg\":\"none\"} and strips the signature. Naive libraries accept it. The 'RS256 to HS256 confusion' attack: an attacker re-signs with the public key as an HMAC secret. Always pin allowed algorithms explicitly."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { jwtVerify, createRemoteJWKSet } from 'jose';\n\nconst JWKS = createRemoteJWKSet(new URL('https://auth.example.com/.well-known/jwks.json'));\n\nexport async function verifyAccessToken(token: string) {\n  const { payload } = await jwtVerify(token, JWKS, {\n    algorithms: ['RS256'],            // pin — defeats alg:none and HS/RS confusion\n    issuer: 'https://auth.example.com',\n    audience: 'api://invoices',\n    clockTolerance: 5,                // seconds of skew\n  });\n  return payload; // exp/nbf/iss/aud already enforced by jwtVerify\n}"
+        }
+      ]
+    },
+    {
+      "id": "refresh-tokens",
+      "heading": "Refresh Tokens and Rotation",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Access tokens are deliberately short-lived to bound the damage of a leak. Refresh tokens let a client obtain a new access token without re-authenticating. The danger: a refresh token is long-lived and high-value. The mitigation is rotation with reuse detection — each use of a refresh token issues a new one and invalidates the old. If an old (already-rotated) token is ever presented, you treat it as theft and revoke the entire token family."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Store refresh tokens server-side (hashed) so they are revocable.",
+            "Rotate on every refresh: issue new refresh token, mark previous as used.",
+            "Reuse detection: a used/superseded token re-presented => compromise => kill the family.",
+            "Bind refresh tokens to a device/family id so one stolen token can't poison others.",
+            "Deliver refresh tokens only over httpOnly, Secure, SameSite cookies — never JS-readable."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Rotation with reuse detection is the single highest-leverage refresh-token control. It turns a stolen refresh token from 'attacker has access for weeks' into 'next legitimate refresh trips the alarm and logs everyone out'."
+        }
+      ]
+    },
+    {
+      "id": "oauth-oidc",
+      "heading": "OAuth2 Grant Types and OpenID Connect",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "OAuth2 is an authorization framework: it lets a client obtain delegated access to resources without handling the user's password. OpenID Connect (OIDC) is a thin identity layer on top of OAuth2 that adds an id_token (a JWT describing the user) and a standard /userinfo endpoint. Critical distinction: OAuth2 access tokens are for accessing APIs; the OIDC id_token is for authenticating the user to your client. Do not use an access token as proof of identity."
+        },
+        {
+          "type": "table",
+          "headers": ["Grant type", "Use case", "Notes"],
+          "rows": [
+            ["Authorization Code + PKCE", "Web/SPA/mobile user login", "The default for any app with a user; PKCE mandatory for public clients"],
+            ["Client Credentials", "Service-to-service, no user", "Machine identity; client_id + secret, no redirect"],
+            ["Refresh Token", "Renew access without re-login", "Rotate; bind to client"],
+            ["Implicit (legacy)", "Old SPAs", "Deprecated — token in URL fragment, do not use"],
+            ["Resource Owner Password (legacy)", "First-party only", "Discouraged — app sees the password"]
+          ]
+        },
+        {
+          "type": "heading",
+          "text": "Why PKCE exists"
+        },
+        {
+          "type": "paragraph",
+          "text": "PKCE (Proof Key for Code Exchange) defends the authorization code flow against interception. The client generates a random code_verifier, sends its SHA-256 hash (code_challenge) on the authorize request, and presents the raw verifier when exchanging the code for tokens. An attacker who intercepts the authorization code cannot redeem it without the verifier, which never left the legitimate client."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { createHash, randomBytes } from 'crypto';\n\n// 1. client generates a verifier and challenge\nconst codeVerifier = randomBytes(32).toString('base64url');\nconst codeChallenge = createHash('sha256').update(codeVerifier).digest('base64url');\n\n// 2. redirect to authorize with the challenge\nconst authorizeUrl = new URL('https://auth.example.com/authorize');\nauthorizeUrl.search = new URLSearchParams({\n  response_type: 'code',\n  client_id: 'spa-client',\n  redirect_uri: 'https://app.example.com/callback',\n  scope: 'openid invoices:read',\n  code_challenge: codeChallenge,\n  code_challenge_method: 'S256',\n  state: randomBytes(16).toString('hex'), // CSRF protection for the redirect\n}).toString();\n\n// 3. on callback, exchange code + the original verifier (proves it's the same client)\n// POST /token { grant_type: 'authorization_code', code, code_verifier, ... }"
+        }
+      ]
+    },
+    {
+      "id": "rbac-abac",
+      "heading": "RBAC vs ABAC",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Once you know who the caller is, you decide what they can do with an authorization model. Role-Based Access Control (RBAC) grants permissions through roles: admin, editor, viewer. Attribute-Based Access Control (ABAC) evaluates policies over attributes of the subject, resource, action, and environment: 'a manager may approve an expense under 10k in their own department during business hours'. RBAC is simple and auditable; ABAC is expressive but harder to reason about and test."
+        },
+        {
+          "type": "table",
+          "headers": ["Aspect", "RBAC", "ABAC"],
+          "rows": [
+            ["Decision input", "Role membership", "Subject/resource/env attributes"],
+            ["Expressiveness", "Coarse", "Fine-grained, contextual"],
+            ["Auditability", "Easy — list roles", "Harder — evaluate policies"],
+            ["Role explosion risk", "High at scale", "Avoided"],
+            ["Typical fit", "Most apps", "Multi-tenant, regulated, complex rules"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "In practice most mature systems are hybrid: RBAC for coarse access, plus a handful of ABAC-style checks (ownership, tenant, resource state) layered on top. Externalize the policy decision (a policy engine like OPA, or a central authorization service) so the rules are reviewed and consistent rather than scattered across endpoints."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Hybrid: RBAC gate + ABAC ownership/amount check\nfunction canApproveExpense(user: User, expense: Expense): boolean {\n  if (!user.roles.includes('manager')) return false;            // RBAC\n  if (expense.departmentId !== user.departmentId) return false; // ABAC: same dept\n  if (expense.amount > user.approvalLimit) return false;        // ABAC: limit\n  if (expense.status !== 'pending') return false;               // resource state\n  return true;\n}"
+        }
+      ]
+    },
+    {
+      "id": "password-hashing",
+      "heading": "Password Hashing: bcrypt and argon2",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Passwords must never be stored reversibly. They are hashed with a deliberately slow, salted, memory-hard function so that a stolen database is expensive to crack. General-purpose hashes (MD5, SHA-256) are catastrophically wrong here precisely because they are fast — a GPU computes billions per second. Use a password hashing function: argon2id (preferred, memory-hard, resists GPU/ASIC) or bcrypt (battle-tested, but capped at 72 bytes and only CPU-hard)."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Always per-password salt (both bcrypt and argon2 embed it in the output — don't roll your own).",
+            "argon2id is the modern default: tune memory (e.g. 64MB), iterations, parallelism.",
+            "bcrypt cost factor 12+ as of today; re-evaluate as hardware improves.",
+            "bcrypt silently truncates input at 72 bytes — pre-hash with SHA-256 if you allow long passphrases.",
+            "Compare using the library's constant-time verify, never with ==."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import argon2 from 'argon2';\n\n// Hash on signup / password change\nconst hash = await argon2.hash(plaintextPassword, {\n  type: argon2.argon2id,\n  memoryCost: 65536,  // 64 MB\n  timeCost: 3,\n  parallelism: 1,\n});\n// store `hash` — salt + params are embedded in the string\n\n// Verify on login (constant-time inside the lib)\nconst ok = await argon2.verify(storedHash, submittedPassword);\nif (!ok) return res.sendStatus(401);\n\n// Rehash opportunistically if params are outdated\nif (argon2.needsRehash(storedHash, { memoryCost: 65536, timeCost: 3 })) {\n  await users.update(userId, { passwordHash: await argon2.hash(submittedPassword) });\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Return identical timing and identical error messages for 'user not found' and 'wrong password'. Otherwise you leak which emails are registered (user enumeration) and create a timing oracle. Run a dummy verify even when the user doesn't exist."
+        }
+      ]
+    },
+    {
+      "id": "cookies-csrf-cors",
+      "heading": "Secure Cookies, CSRF and CORS",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "How you store and transmit the session credential determines which attacks you're exposed to. Cookies sent automatically by the browser enable CSRF; tokens readable by JavaScript enable theft via XSS. The flags below are the controls, and they are not interchangeable mitigations — each addresses a different threat."
+        },
+        {
+          "type": "table",
+          "headers": ["Cookie flag", "Protects against", "Effect"],
+          "rows": [
+            ["HttpOnly", "XSS token theft", "JS cannot read document.cookie"],
+            ["Secure", "Network sniffing", "Cookie only sent over HTTPS"],
+            ["SameSite=Lax/Strict", "CSRF", "Not sent on cross-site requests"],
+            ["__Host- prefix", "Cookie injection/scoping", "Locks cookie to host, path=/, Secure"]
+          ]
+        },
+        {
+          "type": "heading",
+          "text": "CSRF"
+        },
+        {
+          "type": "paragraph",
+          "text": "Cross-Site Request Forgery tricks an authenticated user's browser into making a state-changing request to your site, riding on the automatically-attached session cookie. Defenses: SameSite cookies (Lax blocks most cross-site POSTs), plus an anti-CSRF token (synchronizer token or double-submit cookie) on state-changing endpoints. Token-in-Authorization-header schemes are not vulnerable to CSRF because the browser doesn't auto-attach the header — but they trade that for XSS exposure if the token is JS-accessible."
+        },
+        {
+          "type": "heading",
+          "text": "CORS"
+        },
+        {
+          "type": "paragraph",
+          "text": "CORS is frequently misunderstood as a security feature; it is a relaxation of the Same-Origin Policy, not an enforcement of it. CORS controls whether a browser lets JavaScript on origin A read a response from origin B. It does nothing to stop a server-to-server call or a malicious script that doesn't need to read the response. Never reflect arbitrary Origin headers, and never combine a wildcard origin with credentials."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Express: strict CORS for a credentialed API\napp.use(cors({\n  origin: ['https://app.example.com'], // allowlist, never reflect '*'\n  credentials: true,                   // allow cookies; forbidden with origin '*'\n  methods: ['GET', 'POST', 'PUT', 'DELETE'],\n  maxAge: 600,\n}));\n\n// Session cookie with the right flags\nres.cookie('__Host-session', sessionId, {\n  httpOnly: true,\n  secure: true,\n  sameSite: 'lax',\n  path: '/',\n  maxAge: 15 * 60 * 1000,\n});"
+        }
+      ]
+    },
+    {
+      "id": "production-incident",
+      "heading": "Production Example: The localStorage JWT Incident",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Scenario from a real-shaped incident. A B2B SaaS stored its JWT access token in localStorage so the SPA could attach it as a Bearer header. A third-party analytics script (loaded via a tag manager) was compromised in a supply-chain attack and began exfiltrating localStorage. Because the access token was JS-readable and lived for 24 hours, the attacker replayed valid tokens against the API for a full day across hundreds of tenants before detection. There was no server-side session to revoke."
+        },
+        {
+          "type": "heading",
+          "text": "Root causes"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Token stored in localStorage => readable by any script on the page (XSS / supply chain).",
+            "24-hour access token TTL => enormous replay window.",
+            "Stateless tokens with no version/denylist => no way to revoke after detection.",
+            "Third-party scripts loaded with full DOM access and no CSP."
+          ]
+        },
+        {
+          "type": "heading",
+          "text": "The fix"
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Move tokens out of JS reach: httpOnly cookies + short TTL + rotation\n// Access token: 10 min, in an httpOnly Secure SameSite=Lax cookie\nres.cookie('__Host-at', accessJwt, {\n  httpOnly: true, secure: true, sameSite: 'lax', path: '/', maxAge: 10 * 60 * 1000,\n});\n// Refresh token: httpOnly, rotated on every use, server-side hashed record\nres.cookie('__Host-rt', refreshToken, {\n  httpOnly: true, secure: true, sameSite: 'strict', path: '/auth/refresh', maxAge: 7 * 864e5,\n});\n// Per-user token version claim => 'revoke all' is one DB write.\n// Add CSRF token on state-changing routes since we now rely on cookies.\n// Strict CSP to neuter injected third-party scripts:\n//   Content-Security-Policy: default-src 'self'; script-src 'self'"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Post-fix, the replay window dropped from 24 hours to 10 minutes, tokens became unreachable from JS, and 'log everyone out' became a single token-version bump. The CSP would have blocked the exfiltration entirely."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Trusting the token's alg header instead of pinning algorithms server-side (alg:none, RS/HS confusion).",
+            "Authorizing on the gateway only, then trusting an internal 'X-User-Id' header that a client can spoof.",
+            "Doing AuthZ in the UI ('hide the delete button') but not in the API.",
+            "Wildcard CORS with credentials, or reflecting the Origin header back unconditionally.",
+            "Storing access tokens in localStorage and assuming HTTPS makes it safe (XSS still reads it).",
+            "Long-lived access tokens with no revocation path — a leaked token is valid for hours.",
+            "Using SHA-256/MD5 for passwords, or bcrypt without noticing the 72-byte truncation.",
+            "Different responses/timing for unknown user vs wrong password (user enumeration).",
+            "Putting sensitive data (PII, roles you haven't verified) in a JWT and treating it as confidential — JWTs are signed, not encrypted; anyone can read the payload."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "A signed JWT is integrity-protected, not confidential. base64url-decode any JWT and you can read every claim. Never put secrets in a JWT payload."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Never roll your own crypto or token parsing — use a vetted library (jose, passport, your IdP's SDK).",
+            "Enforce authorization at the resource boundary, server-side, in the data query when possible.",
+            "Short access-token TTL (5-15 min) + rotating, revocable refresh tokens with reuse detection.",
+            "Store tokens in httpOnly + Secure + SameSite cookies; pair with CSRF tokens on writes.",
+            "Pin JWT algorithms and audience/issuer; resolve keys via JWKS with kid.",
+            "argon2id (or bcrypt cost 12+) for passwords; constant-time compare; opportunistic rehash.",
+            "Default-deny authorization; add explicit allows, and fail closed on errors.",
+            "Centralize and externalize policy (OPA / auth service) so AuthZ is reviewable, not scattered.",
+            "Add a strict Content-Security-Policy to shrink the XSS attack surface.",
+            "Log auth events (login, refresh, revoke, denied) for detection and forensics; never log secrets."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Defense in depth: assume each layer can fail. Short TTL limits leak duration, httpOnly limits theft, rotation limits reuse, CSP limits XSS, server-side AuthZ limits escalation. No single control is your whole answer."
+        }
+      ]
+    },
+    {
+      "id": "note-mtls",
+      "heading": "Note: Service-to-Service Auth",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "User auth gets the attention, but internal service-to-service auth is where lateral movement happens after a breach. Don't trust the network. Use mutual TLS (mTLS) or short-lived service tokens from the client_credentials grant, scoped narrowly. A service mesh (e.g. Istio/Linkerd) can enforce mTLS and per-service authorization policy transparently, so a compromised pod cannot freely call every other service."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "auth-code-pkce-flow",
+      "title": "OAuth2 Authorization Code + PKCE Flow",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n    participant U as User\n    participant SPA as SPA Client\n    participant AS as Auth Server\n    participant API as Resource API\n    SPA->>SPA: generate verifier and challenge\n    SPA->>AS: authorize with code_challenge and state\n    AS->>U: prompt login and consent\n    U->>AS: authenticate\n    AS->>SPA: redirect with authorization code\n    SPA->>AS: token with code and code_verifier\n    AS->>AS: verify challenge equals hash of verifier\n    AS->>SPA: access_token and id_token and refresh_token\n    SPA->>API: request with Bearer access_token\n    API->>API: verify signature aud iss exp via JWKS\n    API->>SPA: protected resource"
+    },
+    {
+      "id": "refresh-rotation-flow",
+      "title": "Refresh Token Rotation with Reuse Detection",
+      "type": "mermaid",
+      "content": "flowchart TD\n    A[Client presents refresh token] --> B{Token found and not used}\n    B -->|Yes| C[Mark old token used]\n    C --> D[Issue new access and refresh token]\n    D --> E[Return new tokens]\n    B -->|Used or unknown| F[Reuse detected]\n    F --> G[Revoke entire token family]\n    G --> H[Force re-login and alert]"
+    },
+    {
+      "id": "request-auth-pipeline",
+      "title": "Request AuthN/AuthZ Pipeline",
+      "type": "ascii",
+      "content": "  Incoming Request\n        |\n        v\n  +----------------+      fail      +-------------+\n  |  AuthN: verify | -------------> | 401 Unauth  |\n  |  token / cookie|                +-------------+\n  +----------------+\n        | pass (trusted principal + claims)\n        v\n  +----------------+      deny      +-------------+\n  |  AuthZ: policy | -------------> | 403 / 404   |\n  |  RBAC + ABAC   |                +-------------+\n  +----------------+\n        | permit\n        v\n  +----------------+\n  |  Handler runs  |\n  |  scoped query  |\n  +----------------+\n        |\n        v\n      Response"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-authn-vs-authz",
+      "question": "What is the difference between authentication and authorization, and where does each belong in a request lifecycle?",
+      "answer": "Authentication establishes who the caller is — it produces a verified principal from credentials, a token, or a cookie, typically once per session or per request when validating a token. Authorization decides what that principal may do against a specific resource and action, and it must run on every protected operation. AuthN belongs early, at the edge/middleware. AuthZ belongs at the resource boundary, ideally enforced inside the data query (e.g. scoping by tenantId) so it cannot be bypassed. Passing AuthN never implies passing AuthZ; conflating them produces IDOR and privilege-escalation bugs.",
+      "difficulty": "junior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["authentication", "authorization"],
+      "followUps": ["What is IDOR and how do you prevent it?", "Should a denied resource return 403 or 404?"]
+    },
+    {
+      "id": "q-jwt-structure",
+      "question": "Walk me through the structure of a JWT and what a correct validation routine must check.",
+      "answer": "A JWT is header.payload.signature, each base64url-encoded. The header declares alg and often a kid (key id). The payload holds claims (iss, sub, aud, exp, iat, custom claims). The signature is computed over header+payload with HS256 (shared secret) or RS256/ES256 (asymmetric). Validation must: pin the allowed algorithm server-side (never trust the header's alg), verify the signature against the correct key resolved by kid from JWKS, check exp is in the future and nbf in the past with small clock skew, and confirm iss and aud match your issuer and this API. For revocation-sensitive systems, also check a token-version claim against the user's current version.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["jwt", "validation"],
+      "followUps": ["What is the alg:none attack?", "How do you rotate signing keys without downtime?"]
+    },
+    {
+      "id": "q-session-vs-jwt",
+      "question": "When would you choose server-side sessions over stateless JWTs, and vice versa?",
+      "answer": "Choose server-side sessions when you need instant, reliable revocation (logout-everywhere, banning, password-change invalidation) and your traffic can tolerate a shared session store (Redis). Choose stateless JWTs when you want to avoid a lookup on every request and scale horizontally without a shared store — typically for short-lived access tokens validated by many services. The nuance: pure stateless JWTs sacrifice revocation, so most systems land on a hybrid — short-lived JWT access tokens for stateless validation plus a stateful, revocable refresh token. The choice is really 'where does state live and how do I revoke', not 'which is more modern'.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["jwt", "sessions"],
+      "followUps": ["How do you implement logout-everywhere with JWTs?", "What's the cost of a denylist at scale?"]
+    },
+    {
+      "id": "q-oauth-grants",
+      "question": "Compare the Authorization Code + PKCE grant and the Client Credentials grant. When is each appropriate?",
+      "answer": "Authorization Code + PKCE is for flows with a human user — web apps, SPAs, mobile — where the app acts on behalf of the user. The user authenticates at the authorization server, the app receives a code via redirect, and exchanges it (with the PKCE verifier) for tokens, so the app never sees the password. PKCE protects the code from interception for public clients that can't keep a secret. Client Credentials is for service-to-service auth with no user: the client authenticates with its own id and secret and gets an access token scoped to what that service may do. There's no redirect and no user context. Using client credentials where a user is involved, or using the user flow for a backend job, are both common mistakes.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["oauth2", "pkce"],
+      "followUps": ["Why was the implicit grant deprecated?", "What does the state parameter protect against?"]
+    },
+    {
+      "id": "q-oidc-vs-oauth",
+      "question": "What does OpenID Connect add to OAuth2, and why shouldn't you use an access token to identify a user?",
+      "answer": "OAuth2 is an authorization framework — its access tokens grant access to APIs and are meant to be consumed by resource servers, not introspected for identity by the client. OIDC adds an identity layer: an id_token (a JWT with verified user claims like sub, email, and the auth context), a standard /userinfo endpoint, and discovery. The client should use the id_token to learn who logged in. Treating an access token as proof of identity is wrong because its format is opaque to the client, its audience is the API not the client, and it may be a bearer token for a different party — leading to confused-deputy and token-substitution issues.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["oidc", "oauth2"],
+      "followUps": ["What's in an id_token vs an access token?", "How does the client validate an id_token?"]
+    },
+    {
+      "id": "q-rbac-abac",
+      "question": "Contrast RBAC and ABAC. How do you decide, and how do real systems combine them?",
+      "answer": "RBAC grants permissions via roles (admin, editor, viewer): simple, auditable, easy to reason about, but prone to role explosion when rules get contextual. ABAC evaluates policies over attributes of subject, resource, action, and environment ('manager may approve expenses under 10k in their own department'): expressive and avoids role explosion, but harder to audit and test. Decide by complexity: if your rules are 'which role', RBAC suffices; if they're 'under these conditions', you need ABAC. Most mature systems are hybrid — RBAC for coarse gating plus a few ABAC checks for ownership, tenant, amount, and resource state — ideally externalized to a policy engine like OPA so the rules are centrally reviewed.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["rbac", "abac"],
+      "followUps": ["What is role explosion?", "Where should the authorization decision live — in code or a policy engine?"]
+    },
+    {
+      "id": "q-password-hashing",
+      "question": "How should passwords be stored, and why is SHA-256 the wrong choice?",
+      "answer": "Passwords must be stored as the output of a deliberately slow, salted password-hashing function — argon2id (memory-hard, resists GPU/ASIC cracking) or bcrypt (cost 12+). Each password gets a unique salt, embedded in the hash output by the library. SHA-256 and MD5 are wrong precisely because they're fast: a GPU computes billions per second, so a stolen database of SHA-256 hashes is cracked rapidly even when salted. The slowness and memory-hardness of argon2/bcrypt are the whole point — they make offline brute force economically infeasible. Verify with the library's constant-time function, and rehash opportunistically when you raise parameters.",
+      "difficulty": "junior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["passwords", "argon2", "bcrypt"],
+      "followUps": ["What is the bcrypt 72-byte limit?", "How do you tune argon2 parameters?"]
+    },
+    {
+      "id": "q-csrf-vs-cors",
+      "question": "Explain CSRF and CORS — and why CORS is not a CSRF defense.",
+      "answer": "CSRF tricks an authenticated user's browser into making a state-changing request to your site, relying on the cookie the browser auto-attaches. Defenses are SameSite cookies and anti-CSRF tokens on writes. CORS is a relaxation of the Same-Origin Policy: it tells the browser whether JavaScript on one origin may read a response from another. People assume CORS stops CSRF, but it doesn't — a CSRF attack is a fire-and-forget POST that doesn't need to read the response, and simple requests aren't preflighted. CORS also can't stop server-to-server calls. So CORS controls cross-origin reads in the browser; CSRF protection must come from SameSite and tokens.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["csrf", "cors"],
+      "followUps": ["Why is wildcard CORS with credentials forbidden?", "Does SameSite=Lax fully prevent CSRF?"]
+    },
+    {
+      "id": "q-localstorage-vs-cookie",
+      "question": "Is it safer to store a JWT in localStorage or in an httpOnly cookie? Explain the tradeoff.",
+      "answer": "Neither is unconditionally safe — they expose you to different attacks, and the right answer is to understand the tradeoff. localStorage is readable by any JavaScript on the page, so any XSS (including a compromised third-party script) can exfiltrate the token; cookies sent automatically by the browser are not the issue here, CSRF is, but bearer tokens in headers aren't auto-sent so localStorage avoids CSRF. An httpOnly cookie cannot be read by JavaScript, so it survives XSS token theft, but because the browser attaches it automatically it becomes vulnerable to CSRF, which you must then mitigate with SameSite and CSRF tokens. The senior conclusion: prefer httpOnly + Secure + SameSite cookies and add CSRF protection, because XSS is the more catastrophic and more common failure, and short access-token TTL plus rotation bounds whatever does leak.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["jwt", "xss", "csrf", "cookies"],
+      "followUps": ["How does a strict CSP help here?", "Why does httpOnly not protect against CSRF?"]
+    },
+    {
+      "id": "q-jwt-revocation",
+      "question": "Stateless JWTs can't be revoked before expiry. How do you actually log a user out everywhere immediately?",
+      "answer": "You reintroduce just enough server state. Common approaches: (1) a token-version / tokenVersion counter per user stored in the DB and embedded as a claim — bumping it on logout/compromise invalidates every existing token on next validation, at the cost of a DB read per request or a cache; (2) a denylist of revoked token jti values held until their exp, checked on each request; (3) keep access tokens very short-lived (a few minutes) and make revocation act on the stateful refresh token, so the access token expires naturally moments later. The honest point in an interview: pure statelessness and instant global revocation are in tension; you trade one for the other, and the version-claim + short-TTL combination is the usual pragmatic answer.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["jwt", "revocation"],
+      "followUps": ["What's the per-request cost of checking token version?", "How does refresh-token rotation interact with this?"]
+    },
+    {
+      "id": "q-alg-none",
+      "question": "What are the alg:none and RS256-to-HS256 confusion attacks, and how do you prevent both with one rule?",
+      "answer": "Both exploit trusting the token's own alg header. In alg:none, the attacker sets the header algorithm to 'none' and strips the signature; a naive verifier that honors the header accepts an unsigned token. In RS256-to-HS256 confusion, a service that verifies RS256 with a public key is tricked into HS256 verification using that public key as the HMAC secret — which the attacker knows because it's public — letting them forge tokens. The single rule that defeats both: never let the token decide the algorithm; pin the accepted algorithm(s) server-side (e.g. algorithms: ['RS256']) so a mismatched or 'none' header is rejected before any signature math runs.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["jwt", "attacks"],
+      "followUps": ["Why is HS256 with shared secrets risky across many services?", "How does kid-based key resolution help rotation?"]
+    },
+    {
+      "id": "q-jwt-confidential",
+      "question": "A teammate puts a user's role and email in the JWT payload and says 'it's signed so it's safe'. What's wrong?",
+      "answer": "Signed does not mean confidential. A standard JWT is integrity-protected, not encrypted — anyone who holds the token can base64url-decode the payload and read every claim, including the email and role. The signature only guarantees the claims weren't altered, not that they're hidden. So putting PII or anything sensitive in a JWT leaks it to anyone who intercepts or stores the token (logs, browser, proxies). If confidentiality is required you need JWE (encrypted JWT) or you keep the sensitive data server-side and reference it by an opaque id. Also, the role claim is fine as an assertion the server signed, but the server must still treat authorization decisions as its own — never let a self-asserted client claim be the sole gate.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["jwt", "confidentiality"],
+      "followUps": ["When would you use JWE?", "Should authorization rely on JWT role claims alone?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-refresh-rotation",
+      "title": "Implement Refresh-Token Rotation with Reuse Detection",
+      "difficulty": "senior",
+      "category": "Backend",
+      "prompt": "Implement a refresh endpoint. Given a presented refresh token, issue a fresh access token and a fresh refresh token, invalidate the old refresh token, and detect reuse: if a refresh token that was already rotated (used) is presented again, treat it as theft and revoke the entire token family (force re-login). Refresh tokens are grouped by a familyId so one stolen token cannot be replayed after rotation. Assume an async store with the methods shown and a signAccessToken helper.",
+      "hints": [
+        "Store each refresh token hashed, with familyId, used flag, and expiry.",
+        "Rotation = mark current token used, create a new token in the same family.",
+        "If a presented token is already marked used, the chain forked — revoke the whole family.",
+        "Hash the presented token before lookup; never compare raw secrets.",
+        "Wrap the read-check-write in a transaction to avoid a race between two concurrent refreshes."
+      ],
+      "solutionCode": "import { randomBytes, createHash, timingSafeEqual } from 'crypto';\n\nconst hashToken = (t: string) => createHash('sha256').update(t).digest('hex');\nconst newToken = () => randomBytes(32).toString('base64url');\nconst REFRESH_TTL_MS = 7 * 24 * 60 * 60 * 1000;\n\ninterface RefreshRecord {\n  tokenHash: string;\n  userId: string;\n  familyId: string;\n  used: boolean;\n  expiresAt: number;\n}\n\ninterface Store {\n  findByHash(hash: string): Promise<RefreshRecord | null>;\n  markUsed(hash: string): Promise<void>;\n  insert(rec: RefreshRecord): Promise<void>;\n  revokeFamily(familyId: string): Promise<void>;\n  tx<T>(fn: () => Promise<T>): Promise<T>; // serialize the critical section\n}\n\nexport class ReuseError extends Error {}\nexport class InvalidTokenError extends Error {}\n\nexport async function rotateRefreshToken(\n  presented: string,\n  store: Store,\n  signAccessToken: (userId: string) => string,\n): Promise<{ accessToken: string; refreshToken: string }> {\n  const presentedHash = hashToken(presented);\n\n  return store.tx(async () => {\n    const record = await store.findByHash(presentedHash);\n\n    if (!record || record.expiresAt < Date.now()) {\n      throw new InvalidTokenError('unknown or expired refresh token');\n    }\n\n    // Reuse detection: an already-rotated token came back => theft.\n    if (record.used) {\n      await store.revokeFamily(record.familyId);\n      throw new ReuseError('refresh token reuse detected; family revoked');\n    }\n\n    // Constant-time confirm the hash (defense against partial-match oracles).\n    const a = Buffer.from(record.tokenHash);\n    const b = Buffer.from(presentedHash);\n    if (a.length !== b.length || !timingSafeEqual(a, b)) {\n      throw new InvalidTokenError('token mismatch');\n    }\n\n    // Rotate: burn the old, mint a new one in the same family.\n    await store.markUsed(presentedHash);\n    const next = newToken();\n    await store.insert({\n      tokenHash: hashToken(next),\n      userId: record.userId,\n      familyId: record.familyId,\n      used: false,\n      expiresAt: Date.now() + REFRESH_TTL_MS,\n    });\n\n    return {\n      accessToken: signAccessToken(record.userId),\n      refreshToken: next, // caller sets this in an httpOnly Secure cookie\n    };\n  });\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "The endpoint enforces three properties. First, tokens are stored hashed (SHA-256), so a database dump does not yield usable refresh tokens — we hash the presented value before lookup and never store or compare raw secrets. Second, rotation: a valid, unused token is marked used and a brand-new token is minted in the same familyId, so the old one is single-use. Third, reuse detection: because rotation makes every refresh token single-use, if a token already marked used is presented again, the only explanations are an attacker replaying a stolen token or a client that forked the chain — either way we revokeFamily, invalidating every token descended from the same login and forcing re-authentication. The whole read-check-write runs inside store.tx so two concurrent refreshes (e.g. a double-clicking client or a race between victim and attacker) are serialized; without that, both could read used=false and both succeed, defeating detection. The constant-time hash comparison avoids leaking match information through timing. In production you'd also set the new refresh token in an httpOnly, Secure, SameSite=Strict cookie scoped to the refresh path, keep access tokens short-lived (the rotation here pairs with ~10-minute access tokens), and emit an alert on ReuseError so security can investigate the suspected theft.",
+      "relatedTopic": "security"
+    },
+    {
+      "id": "ch-jwt-verify",
+      "title": "Write a Hardened JWT Verifier",
+      "difficulty": "mid",
+      "category": "Backend",
+      "prompt": "Write an async verifyToken(token) that validates a JWT for an API. It must defeat the alg:none and RS/HS confusion attacks, enforce issuer and audience, enforce expiry with a small clock skew, resolve the signing key by kid from a JWKS, and additionally reject any token whose tokenVersion claim is lower than the user's current version (for revocation). Return the claims on success and throw a clear error otherwise.",
+      "hints": [
+        "Pin the allowed algorithm; do not read alg from the untrusted header to choose verification.",
+        "Resolve the public key from JWKS using the header kid.",
+        "Let the library enforce exp/nbf/iss/aud, but pass clockTolerance.",
+        "After signature/claims pass, look up the user's current tokenVersion and compare.",
+        "Throw distinct errors but don't leak whether failure was signature vs expiry to clients."
+      ],
+      "solutionCode": "import { jwtVerify, createRemoteJWKSet, decodeProtectedHeader, JWTPayload } from 'jose';\n\nconst JWKS = createRemoteJWKSet(new URL('https://auth.example.com/.well-known/jwks.json'));\nconst ISSUER = 'https://auth.example.com';\nconst AUDIENCE = 'api://invoices';\nconst ALLOWED_ALGS = ['RS256'];\n\nexport class AuthError extends Error {}\n\ninterface Claims extends JWTPayload {\n  sub: string;\n  tokenVersion: number;\n}\n\nexport async function verifyToken(\n  token: string,\n  getUserTokenVersion: (userId: string) => Promise<number>,\n): Promise<Claims> {\n  // Cheap guard: reject 'none' before doing anything else.\n  const header = decodeProtectedHeader(token);\n  if (!header.alg || !ALLOWED_ALGS.includes(header.alg)) {\n    throw new AuthError('unsupported algorithm');\n  }\n\n  let payload: JWTPayload;\n  try {\n    ({ payload } = await jwtVerify(token, JWKS, {\n      algorithms: ALLOWED_ALGS, // pin: defeats alg:none and RS/HS confusion\n      issuer: ISSUER,\n      audience: AUDIENCE,\n      clockTolerance: 5,        // seconds of skew; enforces exp/nbf\n    }));\n  } catch {\n    // Uniform error to the caller; log details server-side only.\n    throw new AuthError('invalid token');\n  }\n\n  const claims = payload as Claims;\n  if (typeof claims.sub !== 'string' || typeof claims.tokenVersion !== 'number') {\n    throw new AuthError('invalid token');\n  }\n\n  // Revocation check: stale-version tokens are rejected even if unexpired.\n  const currentVersion = await getUserTokenVersion(claims.sub);\n  if (claims.tokenVersion < currentVersion) {\n    throw new AuthError('token revoked');\n  }\n\n  return claims;\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "This verifier closes the classic JWT footguns. The algorithm is pinned to RS256 both with an explicit pre-check on the decoded header and via the algorithms option passed to jwtVerify, so an alg:none token is rejected and an attacker cannot downgrade an RS256 endpoint to HS256 and forge tokens using the public key as an HMAC secret. The signing key is resolved through createRemoteJWKSet, which fetches the JWKS and selects the key matching the token's kid, enabling key rotation without code changes. jwtVerify enforces the signature plus exp, nbf, iss, and aud, with clockTolerance accommodating small clock skew between issuer and verifier. Crucially, after cryptographic validation we add a revocation layer: we read the user's current tokenVersion (cached in practice to avoid a per-request DB hit) and reject any token whose claim is older — this is how 'log out everywhere' or 'invalidate on password change' works with otherwise-stateless tokens, by bumping the user's version. Finally, all failure paths collapse to a uniform 'invalid token' error returned to the caller while real causes are logged server-side, so we don't hand attackers an oracle distinguishing expiry from signature failure. The combination — pinned alg, JWKS, standard-claim enforcement, and a version-based revocation gate — is the production-grade shape of JWT validation.",
+      "relatedTopic": "security"
+    }
+  ],
+  "references": [
+    {"label": "OWASP Top 10", "url": "https://owasp.org/www-project-top-ten/"},
+    {"label": "OWASP Cheat Sheet: Authentication", "url": "https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html"},
+    {"label": "OWASP Cheat Sheet: Password Storage", "url": "https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html"},
+    {"label": "RFC 7519 - JSON Web Token", "url": "https://datatracker.ietf.org/doc/html/rfc7519"},
+    {"label": "RFC 6749 - OAuth 2.0", "url": "https://datatracker.ietf.org/doc/html/rfc6749"},
+    {"label": "RFC 7636 - PKCE", "url": "https://datatracker.ietf.org/doc/html/rfc7636"},
+    {"label": "OpenID Connect Core", "url": "https://openid.net/specs/openid-connect-core-1_0.html"}
+  ]
+}

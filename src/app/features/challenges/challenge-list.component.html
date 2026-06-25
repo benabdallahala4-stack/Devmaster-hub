@@ -1,0 +1,43 @@
+<div class="page">
+  <header class="page__head">
+    <span class="page__eyebrow"><app-icon name="challenges" [size]="15" /> Challenge Engine</span>
+    <h1 class="page__title">Coding & design challenges</h1>
+    <p class="page__subtitle">Production-grade problems across architecture, backend and frontend — each with progressive hints, a worked solution, and a deep explanation.</p>
+  </header>
+
+  <div class="cl__filters">
+    <div class="chips">
+      @for (l of levels; track l) {
+        <button class="chipbtn chipbtn--sm" [class.is-active]="level() === l" (click)="level.set(l)">{{ l === 'all' ? 'All levels' : l }}</button>
+      }
+    </div>
+    <div class="chips">
+      @for (c of categories(); track c) {
+        <button class="chipbtn" [class.is-active]="category() === c" (click)="category.set(c)">{{ c === 'all' ? 'All' : c }}</button>
+      }
+    </div>
+  </div>
+
+  @if (!loaded()) {
+    <div class="cl__grid">@for (s of [1,2,3,4]; track s) { <div class="cl__skel"></div> }</div>
+  } @else if (filtered().length === 0) {
+    <app-empty-state icon="challenges" title="No challenges match" message="Try a different difficulty or category." />
+  } @else {
+    <div class="cl__grid">
+      @for (c of filtered(); track c.id) {
+        <a class="cl__card" [routerLink]="['/challenges', c.id]">
+          <div class="cl__card-top">
+            <app-difficulty-badge [level]="c.difficulty" />
+            @if (isSolved(c.id)) { <span class="cl__solved"><app-icon name="check" [size]="13" /> Solved</span> }
+          </div>
+          <h3 class="cl__title">{{ c.title }}</h3>
+          <p class="cl__prompt">{{ c.prompt }}</p>
+          <div class="cl__foot">
+            <span class="chip">{{ c.category }}</span>
+            <span class="cl__cta">Solve <app-icon name="arrow-right" [size]="15" /></span>
+          </div>
+        </a>
+      }
+    </div>
+  }
+</div>

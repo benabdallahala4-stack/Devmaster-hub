@@ -1,0 +1,617 @@
+{
+  "id": "spring-boot",
+  "title": "Spring Boot",
+  "category": "Backend",
+  "subcategory": "Java Framework",
+  "difficulty": "senior",
+  "tags": ["spring", "java", "jpa", "transactions", "security", "rest"],
+  "description": "Master Spring Boot from IoC and auto-configuration to the AOP-proxy gotchas around @Transactional that bite senior engineers in production.",
+  "estReadMinutes": 28,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Spring Boot is an opinionated layer on top of the Spring Framework that removes most of the boilerplate of building production-grade JVM services. Where classic Spring required reams of XML and manual bean wiring, Spring Boot gives you auto-configuration, embedded servers, sensible defaults, and a curated set of dependency 'starters' so you can stand up a REST service, wire it to a database, and expose health endpoints in minutes."
+        },
+        {
+          "type": "paragraph",
+          "text": "Underneath the convenience, the same Spring core machinery is running: an Inversion of Control (IoC) container that constructs your objects (beans), injects their dependencies, manages their lifecycle, and wraps them in AOP proxies to provide cross-cutting concerns like transactions, security, and caching. Understanding that machinery — not just the annotations — is what separates someone who can use Spring from someone who can debug it under load."
+        },
+        {
+          "type": "list",
+          "items": [
+            "IoC container: ApplicationContext constructs and wires beans.",
+            "Auto-configuration: starters + conditional beans configure the app from the classpath.",
+            "AOP proxies: how @Transactional, @Cacheable, @Async, and @Secured actually work.",
+            "Data access: Hibernate/JPA, transaction boundaries, and the N+1 trap.",
+            "Security: stateless JWT and OAuth2 resource-server basics."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Spring Boot powers a large fraction of the world's enterprise backends. Decisions you make in the first week of a service — injection style, transaction boundaries, fetch strategies, exception handling — compound into either a maintainable system or a fragile one that leaks connections, double-charges customers, and throws stack traces at clients."
+        },
+        {
+          "type": "list",
+          "items": [
+            "A single misplaced @Transactional self-invocation can silently disable rollback and corrupt data.",
+            "A lazy-loaded collection accessed outside a transaction throws LazyInitializationException in production but not in tests.",
+            "An N+1 query pattern that runs fine with 10 rows melts the database at 100k rows.",
+            "Field injection makes classes impossible to unit test without reflection and hides missing dependencies until runtime.",
+            "Returning raw exceptions from controllers leaks internal structure and stack traces to clients."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Senior interviews rarely ask 'what is @Autowired'. They ask why constructor injection is preferred, and why a @Transactional method calling another method on this fails to start a new transaction. The answers require understanding proxies."
+        }
+      ]
+    },
+    {
+      "id": "ioc-di-beans",
+      "heading": "IoC, Dependency Injection, and Beans",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Inversion of Control means your objects do not construct their own collaborators; the container does, and hands them in. The container is the ApplicationContext. A bean is simply an object the container manages. Beans are typically declared with stereotype annotations (@Component, @Service, @Repository, @Controller) or as @Bean methods inside a @Configuration class."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "@Service\npublic class OrderService {\n    private final PaymentGateway gateway;\n    private final OrderRepository orders;\n\n    // Constructor injection: dependencies are explicit, final, and required.\n    // Since Spring 4.3, a single constructor needs no @Autowired.\n    public OrderService(PaymentGateway gateway, OrderRepository orders) {\n        this.gateway = gateway;\n        this.orders = orders;\n    }\n}\n\n@Configuration\npublic class GatewayConfig {\n    @Bean\n    public PaymentGateway paymentGateway(@Value(\"${payments.url}\") String url) {\n        return new StripePaymentGateway(url);\n    }\n}"
+        },
+        {
+          "type": "heading",
+          "text": "Bean scopes"
+        },
+        {
+          "type": "table",
+          "headers": ["Scope", "Lifetime", "Typical use"],
+          "rows": [
+            ["singleton", "One instance per container (default)", "Stateless services, repositories"],
+            ["prototype", "New instance per injection/lookup", "Stateful helpers, builders"],
+            ["request", "One per HTTP request", "Per-request context holders"],
+            ["session", "One per HTTP session", "Per-user UI state"],
+            ["application", "One per ServletContext", "App-wide web scope"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Injecting a prototype or request-scoped bean into a singleton freezes a single instance at startup. Use ObjectProvider, @Lookup, or a scoped proxy to get a fresh instance per call."
+        },
+        {
+          "type": "heading",
+          "text": "Bean lifecycle"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Instantiation: the container calls the constructor (constructor injection happens here).",
+            "Populate properties: setter/field injection runs.",
+            "Aware callbacks: BeanNameAware, ApplicationContextAware, etc.",
+            "BeanPostProcessor.postProcessBeforeInitialization runs.",
+            "@PostConstruct / InitializingBean.afterPropertiesSet runs.",
+            "BeanPostProcessor.postProcessAfterInitialization runs — this is where AOP proxies are created.",
+            "Bean is in service; on shutdown @PreDestroy / DisposableBean.destroy runs (singletons only)."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "constructor-vs-field",
+      "heading": "Constructor vs Field Injection",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Constructor injection is the recommended style and Spring's own teams advocate it. Field injection (@Autowired on a field) is convenient but carries real costs that surface in testing, immutability, and dependency hygiene."
+        },
+        {
+          "type": "table",
+          "headers": ["Concern", "Constructor", "Field (@Autowired)"],
+          "rows": [
+            ["Immutability", "Dependencies can be final", "Cannot be final"],
+            ["Unit testing", "Plain new with mocks, no Spring", "Needs reflection or @InjectMocks"],
+            ["Missing dependency", "Fails fast at construction", "NPE later at runtime"],
+            ["Circular dependency", "Surfaced at startup, forces redesign", "Hidden, allowed to compile"],
+            ["Too many deps", "Constructor gets ugly — a smell you can see", "Hidden, class quietly bloats"]
+          ]
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// GOOD: testable without any Spring context\n@Service\npublic class InvoiceService {\n    private final TaxCalculator tax;\n    private final InvoiceRepository repo;\n    public InvoiceService(TaxCalculator tax, InvoiceRepository repo) {\n        this.tax = tax; this.repo = repo;\n    }\n}\n\n// Test:\nvar service = new InvoiceService(mockTax, mockRepo); // no reflection needed\n\n// AVOID: field injection hides dependencies and breaks immutability\n@Service\npublic class BadInvoiceService {\n    @Autowired private TaxCalculator tax;   // not final, untestable cleanly\n    @Autowired private InvoiceRepository repo;\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Use Lombok @RequiredArgsConstructor or a single final-field constructor to keep constructor injection terse. You get immutability and fail-fast wiring without verbosity."
+        }
+      ]
+    },
+    {
+      "id": "auto-config-starters-profiles",
+      "heading": "Auto-Configuration, Starters, Profiles, and Actuator",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A starter is a curated dependency aggregator (e.g. spring-boot-starter-web pulls in Spring MVC, Jackson, and an embedded Tomcat). Auto-configuration classes are conditional @Configuration beans registered via spring.factories / AutoConfiguration.imports. They use @ConditionalOnClass, @ConditionalOnMissingBean, and @ConditionalOnProperty to wire defaults only when appropriate — and to back off the moment you define your own bean."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "@AutoConfiguration\n@ConditionalOnClass(DataSource.class)\npublic class MyDataSourceAutoConfiguration {\n\n    @Bean\n    @ConditionalOnMissingBean   // user-defined DataSource wins\n    @ConditionalOnProperty(prefix = \"app.db\", name = \"enabled\", havingValue = \"true\")\n    public DataSource dataSource(DataSourceProperties props) {\n        return DataSourceBuilder.create()\n            .url(props.getUrl())\n            .username(props.getUsername())\n            .password(props.getPassword())\n            .build();\n    }\n}"
+        },
+        {
+          "type": "heading",
+          "text": "Externalized config and profiles"
+        },
+        {
+          "type": "paragraph",
+          "text": "Configuration is layered with a strict precedence: command-line args > environment variables > application-{profile}.yml > application.yml > defaults. Bind related properties into a typed class with @ConfigurationProperties rather than scattering @Value everywhere."
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "code": "# application.yml\nspring:\n  profiles:\n    active: ${APP_PROFILE:dev}\napp:\n  payments:\n    timeout-ms: 2000\n---\nspring:\n  config:\n    activate:\n      on-profile: prod\napp:\n  payments:\n    timeout-ms: 800   # tighter timeout in production"
+        },
+        {
+          "type": "paragraph",
+          "text": "Actuator exposes operational endpoints — /actuator/health, /actuator/metrics, /actuator/prometheus, /actuator/info. Lock down what is exposed and never expose /actuator/env or /actuator/heapdump publicly."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Exposing all Actuator endpoints (management.endpoints.web.exposure.include=*) on a public port leaks env vars, secrets, and heap dumps. Restrict exposure and put Actuator behind auth or a separate management port."
+        }
+      ]
+    },
+    {
+      "id": "rest-dto-validation-exceptions",
+      "heading": "REST: Controllers, DTOs, Validation, and Exception Handling",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Controllers should be thin: bind and validate input, delegate to a service, map the result to a response DTO. Never expose JPA entities directly — it couples your wire format to your schema and risks lazy-loading serialization and accidental field leakage. Use dedicated request/response DTOs and Bean Validation (jakarta.validation) for input constraints."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "public record CreateOrderRequest(\n    @NotBlank String sku,\n    @Min(1) int quantity,\n    @Email String customerEmail) {}\n\n@RestController\n@RequestMapping(\"/api/orders\")\npublic class OrderController {\n    private final OrderService service;\n    public OrderController(OrderService service) { this.service = service; }\n\n    @PostMapping\n    @ResponseStatus(HttpStatus.CREATED)\n    public OrderResponse create(@Valid @RequestBody CreateOrderRequest req) {\n        return OrderResponse.from(service.place(req));\n    }\n}"
+        },
+        {
+          "type": "heading",
+          "text": "Centralized exception handling"
+        },
+        {
+          "type": "paragraph",
+          "text": "A @RestControllerAdvice gives you one place to translate exceptions into a consistent error contract (ideally RFC 7807 ProblemDetail). This keeps controllers free of try/catch and guarantees clients never see a raw stack trace."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "@RestControllerAdvice\npublic class GlobalExceptionHandler {\n\n    @ExceptionHandler(MethodArgumentNotValidException.class)\n    public ProblemDetail onValidation(MethodArgumentNotValidException ex) {\n        var pd = ProblemDetail.forStatus(HttpStatus.BAD_REQUEST);\n        pd.setTitle(\"Validation failed\");\n        pd.setProperty(\"errors\", ex.getBindingResult().getFieldErrors().stream()\n            .collect(Collectors.toMap(FieldError::getField,\n                    FieldError::getDefaultMessage, (a, b) -> a)));\n        return pd;\n    }\n\n    @ExceptionHandler(OrderNotFoundException.class)\n    public ProblemDetail onNotFound(OrderNotFoundException ex) {\n        var pd = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());\n        pd.setTitle(\"Order not found\");\n        return pd;\n    }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Always log the full exception server-side (with a correlation id) while returning a sanitized ProblemDetail to the client. The client gets a stable contract; you keep the diagnostics."
+        }
+      ]
+    },
+    {
+      "id": "jpa-transactions-nplus1",
+      "heading": "JPA, Transactions, Lazy Loading, and N+1",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Spring Data JPA sits on Hibernate. @Transactional defines a unit of work: a single database transaction and a single Hibernate persistence context (first-level cache). Within that boundary, managed entities are dirty-checked and flushed automatically. Outside it, the session is closed and any lazy association you touch throws LazyInitializationException."
+        },
+        {
+          "type": "heading",
+          "text": "Fetch strategies and the N+1 problem"
+        },
+        {
+          "type": "paragraph",
+          "text": "Default to LAZY for associations. EAGER fetching seems convenient but causes uncontrolled joins and N+1 explosions across your codebase. When you DO need the association, fetch it explicitly with a JOIN FETCH query or an @EntityGraph — that way you control the join per use case."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// N+1: 1 query for orders, then 1 query PER order for its lines.\nList<Order> orders = orderRepository.findAll();\nfor (Order o : orders) {\n    total += o.getLines().size(); // lazy load fires a query each iteration\n}\n\n// Fixed: one query with a fetch join\n@Query(\"select distinct o from Order o join fetch o.lines where o.status = :s\")\nList<Order> findWithLines(@Param(\"s\") OrderStatus status);\n\n// Or with an entity graph\n@EntityGraph(attributePaths = \"lines\")\nList<Order> findByStatus(OrderStatus status);"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Use distinct in JPQL fetch joins to avoid duplicate root rows from the cartesian product, and beware combining JOIN FETCH with pagination on a collection — Hibernate will warn and paginate in memory."
+        },
+        {
+          "type": "heading",
+          "text": "Transaction propagation"
+        },
+        {
+          "type": "table",
+          "headers": ["Propagation", "Behavior"],
+          "rows": [
+            ["REQUIRED (default)", "Join existing transaction or create one"],
+            ["REQUIRES_NEW", "Always suspend current and start a new physical transaction"],
+            ["NESTED", "Savepoint within the current transaction"],
+            ["MANDATORY", "Must run in an existing transaction or throw"],
+            ["SUPPORTS", "Join if present, else run non-transactionally"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "aop-proxy-self-invocation",
+      "heading": "AOP Proxies and the @Transactional Self-Invocation Trap",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "This is the single most important Spring internals concept for senior interviews. @Transactional, @Cacheable, @Async, and @Secured are all implemented with AOP proxies. When the container creates your bean, it wraps it in a proxy (a JDK dynamic proxy if the bean implements an interface, otherwise a CGLIB subclass). Callers get a reference to the proxy, not the raw object. The proxy intercepts the call, opens a transaction, then delegates to the real method."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "@Service\npublic class BillingService {\n\n    public void processBatch(List<Long> ids) {\n        for (Long id : ids) {\n            // BUG: this.charge(...) calls the RAW object, bypassing the proxy.\n            // No new transaction is started; @Transactional is IGNORED.\n            this.charge(id);\n        }\n    }\n\n    @Transactional(propagation = Propagation.REQUIRES_NEW)\n    public void charge(Long id) {\n        // intended to commit/rollback per id, but never does when self-invoked\n    }\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Because processBatch calls this.charge(), the call goes straight through the internal method reference — the proxy is never on the call stack, so the @Transactional advice never runs. The whole batch runs in whatever transaction (or none) the outer call had. One bad id fails the entire batch instead of just its own."
+        },
+        {
+          "type": "heading",
+          "text": "Why @Transactional on private/internal methods does nothing"
+        },
+        {
+          "type": "paragraph",
+          "text": "For the same reason, @Transactional on a private method is silently ignored: a CGLIB proxy works by subclassing and overriding methods, and private methods cannot be overridden. The proxy has no way to intercept them. Spring's default proxy-based AOP only advises public methods invoked from outside the bean."
+        },
+        {
+          "type": "heading",
+          "text": "How to fix self-invocation"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Move the transactional method to a separate bean and inject it — the cleanest fix.",
+            "Inject a self-reference (the proxy) and call self.charge(id) instead of this.charge(id).",
+            "Use AopContext.currentProxy() with exposeProxy=true (works but couples code to Spring AOP).",
+            "Switch to AspectJ load-time weaving (mode=aspectj), which weaves the advice into the bytecode so self-invocation is intercepted."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "@Service\npublic class BillingService {\n    private final ChargeService chargeService; // separate bean -> real proxy\n    public BillingService(ChargeService chargeService) {\n        this.chargeService = chargeService;\n    }\n    public void processBatch(List<Long> ids) {\n        for (Long id : ids) {\n            try {\n                chargeService.charge(id); // goes through the proxy -> REQUIRES_NEW honored\n            } catch (ChargeException e) {\n                log.warn(\"Skipping {} \", id, e); // isolated rollback per id\n            }\n        }\n    }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "By default Spring only rolls back on unchecked (RuntimeException) and Error. A checked exception thrown from a @Transactional method commits unless you set @Transactional(rollbackFor = Exception.class). This is a classic silent data-corruption bug."
+        }
+      ]
+    },
+    {
+      "id": "security-jwt-oauth2",
+      "heading": "Security: JWT and OAuth2 Resource Server",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "For stateless APIs, the modern approach is to act as an OAuth2 Resource Server validating JWT access tokens issued by an authorization server (Keycloak, Auth0, Cognito). Spring Security validates the signature against the issuer's JWKS, checks expiry and audience, and maps claims to authorities. Avoid hand-rolling JWT parsing when the resource-server support does it correctly and safely."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "@Configuration\n@EnableWebSecurity\npublic class SecurityConfig {\n\n    @Bean\n    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {\n        http\n            .csrf(csrf -> csrf.disable())                 // stateless API\n            .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))\n            .authorizeHttpRequests(auth -> auth\n                .requestMatchers(\"/actuator/health\", \"/api/public/**\").permitAll()\n                .requestMatchers(HttpMethod.POST, \"/api/orders\").hasAuthority(\"SCOPE_orders:write\")\n                .anyRequest().authenticated())\n            .oauth2ResourceServer(o -> o.jwt(Customizer.withDefaults()));\n        return http.build();\n    }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Disabling CSRF is correct for a token-authenticated stateless API, but wrong if you use cookie-based sessions. Match the protection to the auth model: tokens in Authorization headers are not vulnerable to CSRF; session cookies are."
+        }
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: The Batch That Never Rolled Back",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Incident: a nightly job that settled marketplace payouts. Each seller's payout should be its own atomic unit — if one seller's ledger update fails, only that seller is skipped and retried. Finance reported that on one night a single malformed payout caused 4,200 payouts to be marked SETTLED in the app while no money moved, then the whole transaction rolled back, leaving the database and the payment provider permanently out of sync."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "@Service\npublic class PayoutJob {\n    @Transactional // one giant transaction around everything\n    public void run() {\n        for (Seller s : sellers) {\n            settle(s); // self-invocation: REQUIRES_NEW ignored\n        }\n    }\n    @Transactional(propagation = Propagation.REQUIRES_NEW)\n    void settle(Seller s) { /* update ledger, call provider */ }\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Root cause: two layered bugs. (1) settle() was called via this (self-invocation), so REQUIRES_NEW never took effect — every seller ran in run()'s single transaction. (2) The provider call threw a checked TimeoutException which, without rollbackFor, did not even trigger rollback for the in-flight work that had already been flushed. The fix split settle into its own bean, added rollbackFor, and made the provider call idempotent with an external dedup key."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "@Service\npublic class PayoutJob {\n    private final SettlementService settlement;\n    public PayoutJob(SettlementService settlement) { this.settlement = settlement; }\n\n    public void run() {\n        for (Seller s : sellers) {\n            try {\n                settlement.settle(s); // proxied -> independent transaction per seller\n            } catch (SettlementException e) {\n                metrics.increment(\"payout.failed\");\n                log.error(\"Payout failed for seller {} \", s.getId(), e);\n            }\n        }\n    }\n}\n\n@Service\npublic class SettlementService {\n    @Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)\n    public void settle(Seller s) throws SettlementException { /* ... */ }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Outcome: a failing seller now rolls back only its own work, the job continues, and idempotency keys make the provider call safe to retry. The two-line conceptual fix (separate bean + rollbackFor) prevented a recurrence of a six-figure reconciliation incident."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Self-invoking a @Transactional/@Async/@Cacheable method via this — the proxy is bypassed and the annotation does nothing.",
+            "Relying on default rollback rules and throwing checked exceptions — the transaction commits partial work.",
+            "Returning JPA entities from controllers — triggers lazy-loading serialization errors and leaks schema/fields.",
+            "EAGER fetch defaults causing N+1 storms and giant cartesian joins under load.",
+            "Field injection making code untestable and hiding circular dependencies until startup.",
+            "Putting business logic that needs a transaction in a method touched only inside the same bean.",
+            "Exposing all Actuator endpoints publicly, leaking secrets via /actuator/env and /actuator/heapdump.",
+            "Catching and swallowing exceptions inside a @Transactional method — Spring still marks the tx rollback-only if the exception propagated through the proxy, leading to confusing UnexpectedRollbackException."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "UnexpectedRollbackException at commit usually means an inner @Transactional method already marked the transaction rollback-only (because an exception crossed its proxy) even though the outer code caught the exception. The outer commit then fails. Use REQUIRES_NEW for truly independent inner units, or do not swallow exceptions across transactional boundaries."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Prefer constructor injection with final fields; reserve field injection for tests only.",
+            "Keep @Transactional on service methods, never on controllers or repositories you do not control.",
+            "Make transaction boundaries explicit and small; isolate independent units in their own beans.",
+            "Always set rollbackFor when checked exceptions can occur in a transactional method.",
+            "Default associations to LAZY and fetch eagerly per-query with JOIN FETCH or @EntityGraph.",
+            "Map entities to DTOs at the boundary; never serialize JPA entities to clients.",
+            "Centralize error handling in @RestControllerAdvice returning ProblemDetail; log full traces server-side only.",
+            "Use @ConfigurationProperties for typed, validated, grouped config instead of scattered @Value.",
+            "Restrict Actuator exposure and put it behind auth or a separate management port.",
+            "Validate inputs with Bean Validation at the controller edge so services receive trusted data."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "A simple heuristic: if an annotation is not doing what you expect (transaction, cache, async, security), ask first 'is this call going through the proxy?' Nine times out of ten, self-invocation is the culprit."
+        }
+      ]
+    },
+    {
+      "id": "note-testing",
+      "heading": "A Note on Testing Spring Boot",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Use sliced tests to keep them fast and focused: @WebMvcTest for the controller/validation/advice layer with MockMvc, @DataJpaTest for repositories against an in-memory or Testcontainers database, and plain JUnit with mocks for service logic (made trivial by constructor injection). Reserve @SpringBootTest for a small number of end-to-end smoke tests."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Transactional bugs like self-invocation often pass @DataJpaTest because those tests run inside a rollback-only transaction. Cover transaction propagation with an integration test that commits and reads back through a new transaction."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "proxy-self-invocation",
+      "title": "Why self-invocation bypasses @Transactional",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n  participant C as Caller\n  participant P as Spring Proxy\n  participant B as BillingService bean\n  C->>P: processBatch(ids)\n  P->>B: processBatch(ids)\n  Note over B: loop over ids\n  B->>B: this.charge(id)\n  Note over B: direct call - proxy skipped - no new transaction\n  C->>P: chargeService.charge(id)\n  P->>P: open REQUIRES_NEW transaction\n  P->>B: charge(id)\n  P->>P: commit or rollback"
+    },
+    {
+      "id": "request-flow",
+      "title": "Spring Boot request to database flow",
+      "type": "mermaid",
+      "content": "flowchart TD\n  A[HTTP Request] --> B[Security Filter Chain]\n  B --> C[DispatcherServlet]\n  C --> D[Controller validates DTO]\n  D --> E[Transactional Service]\n  E --> F[Spring Data Repository]\n  F --> G[Hibernate Session]\n  G --> H[(Database)]\n  D -. exception .-> I[RestControllerAdvice]\n  I --> J[ProblemDetail response]"
+    },
+    {
+      "id": "bean-lifecycle",
+      "title": "Bean lifecycle and proxy creation",
+      "type": "ascii",
+      "content": "+----------------------+\n| Instantiate (ctor    |\n| injection happens)   |\n+----------+-----------+\n           |\n           v\n+----------------------+\n| Populate props /     |\n| setter & field inject|\n+----------+-----------+\n           |\n           v\n+----------------------+\n| Aware callbacks      |\n+----------+-----------+\n           |\n           v\n+----------------------+\n| @PostConstruct /     |\n| afterPropertiesSet   |\n+----------+-----------+\n           |\n           v\n+----------------------+\n| postProcessAfterInit |\n| --> AOP PROXY built  |  <== @Transactional wired here\n+----------+-----------+\n           |\n           v\n+----------------------+\n| Bean in service      |\n+----------+-----------+\n           |\n           v\n+----------------------+\n| @PreDestroy on stop  |\n+----------------------+"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-ioc",
+      "question": "What is Inversion of Control and how does Spring implement it?",
+      "answer": "IoC means objects do not create their own dependencies; an external container constructs them and injects collaborators. Spring implements IoC via the ApplicationContext, which reads bean definitions (from annotations, @Bean methods, or component scanning), instantiates beans, resolves and injects their dependencies, manages their lifecycle, and wraps them in proxies for cross-cutting concerns. Dependency injection is the mechanism; IoC is the principle.",
+      "difficulty": "junior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["ioc", "di"],
+      "followUps": ["What are the three injection styles?", "What is the difference between BeanFactory and ApplicationContext?"]
+    },
+    {
+      "id": "q-constructor-injection",
+      "question": "Why is constructor injection preferred over field injection?",
+      "answer": "Constructor injection makes dependencies explicit and lets you mark them final (immutability), fails fast at construction if a dependency is missing, surfaces circular dependencies at startup, and makes the class trivially unit-testable with plain mocks and no reflection. It also makes 'too many dependencies' visible as an ugly constructor — a design smell you want to see. Field injection hides all of this, cannot use final, and requires reflection or @InjectMocks to test.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["di", "testing"],
+      "followUps": ["How do you keep constructors terse?", "How does Spring handle a circular constructor dependency?"]
+    },
+    {
+      "id": "q-bean-scopes",
+      "question": "What happens if you inject a prototype-scoped bean into a singleton?",
+      "answer": "The singleton is created once at startup, so its prototype dependency is resolved exactly once and frozen — you get the same instance forever, defeating the prototype scope. To get a fresh instance per use, inject an ObjectProvider<T> and call getObject(), use @Lookup method injection, or configure a scoped proxy on the prototype bean.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["scopes", "lifecycle"],
+      "followUps": ["What is a scoped proxy?", "When would you actually want prototype scope?"]
+    },
+    {
+      "id": "q-autoconfig",
+      "question": "How does Spring Boot auto-configuration work and how do you override it?",
+      "answer": "Auto-configuration classes are registered via META-INF/spring/...AutoConfiguration.imports and guarded by @Conditional annotations (@ConditionalOnClass, @ConditionalOnMissingBean, @ConditionalOnProperty). They only contribute beans when the classpath and properties match, and they back off (@ConditionalOnMissingBean) the moment you define your own bean. To override, define your own bean, set a property, exclude the auto-config class, or use spring-boot-actuator's conditions report (debug=true) to see what matched and why.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["autoconfig", "starters"],
+      "followUps": ["How do you write your own starter?", "How do you debug why a bean was not created?"]
+    },
+    {
+      "id": "q-transactional-self",
+      "question": "Why does a @Transactional method that calls another @Transactional method via this not start a new transaction?",
+      "answer": "Because @Transactional is implemented with an AOP proxy. Callers hold a reference to the proxy, which intercepts the call and manages the transaction before delegating to the real bean. When the bean calls this.otherMethod(), the call goes directly through the internal object reference — the proxy is not on the call stack — so the transactional advice never runs. The annotation is silently ignored. Fixes: move the method to another bean, inject a self-reference/proxy, use AopContext.currentProxy(), or switch to AspectJ weaving.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["transactions", "aop", "proxy"],
+      "followUps": ["Does @Transactional on a private method work?", "How does AspectJ weaving change this?"]
+    },
+    {
+      "id": "q-transactional-private",
+      "question": "Does @Transactional work on a private or final method?",
+      "answer": "No. Spring's default proxy-based AOP intercepts methods by subclassing (CGLIB) or implementing an interface (JDK proxy). Private methods cannot be overridden and final methods cannot be overridden by the CGLIB subclass, so the proxy cannot intercept them and the annotation is ignored. Only public methods invoked from outside the bean are advised. AspectJ weaving can advise private methods because it modifies bytecode directly rather than using a proxy.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["transactions", "aop"],
+      "followUps": ["What about protected methods?", "Why does CGLIB need a no-arg constructor consideration?"]
+    },
+    {
+      "id": "q-nplus1",
+      "question": "What is the N+1 query problem and how do you fix it?",
+      "answer": "N+1 happens when you load N parent rows in one query, then trigger one additional query per parent to load a lazy association — N+1 total. With large datasets it crushes the database. Fixes: a JPQL JOIN FETCH (use distinct to dedupe root rows), an @EntityGraph specifying the attributes to fetch, batch fetching via @BatchSize / hibernate.default_batch_fetch_size, or a projection/DTO query that selects exactly what you need. Avoid EAGER as a blanket fix — it causes N+1 and cartesian joins elsewhere.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["jpa", "hibernate", "performance"],
+      "followUps": ["Why does JOIN FETCH plus pagination warn?", "When is @BatchSize better than JOIN FETCH?"]
+    },
+    {
+      "id": "q-rollback-checked",
+      "question": "By default, does Spring roll back a transaction when a checked exception is thrown?",
+      "answer": "No. Spring's default rollback rules roll back only on unchecked exceptions (RuntimeException) and Error. A checked exception propagating out of a @Transactional method commits the work done so far. To roll back on checked exceptions, set @Transactional(rollbackFor = Exception.class) (or a specific checked type). This default is a common source of silent partial-commit data corruption.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["transactions"],
+      "followUps": ["How do you exclude a specific exception from rollback?", "What is UnexpectedRollbackException?"]
+    },
+    {
+      "id": "q-lazy-init",
+      "question": "Why do you get LazyInitializationException, and what is the right fix?",
+      "answer": "It occurs when you access a lazy association after the Hibernate session/persistence context that loaded the entity has closed — typically outside the @Transactional boundary, e.g. during JSON serialization in the controller. The right fix is to fetch the needed data inside the transaction with a JOIN FETCH or @EntityGraph and map to a DTO before the boundary closes. Anti-patterns: enabling open-session-in-view (hides the problem, causes N+1 and long-held connections) or making the association EAGER.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["jpa", "hibernate", "transactions"],
+      "followUps": ["What does open-session-in-view do and why avoid it?", "How does mapping to a DTO inside the tx help?"]
+    },
+    {
+      "id": "q-controller-advice",
+      "question": "How do you design a clean exception-handling layer for a REST API?",
+      "answer": "Centralize it in a @RestControllerAdvice with @ExceptionHandler methods that translate each exception family into a consistent contract — ideally RFC 7807 ProblemDetail with type, title, status, detail, and a correlation id. Map domain exceptions to status codes, validation errors to 400 with field-level detail, and a catch-all to 500 that logs the full trace server-side while returning a sanitized body. Controllers stay free of try/catch and clients get a stable, documented error format.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["rest", "exceptions"],
+      "followUps": ["How do you add a correlation id?", "How do you keep error responses out of your OpenAPI noise?"]
+    },
+    {
+      "id": "q-jwt-stateless",
+      "question": "Why is CSRF protection typically disabled for a JWT-based stateless API but required for a session-cookie app?",
+      "answer": "CSRF exploits the browser automatically attaching ambient credentials (session cookies) to cross-site requests. With JWTs sent in an Authorization header, the browser does not attach them automatically, so a malicious site cannot forge an authenticated request — CSRF does not apply, and Spring's stateless setup disables it. With cookie-based sessions, the cookie IS sent automatically, so CSRF protection (synchronizer token or SameSite cookies) is mandatory.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["security", "jwt", "csrf"],
+      "followUps": ["What if you store the JWT in a cookie?", "How does SameSite=Lax help?"]
+    },
+    {
+      "id": "q-actuator-prod",
+      "question": "What are the risks of Actuator in production and how do you secure it?",
+      "answer": "Actuator can expose sensitive endpoints: /env and /configprops leak environment and properties (including secrets), /heapdump leaks the entire heap, /threaddump and /mappings leak internals. Risks: secret disclosure and information leakage. Secure it by exposing only what you need (management.endpoints.web.exposure.include with an explicit list), binding it to a separate management port not reachable externally, and putting it behind authentication. Never expose * publicly.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["actuator", "security", "ops"],
+      "followUps": ["How do you expose Prometheus metrics safely?", "How do you customize the health endpoint details visibility?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-fix-transaction",
+      "title": "Fix the Broken Transaction",
+      "difficulty": "senior",
+      "category": "Backend",
+      "prompt": "The TransferService below is supposed to debit one account and credit another atomically, and to record an immutable audit row in its OWN transaction so the audit survives even if the transfer rolls back. In production, audit rows go missing whenever a transfer fails, and a checked InsufficientFundsException does not roll back the debit. Diagnose both bugs and rewrite the code so (1) the transfer is atomic and rolls back on the checked exception, and (2) the audit write commits independently of the transfer outcome.",
+      "hints": [
+        "How is @Transactional implemented, and what happens when you call this.audit(...)?",
+        "What is Spring's default rollback rule for checked exceptions?",
+        "Which propagation type gives a truly independent transaction, and where must the method live for the proxy to apply?"
+      ],
+      "solutionCode": "// BROKEN\n@Service\npublic class TransferService {\n    private final AccountRepository accounts;\n    public TransferService(AccountRepository accounts) { this.accounts = accounts; }\n\n    @Transactional // default: does NOT roll back on checked exceptions\n    public void transfer(long from, long to, BigDecimal amt) throws InsufficientFundsException {\n        debit(from, amt);   // may throw checked -> debit still commits!\n        credit(to, amt);\n        this.audit(from, to, amt); // self-invocation -> REQUIRES_NEW ignored\n    }\n    @Transactional(propagation = Propagation.REQUIRES_NEW)\n    public void audit(long from, long to, BigDecimal amt) { /* insert audit row */ }\n}\n\n// FIXED\n@Service\npublic class TransferService {\n    private final AccountRepository accounts;\n    private final AuditService auditService; // separate bean -> real proxy\n    public TransferService(AccountRepository accounts, AuditService auditService) {\n        this.accounts = accounts;\n        this.auditService = auditService;\n    }\n\n    // rollbackFor makes the checked exception roll back the transfer\n    @Transactional(rollbackFor = InsufficientFundsException.class)\n    public void transfer(long from, long to, BigDecimal amt) throws InsufficientFundsException {\n        // audit in its OWN committed transaction first, so it survives a rollback\n        auditService.audit(from, to, amt);\n        Account src = accounts.findByIdForUpdate(from);\n        if (src.getBalance().compareTo(amt) < 0) {\n            throw new InsufficientFundsException(from); // now rolls back debit/credit\n        }\n        src.debit(amt);\n        accounts.findByIdForUpdate(to).credit(amt);\n    }\n}\n\n@Service\npublic class AuditService {\n    private final AuditRepository audits;\n    public AuditService(AuditRepository audits) { this.audits = audits; }\n\n    @Transactional(propagation = Propagation.REQUIRES_NEW)\n    public void audit(long from, long to, BigDecimal amt) {\n        audits.save(new AuditRow(from, to, amt, Instant.now()));\n    }\n}",
+      "solutionLanguage": "java",
+      "explanation": "Two bugs. Bug 1: self-invocation. this.audit(...) calls the raw object, bypassing the proxy, so REQUIRES_NEW never takes effect — the audit ran inside the transfer's transaction and vanished on rollback. Moving audit() into its own AuditService bean and injecting it means the call goes through that bean's proxy, so REQUIRES_NEW genuinely suspends the outer transaction and commits the audit independently. We also call audit BEFORE the risky logic so the audit commit is not entangled with the transfer. Bug 2: default rollback rules ignore checked exceptions, so throwing InsufficientFundsException committed a partial transfer. Adding rollbackFor = InsufficientFundsException.class restores atomicity. Note findByIdForUpdate uses a pessimistic lock so concurrent transfers cannot race on the balance check.",
+      "relatedTopic": "spring-boot"
+    },
+    {
+      "id": "ch-exception-layer",
+      "title": "Design a Clean Exception-Handling Layer",
+      "difficulty": "mid",
+      "category": "Backend",
+      "prompt": "Replace scattered try/catch in controllers with a single, consistent error layer. Requirements: validation failures return 400 with field-level messages; a domain ResourceNotFoundException returns 404; an unexpected exception returns 500 with a generated correlation id (and the full stack trace logged server-side, never sent to the client). All responses must use RFC 7807 ProblemDetail. Implement the advice.",
+      "hints": [
+        "Use @RestControllerAdvice with one @ExceptionHandler per exception family.",
+        "ProblemDetail.forStatus / forStatusAndDetail and setProperty give you the 7807 body.",
+        "For the catch-all, log the trace with a UUID correlation id and put only the id in the response."
+      ],
+      "solutionCode": "public class ResourceNotFoundException extends RuntimeException {\n    public ResourceNotFoundException(String msg) { super(msg); }\n}\n\n@RestControllerAdvice\npublic class GlobalExceptionHandler {\n    private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);\n\n    @ExceptionHandler(MethodArgumentNotValidException.class)\n    public ProblemDetail onValidation(MethodArgumentNotValidException ex) {\n        var pd = ProblemDetail.forStatus(HttpStatus.BAD_REQUEST);\n        pd.setTitle(\"Validation failed\");\n        pd.setDetail(\"One or more fields are invalid\");\n        var errors = ex.getBindingResult().getFieldErrors().stream()\n            .collect(Collectors.toMap(FieldError::getField,\n                    fe -> Optional.ofNullable(fe.getDefaultMessage()).orElse(\"invalid\"),\n                    (a, b) -> a));\n        pd.setProperty(\"errors\", errors);\n        return pd;\n    }\n\n    @ExceptionHandler(ResourceNotFoundException.class)\n    public ProblemDetail onNotFound(ResourceNotFoundException ex) {\n        var pd = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());\n        pd.setTitle(\"Resource not found\");\n        return pd;\n    }\n\n    @ExceptionHandler(Exception.class)\n    public ProblemDetail onUnexpected(Exception ex) {\n        String correlationId = UUID.randomUUID().toString();\n        // Full diagnostics stay on the server, keyed by correlation id\n        log.error(\"Unhandled exception correlationId={}\", correlationId, ex);\n        var pd = ProblemDetail.forStatusAndDetail(\n            HttpStatus.INTERNAL_SERVER_ERROR, \"An unexpected error occurred\");\n        pd.setTitle(\"Internal server error\");\n        pd.setProperty(\"correlationId\", correlationId); // client quotes this to support\n        return pd;\n    }\n}",
+      "solutionLanguage": "java",
+      "explanation": "A single @RestControllerAdvice centralizes translation so controllers never try/catch. Each handler maps an exception family to a ProblemDetail (RFC 7807): validation -> 400 with a field->message map under the errors property; ResourceNotFoundException -> 404 with the message as detail; and a catch-all Exception -> 500 that generates a UUID correlation id, logs the full stack trace server-side keyed by that id, and returns only the id and a generic message to the client. This gives a stable, documented error contract, prevents stack-trace leakage, and keeps diagnostics linkable via the correlation id. Handler specificity ensures the catch-all only fires for truly unexpected errors; more specific @ExceptionHandler types take precedence.",
+      "relatedTopic": "spring-boot"
+    }
+  ],
+  "references": [
+    {"label": "Spring Framework Reference: Core", "url": "https://docs.spring.io/spring-framework/reference/core.html"},
+    {"label": "Spring Framework: Transaction Management", "url": "https://docs.spring.io/spring-framework/reference/data-access/transaction.html"},
+    {"label": "Spring Boot Reference Documentation", "url": "https://docs.spring.io/spring-boot/index.html"},
+    {"label": "Spring Data JPA Reference", "url": "https://docs.spring.io/spring-data/jpa/reference/index.html"},
+    {"label": "Spring Security: OAuth2 Resource Server", "url": "https://docs.spring.io/spring-security/reference/servlet/oauth2/resource-server/index.html"},
+    {"label": "RFC 7807 Problem Details for HTTP APIs", "url": "https://www.rfc-editor.org/rfc/rfc7807"}
+  ]
+}

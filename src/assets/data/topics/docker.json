@@ -1,0 +1,553 @@
+{
+  "id": "docker",
+  "title": "Docker",
+  "category": "DevOps",
+  "subcategory": "Containers",
+  "difficulty": "mid",
+  "tags": ["docker", "containers", "dockerfile", "multi-stage", "image-optimization", "devops", "linux"],
+  "description": "A staff-level deep dive into Docker images, the layered union filesystem, Dockerfile build mechanics, and the production techniques that turn a bloated 1.2GB image into a lean, secure, fast-building artifact.",
+  "estReadMinutes": 28,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Docker packages an application together with its dependencies, runtime, and configuration into an image: an immutable, content-addressed artifact that runs identically on a laptop, in CI, and in production. It is not a virtual machine. There is no guest kernel. A container is just a Linux process (or set of processes) isolated by kernel primitives — namespaces for what the process can see and cgroups for what it can consume — running on top of an image's layered filesystem."
+        },
+        {
+          "type": "paragraph",
+          "text": "Understanding Docker well means understanding three things that beginners conflate: the difference between an image and a container, how the union filesystem turns a stack of layers into a single coherent root filesystem, and how the build cache keys off instruction order. Master those and image bloat, slow builds, and surprising 'why did my config change rebuild everything' problems mostly disappear."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Image: a read-only template made of stacked layers plus metadata (the manifest and config).",
+            "Container: a thin writable layer on top of an image, plus a running process tree in isolated namespaces.",
+            "Registry: where images are stored and distributed (Docker Hub, ECR, GCR, GHCR).",
+            "Build context: the directory sent to the daemon; everything COPY/ADD pulls from."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Image size and build speed are not cosmetic. A 1.2GB image is slower to push, slower to pull on every node during a rolling deploy or autoscale event, more expensive to store, and dramatically larger as an attack surface. Every package in the image is a potential CVE that your security scanner will flag and your team will have to triage."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Cold-start latency: a node scaling up must pull the image before the pod can start. 1.2GB vs 80MB is the difference between a 4-second and a 40-second scale-up under load.",
+            "Cost: registry storage and cross-AZ/region data transfer scale with image size times pull frequency.",
+            "Security: a slim or distroless base with no shell and no package manager removes entire classes of exploit primitives and shrinks the CVE surface from hundreds to single digits.",
+            "Developer velocity: correct layer ordering means a code-only change rebuilds in seconds instead of re-running a 3-minute dependency install."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Rule of thumb: optimize the build for cache hit rate (developer time, CI minutes) and optimize the final image for size and attack surface (runtime cost, security). Multi-stage builds let you do both at once."
+        }
+      ]
+    },
+    {
+      "id": "images-vs-containers",
+      "heading": "Images, Containers, and the Union Filesystem",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "An image is an ordered stack of read-only layers. Each layer is a tarball of filesystem changes (added, modified, or deleted files) relative to the layer below it. A storage driver — overlay2 on modern Linux — uses a union mount to merge these layers into a single directory tree. Lower layers provide the base, upper layers shadow them. When a container starts, Docker adds one more layer on top: a thin, writable layer unique to that container."
+        },
+        {
+          "type": "heading",
+          "text": "Copy-on-write"
+        },
+        {
+          "type": "paragraph",
+          "text": "Reads come straight from whichever layer owns the file. The first time a running container writes to a file that lives in a read-only layer, overlay2 copies the whole file up into the container's writable layer and modifies the copy. This copy-on-write (CoW) behavior is why ten containers from the same image share one on-disk copy of the image layers and only diverge by what they actually write — and why writing to a large file inside a container can be surprisingly slow the first time."
+        },
+        {
+          "type": "table",
+          "headers": ["Aspect", "Image", "Container"],
+          "rows": [
+            ["Mutability", "Immutable, read-only layers", "Adds a writable CoW layer"],
+            ["Identity", "Content-addressed by digest (sha256)", "Runtime instance with its own ID"],
+            ["Lifecycle", "Built once, pulled many times", "Created, started, stopped, removed"],
+            ["Storage", "Shared across all containers", "Only the diff (writable layer) is per-container"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Data written to the container's writable layer dies with the container. Anything that must survive a restart or redeploy belongs in a volume, not on the union filesystem."
+        }
+      ]
+    },
+    {
+      "id": "dockerfile-cache",
+      "heading": "Dockerfile, Layers, and the Build Cache",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Each instruction in a Dockerfile that changes the filesystem (FROM, RUN, COPY, ADD) produces a layer. Metadata-only instructions (ENV, WORKDIR, EXPOSE, ENTRYPOINT, CMD, LABEL) create lightweight layers that adjust the image config without adding file content. The build cache is keyed per-instruction: Docker reuses a cached layer only if the instruction string is identical AND every input it depends on is unchanged AND every preceding layer was also a cache hit. The moment one layer misses, every layer after it is rebuilt."
+        },
+        {
+          "type": "heading",
+          "text": "Why order matters"
+        },
+        {
+          "type": "paragraph",
+          "text": "This cache-invalidation cascade is the single most important Dockerfile principle. Put the things that change rarely (dependency manifests, dependency installs) early, and the things that change on every commit (your source code) late. If you COPY your whole source tree before installing dependencies, then every one-character code change busts the dependency-install cache and you reinstall everything."
+        },
+        {
+          "type": "code",
+          "language": "dockerfile",
+          "code": "# BAD: any source change invalidates the npm install layer\nFROM node:20-slim\nWORKDIR /app\nCOPY . .\nRUN npm ci          # re-runs on every code change\nCMD [\"node\", \"server.js\"]\n\n# GOOD: deps cached until package files actually change\nFROM node:20-slim\nWORKDIR /app\nCOPY package.json package-lock.json ./\nRUN npm ci          # cached unless lockfile changes\nCOPY . .            # only this layer rebuilds on code change\nCMD [\"node\", \"server.js\"]"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Use a .dockerignore so node_modules, .git, build artifacts, and secrets never enter the build context. A smaller context means faster COPY . . and prevents accidental cache busts from unrelated file changes."
+        }
+      ]
+    },
+    {
+      "id": "run-layers-tricky",
+      "heading": "RUN Layers and Why Cleanup Must Happen In-Place",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Every RUN creates a new layer that records the filesystem delta of that command. Layers are additive: a later RUN that deletes a file does NOT shrink the image, because the file still exists in the earlier layer and the deletion is just a whiteout marker in a new layer. The bytes are still shipped. This is the classic 'I deleted the apt cache but the image is still huge' trap."
+        },
+        {
+          "type": "code",
+          "language": "dockerfile",
+          "code": "# BAD: three layers; the apt cache is baked into layer 1 forever\nRUN apt-get update\nRUN apt-get install -y curl build-essential\nRUN rm -rf /var/lib/apt/lists/*   # whiteout only; bytes still in layer 1\n\n# GOOD: one layer; cache never persists into any layer\nRUN apt-get update \\\n && apt-get install -y --no-install-recommends curl build-essential \\\n && rm -rf /var/lib/apt/lists/*"
+        },
+        {
+          "type": "paragraph",
+          "text": "Chaining with && and cleaning up within the same RUN means the apt lists are created and removed inside one layer's delta, so they never appear in the final image. The same applies to compiling from source: download, build, install, and delete the source tree all in one RUN, or the source tarball is permanently baked in."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "BuildKit's RUN --mount=type=cache lets you keep a persistent, NON-baked cache (e.g. /root/.cache/pip or apt archives) that speeds rebuilds without ever ending up in a layer. It is the modern answer to the cleanup dance for package-manager caches."
+        }
+      ]
+    },
+    {
+      "id": "multistage",
+      "heading": "Multi-Stage Builds",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A multi-stage build uses several FROM statements in one Dockerfile. Earlier stages contain the full toolchain — compilers, dev headers, build dependencies — and produce an artifact. The final stage starts from a tiny base and COPYs only the built artifact out of the build stage with COPY --from. Everything in the build stage (gigabytes of toolchain) is discarded; only what you explicitly copy forward ships. This is how you get a compiled binary into a 10MB image."
+        },
+        {
+          "type": "code",
+          "language": "dockerfile",
+          "code": "# Stage 1: build with the full Go toolchain\nFROM golang:1.22 AS build\nWORKDIR /src\nCOPY go.mod go.sum ./\nRUN go mod download                       # cached unless deps change\nCOPY . .\nRUN CGO_ENABLED=0 GOOS=linux go build -ldflags=\"-s -w\" -o /app/server ./cmd/server\n\n# Stage 2: distroless runtime, no shell, no package manager, non-root\nFROM gcr.io/distroless/static-debian12:nonroot\nCOPY --from=build /app/server /server\nUSER nonroot:nonroot\nEXPOSE 8080\nENTRYPOINT [\"/server\"]"
+        },
+        {
+          "type": "list",
+          "items": [
+            "CGO_ENABLED=0 yields a static binary with no libc dependency, so distroless/static works.",
+            "-ldflags=\"-s -w\" strips the symbol table and DWARF debug info, shaving several MB.",
+            "The toolchain (~800MB golang image) never reaches the final image — only the binary does.",
+            "distroless has no shell, so an attacker who achieves RCE has no /bin/sh to pivot with."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "copy-add-entrypoint",
+      "heading": "COPY vs ADD, ENTRYPOINT vs CMD",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "heading",
+          "text": "COPY vs ADD"
+        },
+        {
+          "type": "paragraph",
+          "text": "COPY does exactly one thing: copy files and directories from the build context into the image. ADD does that plus two magic behaviors — it auto-extracts local tar archives, and it can fetch remote URLs. Those magic behaviors are footguns: a remote ADD is uncacheable and unverified, and tar auto-extraction is surprising. The staff-engineer answer: prefer COPY for everything; use ADD only when you genuinely want local-tar auto-extraction. For remote files, use RUN curl with an explicit checksum so the download is auditable and pinned."
+        },
+        {
+          "type": "heading",
+          "text": "ENTRYPOINT vs CMD"
+        },
+        {
+          "type": "paragraph",
+          "text": "ENTRYPOINT defines the executable that always runs; CMD provides default arguments (or a default command if there is no ENTRYPOINT). At runtime, anything the user appends to docker run replaces CMD but is passed as arguments to ENTRYPOINT. Use the exec form (JSON array) for both so the process runs as PID 1 directly rather than under a shell."
+        },
+        {
+          "type": "code",
+          "language": "dockerfile",
+          "code": "# ENTRYPOINT = the binary; CMD = overridable default args\nENTRYPOINT [\"/server\"]\nCMD [\"--port=8080\"]\n# docker run img            -> /server --port=8080\n# docker run img --port=9090 -> /server --port=9090\n\n# Shell form (AVOID for the main process): runs via /bin/sh -c,\n# so your app becomes a CHILD of the shell and does NOT get signals.\nENTRYPOINT npm start   # app is PID of a child; SIGTERM hits the shell"
+        },
+        {
+          "type": "table",
+          "headers": ["Form", "Syntax", "PID 1 is", "Signal handling"],
+          "rows": [
+            ["exec", "[\"app\", \"arg\"]", "your app", "app receives SIGTERM directly"],
+            ["shell", "app arg", "/bin/sh -c", "shell rarely forwards SIGTERM to the child"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "pid1-signals",
+      "heading": "PID 1, Signal Handling, and Zombie Reaping",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The first process in a container's PID namespace runs as PID 1, which carries special kernel responsibilities normally handled by init. Two things bite people. First, PID 1 does not get the default signal handlers: if your process has no explicit SIGTERM handler, the kernel does NOT kill it on SIGTERM the way it would a normal process. If your app is PID 1 and ignores SIGTERM, docker stop waits the full grace period (default 10s) and then SIGKILLs it — so graceful shutdown and in-flight request draining silently break."
+        },
+        {
+          "type": "paragraph",
+          "text": "Second, PID 1 is responsible for reaping orphaned children (zombie reaping). When a child process exits, it becomes a zombie until its parent calls wait(). Orphans get reparented to PID 1. A normal init reaps them; a typical application process does not, so zombies accumulate and can exhaust the process table in long-running containers that spawn subprocesses."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Use the exec form so your binary is PID 1 and receives SIGTERM directly, then handle SIGTERM to drain and exit.",
+            "If your process spawns children (shells, subprocesses) and is not designed to reap, run a tiny init: docker run --init, or add tini as ENTRYPOINT. It forwards signals and reaps zombies.",
+            "Never wrap your main process in a bare shell command (ENTRYPOINT npm start) — the shell becomes PID 1 and swallows signals."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "dockerfile",
+          "code": "# Option A: let Docker inject a minimal init (--init flag) for reaping\n# docker run --init myimage\n\n# Option B: bake tini in as PID 1; it reaps zombies and forwards signals\nFROM node:20-slim\nRUN apt-get update && apt-get install -y --no-install-recommends tini \\\n && rm -rf /var/lib/apt/lists/*\nENTRYPOINT [\"/usr/bin/tini\", \"--\"]\nCMD [\"node\", \"server.js\"]"
+        }
+      ]
+    },
+    {
+      "id": "volumes-networks",
+      "heading": "Volumes and Networks",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "heading",
+          "text": "Volumes"
+        },
+        {
+          "type": "table",
+          "headers": ["Type", "Backed by", "Use for"],
+          "rows": [
+            ["named volume", "Docker-managed dir (/var/lib/docker/volumes)", "Persistent app data (databases), survives container removal"],
+            ["bind mount", "An exact host path you choose", "Local dev (mount source code), host config files"],
+            ["tmpfs", "Host RAM, never on disk", "Secrets, scratch data that must not be persisted"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Volumes bypass the union filesystem entirely, so writes go at native disk speed (no copy-on-write penalty) and data persists across the container lifecycle. Named volumes are portable and Docker-managed; bind mounts couple you to a host path and can introduce permission mismatches between the host UID and the container's user."
+        },
+        {
+          "type": "heading",
+          "text": "Networks"
+        },
+        {
+          "type": "list",
+          "items": [
+            "bridge (default): containers get a private subnet; publish ports with -p to reach them from the host. A user-defined bridge also gives automatic DNS by container name.",
+            "host: the container shares the host network namespace — no isolation, no port mapping, lowest latency. Linux-only.",
+            "none: no networking at all; total network isolation for batch/compute jobs."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "On a user-defined bridge network, containers resolve each other by name via Docker's embedded DNS. The default 'bridge' network does not provide that, which is why Compose creates its own network for your services."
+        }
+      ]
+    },
+    {
+      "id": "production-incident",
+      "heading": "Production Example: The 1.2GB Image and a Failed Autoscale",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Incident: a Node.js service shipped a 1.2GB image built FROM node:20 (the full Debian image), with COPY . . before npm install and dev dependencies baked into the runtime. During a traffic spike the cluster autoscaler added nodes, but each new node spent ~40s pulling the 1.2GB image before the pod could start. By the time capacity arrived, the spike had already caused elevated p99 latency and a wave of 503s. The postmortem action item: get the image under 150MB and make rebuilds fast."
+        },
+        {
+          "type": "code",
+          "language": "dockerfile",
+          "code": "# Before: ~1.2GB, dev deps shipped, cache busted on every commit\nFROM node:20\nWORKDIR /app\nCOPY . .\nRUN npm install\nCMD [\"node\", \"dist/server.js\"]\n\n# After: multi-stage, slim base, prod-only deps, cache-friendly order\nFROM node:20-slim AS build\nWORKDIR /app\nCOPY package.json package-lock.json ./\nRUN npm ci                                  # cached unless lockfile changes\nCOPY . .\nRUN npm run build                           # produces dist/\n\nFROM node:20-slim AS runtime\nENV NODE_ENV=production\nWORKDIR /app\nCOPY package.json package-lock.json ./\nRUN npm ci --omit=dev && npm cache clean --force\nCOPY --from=build /app/dist ./dist\nUSER node\nEXPOSE 8080\nCMD [\"node\", \"dist/server.js\"]"
+        },
+        {
+          "type": "list",
+          "items": [
+            "node:20-slim instead of node:20 dropped the base from ~1.1GB to ~240MB of OS.",
+            "Multi-stage: build tooling and devDependencies never reach the runtime stage.",
+            "npm ci --omit=dev in runtime installs only production deps; cache cleaned in the same layer.",
+            "package files copied before source so npm ci stays cached across code-only commits.",
+            "USER node runs the process as a non-root UID, satisfying the cluster's PodSecurity policy."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Result: ~140MB image, ~5s node pull, and CI rebuilds dropped from ~3min to under 20s on code-only changes because the dependency layers stayed cached."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Deleting files in a later RUN and expecting the image to shrink — the bytes live in the earlier layer; clean up within the same RUN.",
+            "COPY . . before installing dependencies, busting the dependency cache on every commit.",
+            "Running as root: a container escape or RCE then has root in the container, and with a host bind mount, root over host files. Always add USER.",
+            "Using the shell form for the main process so the app runs as a child of /bin/sh, never receives SIGTERM, and docker stop always takes the full grace period before SIGKILL.",
+            "Baking secrets into layers via ENV or COPY — they persist in image history forever. Use BuildKit secrets (RUN --mount=type=secret) or runtime env injection.",
+            "Using ADD with a remote URL: uncacheable, unverified, and a supply-chain risk. Use COPY for local files and pinned, checksummed downloads for remote.",
+            "Forgetting .dockerignore, so .git and node_modules bloat the build context and can leak into the image.",
+            "Pinning to a 'latest' base tag, making builds non-reproducible and silently shifting under you."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Image layers are public history. docker history and a docker save | tar reveal every file ever added, even ones 'deleted' in a later layer. A secret committed in layer 3 is recoverable even if layer 9 removes the file. Rotate any secret that ever touched an image layer."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Pin base images by tag and ideally by digest (node:20-slim@sha256:...) for reproducible, tamper-evident builds.",
+            "Order Dockerfile instructions from least-frequently-changed to most: base, system deps, app deps, source, build.",
+            "Use multi-stage builds to keep the toolchain out of the runtime image.",
+            "Choose the smallest viable base: distroless or slim for production; alpine only if you have verified your glibc/musl compatibility.",
+            "Run as a non-root user (USER) and set a read-only root filesystem where possible.",
+            "Chain related RUN commands and clean caches in the same layer; or use BuildKit cache mounts.",
+            "Use the exec form for ENTRYPOINT/CMD and handle SIGTERM for graceful shutdown; add tini or --init when spawning children.",
+            "Maintain a strict .dockerignore and scan images in CI (Trivy, Grype) to keep the CVE surface low.",
+            "Add a HEALTHCHECK so orchestrators can detect a wedged-but-not-crashed process."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "A good production image is small, runs as non-root, has no shell or package manager, handles signals correctly, and is pinned and scanned. Each property removes a class of incident."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "layered-fs",
+      "title": "Union Filesystem: Layers, CoW, and Containers",
+      "type": "ascii",
+      "content": "  Container A (writable)      Container B (writable)\n  +----------------------+    +----------------------+\n  |  /app/cache.tmp      |    |  /app/session.log    |   <- per-container CoW layer\n  +----------+-----------+    +-----------+----------+\n             |                            |\n             +-------------+--------------+\n                           |  shared, read-only image layers\n         +-----------------v------------------+\n         | L4  COPY . .        (app source)   |\n         +------------------------------------+\n         | L3  RUN npm ci      (node_modules) |\n         +------------------------------------+\n         | L2  COPY package*.json             |\n         +------------------------------------+\n         | L1  FROM node:20-slim   (base OS)  |\n         +------------------------------------+\n   union mount merges L1..L4 -> single root filesystem '/'"
+    },
+    {
+      "id": "build-cache-flow",
+      "title": "Build Cache Invalidation Cascade",
+      "type": "mermaid",
+      "content": "flowchart TD\n    A[FROM node:20-slim] --> B[COPY package files]\n    B --> C{lockfile changed?}\n    C -->|no| D[RUN npm ci CACHE HIT]\n    C -->|yes| E[RUN npm ci REBUILD]\n    D --> F[COPY source]\n    E --> F\n    F --> G{source changed?}\n    G -->|yes| H[rebuild this and all later layers]\n    G -->|no| I[full cache hit fast build]"
+    },
+    {
+      "id": "multistage-flow",
+      "title": "Multi-Stage Build: Toolchain Discarded",
+      "type": "mermaid",
+      "content": "flowchart LR\n    subgraph Build Stage\n      T[golang toolchain 800MB] --> CMP[go build]\n      CMP --> BIN[static binary]\n    end\n    subgraph Final Stage\n      D[distroless base 2MB] --> CP[COPY --from=build binary]\n    end\n    BIN -->|COPY --from| CP\n    CP --> IMG[final image ~12MB]\n    T -.discarded.-> X[not shipped]"
+    },
+    {
+      "id": "signal-flow",
+      "title": "docker stop Signal Path",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n    participant U as docker stop\n    participant D as dockerd\n    participant P as PID 1 process\n    U->>D: stop request\n    D->>P: SIGTERM\n    alt app handles SIGTERM\n      P->>P: drain in-flight requests\n      P->>D: exit 0 graceful\n    else app ignores SIGTERM\n      Note over D,P: wait grace period 10s\n      D->>P: SIGKILL forced\n    end"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-image-vs-container",
+      "question": "What is the difference between a Docker image and a container?",
+      "answer": "An image is an immutable, content-addressed template made of stacked read-only layers plus config metadata. A container is a runnable instance of an image: Docker adds a thin writable copy-on-write layer on top of the image's layers and starts a process tree inside isolated namespaces and cgroups. Many containers can run from one image, sharing the read-only layers on disk and diverging only by what each writes into its own writable layer.",
+      "difficulty": "junior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["images", "containers", "fundamentals"],
+      "followUps": ["Where does data written inside a container go, and does it survive a restart?", "How do ten containers from one image share disk space?"]
+    },
+    {
+      "id": "q-copy-vs-add",
+      "question": "COPY vs ADD — when would you use each?",
+      "answer": "COPY copies local files/directories from the build context into the image and does nothing else. ADD does that plus two extra behaviors: it auto-extracts local tar archives and can fetch remote URLs. Prefer COPY everywhere because its behavior is explicit and predictable. Use ADD only when you specifically want local-tar auto-extraction. Never use ADD for remote URLs — those downloads are uncacheable, unverified, and a supply-chain risk; instead use RUN curl with a pinned checksum so the fetch is auditable.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["dockerfile", "copy", "add"],
+      "followUps": ["Why is a remote ADD bad for build caching?", "How do you safely pull a remote artifact in a build?"]
+    },
+    {
+      "id": "q-cache-order",
+      "question": "Why does the order of Dockerfile instructions matter for build speed?",
+      "answer": "The build cache is keyed per instruction, and a cache miss on any layer forces every subsequent layer to rebuild. So you order instructions from least-frequently-changed to most. Dependency manifests and dependency installs go early; application source goes last. If you COPY the whole source before installing dependencies, every code change invalidates the COPY layer and therefore the dependency-install layer beneath it, reinstalling everything on each build. Copying only the manifest first keeps the expensive install cached until the manifest actually changes.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["build-cache", "dockerfile", "performance"],
+      "followUps": ["What exactly invalidates a cached layer?", "How does BuildKit cache mounts change this calculus?"]
+    },
+    {
+      "id": "q-multistage",
+      "question": "What problem do multi-stage builds solve, and how?",
+      "answer": "They separate build-time needs from runtime needs in a single Dockerfile. Earlier stages carry the full toolchain and produce an artifact; the final stage starts from a tiny base and COPY --from pulls only the artifact forward. Everything in the build stages — compilers, dev headers, build deps — is discarded. The result is a runtime image containing only what you need to run, often an order of magnitude smaller, with a much smaller attack surface.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["multi-stage", "image-size", "optimization"],
+      "followUps": ["Can you COPY --from an external image you didn't build?", "How do you debug a distroless final image with no shell?"]
+    },
+    {
+      "id": "q-volumes",
+      "question": "Compare named volumes, bind mounts, and tmpfs.",
+      "answer": "Named volumes are Docker-managed directories under /var/lib/docker/volumes; they persist independently of the container lifecycle and are the right choice for stateful data like databases. Bind mounts map an exact host path into the container, ideal for local development (mounting source code) but coupling you to the host layout and prone to UID permission mismatches. tmpfs mounts live in host RAM and are never written to disk, suited to secrets or scratch data that must not persist. All three bypass the union filesystem, so writes avoid the copy-on-write penalty.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["volumes", "storage", "persistence"],
+      "followUps": ["Why might writes to a volume be faster than writes to the container's writable layer?", "What is a common permission pitfall with bind mounts?"]
+    },
+    {
+      "id": "q-networks",
+      "question": "Explain the bridge, host, and none network drivers.",
+      "answer": "bridge is the default: each container gets an IP on a private virtual subnet and you publish ports with -p to expose them to the host. A user-defined bridge additionally provides DNS resolution by container name. host shares the host's network namespace directly, so there is no isolation and no port mapping — lowest latency, Linux-only, and useful for high-throughput or network-tooling workloads. none gives the container no networking at all, for fully isolated batch jobs.",
+      "difficulty": "junior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["networking", "bridge", "host"],
+      "followUps": ["Why does Docker Compose create a user-defined bridge instead of using the default one?", "How do containers resolve each other by name?"]
+    },
+    {
+      "id": "q-nonroot",
+      "question": "Why run a container as a non-root user, and how do you do it?",
+      "answer": "By default the container process runs as root inside the container. If an attacker achieves RCE, they have root in the container — and capabilities that, combined with a misconfiguration or a host bind mount, can lead to privilege escalation or host file tampering. Running as an unprivileged UID limits the blast radius and is required by hardened orchestrator policies (PodSecurity/restricted). You do it by creating or using a non-root user and adding USER appuser before the entrypoint, ensuring the app's files are readable by that UID and that it doesn't need to bind to privileged ports (<1024).",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["security", "non-root", "hardening"],
+      "followUps": ["How do you let a non-root container listen on port 80?", "What does a read-only root filesystem add on top of non-root?"]
+    },
+    {
+      "id": "q-distroless",
+      "question": "What are distroless images and what are their tradeoffs?",
+      "answer": "Distroless images contain only your application and its runtime dependencies — no shell, no package manager, no general-purpose userland. The upside is a tiny attack surface and image size: far fewer CVEs and no /bin/sh for an attacker to pivot with. The tradeoffs are debuggability (you can't exec a shell into the container) and the need for statically linked or carefully bundled dependencies. You debug them with ephemeral debug containers, a :debug variant that includes busybox, or by copying a static busybox in for troubleshooting only.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["distroless", "security", "base-images"],
+      "followUps": ["How do you debug a running distroless container in Kubernetes?", "When would alpine be a better choice than distroless?"]
+    },
+    {
+      "id": "q-run-layer-tricky",
+      "question": "I added apt packages in one RUN and deleted /var/lib/apt/lists in the next RUN, but my image didn't shrink. Why?",
+      "answer": "Layers are additive and immutable. Each RUN records only the delta of that command. The apt lists were created in the first RUN's layer and physically live there. The second RUN doesn't remove those bytes — it adds a new layer containing a whiteout marker that hides the files in the merged view. The merged filesystem looks clean, but the original bytes are still shipped in the earlier layer and recoverable. To actually shrink the image you must create and delete the cache within the same RUN (chain with &&), so the deletion is part of the same layer's delta and the bytes never persist. The same trap applies to secrets: a secret added in one layer and deleted in another is still in image history.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": ["layers", "image-size", "gotcha"],
+      "followUps": ["How would you remove a secret that was already baked into a pushed image's history?", "How do BuildKit cache mounts avoid this problem entirely?"]
+    },
+    {
+      "id": "q-pid1-tricky",
+      "question": "Your app does graceful shutdown on SIGTERM and works locally, but in the container docker stop always takes 10 seconds. What's wrong?",
+      "answer": "Almost certainly the app is started via the shell form (e.g. ENTRYPOINT npm start or CMD node server.js written without the JSON array). The shell form runs the command under /bin/sh -c, so /bin/sh is PID 1 and your app is a child. PID 1 has no default signal handlers and most shells do not forward SIGTERM to children, so your handler never fires. Docker waits the full grace period (default 10s) and then SIGKILLs. The fix is the exec form — ENTRYPOINT [\"node\", \"server.js\"] — so your process is PID 1 and receives SIGTERM directly. If the app legitimately needs a shell or spawns children, put a real init (tini, or docker run --init) as PID 1 to forward signals.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": ["pid1", "signals", "graceful-shutdown", "gotcha"],
+      "followUps": ["Why does PID 1 not get default signal behavior from the kernel?", "What is zombie reaping and why does PID 1 matter for it?"]
+    },
+    {
+      "id": "q-zombie-tricky",
+      "question": "A long-running container that shells out to subprocesses slowly accumulates zombie processes and eventually fails to fork. What is happening?",
+      "answer": "Zombies are processes that have exited but whose parent hasn't called wait() to read their exit status, so the kernel keeps a minimal entry. When a process's parent dies, the orphan is reparented to PID 1, which is expected to reap it. A real init reaps reparented children automatically; a typical application running as PID 1 does not, because it was never written to reap arbitrary orphans. Over time these unreaped entries fill the process table and fork() starts failing with EAGAIN. The fix is to run a minimal init as PID 1 — docker run --init or tini as ENTRYPOINT — which forwards signals AND reaps zombies. This is the second reason (beyond signal handling) not to make a complex app PID 1 when it spawns children.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": ["pid1", "zombies", "init", "gotcha"],
+      "followUps": ["What error does fork() return when the process table is exhausted?", "Does --init add measurable overhead?"]
+    },
+    {
+      "id": "q-secret-history-tricky",
+      "question": "A teammate ran docker build with an API key passed via --build-arg and says it's safe because the final stage doesn't reference it. Are they right?",
+      "answer": "No. Build args are recorded in the image metadata and are visible via docker history, and any layer where the arg was used as an ENV or written to disk persists in the layer tarballs. Even across stages, if the secret touched a layer that ships, it is recoverable. The correct approach is BuildKit build secrets: RUN --mount=type=secret,id=apikey ... which exposes the secret only during that RUN, mounted in a tmpfs, and never writes it to any layer or to image history. And regardless: if a secret has ever been baked into a pushed image, rotate it — you cannot reliably scrub it from a distributed registry's history.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": ["secrets", "build-args", "security", "gotcha"],
+      "followUps": ["How does RUN --mount=type=secret differ from ARG?", "Why isn't squashing the image a sufficient fix?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-optimize-image",
+      "title": "Shrink a 1.2GB Python Image",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "prompt": "You inherit this Dockerfile for a Python Flask service. It builds a ~1.2GB image, rebuilds dependencies on every code change, and runs as root. Rewrite it to be small, cache-friendly, and non-root, keeping the same runtime behavior (gunicorn serving app:app on port 8000). Original:\n\nFROM python:3.12\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt\nCMD gunicorn -b 0.0.0.0:8000 app:app",
+      "hints": [
+        "Copy requirements.txt before the rest of the source so the pip layer stays cached on code-only changes.",
+        "Use a slim base and consider a multi-stage build so build tools (gcc, headers) don't ship in the runtime image.",
+        "Add a non-root USER, and use the exec form for the start command so gunicorn receives SIGTERM.",
+        "Use --no-cache-dir for pip and a .dockerignore to keep .git and __pycache__ out of the context."
+      ],
+      "solutionCode": "# ---- build stage: compile any wheels with the toolchain ----\nFROM python:3.12-slim AS build\nWORKDIR /app\n# system build deps only needed to build wheels\nRUN apt-get update \\\n && apt-get install -y --no-install-recommends gcc \\\n && rm -rf /var/lib/apt/lists/*\nCOPY requirements.txt .\n# build wheels into /wheels; cached unless requirements.txt changes\nRUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.txt\n\n# ---- runtime stage: slim, no compiler, non-root ----\nFROM python:3.12-slim AS runtime\nENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1\nWORKDIR /app\n# install prebuilt wheels only; no gcc in the final image\nCOPY requirements.txt .\nCOPY --from=build /wheels /wheels\nRUN pip install --no-cache-dir --no-index --find-links=/wheels -r requirements.txt \\\n && rm -rf /wheels\n# copy source last so code changes don't bust the dependency layers\nCOPY . .\n# create and switch to a non-root user\nRUN useradd --create-home --uid 10001 appuser\nUSER appuser\nEXPOSE 8000\n# exec form so gunicorn is PID 1 and receives SIGTERM for graceful drain\nCMD [\"gunicorn\", \"-b\", \"0.0.0.0:8000\", \"--workers\", \"3\", \"app:app\"]",
+      "solutionLanguage": "dockerfile",
+      "explanation": "Four wins. (1) Slim base: python:3.12-slim drops the OS from ~1GB to ~120MB. (2) Multi-stage: gcc and the wheel-building toolchain live only in the build stage; the runtime stage installs prebuilt wheels and ships no compiler, cutting size and CVE surface. (3) Cache ordering: requirements.txt is copied and resolved before the application source, so a code-only change leaves the expensive pip layer cached — rebuilds go from minutes to seconds. (4) Hardening: a dedicated non-root UID (10001) runs the process, and the exec-form CMD makes gunicorn PID 1 so docker stop's SIGTERM reaches it and gunicorn drains workers gracefully instead of being SIGKILLed after the grace period. Pair this with a .dockerignore excluding .git, __pycache__, and venv to keep the build context small and prevent accidental cache busts. Net result is typically a ~150MB image that rebuilds in seconds on code changes.",
+      "relatedTopic": "docker"
+    },
+    {
+      "id": "ch-graceful-shutdown",
+      "title": "Fix Signal Handling and Zombie Reaping",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "prompt": "A Node worker container starts with `ENTRYPOINT npm start` and shells out to ffmpeg for each job. Two bugs in production: (1) docker stop always takes the full 10s grace period and kills in-flight jobs instead of draining, and (2) after days of uptime the container can't fork new ffmpeg processes. Explain the root causes and provide a corrected Dockerfile plus the minimal SIGTERM-handling code so jobs drain on shutdown.",
+      "hints": [
+        "Figure out what PID 1 actually is when you use the shell form `ENTRYPOINT npm start`.",
+        "PID 1 has two special duties: it doesn't get default signal handlers, and it must reap reparented (orphaned) children.",
+        "tini (or docker run --init) forwards signals to your app and reaps zombies.",
+        "Your app still needs an explicit SIGTERM handler to stop accepting new work and finish in-flight jobs."
+      ],
+      "solutionCode": "# Dockerfile: tini as PID 1 forwards SIGTERM and reaps ffmpeg zombies\nFROM node:20-slim\nRUN apt-get update \\\n && apt-get install -y --no-install-recommends tini ffmpeg \\\n && rm -rf /var/lib/apt/lists/*\nWORKDIR /app\nCOPY package.json package-lock.json ./\nRUN npm ci --omit=dev && npm cache clean --force\nCOPY . .\nUSER node\n# tini is PID 1; node is its child but still gets forwarded signals\nENTRYPOINT [\"/usr/bin/tini\", \"--\"]\nCMD [\"node\", \"worker.js\"]\n\n# ---- worker.js: drain in-flight jobs on SIGTERM ----\n# let inFlight = new Set();   // promises for running jobs\n# let shuttingDown = false;\n#\n# async function shutdown(signal) {\n#   if (shuttingDown) return;\n#   shuttingDown = true;\n#   console.log(`${signal} received, draining ${inFlight.size} jobs`);\n#   stopAcceptingNewJobs();              // pause the queue consumer\n#   await Promise.allSettled([...inFlight]);\n#   console.log('drain complete, exiting');\n#   process.exit(0);\n# }\n# process.on('SIGTERM', () => shutdown('SIGTERM'));\n# process.on('SIGINT',  () => shutdown('SIGINT'));",
+      "solutionLanguage": "dockerfile",
+      "explanation": "Root cause 1 (slow stop): `ENTRYPOINT npm start` is shell form, so /bin/sh -c is PID 1 and node is its child. The shell does not forward SIGTERM, so node's handler never fires, docker waits the full 10s grace period, then SIGKILLs — killing in-flight jobs. Root cause 2 (fork failure): each ffmpeg spawned by node, once its immediate parent chain exits, can be reparented to PID 1. node-as-child is not PID 1, and whatever ends up as PID 1 here (the shell) doesn't reap, so zombie ffmpeg entries accumulate until the process table is exhausted and fork() returns EAGAIN. The fix addresses both: tini runs as PID 1 (exec-form ENTRYPOINT). tini forwards SIGTERM to node so the app's handler runs, and tini reaps any reparented zombies, preventing process-table exhaustion. The SIGTERM handler completes the contract on the application side: it flips a shuttingDown flag, stops pulling new jobs from the queue, awaits all in-flight job promises, then exits 0 — so docker stop drains cleanly within the grace period instead of force-killing. docker run --init would inject a comparable init if you prefer not to bake tini into the image.",
+      "relatedTopic": "docker"
+    }
+  ],
+  "references": [
+    {"label": "Docker docs: Dockerfile best practices", "url": "https://docs.docker.com/develop/develop-images/dockerfile_best-practices/"},
+    {"label": "Docker docs: Multi-stage builds", "url": "https://docs.docker.com/build/building/multi-stage/"},
+    {"label": "Docker docs: Storage drivers and overlay2", "url": "https://docs.docker.com/storage/storagedriver/overlayfs-driver/"},
+    {"label": "BuildKit: build secrets and cache mounts", "url": "https://docs.docker.com/build/buildkit/"},
+    {"label": "GoogleContainerTools distroless", "url": "https://github.com/GoogleContainerTools/distroless"},
+    {"label": "tini: a tiny init for containers", "url": "https://github.com/krallin/tini"}
+  ]
+}
