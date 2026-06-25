@@ -1,0 +1,494 @@
+{
+  "id": "golang",
+  "title": "Go",
+  "category": "Backend",
+  "subcategory": "Language",
+  "difficulty": "senior",
+  "tags": ["go", "goroutines", "channels", "concurrency", "gmp", "memory-model"],
+  "description": "A staff-level deep dive into Go's concurrency runtime: the GMP scheduler, channels and select, the memory model and data races, context, error idioms, interfaces, and slice/map internals.",
+  "estReadMinutes": 31,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Go is a statically-typed, compiled language built for concurrent network services. Its defining feature is lightweight concurrency: goroutines are cheap (a few KB of growable stack) and are multiplexed onto OS threads by the runtime's scheduler. Senior Go interviews focus on the runtime - how goroutines are scheduled (the GMP model), how channels coordinate them, what the memory model guarantees, and how to avoid the data races and leaks that the cheapness of goroutines makes easy to create."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Goroutines: user-space, runtime-scheduled, cheap to spawn by the thousands.",
+            "Channels: typed conduits that both transfer data and synchronize - 'share memory by communicating'.",
+            "The GMP scheduler: Goroutines mapped onto OS threads (M) via logical processors (P).",
+            "The memory model: happens-before rules define when one goroutine's writes are visible to another.",
+            "Interfaces: structural typing - a type satisfies an interface implicitly by having the methods."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Go's mantra is 'Do not communicate by sharing memory; instead, share memory by communicating.' Channels are the idiomatic synchronization primitive, but the sync package (Mutex, WaitGroup, atomic) is correct and often faster for simple shared-state protection. Use the right tool, not dogma."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Go makes concurrency so ergonomic that the failure modes shift from 'too hard to write' to 'too easy to write incorrectly'. Spawning ten thousand goroutines is one keyword; leaking them, racing on shared state, or deadlocking on an unbuffered channel is equally easy. Understanding the scheduler and memory model is what lets you write services that stay correct and bounded under load."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Goroutine leaks: a goroutine blocked forever on a channel is never garbage-collected and slowly exhausts memory.",
+            "Data races: concurrent unsynchronized access is undefined behavior, producing corrupted state and non-reproducible bugs.",
+            "Cancellation: without context propagation, work continues after the client has given up, wasting resources.",
+            "Latency: blocking syscalls and long GC pauses (mostly solved by Go's concurrent collector) affect tail latency.",
+            "Correctness of select/channels: subtle ordering and nil-channel behavior cause deadlocks and busy-loops."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The race detector (go test -race, go run -race) is the single most valuable tool in Go. It instruments memory access and reports races at runtime. Run your test suite with -race in CI - a race that 'never happens' in dev will happen in production under load."
+        }
+      ]
+    },
+    {
+      "id": "gmp-scheduler",
+      "heading": "The GMP Scheduler",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Go's scheduler maps many goroutines onto a small number of OS threads. The model has three entities: G (goroutine - the unit of work, with its own growable stack and program counter), M (machine - an OS thread that actually executes code), and P (processor - a logical scheduling context that holds a run queue of runnable Gs and the resources needed to run Go code). To run Go code an M must hold a P. The number of P's defaults to GOMAXPROCS (usually the number of CPU cores), which caps how many goroutines run Go code in parallel."
+        },
+        {
+          "type": "paragraph",
+          "text": "Each P has a local run queue of goroutines; there is also a global run queue. The scheduler is cooperative-with-preemption: goroutines yield at function-call safepoints and channel operations, and since Go 1.14 the runtime can asynchronously preempt a long-running goroutine (via signals) so a tight CPU loop cannot starve others. When a P's local queue empties, its M performs work-stealing: it grabs goroutines from another P's queue or the global queue, keeping cores busy."
+        },
+        {
+          "type": "paragraph",
+          "text": "The crucial mechanism is handling blocking syscalls. When a goroutine makes a blocking syscall, the M it runs on blocks too - but the runtime detaches the P from that M and hands the P (with its remaining runnable goroutines) to another M (creating one if needed). This is why a few thousand goroutines doing blocking I/O do not require a few thousand OS threads: P's are released and reused while M's park in the kernel. For network I/O specifically, Go uses a non-blocking netpoller (epoll/kqueue/IOCP) so the goroutine is parked and resumed without tying up an M at all."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "GOMAXPROCS bounds parallelism (how many goroutines execute Go code simultaneously), not concurrency (how many exist). You can have a million goroutines with GOMAXPROCS=4. In containers, set GOMAXPROCS to the CPU limit (e.g. with automaxprocs) - the default reads host cores and can over-schedule a throttled container, hurting tail latency."
+        }
+      ]
+    },
+    {
+      "id": "channels-select",
+      "heading": "Channels and Select",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A channel is a typed, thread-safe queue used to pass values between goroutines. An unbuffered channel is synchronous: a send blocks until a receiver is ready (and vice versa), making it a rendezvous and a synchronization point. A buffered channel of capacity N lets up to N sends proceed without a receiver before blocking. Closing a channel signals 'no more values'; receivers can detect it with the comma-ok form."
+        },
+        {
+          "type": "code",
+          "language": "go",
+          "code": "// Worker pool: fan-out work, fan-in results.\nfunc workerPool(jobs <-chan int, results chan<- int, workers int) {\n    var wg sync.WaitGroup\n    for i := 0; i < workers; i++ {\n        wg.Add(1)\n        go func() {\n            defer wg.Done()\n            for j := range jobs {        // ranges until jobs is closed AND drained\n                results <- j * j\n            }\n        }()\n    }\n    go func() {\n        wg.Wait()\n        close(results)                   // close results only after all workers finish\n    }()\n}\n\n// select multiplexes channel operations and honors cancellation.\nfunc consume(ctx context.Context, results <-chan int) {\n    for {\n        select {\n        case r, ok := <-results:\n            if !ok {\n                return                   // channel closed and drained\n            }\n            process(r)\n        case <-ctx.Done():\n            return                       // cancelled / deadline exceeded\n        }\n    }\n}"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Send on a closed channel panics; close of a closed channel panics; close of a nil channel panics.",
+            "Receive from a closed channel returns the zero value immediately with ok=false (after draining buffered values).",
+            "Send/receive on a nil channel blocks forever - useful to disable a select case dynamically by setting its channel to nil.",
+            "select with a default case is non-blocking; without default it blocks until one case is ready (random choice if several are).",
+            "The sender should close a channel, never the receiver - and only one goroutine should close it."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "An unbuffered channel send with no receiver blocks the sending goroutine forever - a goroutine leak. The leaked goroutine and everything it references are never collected. Always ensure a receiver exists or use select with ctx.Done()/a timeout so a stuck send can be abandoned."
+        }
+      ]
+    },
+    {
+      "id": "memory-model",
+      "heading": "The Memory Model and Data Races",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The Go memory model defines when a read in one goroutine is guaranteed to observe a write from another, in terms of 'happens-before'. Within a single goroutine, execution is sequentially consistent. Across goroutines, you only get visibility guarantees through synchronization: channel operations, sync primitives (Mutex, WaitGroup, Once), and sync/atomic establish happens-before edges. A data race - two goroutines accessing the same memory concurrently, at least one writing, with no synchronization between them - is undefined behavior. It is not merely 'a stale read'; the compiler and CPU may reorder, tear, or cache values arbitrarily."
+        },
+        {
+          "type": "code",
+          "language": "go",
+          "code": "// DATA RACE: concurrent unsynchronized writes to counter.\nfunc racy() {\n    counter := 0\n    var wg sync.WaitGroup\n    for i := 0; i < 1000; i++ {\n        wg.Add(1)\n        go func() { defer wg.Done(); counter++ }()  // counter++ is read-modify-write, not atomic\n    }\n    wg.Wait()\n    fmt.Println(counter)   // almost never 1000; UB. go run -race flags this.\n}\n\n// FIXED with a mutex (clear, general):\nfunc withMutex() int {\n    var mu sync.Mutex\n    counter := 0\n    var wg sync.WaitGroup\n    for i := 0; i < 1000; i++ {\n        wg.Add(1)\n        go func() {\n            defer wg.Done()\n            mu.Lock()\n            counter++\n            mu.Unlock()\n        }()\n    }\n    wg.Wait()\n    return counter   // exactly 1000\n}\n\n// FIXED with atomics (fastest for a single counter):\nfunc withAtomic() int64 {\n    var counter int64\n    var wg sync.WaitGroup\n    for i := 0; i < 1000; i++ {\n        wg.Add(1)\n        go func() { defer wg.Done(); atomic.AddInt64(&counter, 1) }()\n    }\n    wg.Wait()\n    return atomic.LoadInt64(&counter)\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Channel sends and the matching receive establish happens-before: everything the sender did before the send is visible to the receiver after the receive. A mutex Unlock happens-before the next Lock. This is the only reason your data is consistent across goroutines - never assume visibility without one of these edges."
+        }
+      ]
+    },
+    {
+      "id": "context-errors",
+      "heading": "Context and Error Handling Idioms",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "context.Context carries cancellation signals, deadlines, and request-scoped values across API boundaries and goroutines. The first parameter of any function that does I/O or spawns goroutines should be ctx context.Context. Cancellation propagates down a tree: cancelling a parent cancels all children, so a client disconnect or timeout stops all the work it spawned. Always call the cancel function (often via defer) to release resources, even on the success path."
+        },
+        {
+          "type": "code",
+          "language": "go",
+          "code": "func handleRequest(ctx context.Context) error {\n    // Derive a child context with a 2s budget for downstream work.\n    ctx, cancel := context.WithTimeout(ctx, 2*time.Second)\n    defer cancel()                       // ALWAYS call cancel to free the timer goroutine\n\n    data, err := fetchFromDB(ctx)        // db driver observes ctx.Done() and aborts\n    if err != nil {\n        return fmt.Errorf(\"fetch user: %w\", err)   // %w wraps for errors.Is/As\n    }\n    _ = data\n    return nil\n}\n\nvar ErrNotFound = errors.New(\"not found\")\n\nfunc lookup() error {\n    err := fmt.Errorf(\"lookup failed: %w\", ErrNotFound)\n    if errors.Is(err, ErrNotFound) {     // unwraps the chain to compare sentinels\n        // handle the not-found case\n    }\n    var pathErr *os.PathError\n    if errors.As(err, &pathErr) {        // extracts a concrete error type from the chain\n        _ = pathErr.Path\n    }\n    return err\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Go errors are values, returned explicitly, not exceptions. The idiom is to handle or wrap-and-return at each layer: wrap with fmt.Errorf(\"...: %w\", err) to add context while preserving the chain, then use errors.Is to compare against sentinel errors and errors.As to extract a concrete type. panic/recover is reserved for truly unrecoverable conditions or for crossing a goroutine boundary safely - not for ordinary control flow."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Do not store request-scoped data you depend on for correctness in ctx.Value - it is untyped (interface{}) and invisible to the type system. Use it only for cross-cutting metadata like a request ID or trace span. Pass real dependencies as explicit parameters."
+        }
+      ]
+    },
+    {
+      "id": "slices-maps",
+      "heading": "Slices, Maps, and Interfaces Internals",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A slice is a small struct: a pointer to a backing array, a length, and a capacity. Slicing shares the backing array, so two slices can alias the same memory - appending to one may overwrite the other if capacity allows, or reallocate if it does not. append grows capacity (roughly doubling for small slices) by allocating a new array and copying when len would exceed cap. This sharing is a frequent source of surprising mutations."
+        },
+        {
+          "type": "code",
+          "language": "go",
+          "code": "a := []int{1, 2, 3, 4, 5}\nb := a[1:3]            // b = [2 3], len 2, cap 4, SHARES a's backing array\nb[0] = 99             // mutates a too: a = [1 99 3 4 5]\nb = append(b, 100)    // cap available -> writes into a[3]! a = [1 99 3 100 5]\n\n// Safe copy when you must not alias:\nc := make([]int, len(a))\ncopy(c, a)\n\n// Full slice expression caps capacity to force a reallocation on next append:\nd := a[1:3:3]         // len 2, cap 2 -> append now allocates, won't touch a\n\n// Map gotchas:\nm := map[string]int{}\nv := m[\"missing\"]      // returns zero value (0), NOT an error\nv, ok := m[\"missing\"]  // ok=false distinguishes absent from zero\n// Maps are NOT safe for concurrent read+write -> use sync.RWMutex or sync.Map.\n// You may NOT take the address of a map element (&m[\"k\"] is illegal)."
+        },
+        {
+          "type": "paragraph",
+          "text": "An interface value is a two-word pair: a pointer to type information (the itab/type descriptor) and a pointer to the concrete data. Go uses structural typing - a type satisfies an interface simply by having the required method set; there is no 'implements' declaration. A subtle gotcha: an interface holding a typed nil pointer is NOT equal to nil, because the type word is non-nil even though the value word is nil. This causes the classic 'why is my err != nil when I returned nil?' bug."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Concurrent map access without synchronization is detected by the runtime and crashes the program with 'fatal error: concurrent map writes' - this is not catchable with recover. Guard maps with a mutex, or use sync.Map for read-heavy, low-contention cases."
+        }
+      ]
+    },
+    {
+      "id": "defer-panic-recover",
+      "heading": "Defer, Panic, Recover, and the GC",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "defer schedules a call to run when the surrounding function returns, in LIFO order. It is the idiomatic way to pair acquire/release (open/close, Lock/Unlock) so cleanup is not skipped on early returns or panics. Deferred function ARGUMENTS are evaluated when defer executes, not when the deferred call runs - a common source of surprise. A deferred closure can read and modify named return values."
+        },
+        {
+          "type": "code",
+          "language": "go",
+          "code": "func process() (err error) {\n    defer func() {\n        if r := recover(); r != nil {        // recover only works inside a deferred func\n            err = fmt.Errorf(\"recovered: %v\", r)  // convert panic to error via named return\n        }\n    }()\n    f, err := os.Open(\"data\")\n    if err != nil {\n        return err\n    }\n    defer f.Close()                          // runs on every return path, LIFO\n\n    i := 0\n    defer fmt.Println(\"i at defer-time:\", i)  // prints 0 (arg evaluated NOW)\n    i = 42\n    return nil\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "panic unwinds the stack running deferred functions; recover (only meaningful inside a deferred function) stops the unwinding and returns the panic value. An unrecovered panic crashes the whole process - including all other goroutines. Critically, a panic in one goroutine cannot be recovered by another goroutine; each goroutine that might panic must defer its own recover. Go's garbage collector is a concurrent, tri-color mark-and-sweep collector tuned for low latency: it runs concurrently with your program, targeting sub-millisecond stop-the-world pauses, trading some CPU and a configurable heap-size headroom (GOGC) for short pauses."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "A panic in a goroutine you spawned with `go func()` that has no recover will crash the entire process, not just that goroutine. Library code that launches goroutines must recover at the top of each one (and ideally log) so one bad request cannot take down the server."
+        }
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: A Goroutine Leak Under Load",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Scenario: an API gateway fans out each request to several backends and returns the first successful response. The original code launched one goroutine per backend, each sending its result on an unbuffered channel, and the caller received exactly one value then returned. Memory grew steadily under traffic; pprof showed goroutine count climbing into the hundreds of thousands and never falling. The service OOM-killed nightly."
+        },
+        {
+          "type": "code",
+          "language": "go",
+          "code": "// BEFORE (leaks): slower backends block forever on send after the winner returns.\nfunc fanoutBad(ctx context.Context, backends []Backend) Result {\n    ch := make(chan Result)              // UNBUFFERED\n    for _, b := range backends {\n        go func(b Backend) { ch <- b.Call(ctx) }(b)  // blocks if no receiver\n    }\n    return <-ch                          // receives ONE; the others leak on send\n}\n\n// AFTER (no leak): buffered channel so every sender can complete, plus ctx cancel.\nfunc fanoutGood(parent context.Context, backends []Backend) Result {\n    ctx, cancel := context.WithCancel(parent)\n    defer cancel()                       // signals the losers to stop work\n    ch := make(chan Result, len(backends))  // buffer = N: no sender ever blocks\n    for _, b := range backends {\n        go func(b Backend) {\n            select {\n            case ch <- b.Call(ctx):\n            case <-ctx.Done():           // abandon if we were cancelled\n            }\n        }(b)\n    }\n    return <-ch                          // first result wins; cancel() stops the rest\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Root cause: with an unbuffered channel and a single receiver, every goroutine except the winner blocked forever on its send. Blocked goroutines are never collected, and they pin all the memory they reference (request bodies, buffers). The fix has two parts: a buffered channel of capacity N so no sender can block, and a cancellable context so the losing backends stop doing work instead of running to completion uselessly."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "After the fix, steady-state goroutine count flattened and memory stabilized. The lesson: every goroutine you start must have a guaranteed path to completion. 'Fire and forget' on an unbuffered channel is a leak waiting for the slow path. Audit with runtime.NumGoroutine and pprof's goroutine profile."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Goroutine leaks: launching goroutines that block forever on a channel with no receiver, or that never observe ctx.Done(); they accumulate and OOM the process.",
+            "Loop variable capture (pre-Go 1.22): `for _, v := range xs { go func(){ use(v) }() }` captured a shared v, so all goroutines saw the last value. Go 1.22+ makes the loop variable per-iteration, but pass it explicitly to be safe across versions.",
+            "Data race on shared state: incrementing a counter or appending to a slice from multiple goroutines without a mutex/atomic - corrupts data; caught by -race.",
+            "Typed-nil interface bug: returning a nil concrete pointer as an interface makes `err != nil` true unexpectedly.",
+            "Closing a channel from the receiver or twice: panics. Only the (single) sender should close.",
+            "Forgetting to call context cancel(): leaks the timer goroutine and may delay child cancellation.",
+            "Concurrent map writes: crashes the whole process with a fatal error that recover cannot catch."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Incident pattern: a handler returned `var p *MyError = nil; return p` as an `error` interface. Callers checked `if err != nil` and treated success as failure, returning 500s for every request. The interface was non-nil (it held type *MyError) even though the pointer was nil. Fix: return literal nil for the no-error case, never a typed nil pointer."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Run tests with -race in CI; treat every reported race as a release blocker.",
+            "Give every goroutine a clear exit condition: a closed channel, a ctx.Done() case, or a WaitGroup - never start one that might block forever.",
+            "Pass context.Context as the first parameter through any call chain that does I/O or spawns goroutines, and defer cancel().",
+            "Prefer channels for orchestration and handoff; prefer sync.Mutex/atomic for simple shared-state protection - whichever is clearer and faster for the case.",
+            "The sender closes channels, exactly once; receivers detect closure with the comma-ok form.",
+            "Wrap errors with %w to preserve the chain; compare with errors.Is and extract with errors.As.",
+            "copy() or use the full three-index slice expression when you must not alias a backing array.",
+            "Recover at the top of every goroutine launched by library code so one panic cannot crash the server; set GOMAXPROCS to the container CPU limit."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Need", "Reach for", "Watch out for"],
+          "rows": [
+            ["Protect a counter/map", "sync.Mutex or sync/atomic", "Forgetting to lock every access path"],
+            ["Hand off work between goroutines", "channel", "Unbuffered send with no receiver (leak)"],
+            ["Wait for N goroutines", "sync.WaitGroup", "Add() after the goroutine started"],
+            ["Cancel / deadline", "context.WithCancel/WithTimeout", "Not calling cancel()"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "note-when-channels",
+      "heading": "Channels vs Mutexes: When to Use Which",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Channels excel at transferring ownership of data and at orchestrating pipelines, fan-out/fan-in, and signaling (including cancellation). Mutexes (and atomics) excel at protecting a small piece of shared state accessed by many goroutines - a cache, a counter, a config struct. Reaching for a channel to guard a single shared map is usually slower and more complex than a sync.RWMutex. Conversely, building a work pipeline out of shared mutable state and mutexes is harder to reason about than channels."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Rule of thumb from the Go team: use channels to communicate (move data, signal events) and mutexes to protect shared state. If you are using a channel just to lock access to one variable, a mutex is clearer and faster."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "gmp-model",
+      "title": "GMP: Goroutines Multiplexed onto Threads",
+      "type": "ascii",
+      "content": "  G G G G   G G        <- runnable goroutines (local run queues)\n   \\ | /      \\ |\n    [P0]       [P1]     <- logical processors (= GOMAXPROCS)\n     |          |\n    [M0]       [M1]     <- OS threads (must hold a P to run Go code)\n     |          |\n   CPU0       CPU1\n\nBlocking syscall on M0:\n  P0 detaches from M0 (which parks in kernel)\n  P0 -> handed to a fresh/idle M2, keeps running its Gs\n  Work-stealing: an idle P steals Gs from a busy P's queue."
+    },
+    {
+      "id": "channel-states",
+      "title": "Channel Operation Outcomes",
+      "type": "mermaid",
+      "content": "flowchart TD\n    S[Operation on channel] --> N{nil channel?}\n    N -->|Yes| BF[send/recv block FOREVER]\n    N -->|No| C{closed?}\n    C -->|send| P[PANIC]\n    C -->|recv| Z[zero value, ok=false]\n    C -->|open, recv| R{value ready?}\n    R -->|Yes| V[receive value, ok=true]\n    R -->|No| B[block until ready / select default]"
+    },
+    {
+      "id": "slice-aliasing",
+      "title": "Slice Header Aliasing a Backing Array",
+      "type": "ascii",
+      "content": "backing array:  [ 1 | 99 | 3 | 100 | 5 ]\n                  ^idx0  ^idx1 ...\n a = {ptr->idx0, len 5, cap 5}\n b = {ptr->idx1, len 2, cap 4}   <- shares same array\n\n b[0]=99  -> a[1] changes too\n append(b,100) (cap allows) -> writes a[3]"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-go-gmp",
+      "question": "Explain the GMP scheduler. What are G, M, and P, and how does the runtime keep cores busy when a goroutine blocks on a syscall?",
+      "answer": "G is a goroutine (the unit of work with its own growable stack); M is an OS thread that executes code; P is a logical processor - a scheduling context with a local run queue of runnable goroutines, and an M must hold a P to run Go code. The number of P's is GOMAXPROCS, which caps how many goroutines run Go code in parallel. When a goroutine makes a blocking syscall, its M blocks in the kernel, but the runtime detaches the P from that M and hands it (with its remaining runnable goroutines) to another M - creating or reusing one - so other goroutines keep running. When a P's queue empties, its M steals goroutines from another P's queue or the global queue (work-stealing). For network I/O, Go uses a non-blocking netpoller (epoll/kqueue/IOCP) so goroutines park and resume without tying up an M at all. This is why thousands of blocking-I/O goroutines do not need thousands of OS threads.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["gmp", "scheduler", "runtime"],
+      "followUps": ["What does GOMAXPROCS control?", "How does work-stealing balance load?"]
+    },
+    {
+      "id": "q-go-buffered",
+      "question": "What is the difference between a buffered and an unbuffered channel, and how does each synchronize?",
+      "answer": "An unbuffered channel has zero capacity, so a send blocks until a receiver is ready to receive (and a receive blocks until a sender is ready). It is a rendezvous: the send and receive happen together, providing a strong synchronization point and a happens-before edge. A buffered channel of capacity N lets up to N values sit in the buffer; sends succeed immediately while the buffer has room and only block when it is full, and receives block only when it is empty. Buffering decouples sender and receiver timing - good for smoothing bursts and for fan-out where you do not want senders to block - but it weakens the synchronization (a send no longer implies a receiver has taken the value). Choosing capacity is a backpressure decision: too large hides overload, too small over-synchronizes.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["channels", "buffering", "synchronization"],
+      "followUps": ["When does a buffered channel still block?", "How do you use a buffered channel to avoid a goroutine leak?"]
+    },
+    {
+      "id": "q-go-memory-model",
+      "question": "What guarantees does the Go memory model give, and what is a data race?",
+      "answer": "Within a single goroutine, execution is sequentially consistent. Across goroutines, the memory model only guarantees that a read observes a write if there is a happens-before relationship established by synchronization: a channel send happens-before the corresponding receive completes; a mutex Unlock happens-before the next Lock; sync.Once, WaitGroup, and sync/atomic operations create similar edges. A data race is two goroutines accessing the same memory location concurrently with no synchronization between them, where at least one access is a write. Races are undefined behavior in Go - not just stale reads. The compiler and hardware may reorder or tear values, so results are unpredictable and may corrupt memory. The race detector (-race) instruments accesses to find them at runtime.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["memory-model", "data-race", "happens-before"],
+      "followUps": ["Which operations establish happens-before?", "Why is a race UB rather than just a stale value?"]
+    },
+    {
+      "id": "q-go-context",
+      "question": "What is context.Context for, and what are the rules for using it correctly?",
+      "answer": "context.Context propagates cancellation, deadlines/timeouts, and request-scoped values across API boundaries and goroutines. The rules: pass it as the first parameter (conventionally named ctx) to any function doing I/O or spawning goroutines; derive child contexts with WithCancel/WithTimeout/WithDeadline and always call the returned cancel function (usually via defer) to release resources even on success; respect ctx.Done() in loops and selects so work stops promptly when cancelled; never store a Context in a struct field; and use ctx.Value only for cross-cutting request-scoped metadata (request ID, trace span), not for passing real dependencies, because it is untyped and bypasses the type system. Cancellation propagates down the derived-context tree, so cancelling a parent cancels all descendants.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["context", "cancellation", "deadlines"],
+      "followUps": ["Why must you call cancel even on success?", "What should and should not go in ctx.Value?"]
+    },
+    {
+      "id": "q-go-errors",
+      "question": "How does idiomatic Go error handling work, and what do %w, errors.Is, and errors.As do?",
+      "answer": "Go treats errors as ordinary values returned explicitly, not exceptions; each layer either handles an error or returns it, typically adding context. fmt.Errorf with the %w verb wraps an error, producing a new error that records context while keeping the original in a chain that can be unwrapped. errors.Is walks that chain to test whether any error in it matches a target sentinel error (e.g. errors.Is(err, sql.ErrNoRows)) - the right way to compare against known errors instead of string matching. errors.As walks the chain to find an error of a particular concrete type and assigns it to a pointer, letting you access type-specific fields (e.g. extracting an *os.PathError). panic/recover is reserved for unrecoverable conditions, not normal control flow.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["errors", "wrapping", "idioms"],
+      "followUps": ["When is panic/recover appropriate?", "Why prefer errors.Is over == on errors?"]
+    },
+    {
+      "id": "q-go-slice-internals",
+      "question": "Describe a slice's internal representation and how append can cause surprising mutations.",
+      "answer": "A slice is a three-word header: a pointer to a backing array, a length (number of elements in view), and a capacity (room in the backing array from the slice's start). Slicing creates a new header that shares the same backing array, so two slices can alias the same memory. append appends in place when there is spare capacity (cap > len), writing into the shared backing array - which can silently overwrite elements visible through another slice. When capacity is insufficient, append allocates a new larger array (roughly doubling for small slices), copies, and returns a slice pointing at the new array, so the aliasing ends. The surprise is that whether a mutation is visible to an aliasing slice depends on the runtime capacity. To avoid it, copy() into a fresh slice, or use the full three-index expression a[lo:hi:hi] to cap capacity and force a reallocation on the next append.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["slices", "internals", "append"],
+      "followUps": ["What does the three-index slice expression do?", "How does append decide the new capacity?"]
+    },
+    {
+      "id": "q-go-defer-args",
+      "question": "When are the arguments to a deferred function evaluated?",
+      "answer": "The arguments to a deferred call are evaluated at the moment the defer statement is executed, not when the deferred function actually runs at return time. So `i := 0; defer fmt.Println(i); i = 42` prints 0, because i's value (0) was captured when defer ran. The deferred CALL itself (and the body of a deferred closure) executes later, in LIFO order, when the surrounding function returns. This distinction matters: to observe the final value, defer a closure that reads the variable (defer func(){ fmt.Println(i) }()) rather than passing it as an argument; the closure captures the variable, not a snapshot. A deferred closure can also read and mutate named return values, which is how recover converts a panic into a returned error.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["defer", "evaluation", "closures"],
+      "followUps": ["How do you make a defer see the final value of a variable?", "How does recover use named returns?"]
+    },
+    {
+      "id": "q-go-gc",
+      "question": "Describe Go's garbage collector and what GOGC controls.",
+      "answer": "Go uses a concurrent, tri-color mark-and-sweep garbage collector designed for low latency. Most of the marking work runs concurrently with the application; the stop-the-world phases are kept very short (sub-millisecond targets) by using write barriers to track pointer mutations during concurrent marking. It is not generational or compacting. GOGC (default 100) controls the trade-off between CPU and memory: it sets the target heap growth before the next collection - GOGC=100 means the GC runs when the live heap has grown 100% (doubled) since the last cycle. Raising GOGC reduces GC frequency and CPU at the cost of more memory; lowering it does the opposite. GOMEMLIMIT (Go 1.19+) adds a soft memory cap that makes the GC run more aggressively as you approach it, which is valuable in memory-constrained containers.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["gc", "gogc", "latency"],
+      "followUps": ["How do write barriers enable concurrent marking?", "When would you tune GOGC or set GOMEMLIMIT?"]
+    },
+    {
+      "id": "q-go-tricky-nil-interface",
+      "question": "Tricky: A function returns a nil *MyError as an error, and the caller's `if err != nil` is true. Why?",
+      "answer": "An interface value in Go is a pair of words: a type descriptor and a value pointer. It equals nil only when BOTH are nil. When you assign a nil *MyError pointer to an error interface, the value word is nil but the type word is set to *MyError, so the interface is non-nil - even though the underlying pointer is nil. The caller's `err != nil` therefore evaluates to true, and a typical handler treats the request as failed. The bug is returning a typed nil pointer up to an interface return. The fix is to return the literal nil for the no-error case (return nil), never a nil-valued concrete pointer. A defensive pattern is to check the concrete pointer for nil before returning and explicitly `return nil` when it is nil. This is one of the most common subtle Go bugs and a frequent interview question.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["interfaces", "nil", "gotcha"],
+      "followUps": ["How is an interface value represented internally?", "How do you guard against returning a typed nil?"]
+    },
+    {
+      "id": "q-go-tricky-loopvar",
+      "question": "Tricky: Before Go 1.22, `for _, v := range items { go func(){ fmt.Println(v) }() }` printed the same (last) value many times. Why, and what changed?",
+      "answer": "Before Go 1.22, the loop variable v was declared once for the entire loop and reused each iteration. The goroutines' closures captured the variable v by reference, not its per-iteration value, and because goroutines typically start running after the loop has advanced or finished, they all read v's current (often final) value. The standard fixes were to pass v as an argument - go func(v T){...}(v) - or to shadow it inside the loop body (v := v) so each iteration created a fresh variable. Go 1.22 changed the semantics: the loop variable is now scoped per iteration, so each closure captures a distinct variable and the original code prints each value as expected. Because code may run on older toolchains, the explicit-argument or shadowing pattern is still the portable, unambiguous choice.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["closures", "loop-variable", "gotcha"],
+      "followUps": ["What exactly did Go 1.22 change about loop variables?", "How do you write this safely across Go versions?"]
+    },
+    {
+      "id": "q-go-tricky-select-nil",
+      "question": "Tricky: How can setting a channel to nil be used as a feature inside a select loop?",
+      "answer": "A send or receive on a nil channel blocks forever, which means a select case whose channel is nil is never ready and is effectively disabled. You exploit this to dynamically turn select cases on and off without restructuring the loop. The classic pattern is a pipeline stage that both receives input and sends output: when you have a value buffered to send, you keep the output case enabled; when you do not, you set the output channel variable to nil so the select ignores that case and only waits to receive. Similarly, after an input channel is closed and drained, you set the input channel variable to nil so its case stops firing (a closed channel is always ready and would otherwise busy-loop returning zero values). This lets a single select cleanly handle a state machine of which operations are currently possible.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["select", "nil-channel", "patterns"],
+      "followUps": ["Why does a closed channel cause a select busy-loop if not handled?", "How does this help build a merge/pipeline stage?"]
+    },
+    {
+      "id": "q-go-waitgroup",
+      "question": "What are common ways to misuse sync.WaitGroup?",
+      "answer": "The main rules: call wg.Add before launching the goroutine it accounts for (calling Add inside the goroutine races with Wait and can let Wait return early), call wg.Done exactly once per Add (typically via defer at the top of the goroutine so a panic or early return still decrements), and do not reuse a WaitGroup for a new round until the previous Wait has returned. A negative counter (more Done than Add) panics. Another subtle misuse is copying a WaitGroup by value (e.g. capturing it non-pointer in a struct that gets copied) - it must be shared by pointer. Finally, Wait must be reachable; if a goroutine can exit without calling Done (an early return before the deferred Done is set up), Wait blocks forever.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["waitgroup", "sync", "concurrency"],
+      "followUps": ["Why must Add precede goroutine launch?", "Why defer Done at the top of the goroutine?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-go-fanin",
+      "title": "Fan-In Merge of Multiple Channels with Cancellation",
+      "difficulty": "senior",
+      "category": "Backend",
+      "prompt": "Write a function merge(ctx, chans ...<-chan int) <-chan int that fans in several input channels into one output channel. The output must close after all inputs are drained, no goroutine may leak if the consumer stops reading early, and the whole thing must stop promptly when ctx is cancelled.",
+      "hints": [
+        "Use a sync.WaitGroup with one goroutine per input channel; close the output only after wg.Wait().",
+        "Each forwarding goroutine must select on ctx.Done() so it can exit even if the consumer stopped reading.",
+        "Run the wg.Wait()+close in its own goroutine so merge can return the output channel immediately."
+      ],
+      "solutionCode": "package main\n\nimport (\n    \"context\"\n    \"sync\"\n)\n\nfunc merge(ctx context.Context, chans ...<-chan int) <-chan int {\n    out := make(chan int)\n    var wg sync.WaitGroup\n\n    forward := func(c <-chan int) {\n        defer wg.Done()\n        for v := range c {                 // drains c until it is closed\n            select {\n            case out <- v:                 // forward downstream\n            case <-ctx.Done():             // consumer gone / cancelled: exit, no leak\n                return\n            }\n        }\n    }\n\n    wg.Add(len(chans))\n    for _, c := range chans {\n        go forward(c)\n    }\n\n    // Close out exactly once, after every forwarder has finished.\n    go func() {\n        wg.Wait()\n        close(out)\n    }()\n\n    return out\n}\n",
+      "solutionLanguage": "go",
+      "explanation": "Each input channel gets a forwarding goroutine that ranges over it (so it naturally stops when that input is closed) and forwards each value on out. The critical detail is the select inside the forward loop: writing `out <- v` alone would block forever if the consumer stopped reading, leaking goroutines; adding a `case <-ctx.Done()` gives every forwarder a guaranteed exit path on cancellation or consumer abandonment. A WaitGroup counts the forwarders (Add is called before launching them, satisfying the WaitGroup contract), and a separate goroutine calls wg.Wait() then close(out) - this ensures out is closed exactly once and only after all inputs are fully drained, while letting merge return the output channel immediately. The result is the canonical leak-free, cancellable fan-in pattern: every goroutine has a clear termination condition (input closed OR ctx done), and the single closer prevents the 'close of closed channel' panic.",
+      "relatedTopic": "channels-select"
+    },
+    {
+      "id": "ch-go-ratelimit",
+      "title": "Concurrency-Safe Counter With a Race Test",
+      "difficulty": "mid",
+      "category": "Backend",
+      "prompt": "Implement a Counter type that is safe to Inc() from many goroutines and to read with Value(). Then show the test that proves it is race-free under `go test -race`, launching 1000 concurrent increments and asserting the final value is 1000.",
+      "hints": [
+        "Either guard an int with a sync.Mutex or use sync/atomic on an int64 - pick one and be consistent on every access path.",
+        "Use a sync.WaitGroup to wait for all 1000 goroutines before reading.",
+        "The test only proves race-freedom when run with the -race flag."
+      ],
+      "solutionCode": "package counter\n\nimport (\n    \"sync\"\n    \"sync/atomic\"\n    \"testing\"\n)\n\ntype Counter struct {\n    n int64\n}\n\nfunc (c *Counter) Inc() {\n    atomic.AddInt64(&c.n, 1)        // atomic read-modify-write: no mutex needed\n}\n\nfunc (c *Counter) Value() int64 {\n    return atomic.LoadInt64(&c.n)   // atomic read pairs with the atomic writes\n}\n\nfunc TestCounterRaceFree(t *testing.T) {\n    var c Counter\n    var wg sync.WaitGroup\n    const n = 1000\n    wg.Add(n)\n    for i := 0; i < n; i++ {\n        go func() {\n            defer wg.Done()\n            c.Inc()\n        }()\n    }\n    wg.Wait()\n    if got := c.Value(); got != n {\n        t.Fatalf(\"got %d, want %d\", got, n)\n    }\n}\n",
+      "solutionLanguage": "go",
+      "explanation": "The naive `c.n++` is a read-modify-write that is not atomic, so concurrent increments lose updates and form a data race - the final value would be unpredictable and below 1000, and `go test -race` would flag it. Using sync/atomic makes the increment a single indivisible operation: atomic.AddInt64 reads, adds, and writes atomically, and atomic.LoadInt64 reads consistently, with the atomic operations establishing the happens-before edges the memory model requires. (A sync.Mutex around `c.n++` would be equally correct and is the right choice when you must update several fields together; atomics are leaner for a single counter.) The test launches 1000 goroutines, each calling Inc once, uses a WaitGroup - Add(n) before launching, Done via defer - to wait for all of them, then asserts Value()==1000. Crucially, this test only validates race-freedom when executed as `go test -race`, which instruments memory accesses; without the flag a racy implementation could still pass by luck.",
+      "relatedTopic": "memory-model"
+    }
+  ],
+  "references": [
+    {"label": "The Go Memory Model", "url": "https://go.dev/ref/mem"},
+    {"label": "Effective Go", "url": "https://go.dev/doc/effective_go"},
+    {"label": "Go Blog - Go Concurrency Patterns: Context", "url": "https://go.dev/blog/context"},
+    {"label": "Go Blog - Scheduler (Scheduling Multiple Goroutines)", "url": "https://go.dev/blog/pprof"},
+    {"label": "Go Blog - Working with Errors in Go 1.13", "url": "https://go.dev/blog/go1.13-errors"},
+    {"label": "Go Runtime / GC Guide", "url": "https://go.dev/doc/gc-guide"}
+  ]
+}

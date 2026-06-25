@@ -1,0 +1,507 @@
+{
+  "id": "terraform",
+  "title": "Terraform & IaC",
+  "category": "DevOps",
+  "subcategory": "IaC",
+  "difficulty": "mid",
+  "tags": ["terraform", "iac", "state", "providers", "modules", "for_each"],
+  "description": "A practical deep dive into Terraform and Infrastructure as Code: declarative provisioning, state and locking, the plan/apply lifecycle, providers and modules, count vs for_each, the dependency graph, workspaces, secrets, and the footguns that corrupt state.",
+  "estReadMinutes": 30,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Terraform is a declarative Infrastructure as Code (IaC) tool: you describe the desired end state of your infrastructure in HCL, and Terraform computes and executes the changes needed to reach it. It is provider-agnostic - the same workflow provisions AWS, GCP, Azure, Kubernetes, and hundreds of other APIs via plugins. The defining concept, and the source of most operational pain, is state: Terraform records what it created in a state file and diffs your configuration against that record to plan changes. Senior questions center on state management, the plan/apply lifecycle, and the resource-addressing footguns that can destroy infrastructure."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Declarative: you specify desired state, not the steps; Terraform derives the diff.",
+            "State: a record (terraform.tfstate) mapping your config to real-world resource IDs.",
+            "Plan/apply: plan shows the diff (create/update/destroy); apply executes it.",
+            "Providers: plugins that translate resources into API calls (aws, google, azurerm, kubernetes).",
+            "Modules: reusable, parameterized groups of resources - the unit of composition and reuse."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Terraform is desired-state and idempotent: running apply twice with no config change produces no changes. This is the opposite of imperative scripts (a shell script that 'creates a bucket' fails or duplicates on the second run). The whole model hinges on state accurately reflecting reality."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Infrastructure as Code turns servers, networks, and databases into version-controlled, reviewable, repeatable artifacts. But Terraform's power is coupled to its single most fragile component - the state file. State drift, a corrupted or lost state, a bad resource address change, or an unguarded destroy can take down production. The difference between a junior and a senior Terraform user is almost entirely about respecting state and the plan/apply lifecycle."
+        },
+        {
+          "type": "list",
+          "items": [
+            "State corruption / loss: lose the state file and Terraform no longer knows what it manages - it will try to recreate everything.",
+            "Concurrent applies: two engineers applying at once without locking can corrupt state and create conflicting changes.",
+            "Drift: someone changes infrastructure by hand; the next plan wants to revert it, surprising everyone.",
+            "Destructive changes: a small config edit (renaming, changing an immutable attribute) can force a destroy-and-recreate of a database.",
+            "Secrets in state: provider credentials and resource attributes (passwords) land in plaintext state - it must be protected."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Always read the plan before you apply. The plan is Terraform telling you exactly what it will create, change, and - critically - destroy. A '-/+ destroy and then create' on a stateful resource (RDS, a volume) in the plan output is the warning that prevents a data-loss incident."
+        }
+      ]
+    },
+    {
+      "id": "state",
+      "heading": "State, Remote Backends, Locking, and Drift",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Terraform's state file maps each resource in your configuration to its real-world identity (e.g. an AWS instance ID) and caches its attributes. Terraform uses it to know what already exists, to compute diffs efficiently, and to track dependencies. By default state is a local terraform.tfstate file - unacceptable for teams, because it cannot be shared and is easily lost. The fix is a remote backend (S3, GCS, Azure Blob, Terraform Cloud) that stores state centrally and supports state locking."
+        },
+        {
+          "type": "code",
+          "language": "hcl",
+          "code": "terraform {\n  backend \"s3\" {\n    bucket         = \"acme-tf-state\"\n    key            = \"prod/network/terraform.tfstate\"\n    region         = \"eu-west-1\"\n    encrypt        = true             # encrypt state at rest (it holds secrets!)\n    dynamodb_table = \"tf-locks\"       # state LOCKING via DynamoDB\n  }\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "State locking prevents two people (or two CI runs) from applying simultaneously: the backend acquires a lock (e.g. a DynamoDB item for the S3 backend) before any write operation and releases it after, so a second apply waits or fails fast rather than racing and corrupting state. Drift is when the real infrastructure diverges from state - usually because someone changed it manually in the console. terraform plan (which refreshes state against the real API) surfaces drift as a diff; you then either import/accept the change into config or let apply revert it back to the declared state."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Never edit terraform.tfstate by hand, and never commit it to git. It contains resource IDs AND secret attributes (DB passwords, private keys) in plaintext. Use a remote backend with encryption and locking, restrict access to it, and treat it as sensitive as your production credentials."
+        }
+      ]
+    },
+    {
+      "id": "lifecycle",
+      "heading": "The Plan / Apply Lifecycle",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The core workflow is init -> plan -> apply. init downloads providers and configures the backend. plan refreshes state, compares desired config to current state, and prints an execution plan: resources to create (+), update in place (~), destroy (-), or replace (-/+, a destroy then create forced by changing an immutable attribute). apply executes that plan; saving a plan file (terraform plan -out) and applying exactly it guarantees apply does only what you reviewed. destroy tears everything down."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "terraform init                       # download providers, configure backend\nterraform fmt -recursive             # canonical formatting\nterraform validate                   # syntax + internal consistency\nterraform plan -out=tfplan           # save the EXACT plan you reviewed\n# ... review the plan: watch for '-/+' (replace) and '-' (destroy) lines ...\nterraform apply tfplan               # apply precisely that plan, no re-diff\n\n# Surgical operations:\nterraform plan -target=aws_instance.web   # plan a subset (use sparingly)\nterraform state list                       # what is tracked\nterraform import aws_s3_bucket.logs my-existing-bucket   # adopt an existing resource"
+        },
+        {
+          "type": "list",
+          "items": [
+            "+ create: a new resource will be added.",
+            "~ update in-place: an attribute changes without recreating the resource.",
+            "-/+ replace: an immutable attribute changed, so Terraform will DESTROY then CREATE - dangerous for stateful resources.",
+            "- destroy: the resource will be removed (it left the config or you ran destroy).",
+            "Applying a saved plan file (terraform apply tfplan) avoids the gap where reality changes between plan and apply."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "create_before_destroy in a lifecycle block flips replace ordering: it creates the new resource before destroying the old, avoiding downtime (and avoiding a destroy-first failure when a name must stay unique). Use it for resources behind a load balancer; but it requires the resource to tolerate two existing briefly."
+        }
+      ]
+    },
+    {
+      "id": "resources-modules",
+      "heading": "Providers, Resources, Variables, and Modules",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A provider is a plugin (aws, google, azurerm) that exposes resource and data-source types and handles authentication and API calls. A resource block declares a piece of infrastructure; a data source reads existing infrastructure without managing it. Variables parameterize a configuration (inputs), outputs expose values (for humans or for other configs), and locals are computed intermediate values. Modules package a set of resources behind input variables and outputs, making infrastructure reusable and composable."
+        },
+        {
+          "type": "code",
+          "language": "hcl",
+          "code": "variable \"environment\" {\n  type    = string\n  default = \"staging\"\n}\n\nprovider \"aws\" {\n  region = \"eu-west-1\"\n}\n\n# A reusable module called twice with different inputs.\nmodule \"network\" {\n  source      = \"./modules/vpc\"\n  cidr_block  = \"10.0.0.0/16\"\n  environment = var.environment\n}\n\nresource \"aws_instance\" \"web\" {\n  ami           = data.aws_ami.ubuntu.id   # data source: reads, does not manage\n  instance_type = \"t3.micro\"\n  subnet_id     = module.network.public_subnet_id   # consume a module output\n  tags = { Name = \"web-${var.environment}\" }\n}\n\noutput \"web_ip\" {\n  value = aws_instance.web.public_ip\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Pin provider and module versions (required_providers with version constraints, module source with ?ref=tag). An unpinned provider can introduce breaking schema changes that make the next plan want to replace resources unexpectedly. Reproducible infrastructure requires pinned dependencies, just like application code."
+        }
+      ]
+    },
+    {
+      "id": "count-foreach",
+      "heading": "count vs for_each",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Both count and for_each create multiple instances of a resource or module, but they address those instances differently, and the difference is the cause of one of Terraform's most painful footguns. count creates instances addressed by a numeric INDEX: resource.name[0], [1], [2]. for_each creates instances addressed by a stable KEY from a map or set: resource.name[\"alice\"], [\"bob\"]. Because count uses positional indices, removing or reordering an element shifts every subsequent index - and Terraform interprets a shifted index as 'destroy the resource that was at that index and create a new one', causing mass recreation."
+        },
+        {
+          "type": "code",
+          "language": "hcl",
+          "code": "# count: indexed by position -> FRAGILE if the list changes order/middle removed.\nvariable \"users\" { default = [\"alice\", \"bob\", \"carol\"] }\nresource \"aws_iam_user\" \"by_count\" {\n  count = length(var.users)\n  name  = var.users[count.index]      # user[0]=alice, user[1]=bob, user[2]=carol\n}\n# Remove \"bob\": carol shifts from index 2 to 1 -> Terraform destroys & recreates carol!\n\n# for_each: keyed by a stable identifier -> SAFE under add/remove.\nresource \"aws_iam_user\" \"by_each\" {\n  for_each = toset(var.users)\n  name     = each.value                # user[\"alice\"], user[\"bob\"], user[\"carol\"]\n}\n# Remove \"bob\": only user[\"bob\"] is destroyed; alice and carol are untouched."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Use for_each (keyed) for any collection that may change membership over time - users, subnets, accounts.",
+            "Reserve count for truly positional or all-or-nothing cases, or the common count = var.enabled ? 1 : 0 toggle pattern.",
+            "Migrating count -> for_each requires terraform state mv to re-key existing instances, or Terraform will destroy and recreate them.",
+            "for_each requires keys known at plan time; you cannot key on values that only exist after apply (a chicken-and-egg error)."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The classic incident: a team used count over a list of database users. Someone removed a user from the middle of the list, and the next apply silently destroyed and recreated every database user after it - wiping their grants. for_each with a stable key would have destroyed only the removed user."
+        }
+      ]
+    },
+    {
+      "id": "graph-workspaces",
+      "heading": "The Dependency Graph and Workspaces",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Terraform builds a directed acyclic graph (DAG) of resources from their references. If resource B uses an attribute of resource A (A.id), Terraform infers an implicit dependency and creates A before B (and destroys in reverse order). When there is no data reference but an ordering requirement exists, depends_on declares an explicit dependency. The graph is what lets Terraform parallelize independent resources and order dependent ones correctly. Destroy ordering follows the reverse of create ordering, which is why deleting a VPC fails if subnets still reference it."
+        },
+        {
+          "type": "code",
+          "language": "hcl",
+          "code": "resource \"aws_vpc\" \"main\" { cidr_block = \"10.0.0.0/16\" }\n\nresource \"aws_subnet\" \"app\" {\n  vpc_id     = aws_vpc.main.id          # implicit dependency: vpc before subnet\n  cidr_block = \"10.0.1.0/24\"\n}\n\nresource \"aws_instance\" \"app\" {\n  subnet_id  = aws_subnet.app.id\n  ami        = data.aws_ami.ubuntu.id\n  depends_on = [aws_iam_role_policy.app]  # explicit: no attribute ref, but must exist first\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Workspaces let one configuration manage multiple distinct state files (default, staging, prod) under the same backend, switching with terraform workspace select. They are handy for ephemeral or per-developer copies of the same infra. However, the official guidance is that CLI workspaces are NOT a strong isolation boundary for environments like prod vs staging - they share the same backend and configuration, so a mistake can cross environments. Most teams prefer separate state files / separate backends / separate directories per environment for real isolation, reserving workspaces for short-lived parallel instances."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Prefer implicit dependencies (reference the attribute you actually use) over depends_on. Implicit dependencies are precise and self-documenting; overusing depends_on creates coarse, sometimes unnecessary ordering that slows applies and can hide the real data flow."
+        }
+      ]
+    },
+    {
+      "id": "secrets",
+      "heading": "Secrets Handling and the State Problem",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Secrets in Terraform are tricky because of one inescapable fact: any secret a resource needs ends up in the state file, in plaintext, regardless of how carefully you pass it in. Marking a variable or output sensitive = true only hides it from CLI output and logs - it does NOT encrypt it in state or prevent it from being stored there. So the primary secret-handling strategy is to protect the state itself (encrypted remote backend, strict access control) and to avoid putting long-lived secrets into Terraform at all where possible."
+        },
+        {
+          "type": "code",
+          "language": "hcl",
+          "code": "variable \"db_password\" {\n  type      = string\n  sensitive = true            # redacts from plan/apply output and logs ONLY\n}\n\n# Better: fetch secrets at apply time from a secret manager instead of passing them in.\ndata \"aws_secretsmanager_secret_version\" \"db\" {\n  secret_id = \"prod/db/password\"\n}\n\nresource \"aws_db_instance\" \"main\" {\n  username = \"app\"\n  password = data.aws_secretsmanager_secret_version.db.secret_string   # still lands in state\n  # ... but the source of truth is the secret manager, rotatable independently.\n}"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Never hardcode secrets in .tf files or commit .tfvars containing secrets to git.",
+            "Use a secret manager (Vault, AWS Secrets Manager, GCP Secret Manager) as the source of truth; reference it via data sources.",
+            "Provider credentials should come from the environment / instance roles / OIDC, not from variables checked into code.",
+            "Encrypt the remote state backend and lock down who can read it, because secrets are in state no matter what.",
+            "sensitive = true is about hiding from output, not about encryption - do not mistake it for protection of state."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Because secrets persist in state, rotating a credential means the old value lingers in state history (and in any state versioning the backend keeps). For high-security secrets, prefer mechanisms that keep Terraform out of the secret's lifecycle entirely - e.g. have the application fetch from Vault at runtime rather than Terraform writing the secret into a resource."
+        }
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: A Rename That Destroyed a Database",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Scenario: an engineer 'cleaned up' naming by renaming a resource block from aws_db_instance.db to aws_db_instance.primary in the .tf file. The config still described the same database with the same settings, so they assumed it was cosmetic and approved the apply quickly. Terraform's plan showed aws_db_instance.db will be destroyed and aws_db_instance.primary will be created. The apply destroyed the production database and provisioned an empty new one."
+        },
+        {
+          "type": "paragraph",
+          "text": "Root cause: a resource's address (type.name) is its identity in state. Renaming the block makes Terraform see the old address as 'removed' and the new address as 'added' - it does not know they are the same database, so it plans a destroy-and-create. Nothing about the database's attributes changed; only its name in state did, and that was enough."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "# WRONG: just rename the block and apply -> destroy + recreate.\n\n# RIGHT: tell Terraform the address moved BEFORE applying.\n# Option A (CLI): re-key the existing resource in state, no destroy.\nterraform state mv aws_db_instance.db aws_db_instance.primary\n\n# Option B (config, Terraform 1.1+): a moved block, reviewed and version-controlled.\n# moved {\n#   from = aws_db_instance.db\n#   to   = aws_db_instance.primary\n# }\n# Now 'terraform plan' shows '0 to destroy' - it understands the rename."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The fix is either terraform state mv to re-point state at the new address, or a moved {} block committed alongside the rename so the plan shows zero destroys. The broader lesson: the plan output is the safety check - a '- destroy' on a stateful resource must stop the apply until you understand WHY."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Local state for a team: cannot share, easily lost; lose it and Terraform tries to recreate all infrastructure. Use a remote backend.",
+            "No state locking: concurrent applies race and corrupt state. Use a backend that supports locking (e.g. S3 + DynamoDB).",
+            "Committing tfstate or secrets to git: leaks credentials and resource IDs; state is sensitive and must be protected, not versioned in the repo.",
+            "Renaming a resource block without state mv / moved {}: Terraform destroys and recreates it because the address is its identity.",
+            "count over a changeable list: removing a middle element shifts indices and recreates everything after it; use for_each with stable keys.",
+            "Ignoring drift: manual console changes make the next plan revert them unexpectedly; reconcile drift deliberately.",
+            "Applying without reading the plan: missing a '-/+' replace on a database or volume leads to data loss.",
+            "Unpinned providers/modules: a new version changes schema and the next plan wants to replace resources you did not touch."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Incident pattern: two CI pipelines triggered terraform apply on the same state at nearly the same time with no locking. Their writes interleaved, the state file became internally inconsistent, and subsequent plans showed nonsensical diffs. Recovery required restoring a prior state version. State locking exists precisely to make this impossible."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Use an encrypted remote backend with locking (S3+DynamoDB, GCS, Terraform Cloud) for any shared infrastructure.",
+            "Always review the plan; save it with -out and apply exactly that file so apply does only what you reviewed.",
+            "Treat a '- destroy' or '-/+ replace' on stateful resources as a stop sign until you understand the cause.",
+            "Prefer for_each (stable keys) over count for collections that can change membership.",
+            "Rename resources with terraform state mv or a moved {} block, never by editing the block and applying blind.",
+            "Pin provider and module versions for reproducible plans.",
+            "Keep secrets out of code: use a secret manager as the source of truth, env/OIDC for provider auth, and protect state because secrets live in it.",
+            "Use separate state (directories/backends) per environment for real isolation; reserve CLI workspaces for short-lived parallel instances; run fmt/validate and a plan in CI on every PR."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Risk", "Mitigation", "Symptom if ignored"],
+          "rows": [
+            ["Lost / corrupted state", "Remote backend + locking + versioning", "Terraform recreates everything"],
+            ["Mass recreation", "for_each over count", "Index shift destroys/recreates resources"],
+            ["Accidental destroy", "Read plan; moved {} for renames", "Stateful resource wiped on apply"],
+            ["Secret leakage", "Secret manager + encrypted state", "Plaintext secrets in repo/state"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "note-import-refactor",
+      "heading": "Importing and Refactoring Safely",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Adopting existing infrastructure into Terraform uses import: terraform import (or, from Terraform 1.5+, declarative import {} blocks) writes a real resource's identity into state and binds it to a config block, so Terraform manages it going forward without recreating it. Refactoring within Terraform - renaming resources, moving them between modules, splitting state - is done with terraform state mv and moved {} blocks so the address change does not read as a destroy/create. Both are about keeping state's view aligned with reality and config."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "After any import, always run terraform plan and expect '0 to add, 0 to change, 0 to destroy'. A non-empty plan means your config does not yet exactly match the imported resource's real attributes - fix the config to match before applying, or you will mutate the resource you just adopted."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "tf-state-flow",
+      "title": "Plan/Apply Reconciliation Loop",
+      "type": "mermaid",
+      "content": "flowchart LR\n    CFG[Desired config .tf] --> PLAN[terraform plan]\n    STATE[(State file)] --> PLAN\n    REAL[(Real infrastructure)] -->|refresh| PLAN\n    PLAN --> DIFF{Diff: +create ~update -destroy -/+replace}\n    DIFF --> APPLY[terraform apply]\n    APPLY -->|provision via provider| REAL\n    APPLY -->|record IDs/attrs| STATE"
+    },
+    {
+      "id": "tf-count-foreach",
+      "title": "count Index Shift vs for_each Stable Keys",
+      "type": "ascii",
+      "content": "count (positional):                for_each (keyed):\n  [0] alice                          [\"alice\"] alice\n  [1] bob    <- remove bob           [\"bob\"]   bob   <- remove bob\n  [2] carol                          [\"carol\"] carol\n\n after removing bob:                after removing bob:\n  [0] alice (same)                   [\"alice\"] (untouched)\n  [1] carol  <- was [2]!             [\"carol\"] (untouched)\n        ^ index shift -> Terraform     only [\"bob\"] destroyed\n          DESTROYS+RECREATES carol"
+    },
+    {
+      "id": "tf-dag",
+      "title": "Dependency Graph (create order; destroy is reverse)",
+      "type": "mermaid",
+      "content": "flowchart TD\n    VPC[aws_vpc.main] --> SUBNET[aws_subnet.app]\n    SUBNET --> EC2[aws_instance.app]\n    IAM[aws_iam_role_policy.app] -.depends_on.-> EC2\n    EC2 --> EIP[aws_eip.app]\n    classDef note fill:#eee,stroke:#999;\n    note[Destroy walks this graph in REVERSE]:::note"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-tf-declarative",
+      "question": "What does it mean that Terraform is declarative and idempotent?",
+      "answer": "Declarative means you describe the desired end state of your infrastructure - what should exist and how it should be configured - rather than the imperative steps to get there. Terraform reads that desired state, compares it to the recorded state of what currently exists, and computes the minimal set of create/update/destroy actions to reconcile reality with your description. Idempotent means applying the same configuration repeatedly converges to the same result: if nothing in the config or the real infrastructure has changed, a second apply reports no changes and does nothing. This contrasts with imperative scripts, where re-running a 'create a bucket' command either errors or creates a duplicate. The model depends entirely on state accurately reflecting reality, which is why state management is the central operational concern.",
+      "difficulty": "junior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["declarative", "idempotency", "iac"],
+      "followUps": ["How does Terraform know what already exists?", "How is this different from a shell provisioning script?"]
+    },
+    {
+      "id": "q-tf-state",
+      "question": "What is the Terraform state file, why is local state a problem for teams, and what does a remote backend add?",
+      "answer": "The state file maps each resource in your configuration to its real-world identity (e.g. an instance ID) and caches its attributes, so Terraform knows what it manages, can compute diffs efficiently, and can order dependencies. Local state (terraform.tfstate on one machine) is a problem for teams because it cannot be shared, so collaborators have divergent views; it is easily lost (and losing it means Terraform no longer knows what exists and will try to recreate everything); and it offers no protection against two people applying at once. A remote backend (S3, GCS, Azure Blob, Terraform Cloud) stores state centrally so the whole team and CI share one source of truth, supports encryption at rest (state contains secrets), keeps version history for recovery, and - crucially - supports state locking to serialize applies. Remote state with locking and encryption is the baseline for any shared Terraform.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["state", "backend", "locking"],
+      "followUps": ["What does state locking prevent?", "Why is the state file sensitive?"]
+    },
+    {
+      "id": "q-tf-locking",
+      "question": "What is state locking and what goes wrong without it?",
+      "answer": "State locking is a mechanism where the backend acquires an exclusive lock before any operation that writes state (apply, and state-mutating commands) and releases it afterward, so only one apply can modify a given state at a time. For the S3 backend this is implemented with a DynamoDB table; Terraform Cloud and other backends have built-in locking. Without locking, two engineers or two CI pipelines can run apply against the same state concurrently; their reads and writes interleave, and the resulting state file can become internally inconsistent or lose track of resources, while the two runs may also make conflicting infrastructure changes. Recovering usually means restoring a prior state version and reconciling drift by hand. Locking turns this race into a wait-or-fail-fast: the second apply blocks until the first finishes (or errors out cleanly), making concurrent corruption impossible.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["locking", "state", "concurrency"],
+      "followUps": ["How is locking implemented for the S3 backend?", "What do you do if a lock is stuck?"]
+    },
+    {
+      "id": "q-tf-plan-symbols",
+      "question": "In a terraform plan, what do +, ~, -, and -/+ mean, and which is the dangerous one?",
+      "answer": "+ means a resource will be created. ~ means a resource will be updated in place - an attribute changes without recreating the resource, so it is generally safe. - means a resource will be destroyed, because it was removed from config or you ran destroy. -/+ means replace: an immutable attribute changed, so Terraform must DESTROY the existing resource and then CREATE a new one to satisfy the new config. The dangerous ones are - (destroy) and especially -/+ (replace) on stateful resources, because a replace of a database, disk, or volume destroys the data along with the resource. The whole point of reading the plan is to catch a -/+ or - on something you cannot afford to lose before applying. create_before_destroy can reorder a replace to create the new one first, reducing downtime but not changing that a replace is happening.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["plan", "lifecycle", "replace"],
+      "followUps": ["What forces a -/+ replace?", "How does create_before_destroy change a replace?"]
+    },
+    {
+      "id": "q-tf-modules",
+      "question": "What are modules, variables, and outputs, and how do they enable reuse?",
+      "answer": "A module is a container for a set of resources packaged behind input variables and outputs - effectively a reusable function for infrastructure. Variables are the module's inputs (parameters like cidr_block or environment), outputs are the values it exposes (like a subnet ID) for callers or humans, and locals are computed intermediate values inside it. Reuse works by calling the same module multiple times with different inputs - e.g. a vpc module instantiated once per environment with different CIDRs - so you write the resource definitions once and parameterize them. The root configuration is itself a module that wires child modules together by passing one module's outputs into another's inputs, which also establishes dependencies in the graph. Good modules have clear, minimal inputs, sensible outputs, and pinned source versions so they are reproducible and composable.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["modules", "variables", "reuse"],
+      "followUps": ["How do you pass one module's output to another?", "Why pin a module's source version?"]
+    },
+    {
+      "id": "q-tf-count-foreach",
+      "question": "What is the difference between count and for_each, and why does it matter for safety?",
+      "answer": "Both create multiple instances, but they address them differently. count creates instances indexed by position - resource.name[0], [1], [2] - derived from a number or a list's length. for_each creates instances keyed by a stable identifier from a map or set - resource.name[\"alice\"], [\"bob\"]. The safety difference comes from how Terraform tracks identity in state. With count, the index IS the identity, so if you remove or reorder a list element, every subsequent element's index shifts; Terraform sees the resource that used to be at index 2 now at index 1 as a different resource and plans to destroy the old one and recreate it - causing mass recreation from a single removal. With for_each, the key is the identity, so removing one element destroys only that keyed instance and leaves the others untouched. Therefore use for_each for any collection whose membership can change (users, subnets), and reserve count for positional or all-or-nothing toggles like count = var.enabled ? 1 : 0.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["count", "for_each", "addressing"],
+      "followUps": ["How do you migrate from count to for_each safely?", "Why can't for_each keys depend on apply-time values?"]
+    },
+    {
+      "id": "q-tf-graph",
+      "question": "How does Terraform determine the order in which to create and destroy resources?",
+      "answer": "Terraform builds a directed acyclic graph (DAG) of all resources and infers dependencies primarily from references: if resource B uses an attribute of resource A (e.g. aws_vpc.main.id), B implicitly depends on A, so Terraform creates A before B. When an ordering requirement exists but there is no attribute reference to express it, you declare it explicitly with depends_on. Terraform then walks the graph, creating independent resources in parallel and dependent ones in order. Destroy follows the reverse topological order of create - dependents are destroyed before the things they depend on - which is why Terraform tears down an instance and subnet before the VPC they live in. Preferring implicit dependencies (referencing the value you actually use) over depends_on keeps the graph precise and self-documenting; overusing depends_on adds coarse ordering that can slow applies.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["graph", "dependencies", "depends_on"],
+      "followUps": ["When is depends_on necessary?", "Why is destroy order the reverse of create order?"]
+    },
+    {
+      "id": "q-tf-secrets",
+      "question": "How should you handle secrets in Terraform, and what does sensitive = true actually do?",
+      "answer": "The inescapable fact is that any secret a resource consumes ends up in the state file in plaintext, no matter how you supply it. sensitive = true only redacts the value from CLI plan/apply output and logs; it does NOT encrypt the value in state or stop it from being stored there. So secret handling has two parts. First, protect the state itself: use an encrypted remote backend with strict access control, because secrets live in it. Second, keep long-lived secrets out of Terraform where possible: use a dedicated secret manager (Vault, AWS/GCP Secret Manager) as the source of truth and reference it via data sources, supply provider credentials from the environment, instance roles, or OIDC rather than committed variables, and never hardcode secrets in .tf files or commit secret-bearing .tfvars. For the highest-sensitivity secrets, prefer designs where the application fetches the secret at runtime so Terraform is never in the secret's lifecycle at all.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["secrets", "state", "security"],
+      "followUps": ["Why does sensitive=true not protect state?", "How do you keep Terraform out of a secret's lifecycle?"]
+    },
+    {
+      "id": "q-tf-tricky-rename",
+      "question": "Tricky: You rename a resource block from aws_db_instance.db to aws_db_instance.primary with no other changes. Is this safe?",
+      "answer": "No - by default this is a destructive change. A resource's address (type.name) is its identity in Terraform state, not the attributes. When you rename the block, Terraform sees the old address as having been removed from config and the new address as newly added; it has no way to know they refer to the same database. So the plan shows the old resource will be destroyed and the new one created - for a database, that means deleting it and provisioning an empty replacement, losing all data. Renaming is therefore safe only if you also tell Terraform the address moved: run terraform state mv aws_db_instance.db aws_db_instance.primary to re-key the existing resource in state, or add a moved { from = ... to = ... } block (Terraform 1.1+) committed alongside the rename. After either, the plan shows zero destroys. The general lesson: always read the plan, and treat any '- destroy' on a stateful resource as a stop sign until you understand it.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": ["state", "refactor", "gotcha"],
+      "followUps": ["What does a moved {} block do?", "How would you split a resource into a module without recreation?"]
+    },
+    {
+      "id": "q-tf-tricky-workspaces",
+      "question": "Tricky: A teammate proposes using Terraform CLI workspaces to separate prod and staging. Why might a senior engineer object?",
+      "answer": "Because CLI workspaces are a weak isolation boundary, and HashiCorp explicitly advises against using them for strong separation between environments like prod and staging. Workspaces give each workspace its own state file under the SAME backend and the SAME configuration - so prod and staging share backend credentials, the same code path, and the same blast radius for a mistake. A misapplied variable, a wrong terraform workspace select, or a config change intended for staging can hit prod because there is no real separation of code, credentials, or backend. Workspaces also do not let environments diverge structurally (different providers, different backends, different module versions). The recommended pattern for environment isolation is separate state per environment via separate directories, separate backend configurations, or separate repos, each with its own credentials and CI pipeline. Workspaces are better reserved for short-lived, parallel copies of the SAME environment - e.g. per-developer or per-feature ephemeral stacks - where the weaker isolation is acceptable.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": ["workspaces", "isolation", "gotcha"],
+      "followUps": ["What isolation do separate directories/backends give that workspaces do not?", "When are workspaces a good fit?"]
+    },
+    {
+      "id": "q-tf-tricky-count-removal",
+      "question": "Tricky: A config uses count over a list of IAM users. Removing one user from the middle of the list causes far more changes than expected. Explain.",
+      "answer": "count addresses instances by their position in the list, so the resources are stored in state as user[0], user[1], user[2], ... bound to whatever value sits at that index. When you remove an element from the MIDDLE of the list, every element after it shifts down one index: the user formerly at index 2 is now at index 1, index 3 becomes 2, and so on. Terraform compares state (which still has the old index->value mapping) to the new config and sees that the value at, say, index 1 changed from 'bob' to 'carol'. Because the index is the identity, it does not interpret this as 'bob removed'; it interprets it as 'the resource at index 1 must be destroyed and recreated with carol's settings', and similarly for every shifted index. The result is a cascade of destroy-and-recreate for every user after the removed one, which can wipe their attached policies/grants. The fix is for_each = toset(var.users), which keys instances by the stable user name, so removing 'bob' destroys only user[\"bob\"] and leaves everyone else untouched.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": ["count", "for_each", "gotcha"],
+      "followUps": ["How do you migrate the existing count instances to for_each without recreation?", "When is count still the right choice?"]
+    },
+    {
+      "id": "q-tf-import",
+      "question": "How do you bring an existing, manually-created resource under Terraform management?",
+      "answer": "You use import, which binds a real resource's identity into Terraform state so Terraform manages it going forward without recreating it. The classic workflow: write a resource block matching the existing resource, then run terraform import <address> <real-id> (e.g. terraform import aws_s3_bucket.logs my-existing-bucket) to record its identity in state. From Terraform 1.5+ you can instead use a declarative import {} block that is planned and version-controlled. The critical follow-up step is to run terraform plan and confirm it reports '0 to add, 0 to change, 0 to destroy'. A non-empty plan means your config does not yet exactly match the imported resource's actual attributes; you must adjust the config to match reality before applying, otherwise the next apply will mutate (or even replace) the resource you just adopted. Import aligns state with an existing resource; making the config match is what makes future applies safe.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["import", "adoption", "state"],
+      "followUps": ["Why must the plan be empty after import?", "What does the import {} block add over the CLI command?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-tf-foreach-refactor",
+      "title": "Refactor count to for_each Without Recreating Resources",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "prompt": "A module manages IAM users with count over var.users = [\"alice\", \"bob\", \"carol\"]. Removing a middle user causes index-shift recreation. Refactor to for_each keyed by username, and give the exact state-migration commands so the THREE existing users (currently aws_iam_user.users[0..2]) are NOT destroyed and recreated.",
+      "hints": [
+        "Switch the resource to for_each = toset(var.users) and use each.value for the name.",
+        "Existing instances are addressed by index ([0]) but the new ones are addressed by key ([\"alice\"]); you must terraform state mv each one.",
+        "After migrating, terraform plan must show 0 to add, 0 to change, 0 to destroy."
+      ],
+      "solutionCode": "# --- BEFORE (fragile, indexed) ---\n# resource \"aws_iam_user\" \"users\" {\n#   count = length(var.users)\n#   name  = var.users[count.index]\n# }\n\n# --- AFTER (stable keys) ---\nvariable \"users\" {\n  type    = set(string)\n  default = [\"alice\", \"bob\", \"carol\"]\n}\n\nresource \"aws_iam_user\" \"users\" {\n  for_each = toset(var.users)\n  name     = each.value\n}\n\n# --- STATE MIGRATION (run once, BEFORE the next apply) ---\n# Re-key each existing indexed instance to its new keyed address.\n# terraform state mv 'aws_iam_user.users[0]' 'aws_iam_user.users[\"alice\"]'\n# terraform state mv 'aws_iam_user.users[1]' 'aws_iam_user.users[\"bob\"]'\n# terraform state mv 'aws_iam_user.users[2]' 'aws_iam_user.users[\"carol\"]'\n#\n# Then verify it is a no-op:\n# terraform plan   # expect: 0 to add, 0 to change, 0 to destroy\n",
+      "solutionLanguage": "hcl",
+      "explanation": "The refactor changes the resource's addressing scheme from positional (count.index) to keyed (for_each over a set), which is what makes future membership changes safe - removing 'bob' will then destroy only aws_iam_user.users[\"bob\"] instead of shifting indices and recreating everyone after him. But the change of addressing scheme is itself the hazard: in state the three users are stored as users[0], users[1], users[2], while the new config expects users[\"alice\"], users[\"bob\"], users[\"carol\"]. If you simply applied, Terraform would see three old indexed addresses being destroyed and three new keyed addresses being created - a full destroy-and-recreate. The terraform state mv commands re-point each existing state entry to its new keyed address WITHOUT touching the real resource, so Terraform now recognizes the already-existing users under their new identities. The proof of a correct migration is that the subsequent plan is a complete no-op (0/0/0); any non-zero number means an address did not line up and you would still recreate something. This state-mv-before-apply discipline is the general technique for any addressing refactor, including count<->for_each and moving resources into modules.",
+      "relatedTopic": "count-foreach"
+    },
+    {
+      "id": "ch-tf-remote-backend",
+      "title": "Configure a Locked, Encrypted Remote Backend",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "prompt": "Write the Terraform configuration for an S3 remote backend that is safe for a team: state is encrypted at rest, isolated per environment, and protected by state locking so two applies cannot race. Explain how locking is achieved and one operational caveat.",
+      "hints": [
+        "The s3 backend stores the state object; encryption is enabled with encrypt = true.",
+        "State locking for the S3 backend uses a DynamoDB table with a LockID key (dynamodb_table).",
+        "Use a per-environment key (path) so prod and staging do not share one state object."
+      ],
+      "solutionCode": "terraform {\n  required_version = \">= 1.5.0\"\n  required_providers {\n    aws = {\n      source  = \"hashicorp/aws\"\n      version = \"~> 5.0\"        # pin provider for reproducible plans\n    }\n  }\n\n  backend \"s3\" {\n    bucket         = \"acme-tf-state\"\n    key            = \"prod/network/terraform.tfstate\"  # per-env, per-stack isolation\n    region         = \"eu-west-1\"\n    encrypt        = true                               # SSE for state at rest\n    dynamodb_table = \"tf-state-locks\"                   # enables state LOCKING\n  }\n}\n\n# The DynamoDB lock table (created once, e.g. in a bootstrap config) must have a\n# primary key named exactly 'LockID' (string):\n# resource \"aws_dynamodb_table\" \"tf_locks\" {\n#   name         = \"tf-state-locks\"\n#   billing_mode = \"PAY_PER_REQUEST\"\n#   hash_key     = \"LockID\"\n#   attribute { name = \"LockID\"  type = \"S\" }\n# }\n",
+      "solutionLanguage": "hcl",
+      "explanation": "This backend makes Terraform state team-safe along three axes. Isolation: the key path 'prod/network/terraform.tfstate' gives each environment and stack its own state object in the bucket, so prod and staging never share a state file (the recommended alternative to using CLI workspaces for environment separation). Encryption at rest: encrypt = true tells the backend to store the state object with server-side encryption, which matters because state holds resource IDs and secret attributes in plaintext. Locking: dynamodb_table points at a DynamoDB table whose primary key must be named exactly LockID; before any state-writing operation Terraform writes a lock item there and refuses to proceed if one already exists, so a second concurrent apply waits or fails fast instead of racing and corrupting state. Provider pinning (~> 5.0) keeps plans reproducible. One important operational caveat: if an apply is killed (CI cancelled, network drop) the lock item can be left behind, blocking future runs with a 'state locked' error; you recover with terraform force-unlock <LOCK_ID> - but only after confirming no apply is actually still running, since force-unlocking during a live apply reintroduces the corruption risk locking exists to prevent. Enabling S3 bucket versioning additionally lets you roll back to a previous state if one is ever damaged.",
+      "relatedTopic": "state"
+    }
+  ],
+  "references": [
+    {"label": "Terraform - State", "url": "https://developer.hashicorp.com/terraform/language/state"},
+    {"label": "Terraform - Backend Configuration (remote state & locking)", "url": "https://developer.hashicorp.com/terraform/language/backend"},
+    {"label": "Terraform - The for_each Meta-Argument", "url": "https://developer.hashicorp.com/terraform/language/meta-arguments/for_each"},
+    {"label": "Terraform - Resource Behavior and the Dependency Graph", "url": "https://developer.hashicorp.com/terraform/language/resources/behavior"},
+    {"label": "Terraform - Managing Workspaces (and their limits)", "url": "https://developer.hashicorp.com/terraform/cli/workspaces"},
+    {"label": "Terraform - moved block (refactoring)", "url": "https://developer.hashicorp.com/terraform/language/modules/develop/refactoring"}
+  ]
+}
