@@ -1,0 +1,486 @@
+{
+  "id": "refactoring",
+  "title": "Refactoring",
+  "category": "Engineering",
+  "subcategory": "Quality",
+  "difficulty": "senior",
+  "tags": ["refactoring", "code-smells", "legacy-code", "testing", "quality", "maintainability"],
+  "description": "A senior-level treatment of refactoring as a disciplined, behavior-preserving practice: recognizing code smells, the core mechanical refactorings, tests as a safety net, the strangler fig pattern for legacy systems, the refactor-vs-rewrite decision, and how to make every change safe with small steps and characterization tests.",
+  "estReadMinutes": 32,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Refactoring, in Martin Fowler's precise sense, is a change to the internal structure of software that makes it easier to understand and cheaper to modify without changing its observable behavior. The behavior-preserving constraint is the whole point: a refactoring is a controlled transformation, not a rewrite, and certainly not a place to slip in a bug fix or a new feature. If observable behavior changes, it was not a refactoring."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Behavior-preserving: external behavior before == external behavior after. Tests are how you prove it.",
+            "Structure-improving: clearer names, smaller units, better-placed responsibilities, less duplication.",
+            "Small and reversible: a sequence of tiny steps, each leaving the system green, rather than one big bang.",
+            "Separate from feature work: you wear the 'refactoring hat' or the 'feature hat', never both at once."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Kent Beck's mantra: 'Make the change easy, then make the easy change.' Refactoring is the first half — reshape the code so the feature becomes a small addition rather than a risky surgery. Separating the two halves is what keeps both safe."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Software entropy is relentless: every feature added under deadline pressure nudges the design toward disorder. Without continuous refactoring, the cost of each subsequent change rises until the team grinds to a halt and starts whispering about a rewrite. Refactoring is the mechanism that pays down this design debt incrementally, keeping the marginal cost of change roughly flat instead of exponential."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Sustained velocity: a clean, well-named, well-factored codebase keeps feature delivery fast; a rotting one slows to a crawl.",
+            "Defect reduction: duplication and tangled control flow are where bugs breed; removing them removes the habitat.",
+            "Comprehension: most engineering time is spent reading code. Refactoring optimizes for the reader, who is usually you, six months from now.",
+            "Enables design to emerge: you do not need to get the design perfect up front if you refactor continuously as understanding grows.",
+            "De-risks change: small, tested, reversible steps mean a refactor that goes wrong is caught immediately and rolled back cheaply."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Refactoring without tests is just changing code and hoping. The safety net is not optional — it is the thing that distinguishes refactoring (provably behavior-preserving) from editing (possibly behavior-breaking)."
+        }
+      ]
+    },
+    {
+      "id": "code-smells",
+      "heading": "Code Smells: The Triggers",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A code smell is a surface symptom that usually (not always) points to a deeper design problem. Smells are heuristics, not rules — they tell you where to look, not what to do. The skill is recognizing the smell and choosing the refactoring that addresses the underlying cause."
+        },
+        {
+          "type": "table",
+          "headers": ["Smell", "What it looks like", "Typical refactoring"],
+          "rows": [
+            ["Long Method", "A method that scrolls off the screen and does many things.", "Extract Method into named sub-steps."],
+            ["Large Class", "A class with too many fields/methods and several responsibilities.", "Extract Class / Extract Subclass."],
+            ["Feature Envy", "A method that reaches into another object's data more than its own.", "Move Method to the class it envies."],
+            ["Primitive Obsession", "Using raw strings/ints for domain concepts (money, email, phone).", "Replace Primitive with Value Object."],
+            ["Shotgun Surgery", "One conceptual change forces edits across many classes.", "Move related behavior together (Inline/Move)."],
+            ["Data Clumps", "The same group of fields travels together everywhere.", "Introduce Parameter Object / Extract Class."],
+            ["Switch on Type", "A switch/if-chain on a type code, repeated in several places.", "Replace Conditional with Polymorphism."],
+            ["Duplicated Code", "The same logic copy-pasted in multiple places.", "Extract Method / Pull Up Method."]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Two smells are worth contrasting because they pull in opposite directions. Shotgun surgery means one change is scattered across many modules (too much spreading) — the fix is to gather the related behavior together. Divergent change is the opposite: one module changes for many unrelated reasons (too much gathering) — the fix is to split it. Both are violations of cohesion; the cure depends on which way the cohesion broke."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A smell is a prompt to investigate, not a mandate to refactor. Primitive obsession in a throwaway script is fine. The same smell in a domain model that 47 call sites depend on is a real cost. Context decides."
+        }
+      ]
+    },
+    {
+      "id": "core-refactorings",
+      "heading": "Core Refactorings",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Most refactoring is composed from a small vocabulary of named, mechanical transformations. Knowing them by name matters because each has a known-safe sequence of steps. The most-used are Extract Function/Method, Inline, Rename, Move, Replace Conditional with Polymorphism, and Introduce Parameter Object."
+        },
+        {
+          "type": "heading",
+          "text": "Extract Method: long method to named steps"
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Before: one long method doing several things.\nfunction printReport(orders) {\n  let total = 0;\n  for (const o of orders) total += o.amount;\n  console.log('=== Report ===');\n  for (const o of orders) console.log(`${o.id}: ${o.amount}`);\n  console.log(`Total: ${total}`);\n  console.log(`Avg: ${total / orders.length}`);\n}\n\n// After: each step is a named, testable function.\nfunction printReport(orders) {\n  printHeader();\n  printLines(orders);\n  printSummary(orders);\n}\nfunction printHeader() { console.log('=== Report ==='); }\nfunction printLines(orders) {\n  for (const o of orders) console.log(`${o.id}: ${o.amount}`);\n}\nfunction total(orders) { return orders.reduce((s, o) => s + o.amount, 0); }\nfunction printSummary(orders) {\n  const t = total(orders);\n  console.log(`Total: ${t}`);\n  console.log(`Avg: ${t / orders.length}`);\n}"
+        },
+        {
+          "type": "heading",
+          "text": "Replace Conditional with Polymorphism"
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Before: a type switch that recurs wherever a bird is handled.\nfunction speed(bird) {\n  switch (bird.type) {\n    case 'european': return 35;\n    case 'african':  return 40 - 2 * bird.numberOfCoconuts;\n    case 'norwegian-blue':\n      return bird.isNailed ? 0 : 10 + bird.voltage / 10;\n    default: return null;\n  }\n}\n\n// After: each variant owns its behavior; adding a species adds a class.\nclass Bird { speed() { return null; } }\nclass European extends Bird { speed() { return 35; } }\nclass African extends Bird {\n  constructor(coconuts) { super(); this.coconuts = coconuts; }\n  speed() { return 40 - 2 * this.coconuts; }\n}\nclass NorwegianBlue extends Bird {\n  constructor(nailed, voltage) { super(); this.nailed = nailed; this.voltage = voltage; }\n  speed() { return this.nailed ? 0 : 10 + this.voltage / 10; }\n}"
+        },
+        {
+          "type": "heading",
+          "text": "Introduce Parameter Object: kill a data clump"
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Before: the same (start, end) clump threads through many signatures.\nfunction amountInvoiced(startDate, endDate) { /* ... */ }\nfunction amountReceived(startDate, endDate) { /* ... */ }\nfunction amountOverdue(startDate, endDate)  { /* ... */ }\n\n// After: the clump becomes a first-class concept that can hold behavior.\nclass DateRange {\n  constructor(start, end) { this.start = start; this.end = end; }\n  includes(date) { return date >= this.start && date <= this.end; }\n}\nfunction amountInvoiced(range) { /* range.includes(...) */ }\nfunction amountReceived(range) { /* ... */ }\nfunction amountOverdue(range)  { /* ... */ }"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Rename is the most under-rated refactoring. A precise name removes the need for a comment, encodes intent, and is the cheapest readability win available. Modern IDEs make Rename across a codebase safe and instant — there is no excuse for a misleading name to survive."
+        }
+      ]
+    },
+    {
+      "id": "tests-safety-net",
+      "heading": "Tests as the Safety Net",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The discipline that makes refactoring safe rather than reckless is a test suite you trust. The loop is: ensure the area is green, make one small transformation, run the tests, and only proceed if they still pass. Because each step is tiny and verified, a mistake is caught within seconds and is trivially reversible — you never debug a giant tangled change."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Fast tests enable refactoring: if the suite takes 20 minutes you will not run it after every small step, and the discipline collapses.",
+            "Refactoring tests must assert behavior, not structure — a test coupled to internal method names breaks on every refactor and becomes an obstacle.",
+            "When code has no tests (the usual case for legacy), you write characterization tests first to pin down current behavior before touching anything.",
+            "If a refactoring breaks a test, the refactoring is wrong (or the test asserted an implementation detail) — never 'fix' a behavior test to make a refactor pass."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Over-specified tests are the silent killer of refactoring. If your tests mock every collaborator and assert call sequences, they re-fail on every internal change, and the team learns to fear refactoring. Test through the public interface and assert outcomes."
+        }
+      ]
+    },
+    {
+      "id": "characterization-legacy",
+      "heading": "Characterization Tests and Legacy Code",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Michael Feathers defines legacy code as code without tests, because without tests you cannot change it safely. The bootstrapping problem is real: you need to refactor to make it testable, but you need tests to refactor safely. The escape is the characterization test — a test that documents what the code currently does (bugs included), so you have a net before you start."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Characterization test: you don't yet know the 'right' answer.\n// You pin the CURRENT behavior, even if it looks wrong, so any\n// change you make is visible as a diff in test results.\nit('characterizes legacyTax for a known input', () => {\n  // Run it once, see what it returns, then assert exactly that.\n  expect(legacyTax(100, 'CA')).toBe(7.25); // observed, not derived\n});\n\n// Now wrap the messy function in a seam you can test through,\n// add more characterization cases around the branches, and only\n// THEN start the behavior-preserving refactor underneath.\n"
+        },
+        {
+          "type": "paragraph",
+          "text": "The technique is to find a 'seam' — a place where you can alter behavior without editing the code in place, such as a constructor parameter, a subclass override, or a dependency you can inject. Feathers's 'sprout' and 'wrap' methods let you add new, tested code alongside the untested legacy without first untangling it, gradually growing the tested island."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Characterization tests pin current behavior, including bugs. That is intentional: during a refactor you must preserve the bug too, because something downstream may depend on it. Fix the bug as a separate, clearly-labelled change afterward — never silently inside a refactor."
+        }
+      ]
+    },
+    {
+      "id": "strangler-fig",
+      "heading": "The Strangler Fig Pattern",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "For large legacy systems that are too risky to rewrite in one shot, Martin Fowler's Strangler Fig pattern offers an incremental migration. Named after the vine that grows around a host tree and gradually replaces it, the pattern puts a facade (often a router or proxy) in front of the old system, then migrates one capability at a time to a new implementation behind that facade. The old and new run side by side until the old is fully strangled and can be deleted."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Place an interception layer (HTTP router, event interceptor, or in-process facade) in front of the legacy system.",
+            "Pick one slice of functionality, build it new, and route just that slice to the new code.",
+            "Verify in production (often with traffic mirroring / dual-run comparison) before flipping the route fully.",
+            "Repeat slice by slice; each migration is independently shippable and reversible.",
+            "When no traffic reaches the legacy path, delete it."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The strangler fig's superpower is that you ship value and reduce risk continuously. At every step the system works, you can stop and still be better off, and there is never a high-stakes 'big bang' cutover weekend."
+        }
+      ]
+    },
+    {
+      "id": "refactor-example",
+      "heading": "A Worked Refactor: Make the Change Easy",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Scenario: a checkout function computes a total inline and you must add a loyalty discount. The naive move is to wedge the new logic into the tangle. The disciplined move is to first refactor (behavior-preserving) so the addition becomes trivial, then make the easy change as a separate step."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Step 0: the tangled starting point (no place to hang a discount).\nfunction checkout(cart) {\n  let total = 0;\n  for (const item of cart.items) total += item.price * item.qty;\n  if (cart.country === 'US') total *= 1.0;\n  else if (cart.country === 'DE') total *= 1.19;\n  return total;\n}\n\n// Step 1 (refactor, behavior PRESERVED): extract the two concerns.\nfunction subtotal(cart) {\n  return cart.items.reduce((s, i) => s + i.price * i.qty, 0);\n}\nfunction withTax(amount, country) {\n  const rate = country === 'DE' ? 1.19 : 1.0;\n  return amount * rate;\n}\nfunction checkout(cart) {\n  return withTax(subtotal(cart), cart.country); // same result as before\n}\n\n// Step 2 (the easy change): the discount is now a one-line insertion.\nfunction applyLoyalty(amount, tier) {\n  const off = { gold: 0.10, silver: 0.05 }[tier] ?? 0;\n  return amount * (1 - off);\n}\nfunction checkout(cart) {\n  const discounted = applyLoyalty(subtotal(cart), cart.loyaltyTier);\n  return withTax(discounted, cart.country);\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Crucially, Step 1 ships green with no behavior change — the loyalty discount does not exist yet, so existing tests pass unchanged, which is the proof the refactor was safe. Only Step 2 changes behavior, and it is a tiny, obvious, well-isolated diff that a reviewer can verify at a glance."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Notice how the feature became a one-line insertion once the structure was right. That is the entire economic argument for refactoring: it converts risky surgery into a cheap, low-risk addition."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Mixing refactoring with feature work or bug fixes in the same commit: the reviewer can no longer tell intended behavior changes from accidental ones, and accidental regressions hide in the noise.",
+            "Refactoring without a test net: 'changing code and hoping' — there is no proof behavior was preserved, so it is editing, not refactoring.",
+            "Big-bang refactor: rewriting a whole module in one giant change, which is unreviewable, unmergeable, and conflicts with everyone else's work.",
+            "Speculative generality: adding abstraction layers, hooks, and parameters for needs that may never come — over-engineering disguised as cleanup (a smell in its own right).",
+            "Refactoring code that is about to be deleted or never changes — effort with no payoff. Refactor where change is actually happening.",
+            "'Fixing' a failing behavior test to make a refactor pass, instead of recognizing the refactor changed behavior.",
+            "Silently fixing a bug during a refactor: something downstream may depend on the old behavior; bug fixes must be separate, visible changes."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The most dangerous mistake is the heroic rewrite framed as 'refactoring'. A rewrite is not behavior-preserving, has no test net by definition (the new code has no history), reintroduces every old bug the original had already fixed, and stalls feature delivery for months while the business waits. Most rewrites fail to ship."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Take small steps and keep the suite green after each one; a broken step is then caught and reverted in seconds.",
+            "Separate the two hats: refactor (no behavior change) and feature/fix (behavior change) live in different commits, ideally different PRs.",
+            "Establish a test net first — write characterization tests for legacy code before you touch its structure.",
+            "Refactor opportunistically at the point of change (the 'campsite rule': leave the code a little cleaner than you found it), not as a separate quarterly project.",
+            "Prefer mechanical, named refactorings and let the IDE perform them (Rename, Extract, Move) so the transformation is provably safe.",
+            "Test through the public interface and assert outcomes, so the tests survive internal restructuring.",
+            "For large legacy systems, prefer the Strangler Fig (incremental, reversible, ships value) over a big-bang rewrite.",
+            "Know when NOT to refactor: deadline-critical hotfix paths, code slated for deletion, code that never changes, or a module nobody understands and that has no tests yet."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Situation", "Refactor?", "Why"],
+          "rows": [
+            ["About to add a feature to messy code", "Yes, first", "Make the change easy, then make the easy change."],
+            ["Code is ugly but never changes", "No", "No payoff; readability cost is rarely paid."],
+            ["Legacy with no tests, must change it", "Tests first, then yes", "Characterization tests provide the net."],
+            ["Mid-incident hotfix", "No, ship the fix", "Refactor later in a separate calm PR."],
+            ["Whole module is rotten and central", "Strangler fig, not rewrite", "Incremental, reversible, ships value."]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "note-vs-rewrite",
+      "heading": "Note: Refactor vs Rewrite",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The refactor-vs-rewrite decision is one of the highest-stakes calls an engineering team makes. Refactoring is incremental, behavior-preserving, low-risk, and keeps shipping value throughout. A rewrite throws away years of accumulated bug fixes and hard-won edge-case knowledge embedded in the old code (Joel Spolsky's classic argument), starts with zero test coverage, and typically over-runs its estimate by a wide margin while the business stalls. The default should be refactor; a rewrite is justified only when the platform itself is dead (an unsupported language/runtime), the problem domain has fundamentally changed, or the architecture cannot meet new non-functional requirements no matter how it is restructured — and even then, prefer a strangler-fig incremental rewrite over a big-bang one."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A useful test: can you get to the target design through a sequence of small, behavior-preserving steps, each of which ships? If yes, refactor (possibly via strangler fig). If no path of small green steps exists, you may genuinely need a rewrite — but verify that claim hard before committing, because it is usually false."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "refactor-loop",
+      "title": "The Refactoring Loop: Small Verified Steps",
+      "type": "mermaid",
+      "content": "flowchart TD\n    A[Ensure tests are green] --> B[Make one tiny transformation]\n    B --> C{Tests still green?}\n    C -- yes --> D{Done?}\n    C -- no --> E[Revert the step]\n    E --> A\n    D -- no --> B\n    D -- yes --> F[Commit refactor]\n    style C fill:#1e3a5f,color:#fff"
+    },
+    {
+      "id": "strangler-fig-diagram",
+      "title": "Strangler Fig: Migrate One Slice at a Time Behind a Facade",
+      "type": "mermaid",
+      "content": "flowchart LR\n    Client --> Facade[Facade / Router]\n    Facade -- migrated slice --> New[New service]\n    Facade -- not yet migrated --> Old[Legacy monolith]\n    New -. shrinks .-> Old\n    style New fill:#1f5f2b,color:#fff\n    style Old fill:#5f1f1f,color:#fff"
+    },
+    {
+      "id": "two-hats",
+      "title": "Two Hats: Never Refactor and Add Behavior at Once",
+      "type": "ascii",
+      "content": "+-------------------+        +-------------------+\n|  REFACTORING HAT  |        |   FEATURE HAT     |\n|  structure changes|  XOR   |  behavior changes |\n|  tests STAY green  |        |  tests CHANGE/add |\n+-------------------+        +-------------------+\n         |                            |\n         +--- one commit each, never mixed ---+\n  Mixing them = cannot tell intended vs accidental behavior change"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-rf-definition",
+      "question": "What is the precise definition of refactoring, and what is the one invariant that must hold?",
+      "answer": "Refactoring is a change to the internal structure of software that makes it easier to understand and cheaper to modify without changing its observable (external) behavior. The single invariant is behavior preservation: for every observable input, the output and side effects must be identical before and after. That invariant is what separates refactoring from ordinary editing — it is a controlled, reversible transformation, not a place to fix bugs or add features. The practical consequence is that a refactor should leave your existing behavior tests passing unchanged; if a behavior test changes, you were not refactoring, you were changing behavior.",
+      "difficulty": "mid",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["definition", "behavior-preserving"],
+      "followUps": ["How do you prove behavior was preserved?", "Why keep refactors out of feature commits?"]
+    },
+    {
+      "id": "q-rf-smells",
+      "question": "What is a code smell, and can you name several with the refactoring that addresses each?",
+      "answer": "A code smell is a surface symptom that usually points to a deeper design problem; it is a heuristic that tells you where to look, not a rule that mandates action. Examples: Long Method -> Extract Method; Large Class -> Extract Class; Feature Envy (a method using another object's data more than its own) -> Move Method; Primitive Obsession (raw strings/ints for domain concepts) -> Replace Primitive with Value Object; Data Clumps (the same fields traveling together) -> Introduce Parameter Object; Switch-on-type repeated everywhere -> Replace Conditional with Polymorphism; Duplicated Code -> Extract Method / Pull Up. Two opposites worth contrasting: Shotgun Surgery (one change scattered across many classes — gather behavior together) versus Divergent Change (one class changing for many reasons — split it).",
+      "difficulty": "mid",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["code-smells", "catalog"],
+      "followUps": ["How do shotgun surgery and divergent change differ?", "When is a smell acceptable to leave?"]
+    },
+    {
+      "id": "q-rf-safety-net",
+      "question": "Why are tests called the safety net of refactoring, and what kind of tests work?",
+      "answer": "Tests are how you prove the behavior-preservation invariant. The refactoring loop is: confirm green, make one tiny transformation, re-run tests, proceed only if still green — so any mistake is caught within seconds and reverted cheaply, and you never debug a giant tangled change. For this to work the tests must be fast (so you run them after every small step) and must assert behavior through the public interface, not internal structure. Tests coupled to internal method names or mock-call sequences re-fail on every refactor and become an obstacle that teaches people to fear restructuring. For legacy code with no tests, you first write characterization tests to pin current behavior, then refactor underneath them.",
+      "difficulty": "mid",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["tests", "safety-net"],
+      "followUps": ["What makes a test obstruct refactoring?", "What are characterization tests?"]
+    },
+    {
+      "id": "q-rf-characterization",
+      "question": "What is a characterization test and why does it intentionally encode current behavior including bugs?",
+      "answer": "A characterization test (Michael Feathers' term) documents what a piece of code currently does, rather than what it should do. You run the code on a known input, observe the actual output, and assert exactly that — even if it looks wrong. The point is to create a safety net for legacy code that has none, so that any change you subsequently make shows up as a failing characterization test (a behavior diff). It deliberately pins bugs because during a refactor you must preserve behavior, and downstream code may unknowingly depend on the buggy behavior; changing it inside a refactor would be an unverified, invisible behavior change. The correct sequence is: characterize, refactor (preserving everything), and only then fix the bug as a separate, clearly-labelled change.",
+      "difficulty": "senior",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["characterization-tests", "legacy"],
+      "followUps": ["What is a 'seam' in Feathers' sense?", "How do sprout and wrap methods help?"]
+    },
+    {
+      "id": "q-rf-strangler",
+      "question": "Explain the Strangler Fig pattern and when you would choose it.",
+      "answer": "The Strangler Fig pattern (Martin Fowler) is an incremental migration strategy for large legacy systems. You place an interception layer — an HTTP router, proxy, or in-process facade — in front of the legacy system, then migrate one capability at a time to a new implementation behind that facade, routing just that slice to the new code while everything else still hits the old system. You verify each slice in production (often with dual-running / traffic mirroring) before flipping the route, repeat slice by slice, and finally delete the legacy path once no traffic reaches it. You choose it over a big-bang rewrite whenever the system is too large or business-critical to replace in one risky cutover: it ships value continuously, is reversible at every step, and never requires a high-stakes migration weekend.",
+      "difficulty": "senior",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["strangler-fig", "legacy", "migration"],
+      "followUps": ["How do you verify a migrated slice before cutover?", "What is the interception layer in practice?"]
+    },
+    {
+      "id": "q-rf-when-not",
+      "question": "When should you NOT refactor?",
+      "answer": "Refactoring has a cost (time, risk, review, merge conflicts) that must be justified by a payoff. Skip it when: the code is about to be deleted (no payoff); the code is ugly but genuinely never changes (the readability cost is rarely paid back); you are mid-incident and need to ship a hotfix (refactor later in a separate calm PR); there is a hard deadline and the refactor is not on the critical path; or you do not yet have a test net for legacy code (write characterization tests first, then refactor). The governing question is always 'will this code change again, and does the cleanup make that change cheaper or safer?' If the honest answer is no, leave it.",
+      "difficulty": "senior",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["when-not", "judgement"],
+      "followUps": ["How do you decide if code will change again?", "What is the campsite rule?"]
+    },
+    {
+      "id": "q-rf-small-steps",
+      "question": "Why take many small steps instead of one large refactor?",
+      "answer": "Small steps keep the system green and the change reversible at all times. After each tiny transformation you run the tests; if they fail, exactly one small change caused it, so you find and revert it in seconds rather than debugging a giant tangle. Small steps also keep the change reviewable and mergeable, and minimize the window in which you conflict with everyone else's work on the same files. A big-bang refactor, by contrast, is unreviewable, accumulates merge conflicts, cannot be partially shipped, and when something breaks you have no idea which of a thousand changes did it. The discipline of small green steps is precisely what makes refactoring low-risk rather than reckless.",
+      "difficulty": "mid",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["small-steps", "discipline"],
+      "followUps": ["How small is small enough?", "How does this interact with commit hygiene?"]
+    },
+    {
+      "id": "q-rf-tricky-rewrite",
+      "question": "Tricky: your team wants to rewrite a 'hopelessly messy' core service from scratch. Make the senior case against it.",
+      "answer": "A rewrite is rarely the win it feels like. First, the old code encodes years of accumulated bug fixes and edge-case knowledge that is invisible in the source but real (Joel Spolsky's 'things you can do to make code messy are also the things that fix bugs') — a rewrite reintroduces every one of those already-solved bugs. Second, a rewrite starts with zero test coverage and no production track record, so it is less trustworthy than the battle-tested mess it replaces. Third, it stalls feature delivery for months or years while the business waits, and rewrites notoriously over-run; many never ship. The behavior-preservation invariant is also lost by definition, so you cannot prove equivalence. The senior alternative is the Strangler Fig: migrate slice by slice behind a facade, each step tested, reversible, and shipping value — you get a clean implementation incrementally without the big-bang risk. Reserve a true rewrite for a dead platform or a fundamentally changed problem domain, and verify that claim hard, because it is usually false.",
+      "difficulty": "senior",
+      "category": "Engineering",
+      "tricky": true,
+      "tags": ["rewrite", "strangler-fig", "gotcha"],
+      "followUps": ["What conditions genuinely justify a rewrite?", "How does strangler fig give you the rewrite incrementally?"]
+    },
+    {
+      "id": "q-rf-tricky-bug-during",
+      "question": "Tricky: while refactoring you notice the original code has a bug. Do you fix it as part of the refactor?",
+      "answer": "No — fixing it inside the refactor is a trap, for two reasons. First, it breaks the behavior-preservation invariant: your refactor now changes observable behavior, so you can no longer use 'tests stayed green' as proof the structural change was safe, and an accidental regression elsewhere in the same change becomes indistinguishable from your intentional fix. Second, and more subtly, downstream code may depend on the buggy behavior (a caller that compensates for it, a report that expects the wrong number), so 'fixing' it can break things in non-obvious ways that need their own analysis. The correct sequence is: preserve the bug through the refactor (your characterization tests will even assert the buggy output), land the refactor green, then fix the bug as a separate, clearly-labelled commit with its own tests so the behavior change is visible and reviewable on its own.",
+      "difficulty": "senior",
+      "category": "Engineering",
+      "tricky": true,
+      "tags": ["bug", "behavior-preserving", "gotcha"],
+      "followUps": ["How do characterization tests handle a known bug?", "Why might downstream depend on a bug?"]
+    },
+    {
+      "id": "q-rf-tricky-tests-fail",
+      "question": "Tricky: you perform what you believe is a pure refactor and three tests turn red. What does that tell you, and what are the two possible causes?",
+      "answer": "Red tests after a 'pure' refactor mean one of exactly two things, and you must diagnose which before doing anything. Cause 1: your refactor was not actually behavior-preserving — you changed observable behavior by accident (reordered a side effect, dropped a branch, changed a default). In that case the test is correct and the refactor is wrong; revert or fix the transformation. Cause 2: the tests were over-specified — they asserted internal structure (a mock call sequence, a private method name) rather than observable behavior, so a legitimate behavior-preserving change broke them. In that case the test is the problem; it should be rewritten to assert outcomes through the public interface. The critical anti-pattern is to assume Cause 2 reflexively and 'fix' a genuine behavior test to make it pass — that silently ships the regression. Always confirm which cause it is by checking whether observable behavior truly changed before editing either side.",
+      "difficulty": "senior",
+      "category": "Engineering",
+      "tricky": true,
+      "tags": ["tests", "diagnosis", "gotcha"],
+      "followUps": ["How do you tell a behavior test from a structure test?", "Why is reflexively editing the test dangerous?"]
+    },
+    {
+      "id": "q-rf-make-change-easy",
+      "question": "What does Kent Beck mean by 'make the change easy, then make the easy change'?",
+      "answer": "It is a two-phase discipline for adding behavior to messy code. Phase one is a behavior-preserving refactor that reshapes the code so the desired feature becomes a small, obvious insertion rather than risky surgery — for example extracting functions so there is a clean place to hang the new logic. Phase two is the feature itself, which is now trivial. Beck adds the wry caveat 'warning: making the change easy can be hard.' The payoff is that the risky restructuring ships separately with all existing tests green (proving it changed nothing), and the behavior change is a tiny, isolated, easily reviewed diff. This separation is exactly what keeps both halves safe and is the everyday application of refactoring.",
+      "difficulty": "mid",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["kent-beck", "workflow"],
+      "followUps": ["Why ship the refactor separately?", "How does this relate to the two-hats rule?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-rf-replace-conditional",
+      "title": "Replace a Type Switch with Polymorphism",
+      "difficulty": "senior",
+      "category": "Engineering",
+      "prompt": "You are given a function that computes monthly pay using a switch over employee type, and the same switch shape is duplicated in three other functions (vacation days, bonus eligibility). Refactor `monthlyPay` to use Replace Conditional with Polymorphism so that adding a new employee type is a new class, not an edit to every switch. Behavior must be preserved: ENGINEER = base, MANAGER = base * 1.2, CONTRACTOR = base (no benefits). Original:\n\nfunction monthlyPay(emp) {\n  switch (emp.type) {\n    case 'ENGINEER':   return emp.base;\n    case 'MANAGER':    return emp.base * 1.2;\n    case 'CONTRACTOR': return emp.base;\n    default: throw new Error('unknown type');\n  }\n}",
+      "hints": [
+        "Create a class per employee type with a monthlyPay() method holding that variant's rule.",
+        "Use a small factory to map the legacy type string to the right class, so existing callers keep working.",
+        "Once polymorphic, the other duplicated switches (vacationDays, bonusEligible) become methods on the same classes."
+      ],
+      "solutionCode": "// Each variant owns its own behavior — no switch anywhere.\nclass Employee {\n  constructor(base) { this.base = base; }\n  monthlyPay() { throw new Error('abstract'); }\n}\n\nclass Engineer extends Employee {\n  monthlyPay() { return this.base; }\n}\n\nclass Manager extends Employee {\n  monthlyPay() { return this.base * 1.2; }\n}\n\nclass Contractor extends Employee {\n  monthlyPay() { return this.base; }\n}\n\n// Factory keeps legacy callers (which pass {type, base}) working,\n// isolating the ONE remaining place that knows about type strings.\nconst REGISTRY = {\n  ENGINEER: Engineer,\n  MANAGER: Manager,\n  CONTRACTOR: Contractor,\n};\n\nfunction toEmployee(emp) {\n  const Cls = REGISTRY[emp.type];\n  if (!Cls) throw new Error('unknown type');\n  return new Cls(emp.base);\n}\n\n// Backwards-compatible wrapper: same signature, same results as before.\nfunction monthlyPay(emp) {\n  return toEmployee(emp).monthlyPay();\n}\n\n// Adding INTERN is now a new class + one registry line; monthlyPay,\n// vacationDays, and bonusEligible are never touched again.\nclass Intern extends Employee {\n  monthlyPay() { return this.base * 0.5; }\n}\nREGISTRY.INTERN = Intern;\n\n// --- quick behavior-preservation check (characterization) ---\n// monthlyPay({type:'ENGINEER',   base:100}) === 100\n// monthlyPay({type:'MANAGER',    base:100}) === 120\n// monthlyPay({type:'CONTRACTOR', base:100}) === 100",
+      "solutionLanguage": "javascript",
+      "explanation": "This is the textbook Replace Conditional with Polymorphism refactoring. The type switch is replaced by a class hierarchy where each subclass holds exactly its own pay rule, so the conditional disappears. The single remaining place that maps the legacy `type` string to a class is the factory/registry — by funnelling all construction through it, the duplicated switches scattered across the codebase collapse into methods on the same classes (vacationDays(), bonusEligible() become overrides), which also cures the shotgun-surgery smell where adding a type forced edits to four functions. Behavior is preserved exactly: ENGINEER and CONTRACTOR return base, MANAGER returns base * 1.2, and an unknown type still throws — the inline characterization checks confirm equal outputs, which is the proof the transformation was a true refactor. The `monthlyPay(emp)` wrapper retains the original signature so no caller has to change in this step (keeping the change small and reversible); migrating callers to pass real Employee objects can be a later, separate refactor. Adding a new variant (Intern) is now additive — a new class plus one registry entry — satisfying open/closed without re-touching tested code.",
+      "relatedTopic": "core-refactorings"
+    },
+    {
+      "id": "ch-rf-characterize-then-extract",
+      "title": "Characterize Legacy Code, Then Extract Safely",
+      "difficulty": "senior",
+      "category": "Engineering",
+      "prompt": "You inherit an untested legacy function `priceOrder(qty, unitPrice, customerTier)` whose logic is tangled but in production. Before you can refactor it, write characterization tests that pin its CURRENT behavior, then perform a behavior-preserving Extract Method refactor that separates the discount calculation from the total. Legacy code:\n\nfunction priceOrder(qty, unitPrice, customerTier) {\n  let total = qty * unitPrice;\n  if (customerTier === 'gold') total = total - total * 0.10;\n  else if (customerTier === 'silver') total = total - total * 0.05;\n  if (qty >= 100) total = total - total * 0.02; // bulk, stacks on tier\n  return Math.round(total * 100) / 100;\n}",
+      "hints": [
+        "Run the function on representative inputs (each tier, the bulk boundary at qty=100) and assert exactly what it returns now.",
+        "Cover the stacking case (gold + bulk) and the rounding behavior, since those are the easy-to-break parts.",
+        "Only after the net is in place, extract a discountRate(...) helper — re-run the characterization tests to prove behavior is unchanged."
+      ],
+      "solutionCode": "// ---- Step 1: characterization tests (pin CURRENT behavior) ----\n// Computed by hand from the legacy code, asserted exactly.\n//   no tier, no bulk:   10 * 5            = 50.00\n//   gold:               50 * 0.90         = 45.00\n//   silver:             50 * 0.95         = 47.50\n//   bulk only (qty100): 100*5=500; *0.98  = 490.00\n//   gold + bulk:        500*0.90=450; *0.98 = 441.00\nimport { describe, it, expect } from 'vitest';\n\ndescribe('priceOrder characterization', () => {\n  it('no tier, below bulk', () => expect(priceOrder(10, 5, 'none')).toBe(50));\n  it('gold tier',          () => expect(priceOrder(10, 5, 'gold')).toBe(45));\n  it('silver tier',        () => expect(priceOrder(10, 5, 'silver')).toBe(47.5));\n  it('bulk boundary at 100',() => expect(priceOrder(100, 5, 'none')).toBe(490));\n  it('gold stacks with bulk',() => expect(priceOrder(100, 5, 'gold')).toBe(441));\n  it('just below bulk',    () => expect(priceOrder(99, 5, 'none')).toBe(495));\n});\n\n// ---- Step 2: behavior-preserving Extract Method refactor ----\nfunction tierRate(tier) {\n  if (tier === 'gold') return 0.10;\n  if (tier === 'silver') return 0.05;\n  return 0;\n}\n\nfunction bulkRate(qty) {\n  return qty >= 100 ? 0.02 : 0;\n}\n\nfunction priceOrder(qty, unitPrice, customerTier) {\n  let total = qty * unitPrice;\n  total = total - total * tierRate(customerTier); // same math, named\n  total = total - total * bulkRate(qty);          // bulk still stacks after tier\n  return Math.round(total * 100) / 100;\n}\n// Re-running the Step 1 tests: all still green -> behavior preserved.",
+      "solutionLanguage": "javascript",
+      "explanation": "The challenge demonstrates the legacy-refactoring discipline end to end. Step 1 builds the safety net: because the code has no tests, you cannot yet trust any change, so you write characterization tests that assert the exact current outputs — computed by hand to verify them: 10*5=50; gold 50*0.90=45; silver 50*0.95=47.50; bulk-only 100*5=500 then *0.98=490; and critically the stacking case gold+bulk = 500*0.90=450 then 450*0.98=441 (the discounts multiply sequentially, they do not add to 12%). The boundary cases qty=99 (no bulk, 495) and qty=100 (bulk applies) pin the off-by-one-prone bulk threshold. Step 2 is a pure Extract Method refactor: tierRate and bulkRate name the two discount concerns without changing the arithmetic or the order of application (tier first, then bulk, preserving the stacking), and rounding is untouched. Re-running the identical characterization tests and seeing them all green is the proof the structural change preserved behavior — the defining property of a true refactor. Note the tests deliberately encode the current stacking-discount design as-is; if a stakeholder later decides discounts should not stack, that is a separate, visible behavior change with its own test edits, never folded into this refactor.",
+      "relatedTopic": "characterization-legacy"
+    }
+  ],
+  "references": [
+    {"label": "Martin Fowler — Refactoring (book site & catalog)", "url": "https://refactoring.com/"},
+    {"label": "Martin Fowler — Refactoring catalog", "url": "https://refactoring.com/catalog/"},
+    {"label": "Martin Fowler — StranglerFigApplication", "url": "https://martinfowler.com/bliki/StranglerFigApplication.html"},
+    {"label": "Martin Fowler — CodeSmell", "url": "https://martinfowler.com/bliki/CodeSmell.html"},
+    {"label": "Michael Feathers — Working Effectively with Legacy Code", "url": "https://www.oreilly.com/library/view/working-effectively-with/0131177052/"},
+    {"label": "Joel Spolsky — Things You Should Never Do, Part I (rewrites)", "url": "https://www.joelonsoftware.com/2000/04/06/things-you-should-never-do-part-i/"}
+  ]
+}

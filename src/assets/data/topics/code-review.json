@@ -1,0 +1,507 @@
+{
+  "id": "code-review",
+  "title": "Code Review",
+  "category": "Engineering",
+  "subcategory": "Process",
+  "difficulty": "mid",
+  "tags": ["code-review", "process", "collaboration", "quality", "security", "feedback"],
+  "description": "A practical, mid-to-senior guide to code review as an engineering practice: what to look for, how to give and receive feedback without friction, sizing pull requests, balancing automation against human judgement, and the etiquette of approving and blocking.",
+  "estReadMinutes": 30,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Code review is the practice of having one or more engineers read a change before it merges, to catch defects, share context, and keep a codebase coherent. It is a human gate that sits after the automated gates (compile, lint, tests) and before integration. Done well it is the cheapest place in the lifecycle to catch a class of bugs and the most reliable way to spread knowledge across a team. Done badly it becomes a bottleneck, a source of resentment, and a rubber stamp that provides false confidence."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Primary goal: ship correct, maintainable changes — not to demonstrate the reviewer's cleverness.",
+            "Reviews are a conversation about the change, not a verdict on the author.",
+            "Automation handles the mechanical; humans handle design, intent, and trade-offs.",
+            "The author owns the change; the reviewer is accountable for the questions they did and did not ask."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Google's research on its own review process found the dominant benefit is not bug-finding but education and code-base consistency. Treat review primarily as a knowledge-transfer mechanism that also catches defects."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A change that merges is read far more often than it is written, and it constrains every future change in the same area. Review is the last point at which redesigning is cheap. It also distributes ownership: after a review, at least two people understand the code, which reduces the bus factor and means the on-call engineer at 3 a.m. is not seeing the code for the first time."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Defect cost: a logic bug caught in review costs minutes; the same bug in production can cost an incident, a rollback, and customer trust.",
+            "Shared context: reviewers learn the part of the system they review, so knowledge does not pool in one person.",
+            "Consistency: review keeps style, patterns, and architecture coherent so the codebase reads as if one careful person wrote it.",
+            "Mentorship: junior engineers level up faster from concrete feedback on real changes than from any course.",
+            "Audit trail: the review thread documents why a non-obvious decision was made, which is invaluable months later."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Review only pays off if it is fast. A review that sits for two days blocks the author, encourages giant batched changes, and trains people to route around the process. Aim to respond within one business day, ideally hours."
+        }
+      ]
+    },
+    {
+      "id": "what-to-look-for",
+      "heading": "What to Look For",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A useful review scans several axes in roughly this priority order. Correctness and design problems are expensive to fix later, so they come first; style is cheap and largely automatable, so it comes last (and ideally is delegated to a formatter)."
+        },
+        {
+          "type": "table",
+          "headers": ["Axis", "Question the reviewer asks", "Example finding"],
+          "rows": [
+            ["Correctness", "Does it do what it claims, including edge cases?", "Off-by-one on the last page of pagination; null not handled."],
+            ["Design", "Does it fit the existing architecture and abstractions?", "New direct DB call bypasses the repository layer."],
+            ["Readability", "Will the next engineer understand this in 6 months?", "A 40-line method that should be three named helpers."],
+            ["Tests", "Is the new behavior covered, including the failure paths?", "Happy path tested, the retry/timeout branch is not."],
+            ["Security", "Can untrusted input reach something dangerous?", "User input concatenated into a SQL string."],
+            ["Performance", "Will this scale at production data sizes?", "N+1 query inside a loop over orders."]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Read the change in context, not as an isolated diff. Pull the branch when the change is non-trivial; a diff hides whether a deleted call had side effects elsewhere or whether a new method duplicates an existing one two files away. Always check that tests actually exercise the new logic rather than merely existing."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Separate must-fix from nice-to-have. Prefix non-blocking comments with 'nit:' or 'optional:' so the author knows what gates the merge and what is a suggestion they may ignore."
+        }
+      ]
+    },
+    {
+      "id": "giving-receiving-feedback",
+      "heading": "Giving and Receiving Feedback",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Review comments are read by a person who just spent hours on the change. Tone determines whether the feedback lands or triggers defensiveness. Critique the code, never the author; ask questions instead of issuing decrees when you are not certain; and explain the why, because a reason teaches while a command only corrects."
+        },
+        {
+          "type": "heading",
+          "text": "Reframing comments to land well"
+        },
+        {
+          "type": "table",
+          "headers": ["Instead of", "Write"],
+          "rows": [
+            ["This is wrong.", "This breaks if `items` is empty — should we guard for that?"],
+            ["Why didn't you use a map here?", "A map keyed by id would make this O(1); was there a reason for the linear scan?"],
+            ["Bad naming.", "nit: `data` is vague here — maybe `pendingOrders`?"],
+            ["You always forget error handling.", "The network call here can throw; what should happen on timeout?"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Receiving feedback well is just as important and is a senior signal. Assume good intent, do not take comments personally, and answer the substance rather than defending the ego. If you disagree, say so with a technical reason — review is a discussion, and the author often has context the reviewer lacks. If a comment is unclear, ask; do not silently guess and re-push."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Praise costs nothing and changes behavior. A short 'nice — this is much clearer than the old version' tells the author what to keep doing and makes the next round of criticism easier to hear."
+        }
+      ]
+    },
+    {
+      "id": "pr-size-scope",
+      "heading": "Pull Request Size and Scope",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Small, focused pull requests are the single biggest lever on review quality. Review effectiveness drops sharply with size: studies and practitioner data converge on the same result — defect detection falls once a change exceeds roughly 200–400 lines, because reviewers skim. A 1,000-line PR almost always gets a rubber stamp."
+        },
+        {
+          "type": "list",
+          "items": [
+            "One PR should do one thing: a feature, a refactor, or a fix — not all three at once.",
+            "Separate mechanical changes (rename, reformat, move a file) from behavioral changes, ideally into different PRs, so reviewers are not hunting for the one real change among 800 whitespace diffs.",
+            "If a feature is large, ship it as a stack of small PRs behind a flag rather than one mega-merge.",
+            "A good PR description states intent, scope, how it was tested, and anything the reviewer should pay special attention to."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "A refactor mixed into a feature PR is dangerous: the reviewer cannot tell whether a behavior change was intentional or an accident of the refactor. Keep 'change behavior' and 'change structure' in separate commits at minimum, separate PRs ideally."
+        }
+      ]
+    },
+    {
+      "id": "automation-vs-human",
+      "heading": "Automation vs Human Judgement",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The cardinal rule: never spend human attention on what a machine can decide. Formatting, import ordering, trailing whitespace, basic lint rules, type errors, and obvious dead code should be enforced by tooling in CI and never appear as a review comment. Reserve the scarce, expensive resource — human judgement — for the things machines cannot assess: is this the right abstraction, does this match user intent, is this name clear, will an on-call engineer understand the failure mode."
+        },
+        {
+          "type": "table",
+          "headers": ["Delegate to automation", "Reserve for humans"],
+          "rows": [
+            ["Code formatting (Prettier, gofmt, Black)", "Is this the right design / abstraction?"],
+            ["Lint rules, type checks", "Does the code match the actual requirement?"],
+            ["Test execution and coverage gates", "Are these the right tests, testing real behavior?"],
+            ["Static analysis (SQLi, taint, secret scanning)", "Subtle logic and concurrency correctness"],
+            ["Dependency / vulnerability scanning", "Readability, naming, future maintainability"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Static analysis catches a wide net of mechanical security and correctness issues cheaply, but it has false positives and cannot reason about intent. It augments the reviewer; it does not replace them. A clean CI run is necessary, not sufficient, for approval."
+        }
+      ]
+    },
+    {
+      "id": "security-review",
+      "heading": "Security-Focused Review",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Every review is partly a security review. Trace untrusted input — request bodies, query params, headers, file uploads, third-party webhooks — to where it is used, and ask whether it can reach a dangerous sink: a database query, a shell command, a file path, an HTML response, or a deserialization call. The classic vulnerability classes are still the most common findings."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Injection: user input concatenated into SQL, shell, or template strings. The fix is parameterized queries / safe APIs, never string building.",
+            "Broken access control: an endpoint that returns object N without checking the caller owns N (insecure direct object reference).",
+            "Authentication / session: tokens logged, secrets hardcoded, missing expiry, comparing secrets with a non-constant-time `==`.",
+            "Cross-site scripting: user data rendered into HTML without escaping or via `innerHTML`/`dangerouslySetInnerHTML`.",
+            "Sensitive data exposure: PII or secrets in logs, error messages, or analytics events.",
+            "SSRF / path traversal: a user-controlled URL or filename used without allow-listing or normalization."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// DANGEROUS: user input flows straight into the query string.\nconst q = `SELECT * FROM users WHERE email = '${req.body.email}'`;\nawait db.query(q);  // ' OR '1'='1 ...  -> auth bypass / dump\n\n// SAFE: parameterized query — the driver separates code from data.\nawait db.query(\n  'SELECT * FROM users WHERE email = $1',\n  [req.body.email]\n);"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Authorization bugs rarely show up in tests because the happy-path user is authorized. In review, for every data-fetching endpoint explicitly ask: 'what stops user A from passing user B's id here?' If the answer is not in the diff, it is probably missing."
+        }
+      ]
+    },
+    {
+      "id": "review-example",
+      "heading": "A Worked Review",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Consider a small PR that adds an endpoint returning a user's invoices. The diff compiles, lint is green, and one happy-path test passes. A skimming reviewer approves. A careful reviewer reads it in context and finds three issues a machine would miss."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// The submitted change.\napp.get('/invoices/:id', async (req, res) => {\n  const invoice = await db.query(\n    `SELECT * FROM invoices WHERE id = ${req.params.id}`\n  );\n  res.json(invoice.rows[0]);\n});"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Security (blocking): `req.params.id` is interpolated into SQL — injection. Use a parameterized query.",
+            "Authorization (blocking): nothing checks that the logged-in user owns this invoice — any user can read any invoice by guessing ids. Add an ownership/role check.",
+            "Correctness (blocking): if no row matches, `rows[0]` is undefined and the response is `null` with a 200; it should 404.",
+            "nit (optional): the route should live in the invoices module with its siblings, not in the root app file."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// After review.\napp.get('/invoices/:id', requireAuth, async (req, res) => {\n  const { rows } = await db.query(\n    'SELECT * FROM invoices WHERE id = $1 AND owner_id = $2',\n    [req.params.id, req.user.id]\n  );\n  if (rows.length === 0) return res.sendStatus(404);\n  res.json(rows[0]);\n});"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "None of the three blocking issues would be caught by lint, formatting, or the single happy-path test. This is exactly the category of problem human review exists to catch."
+        }
+      ]
+    },
+    {
+      "id": "anti-patterns",
+      "heading": "Common Anti-Patterns",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Rubber-stamping: approving a large PR after a 30-second skim. It provides false confidence — worse than no review, because everyone believes it was checked.",
+            "Nitpicking: burying two real bugs under twenty style comments the formatter should have caught, so the author cannot see the signal for the noise.",
+            "Bikeshedding: spending the whole thread arguing about a variable name or tabs-vs-spaces while ignoring a concurrency bug, because trivial things are easy to have opinions about.",
+            "Ego review / power trip: using comments to show off or to gate-keep, rather than to improve the change.",
+            "Scope creep in review: demanding the author also fix unrelated pre-existing issues in the same PR, ballooning a small change.",
+            "Ghosting: leaving a PR unreviewed for days, blocking the author and pushing the team toward giant batched merges.",
+            "'Looks good to me' with no engagement: an approval that signals the reviewer did not actually read it."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Bikeshedding (Parkinson's law of triviality) is insidious because it feels productive. A 60-comment thread about naming can hide the fact that nobody verified the change is correct. If you catch the review drifting to trivia, explicitly redirect: 'naming aside, has anyone confirmed the retry logic terminates?'"
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices and Etiquette",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Review promptly — treat an open PR like a teammate waiting at your desk. Fast small reviews beat slow thorough ones.",
+            "Automate everything mechanical: formatter, linter, type check, tests, static analysis, secret scanning all run in CI before a human looks.",
+            "Distinguish blocking from non-blocking: use clear prefixes (nit:, optional:, question:, blocking:) so the author knows what gates the merge.",
+            "Explain the why behind every change request; a reason teaches and is easier to accept than a bare command.",
+            "Critique code, not people; ask questions when uncertain; assume the author had a reason.",
+            "Approve when the change is a net improvement and the remaining comments are non-blocking — do not hold a good change hostage to perfection.",
+            "Block only for real problems: correctness, security, data loss, or a design that will be expensive to undo. Say explicitly why it is blocking.",
+            "Keep PRs small and single-purpose so reviewers can actually reason about them."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Verdict", "When to use it", "How to phrase it"],
+          "rows": [
+            ["Approve", "Net improvement; no blocking issues remain.", "LGTM — left two optional nits, ship when ready."],
+            ["Approve with comments", "Good, but small fixes expected (you trust the author).", "LGTM once the null check is added; no need for re-review."],
+            ["Request changes / Block", "Correctness, security, or data-loss risk.", "Blocking: this query is injectable — needs parameterizing before merge."],
+            ["Comment (no verdict)", "Questions or you are not the right reviewer for the core.", "Not blocking — just curious why the retry count is 5?"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Adopt a lightweight checklist (correctness, tests, security, readability, design) so reviews are consistent across reviewers and nobody forgets the security pass on a busy day. The checklist is a floor, not a ceiling."
+        }
+      ]
+    },
+    {
+      "id": "note-culture",
+      "heading": "Note: Review Culture Beats Review Rules",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "No checklist saves a team whose culture treats review as combat. The healthiest teams share an implicit contract: authors send small, well-described changes and respond to feedback without defensiveness; reviewers respond fast, focus on what matters, and explain their reasoning. Disagreements are resolved on technical merit, and when stuck, the team escalates to a third engineer or a documented convention rather than letting the PR rot. Speed and kindness are not in tension with rigor — they are what make rigor sustainable."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A good north star, from Google's guidance: approve a change once it definitely improves the overall code health of the system, even if it is not perfect. Perfection is the enemy of a shipped improvement."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "review-lifecycle",
+      "title": "The Review Lifecycle: Automated Gates Then Human Gate",
+      "type": "mermaid",
+      "content": "flowchart TD\n    A[Author opens PR] --> B{CI: format, lint, types, tests}\n    B -- fails --> A\n    B -- passes --> C[Human review]\n    C -- request changes --> A\n    C -- approve --> D[Merge]\n    D --> E[Deploy]\n    style B fill:#1e3a5f,color:#fff\n    style C fill:#3f2b5f,color:#fff"
+    },
+    {
+      "id": "size-vs-quality",
+      "title": "Defect Detection Falls As PR Size Grows",
+      "type": "ascii",
+      "content": "defect\ndetection\n  ^\n  |  ****\n  |      *****\n  |           ****        (reviewers start skimming)\n  |               *****\n  |                    *********\n  +-----+-----+-----+-----+-----+----> lines changed\n        100   200   400   800  1600\n        ^ sweet spot: <= ~200-400 lines"
+    },
+    {
+      "id": "input-to-sink",
+      "title": "Security Review: Trace Untrusted Input to Dangerous Sinks",
+      "type": "mermaid",
+      "content": "flowchart LR\n    U[Untrusted input\\nbody / params / headers] --> V{Validated &\\nescaped?}\n    V -- no --> S1[SQL query]\n    V -- no --> S2[Shell command]\n    V -- no --> S3[HTML output]\n    V -- no --> S4[File path]\n    V -- yes --> OK[Safe use]\n    S1 --> X[Injection]\n    S2 --> X\n    S3 --> Y[XSS]\n    S4 --> Z[Path traversal]"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-cr-purpose",
+      "question": "What is the primary purpose of code review, and is it mainly to find bugs?",
+      "answer": "Code review has several goals, but bug-finding is usually not the dominant one in practice. Studies of large review programs (notably Google's) find the biggest measured benefits are knowledge sharing, code-base consistency, and education — review spreads understanding so knowledge does not pool in one engineer, and keeps the codebase reading as if one careful person wrote it. Defect detection is a real and valuable secondary benefit, especially for the class of bug that automated checks cannot catch (logic errors, missing edge cases, authorization gaps, bad abstractions). The mental model to hold is: review is a knowledge-transfer and consistency mechanism that also catches defects, not a QA replacement.",
+      "difficulty": "mid",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["purpose", "process"],
+      "followUps": ["How does review reduce the bus factor?", "Why isn't review a substitute for testing?"]
+    },
+    {
+      "id": "q-cr-what-to-look-for",
+      "question": "When reviewing a change, what axes do you check and in what priority order?",
+      "answer": "Roughly: correctness first, then design, then tests, then security, then readability, with style/formatting last (and ideally fully automated so it never appears in a comment). Correctness and design are checked first because they are the most expensive to fix after merge — a wrong abstraction constrains every future change. You verify the change does what it claims including edge cases, that it fits existing architecture and abstractions, that new behavior is genuinely covered by tests (not just that tests exist), that untrusted input cannot reach a dangerous sink, and that the next engineer will understand it in six months. Formatting and lint should be enforced by CI, never spent human attention on.",
+      "difficulty": "mid",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["checklist", "what-to-look-for"],
+      "followUps": ["Why is style last?", "How do you verify tests cover real behavior?"]
+    },
+    {
+      "id": "q-cr-pr-size",
+      "question": "Why does pull-request size matter so much for review quality?",
+      "answer": "Review effectiveness drops sharply as size grows because human attention does not scale linearly — past roughly 200–400 changed lines reviewers begin skimming, and detection of real defects falls off. A very large PR almost always receives a rubber stamp: it looks reviewed but was not. Small, single-purpose PRs let a reviewer hold the entire change in their head, reason about edge cases, and respond quickly, which also keeps the author unblocked. The practical guidance is one PR does one thing, mechanical changes (renames, reformats) are split from behavioral changes, and large features are shipped as a stack of small PRs behind a flag.",
+      "difficulty": "mid",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["pr-size", "scope"],
+      "followUps": ["How do you split a large feature into reviewable PRs?", "Why separate refactors from behavior changes?"]
+    },
+    {
+      "id": "q-cr-feedback",
+      "question": "How do you give review feedback that improves the code without creating friction?",
+      "answer": "Critique the code, never the author. Ask questions instead of issuing decrees when you are not certain ('was there a reason for the linear scan?' rather than 'use a map'). Always explain the why, because a reason teaches and is easier to accept than a bare command. Distinguish blocking issues from suggestions using clear prefixes (blocking:, nit:, optional:). Acknowledge good work — praise is cheap and reinforces behavior. Keep tone neutral and specific: 'this breaks if items is empty' lands far better than 'this is wrong'. The receiving side matters too: assume good intent, answer the substance, and raise a technical counter-argument if you disagree rather than silently complying.",
+      "difficulty": "mid",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["feedback", "communication"],
+      "followUps": ["How do you handle disagreement with a reviewer?", "What do you do when a comment is unclear?"]
+    },
+    {
+      "id": "q-cr-automation",
+      "question": "What should be automated in code review and what must stay human?",
+      "answer": "Automate everything mechanical and decidable: formatting, import ordering, lint rules, type checks, test execution and coverage gates, static analysis for taint/injection, secret scanning, and dependency vulnerability scanning. These run in CI before a human looks, so reviewers never waste comments on whitespace. Reserve human judgement for what machines cannot assess: whether the design and abstraction are right, whether the code matches the actual requirement and user intent, whether the tests test real behavior, subtle logic and concurrency correctness, and readability/naming/maintainability. A clean CI run is necessary but not sufficient for approval — it clears the mechanical floor so humans can focus on judgement.",
+      "difficulty": "mid",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["automation", "ci", "static-analysis"],
+      "followUps": ["Can static analysis replace a security reviewer?", "What is the cost of a false positive in CI?"]
+    },
+    {
+      "id": "q-cr-security",
+      "question": "What does a security-focused pass during code review involve?",
+      "answer": "Trace untrusted input (request bodies, params, headers, uploads, webhooks) to every place it is used, and ask whether it can reach a dangerous sink: a SQL query (injection), a shell command (command injection), HTML output (XSS), a file path (path traversal), a URL fetch (SSRF), or a deserializer. The fix for injection is always parameterized queries / safe APIs, never string building; for XSS it is contextual escaping; for path traversal it is normalization plus allow-listing. Critically, also check authorization on every data-fetching endpoint — ask 'what stops user A from passing user B's id?' — because access-control bugs almost never appear in happy-path tests where the user is already authorized.",
+      "difficulty": "mid",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["security", "injection", "authorization"],
+      "followUps": ["Why do authorization bugs evade tests?", "How do you spot an IDOR in a diff?"]
+    },
+    {
+      "id": "q-cr-approve-block",
+      "question": "When should you approve a change versus block it?",
+      "answer": "Approve when the change definitely improves the overall code health of the system and no blocking issues remain, even if it is not perfect — outstanding nits can be optional. Holding a clear improvement hostage to perfection is itself an anti-pattern. Block (request changes) only for real problems: a correctness bug, a security vulnerability, a data-loss risk, or a design that will be expensive to undo later. When you block, say explicitly that it is blocking and why, so the author understands the gate. For everything between, you can 'approve with comments' (trusting the author to apply small fixes without re-review) or leave non-blocking comments with no verdict.",
+      "difficulty": "mid",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["etiquette", "approve", "block"],
+      "followUps": ["What is 'approve with comments' good for?", "How do you avoid being the bottleneck?"]
+    },
+    {
+      "id": "q-cr-antipatterns",
+      "question": "Name the common review anti-patterns and why each is harmful.",
+      "answer": "Rubber-stamping: approving after a skim, giving false confidence that the code was checked — worse than no review. Nitpicking: burying real bugs under style comments the formatter should catch, drowning the signal. Bikeshedding (Parkinson's law of triviality): arguing endlessly about trivial, easy-to-opine-on things (naming, tabs) while ignoring hard correctness issues. Ego/power-trip review: using comments to show off or gate-keep rather than improve the change. Scope creep: demanding the author fix unrelated pre-existing issues in the same PR. Ghosting: leaving PRs unreviewed for days, blocking authors and encouraging giant batched merges. Each one either erodes trust, hides defects, or slows the team to the point people route around review entirely.",
+      "difficulty": "mid",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["anti-patterns", "bikeshedding", "nitpicking"],
+      "followUps": ["How do you redirect a bikeshedding thread?", "How can a checklist reduce rubber-stamping?"]
+    },
+    {
+      "id": "q-cr-tricky-clean-ci",
+      "question": "Tricky: CI is fully green — formatter, linter, type-check, and tests all pass. Is the change safe to approve?",
+      "answer": "No. Green CI clears the mechanical floor but is necessary, not sufficient. Automated checks cannot assess the things that matter most: whether the design is right, whether the code matches the actual requirement, whether the tests test real behavior or just exist, and whole classes of bugs they do not catch — authorization gaps (the happy-path test user is authorized, so an IDOR passes), logic and edge-case errors, race conditions, and bad abstractions that will be expensive to undo. A passing test suite can also be passing precisely because it omits the failure paths. The gotcha is conflating 'CI passed' with 'reviewed': CI tells you the change is not obviously broken; only human judgement tells you it is correct and well-designed.",
+      "difficulty": "senior",
+      "category": "Engineering",
+      "tricky": true,
+      "tags": ["ci", "gotcha", "false-confidence"],
+      "followUps": ["What bug classes does CI systematically miss?", "How do you review test quality, not just presence?"]
+    },
+    {
+      "id": "q-cr-tricky-disagree",
+      "question": "Tricky: you are the author, the reviewer requests a change you believe is wrong, and they will not budge. What do you do?",
+      "answer": "First separate fact from taste. If it is a factual/technical disagreement, present the concrete reasoning or evidence (a benchmark, a failing case the reviewer's approach causes, a documented convention) rather than restating your preference — the reviewer may have context you lack, and you may have context they lack, so surface it. If it is a matter of taste with no clear winner, defer to a team convention if one exists; the cost of churn usually exceeds the value of winning a style argument. If you are genuinely stuck on something that matters, escalate to a neutral third engineer or a tech lead and let the decision be made on technical merit and documented, rather than letting the PR rot or merging over an unresolved objection. What you should not do is silently comply against your judgement on a correctness matter, nor force the merge over a substantive objection.",
+      "difficulty": "senior",
+      "category": "Engineering",
+      "tricky": true,
+      "tags": ["disagreement", "escalation", "gotcha"],
+      "followUps": ["When is it right to defer to convention?", "How do you document a resolved disagreement?"]
+    },
+    {
+      "id": "q-cr-tricky-refactor-mixed",
+      "question": "Tricky: a PR mixes a large refactor with a behavior change and the diff is 900 lines. Why is this especially dangerous, beyond just being big?",
+      "answer": "Because the reviewer loses the ability to distinguish intentional behavior changes from accidental ones. In a pure refactor, the invariant is 'behavior is identical', so any observable change is a red flag the reviewer can catch. In a pure feature PR, every change is expected to alter behavior. Mix them, and a behavior change accidentally introduced by the refactor (a reordered call, a dropped branch, a subtly different default) is indistinguishable from the intended feature change — the reviewer cannot tell which diffs are supposed to change behavior, so accidental regressions sail through. The size compounds it (skimming), but the real hazard is the lost invariant. The fix is to land the refactor first as a behavior-preserving PR (ideally proven by unchanged tests), then the feature on top.",
+      "difficulty": "senior",
+      "category": "Engineering",
+      "tricky": true,
+      "tags": ["refactor", "scope", "gotcha"],
+      "followUps": ["How do unchanged tests help prove a refactor is safe?", "How would you split this PR?"]
+    },
+    {
+      "id": "q-cr-self-review",
+      "question": "What is the value of reviewing your own change before requesting review?",
+      "answer": "A self-review catches the embarrassing, cheap-to-fix issues before they cost a reviewer a round trip: leftover debug logs, commented-out code, a stray TODO, a test that was meant to be added, a file accidentally included. Reading your own diff in the review UI (not the editor) puts you in the reviewer's seat and surfaces unclear naming and missing context you were blind to while writing. It is also where you write a clear PR description and inline comments explaining non-obvious decisions, which dramatically speeds the human review. Teams that self-review first consistently have faster, higher-signal reviews because the reviewer's attention is spent on substance instead of cleanup.",
+      "difficulty": "junior",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["self-review", "pr-description"],
+      "followUps": ["What belongs in a good PR description?", "Why review the diff in the PR UI, not the editor?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-cr-find-the-bugs",
+      "title": "Review This Endpoint and List the Blocking Issues",
+      "difficulty": "mid",
+      "category": "Engineering",
+      "prompt": "You are reviewing a Node/Express endpoint that returns a document by id. CI is green (lint passes, one happy-path test passes). Identify every blocking issue and rewrite the handler to fix them. Original code:\n\napp.get('/docs/:id', async (req, res) => {\n  const id = req.params.id;\n  const doc = await db.query('SELECT * FROM docs WHERE id = ' + id);\n  res.json(doc.rows[0]);\n});",
+      "hints": [
+        "Trace the untrusted input (req.params.id) to where it is used — does it reach a SQL query unsanitized?",
+        "Ask 'what stops user A from reading user B's document?' — is there an ownership check?",
+        "What does rows[0] return if no row matches, and what status code does the client get?"
+      ],
+      "solutionCode": "// Blocking issues found in review:\n//  1. SQL injection: req.params.id is string-concatenated into the query.\n//  2. Broken access control (IDOR): no check that the caller owns the doc.\n//  3. Correctness: rows[0] is undefined on no match -> returns 200 with null.\n//  (nit, non-blocking: handler should live in the docs module, not app root.)\n\nconst express = require('express');\nconst app = express();\n\n// requireAuth populates req.user from a verified session/JWT (assumed middleware).\napp.get('/docs/:id', requireAuth, async (req, res) => {\n  // Fix 1: parameterized query — driver separates code from data.\n  // Fix 2: scope the row to the authenticated owner.\n  const { rows } = await db.query(\n    'SELECT * FROM docs WHERE id = $1 AND owner_id = $2',\n    [req.params.id, req.user.id]\n  );\n\n  // Fix 3: 404 when nothing matches (also avoids leaking existence to non-owners).\n  if (rows.length === 0) {\n    return res.sendStatus(404);\n  }\n\n  res.json(rows[0]);\n});\n\nmodule.exports = app;",
+      "solutionLanguage": "javascript",
+      "explanation": "The exercise demonstrates the bug classes human review exists to catch — none are caught by lint, formatting, or the single happy-path test. (1) SQL injection: concatenating req.params.id into the query string lets an attacker pass `1 OR 1=1` to dump the table or worse; the fix is a parameterized query ($1) so the driver treats the value as data, never code. (2) Insecure direct object reference: the original returns any document by id with no ownership check, so any authenticated (or unauthenticated) user can read others' documents; the fix adds requireAuth and scopes the WHERE clause to owner_id = req.user.id. (3) Correctness/leak: on no match, rows[0] is undefined and the original responds 200 with null; returning 404 is both correct and avoids leaking whether an id exists. The ownership-scoped query plus 404 also means a non-owner cannot distinguish 'does not exist' from 'not yours', closing an enumeration side channel. The misplaced-route comment is a non-blocking nit and must not gate the merge.",
+      "relatedTopic": "security-review"
+    },
+    {
+      "id": "ch-cr-rewrite-comments",
+      "title": "Rewrite Hostile Review Comments Into Constructive Ones",
+      "difficulty": "mid",
+      "category": "Engineering",
+      "prompt": "A reviewer left these comments on a PR. They are technically pointing at real issues but are phrased in a way that will create friction. Rewrite each so it critiques the code (not the author), explains the why, asks rather than decrees where appropriate, and signals whether it is blocking. Comments:\n  A) 'This is wrong.'\n  B) 'Why do you always forget error handling?'\n  C) 'Bad variable name.'\n  D) 'Nobody writes loops like this anymore, use a map.'",
+      "hints": [
+        "Name the concrete problem and the condition that triggers it instead of a bare verdict.",
+        "Attack the code path, not a personal habit ('you always...').",
+        "Use a prefix (nit:/blocking:/question:) so the author knows what gates the merge."
+      ],
+      "solutionCode": "// A) blocking, names the failing condition and asks for the guard:\n// \"blocking: this throws when `items` is empty because we index items[0]\n//  before the length check. Can we guard for the empty case and return [] ?\"\n\n// B) blocking but about the code path, no personal jab, states the why:\n// \"blocking: the network call on line 42 can reject (timeout / 5xx) and\n//  nothing catches it, so the request hangs. What should happen on failure\n//  here \\u2014 retry, or surface a 503 to the caller?\"\n\n// C) non-blocking nit with a concrete suggestion and rationale:\n// \"nit: `data` is hard to follow three screens down \\u2014 maybe `pendingOrders`\n//  so the type is obvious at the call site? Non-blocking.\"\n\n// D) question first (the author may have a reason), with the why:\n// \"A map keyed by id would make this lookup O(1) instead of the current\n//  O(n) scan inside the loop, which matters at our order volumes. Was there\n//  a reason for the linear search, or shall we switch it? (optional)\"\n\n// Principles applied to every rewrite:\n//  - critique the code, never the author (drop 'you always')\n//  - explain the why (teaches, and is easier to accept)\n//  - ask when uncertain; decree only when certain and it is blocking\n//  - prefix blocking vs nit/optional so the merge gate is unambiguous\nconst principles = [\n  'code-not-person',\n  'explain-why',\n  'ask-when-uncertain',\n  'label-blocking-vs-nit'\n];",
+      "solutionLanguage": "javascript",
+      "explanation": "Each rewrite applies the four constructive-feedback principles. (A) 'This is wrong' is a bare verdict that triggers defensiveness and gives the author nothing to act on; the rewrite names the exact failing condition (empty `items` indexed before the length check) and proposes the fix, and marks it blocking because it is a real bug. (B) 'why do you always forget' attacks a personal habit, which is both inaccurate and demoralizing; the rewrite targets the specific unhandled rejection on a specific line, explains the consequence (hung request), and asks for the intended failure behavior. (C) naming is a genuine but minor issue, so it is marked as a non-blocking nit with a concrete alternative and the reason (readability at the call site) — never block a good change on a name. (D) leads with a question because the author may have had a constraint, and supplies the performance rationale (O(1) vs O(n) at production volume) so the suggestion teaches rather than commands. The unifying idea: feedback lands when it is specific, reasoned, ego-free, and clearly labelled as blocking or optional.",
+      "relatedTopic": "giving-receiving-feedback"
+    }
+  ],
+  "references": [
+    {"label": "Google Engineering Practices — Code Review Developer Guide", "url": "https://google.github.io/eng-practices/review/"},
+    {"label": "Google — What to look for in a code review", "url": "https://google.github.io/eng-practices/review/reviewer/looking-for.html"},
+    {"label": "Google — The standard of code review", "url": "https://google.github.io/eng-practices/review/reviewer/standard.html"},
+    {"label": "OWASP Code Review Guide", "url": "https://owasp.org/www-project-code-review-guide/"},
+    {"label": "SmartBear — Best Practices for Peer Code Review", "url": "https://smartbear.com/learn/code-review/best-practices-for-peer-code-review/"},
+    {"label": "Conventional Comments (labelling review feedback)", "url": "https://conventionalcomments.org/"}
+  ]
+}
