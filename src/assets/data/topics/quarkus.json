@@ -1,0 +1,380 @@
+{
+  "id": "quarkus",
+  "title": "Quarkus",
+  "category": "Backend",
+  "subcategory": "Java Framework",
+  "difficulty": "senior",
+  "tags": ["quarkus", "graalvm", "native-image", "reactive", "kubernetes", "cdi", "panache", "mutiny"],
+  "description": "A Kubernetes-native Java framework that moves work from runtime to build time, producing tiny, fast-starting GraalVM native binaries ideal for serverless and high-density containers.",
+  "estReadMinutes": 28,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "What Quarkus Is",
+      "kind": "intro",
+      "blocks": [
+        {"type": "paragraph", "text": "Quarkus is a Java framework engineered from the ground up for GraalVM and HotSpot, optimized for cloud-native and serverless workloads. Its central thesis is unusual: instead of doing classpath scanning, annotation processing, proxy generation, and configuration parsing at application startup the way traditional Java frameworks do, Quarkus does as much of this as possible at build time. The result is a JAR (or native binary) that starts in tens of milliseconds and consumes a fraction of the memory of an equivalent Spring Boot service."},
+        {"type": "paragraph", "text": "It exposes a familiar, standards-based programming model: Jakarta CDI for dependency injection (via an implementation called Arc), JAX-RS for REST (via RESTEasy Reactive), Hibernate ORM with the Panache convenience layer, and the Mutiny reactive library. The novelty is not the APIs you write against — it is the compiler-like build pipeline underneath them."},
+        {"type": "callout", "variant": "info", "text": "Mental model: Quarkus treats your application like a compiler treats source code. Reflection, dynamic proxies, and config resolution that a normal framework defers to runtime are resolved during the Maven/Gradle build by Quarkus 'build steps' and recorded into bytecode that simply executes at boot."}
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {"type": "paragraph", "text": "The economics of running Java in containers changed when orchestration (Kubernetes) and serverless (Knative, AWS Lambda) made startup time and resident memory directly translate into cost and user-facing latency. A traditional Spring Boot service might need 300-500 MB of RSS and take 3-8 seconds to become ready. On a per-pod basis that is fine; at the scale of hundreds of microservices, or under scale-to-zero, it is expensive and slow."},
+        {"type": "list", "items": [
+          "Cold start: a native Quarkus app reaches first-request-served in ~15-50 ms, making Java viable on AWS Lambda and Knative scale-to-zero where JVM cold starts are otherwise prohibitive.",
+          "Density: native binaries commonly run in 30-90 MB RSS, so you can pack 5-10x more pods onto the same node, directly lowering cluster cost.",
+          "Developer velocity: live reload (dev mode) and Dev Services (auto-provisioned databases/brokers via Testcontainers) compress the inner loop dramatically.",
+          "No vendor lock-in on the API: you still write CDI, JAX-RS, and Hibernate, so the skills and code are portable."
+        ]},
+        {"type": "callout", "variant": "warning", "text": "Quarkus is not automatically the right choice. If your workload is a long-running, high-throughput monolith that is rarely restarted, JIT warmup on the JVM can beat native peak throughput, and the build complexity of native image may not pay off. Choose deliberately."}
+      ]
+    },
+    {
+      "id": "build-time-vs-runtime",
+      "heading": "Build-Time vs Runtime Processing",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "This is the single most important concept to understand about Quarkus, and the one most often missed in interviews. Traditional frameworks perform 'metadata processing' at startup: scan the classpath for annotated beans, build the DI container, generate JDK dynamic proxies, parse persistence units, and resolve configuration. Quarkus shifts almost all of this into the build via an extension SPI built on three phases."},
+        {"type": "heading", "text": "The three build phases"},
+        {"type": "list", "items": [
+          "Augmentation: extensions run build steps that read your code and config, produce 'build items', and ultimately emit recorded bytecode (via a Recorder) and reflection/resource metadata.",
+          "Static init: bytecode generated at build time runs once during native-image build or at JVM static-init, wiring up things that never change between runs (e.g. the DI container layout, Hibernate metamodel).",
+          "Runtime init: the small remainder that genuinely depends on the environment (e.g. a connection pool opening sockets) runs at actual startup."
+        ]},
+        {"type": "code", "language": "java", "code": "// A simplified Quarkus extension build step.\n// This runs during 'mvn package', NOT at app startup.\npublic class GreetingProcessor {\n\n    @BuildStep\n    FeatureBuildItem feature() {\n        return new FeatureBuildItem(\"greeting\");\n    }\n\n    // Records bytecode that will execute at static-init time.\n    @BuildStep\n    @Record(ExecutionTime.STATIC_INIT)\n    BeanContainerBuildItem configure(GreetingRecorder recorder,\n                                     GreetingConfig config) {\n        recorder.configureGreeting(config.message());\n        return new BeanContainerBuildItem();\n    }\n}\n\n@Recorder\npublic class GreetingRecorder {\n    public void configureGreeting(String message) {\n        // Code captured here is replayed; it is the 'output' of build.\n        GreetingHolder.MESSAGE = message;\n    }\n}"},
+        {"type": "callout", "variant": "success", "text": "Consequence: because the framework already 'knows' the answer at build time, native image (GraalVM closed-world) can prove which classes are reachable, eliminate dead code, and avoid most runtime reflection. That is why Quarkus native images are small and start instantly."}
+      ]
+    },
+    {
+      "id": "native-graalvm",
+      "heading": "Native Compilation with GraalVM",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "GraalVM's native-image performs ahead-of-time (AOT) compilation under a 'closed-world assumption': everything reachable must be known at build time. It runs a static reachability analysis (points-to analysis), initializes selected classes at build time, snapshots the heap, and emits a self-contained native executable plus a minimal substrate VM (garbage collector, threading) — no JVM required at runtime."},
+        {"type": "table", "headers": ["Aspect", "JVM (JIT)", "Native (AOT)"],
+          "rows": [
+            ["Startup", "Seconds (class load + JIT warmup)", "Tens of ms"],
+            ["Memory (RSS)", "200-500 MB typical", "30-90 MB typical"],
+            ["Peak throughput", "Higher after warmup (JIT)", "Lower; no profile-guided JIT by default"],
+            ["Build time", "Fast (seconds)", "Slow (1-5 min, memory-hungry)"],
+            ["Dynamic features", "Full reflection/proxies", "Must be registered explicitly"]
+          ]},
+        {"type": "code", "language": "bash", "code": "# Build a native binary. Requires GraalVM or uses a builder container.\n./mvnw package -Dnative\n\n# No local GraalVM? Build inside a container (reproducible, CI-friendly):\n./mvnw package -Dnative -Dquarkus.native.container-build=true\n\n# Run it: no JVM, just an OS process.\n./target/order-service-1.0.0-runner\n# __  ____  __  _____   ___  __ ____  ______\n# started in 0.021s. Listening on: http://0.0.0.0:8080"},
+        {"type": "callout", "variant": "warning", "text": "Native build is the slow, expensive step in CI. Keep it on a separate pipeline stage, cache the GraalVM toolchain, and give the builder generous memory (8 GB+). Most teams run JVM mode locally and native only on the release branch."}
+      ]
+    },
+    {
+      "id": "cdi-arc",
+      "heading": "CDI with Arc",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Arc is Quarkus's build-time CDI container. It implements a curated, performance-focused subset of Jakarta CDI. Crucially, the bean graph is resolved at build time: Arc generates concrete bytecode for each bean's instantiation and injection, so there is no runtime classpath scanning and far fewer dynamic proxies than a runtime container would create."},
+        {"type": "list", "items": [
+          "Bean discovery is build-time, so an unsatisfied or ambiguous dependency becomes a build failure, not a runtime exception. You catch wiring errors before deploy.",
+          "Unused beans are removed by default (dead-code elimination), shrinking the native image — a behavior you sometimes must override with @Unremovable.",
+          "Normal-scoped beans (@ApplicationScoped, @RequestScoped) still use client proxies, but they are generated subclasses, not JDK dynamic proxies — important for native image."
+        ]},
+        {"type": "code", "language": "java", "code": "@ApplicationScoped\npublic class PricingService {\n\n    private final TaxClient taxClient;\n\n    // Constructor injection is preferred and fully supported.\n    @Inject\n    public PricingService(TaxClient taxClient) {\n        this.taxClient = taxClient;\n    }\n\n    public BigDecimal priceWithTax(BigDecimal net, String region) {\n        return net.add(taxClient.taxFor(net, region));\n    }\n}\n\n// If a bean is only referenced reflectively/by name, Arc may remove it.\n// Force retention:\n@ApplicationScoped\n@Unremovable\npublic class AuditListener { /* ... */ }"},
+        {"type": "callout", "variant": "info", "text": "Because @ApplicationScoped beans are proxied, a final method on such a bean cannot be intercepted/overridden and may silently bypass the proxy. Avoid final on normal-scoped bean methods, or use @Singleton when you do not need a contextual proxy."}
+      ]
+    },
+    {
+      "id": "resteasy-reactive",
+      "heading": "RESTEasy Reactive and Mutiny",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "RESTEasy Reactive (now 'Quarkus REST') is a JAX-RS implementation built directly on the reactive Vert.x event loop. It does build-time processing of your resource methods so it knows, ahead of time, whether each endpoint is blocking or non-blocking and dispatches it on the correct thread. You write standard JAX-RS annotations but get reactive performance."},
+        {"type": "paragraph", "text": "Mutiny is the reactive API. It has exactly two types: Uni<T> (a lazy async value that emits one item or a failure) and Multi<T> (a stream of zero-to-many items). Mutiny's design philosophy is navigability — its fluent, event-driven API (uni.onItem().transform(...)) reads as English and avoids the operator soup of other reactive libraries."},
+        {"type": "code", "language": "java", "code": "@Path(\"/orders\")\npublic class OrderResource {\n\n    @Inject OrderRepository repo;\n\n    // Non-blocking: returns a Uni, runs on the event loop.\n    @GET\n    @Path(\"/{id}\")\n    public Uni<Order> get(@RestPath Long id) {\n        return repo.findById(id)\n                   .onItem().ifNull().failWith(NotFoundException::new);\n    }\n\n    // Streaming many items as Server-Sent Events.\n    @GET\n    @Path(\"/stream\")\n    @RestStreamElementType(MediaType.APPLICATION_JSON)\n    public Multi<Order> stream() {\n        return repo.streamAll();\n    }\n\n    // Explicitly blocking work is offloaded to a worker thread.\n    @POST\n    @Blocking\n    public Order create(Order o) {\n        return legacyBlockingService.persist(o);\n    }\n}"},
+        {"type": "callout", "variant": "danger", "text": "The cardinal sin in reactive Quarkus: doing blocking I/O (a JDBC call, Thread.sleep, a blocking HTTP client) on an event-loop thread. It stalls all requests sharing that loop. Either return a Uni/Multi backed by truly async I/O, or annotate the method @Blocking so Quarkus dispatches it to a worker pool."}
+      ]
+    },
+    {
+      "id": "panache",
+      "heading": "Hibernate ORM with Panache",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Panache is a thin, opinionated layer on top of Hibernate ORM that eliminates boilerplate. It offers two patterns you can choose per entity: the active-record pattern (the entity extends PanacheEntity and exposes static finders) and the repository pattern (a separate PanacheRepository<T> class). Both compile down to ordinary Hibernate; Panache rewrites your code at build time so that static field access and finder methods map to real queries."},
+        {"type": "code", "language": "java", "code": "// Active-record style: public fields + static finders.\n@Entity\npublic class Product extends PanacheEntity {  // gives you 'id' for free\n    public String sku;\n    public BigDecimal price;\n    public boolean active;\n\n    public static List<Product> findActiveBySku(String sku) {\n        // Named, parameterized query; safe against injection.\n        return list(\"active = true and sku = ?1\", sku);\n    }\n}\n\n// Usage reads almost like a DSL:\nProduct p = Product.findById(42L);\nlong cheap = Product.count(\"price < ?1\", new BigDecimal(\"9.99\"));\nProduct.update(\"active = false where price = 0\");"},
+        {"type": "code", "language": "java", "code": "// Repository style: better for testability and DI seams.\n@ApplicationScoped\npublic class OrderRepository implements PanacheRepository<Order> {\n\n    public List<Order> recentFor(Long customerId, int limit) {\n        return find(\"customerId = ?1 order by createdAt desc\", customerId)\n                .page(0, limit)\n                .list();\n    }\n}"},
+        {"type": "callout", "variant": "info", "text": "There is also a reactive Panache (PanacheEntityBase with Uni return types) backed by Hibernate Reactive over the non-blocking Vertx SQL client. Do not mix blocking Hibernate ORM and reactive Hibernate in the same persistence path — pick one model for a given service."}
+      ]
+    },
+    {
+      "id": "dev-mode-dev-services",
+      "heading": "Dev Mode, Live Reload, and Dev Services",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Dev mode (quarkus dev) is one of Quarkus's most loved features. It runs the app with a background compiler and a classloader that hot-swaps your changes on the next HTTP request — no restart, no redeploy. Because augmentation is fast, the perceived reload latency is sub-second for most edits. A continuous-testing pane re-runs affected tests as you save."},
+        {"type": "paragraph", "text": "Dev Services automatically provision the backing infrastructure your app needs during dev and test, using Testcontainers under the hood. If you depend on a datasource but provide no JDBC URL, Quarkus starts a throwaway PostgreSQL container and wires the connection in. The same applies to Kafka, Redis, Keycloak, and more."},
+        {"type": "code", "language": "bash", "code": "./mvnw quarkus:dev\n# Listening on: http://localhost:8080\n# Dev Services for default datasource (postgresql) started.\n#   container: postgres:16  ->  jdbc:postgresql://localhost:54213/quarkus\n#\n# Press [r] to resume testing, [d] for Dev UI, [h] for help\n# Edit a .java file, hit the endpoint -> change is live."},
+        {"type": "callout", "variant": "warning", "text": "Dev Services only activate when the relevant config (e.g. quarkus.datasource.jdbc.url) is absent. In CI or prod you must supply real connection config, otherwise Testcontainers will either fail (no Docker) or spin up an unwanted container. Gate prod config explicitly with %prod profiles."}
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: Lambda Cold-Start Rescue",
+      "kind": "example",
+      "blocks": [
+        {"type": "paragraph", "text": "Scenario: A payments team ran a fraud-scoring endpoint on AWS Lambda using Spring Boot on the JVM. P99 cold starts hit 6-9 seconds, tripping API Gateway's 29s budget under bursty traffic and causing intermittent 5xx during scale-out. Provisioned concurrency masked it but cost $4,100/month. They migrated the function to Quarkus native."},
+        {"type": "code", "language": "java", "code": "// Quarkus Lambda handler — same business logic, native-compiled.\npublic class FraudHandler implements RequestHandler<ScoreRequest, ScoreResponse> {\n\n    @Inject FraudScorer scorer;   // Arc injects at build-resolved wiring\n\n    @Override\n    public ScoreResponse handleRequest(ScoreRequest req, Context ctx) {\n        double risk = scorer.score(req.features());\n        return new ScoreResponse(risk, risk > 0.8 ? \"DECLINE\" : \"ALLOW\");\n    }\n}"},
+        {"type": "code", "language": "yaml", "code": "# template.yaml (SAM) — native binary in a custom runtime.\nResources:\n  FraudFunction:\n    Type: AWS::Serverless::Function\n    Properties:\n      Runtime: provided.al2023\n      Handler: not.used.in.native\n      MemorySize: 256        # was 1024 on JVM\n      CodeUri: target/function.zip\n      Architectures: [arm64] # Graviton: cheaper + good native perf"},
+        {"type": "list", "items": [
+          "Cold start dropped from ~7s to ~280 ms; provisioned concurrency was removed entirely.",
+          "Memory dropped from 1024 MB to 256 MB per invocation, cutting per-invocation cost ~60%.",
+          "Net monthly cost fell from ~$5,300 (incl. provisioned concurrency) to ~$900.",
+          "Trade-off: the native build added ~4 minutes to the release pipeline and required @RegisterForReflection on the Jackson DTOs (see mistakes section)."
+        ]},
+        {"type": "callout", "variant": "success", "text": "The win here was not raw throughput — it was eliminating cold-start tail latency and shrinking memory, the two things that dominate serverless cost and reliability."}
+      ]
+    },
+    {
+      "id": "mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {"type": "heading", "text": "1. Reflection that silently disappears in native image"},
+        {"type": "paragraph", "text": "A class deserialized by name, instantiated via reflection, or accessed by a library that does so will compile fine but throw ClassNotFoundException or return null fields at runtime in native mode. GraalVM's closed-world analysis dropped it because nothing statically referenced it. The fix is to register it for reflection."},
+        {"type": "code", "language": "java", "code": "// DTO populated by a reflective library (e.g. a custom mapper).\n// Works on JVM, fails (empty fields) in native unless registered.\n@RegisterForReflection\npublic class ScoreRequest {\n    public double[] features;\n    public String correlationId;\n}\n\n// Register third-party classes you don't own:\n@RegisterForReflection(targets = { com.vendor.sdk.Token.class,\n                                   com.vendor.sdk.Claims.class })\npublic class ReflectionConfig {}"},
+        {"type": "heading", "text": "2. Blocking the event loop"},
+        {"type": "paragraph", "text": "An endpoint returning a plain value but internally calling a blocking JDBC repository, while RESTEasy Reactive scheduled it on the event loop, throttled the whole service to a handful of concurrent requests. Quarkus actually warns about this ('You have attempted to perform a blocking operation on an IO thread'). Fix: add @Blocking or make the call truly reactive."},
+        {"type": "heading", "text": "3. Build-time vs runtime config confusion"},
+        {"type": "paragraph", "text": "Some Quarkus config is fixed at build time (e.g. which extensions/datasource kind are active) and cannot be changed by an environment variable at deploy time. Teams baked a build-time value into the native image, then tried to override it with an env var in prod and were baffled when it was ignored."},
+        {"type": "table", "headers": ["Config type", "When fixed", "Overridable at runtime?"],
+          "rows": [
+            ["quarkus.datasource.db-kind", "Build time", "No"],
+            ["quarkus.datasource.jdbc.url", "Runtime", "Yes (env var)"],
+            ["quarkus.http.port", "Runtime", "Yes"],
+            ["quarkus.package.type", "Build time", "No"]
+          ]},
+        {"type": "heading", "text": "4. Static initializers running too early"},
+        {"type": "paragraph", "text": "A class whose static block opened a network connection got initialized at native-image BUILD time, capturing a connection (or a random seed, or a timestamp) into the image heap. In prod every instance shared the stale/baked value. Fix: mark it --initialize-at-run-time via quarkus.native.additional-build-args, or restructure so I/O happens lazily."},
+        {"type": "callout", "variant": "danger", "text": "Golden rule for native debugging: if it works in JVM mode but breaks in native, suspect reflection, dynamic proxies, resources (files not bundled), JNI, or build-time class initialization — in that order."}
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {"type": "list", "items": [
+          "Develop and test in JVM mode for speed; reserve native builds for release pipelines and run a native integration test suite (@QuarkusIntegrationTest) so reflection gaps surface before prod, not after.",
+          "Prefer constructor injection and avoid final methods on normal-scoped beans so client proxies work correctly.",
+          "Keep endpoints honest about blocking: annotate @Blocking when you do blocking I/O, or go fully reactive with Mutiny + reactive datasources — never half-and-half on the event loop.",
+          "Register reflection proactively with @RegisterForReflection for any DTO touched by reflective serialization, and centralize third-party registrations in one config class.",
+          "Use config profiles (%dev, %test, %prod) and let Dev Services handle local/test infra, but always provide explicit %prod connection config.",
+          "Right-size native builds in CI: dedicated stage, container build for reproducibility, 8GB+ builder memory, and cache the Mandrel/GraalVM toolchain.",
+          "Target arm64/Graviton for native on AWS — it pairs well with Quarkus's low memory footprint and lowers cost."
+        ]},
+        {"type": "callout", "variant": "info", "text": "Adopt the rule: every PR runs JVM tests; the merge-to-main pipeline runs the native build plus native integration tests. This keeps the slow native step off the hot path while still catching native-only regressions."}
+      ]
+    },
+    {
+      "id": "spring-vs-quarkus",
+      "heading": "Choosing Quarkus vs Spring Boot",
+      "kind": "note",
+      "blocks": [
+        {"type": "paragraph", "text": "Both are excellent. The decision is about workload shape, team familiarity, and operational targets, not about which is 'better' in the abstract."},
+        {"type": "table", "headers": ["Dimension", "Spring Boot", "Quarkus"],
+          "rows": [
+            ["Startup / cold start", "Slower (runtime wiring)", "Very fast (build-time wiring)"],
+            ["Memory footprint", "Higher", "Lower"],
+            ["Native image", "Supported via Spring AOT/GraalVM, less mature", "First-class, mature"],
+            ["Ecosystem breadth", "Largest in Java", "Growing, MicroProfile + many extensions"],
+            ["Best fit", "Large monoliths, broad integrations, rich existing skills", "Serverless, k8s density, fast scale-to-zero"]
+          ]},
+        {"type": "list", "items": [
+          "Choose Quarkus when: serverless/Lambda cold start matters, you need high pod density on k8s, scale-to-zero is in play, or you want fastest possible boot.",
+          "Choose Spring Boot when: you depend on the breadth of the Spring ecosystem, your team is deeply invested, the service is a long-lived high-throughput monolith where JIT peak throughput wins, or native image is not a goal."
+        ]}
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "build-pipeline",
+      "title": "Build-time augmentation pipeline",
+      "type": "mermaid",
+      "content": "flowchart TD\n  A[Source code plus config] --> B[Maven build]\n  B --> C[Augmentation build steps]\n  C --> D[Recorders emit bytecode]\n  C --> E[Reflection and resource metadata]\n  D --> F[Static init bytecode]\n  E --> G[GraalVM native image]\n  F --> G\n  G --> H[Tiny native binary]\n  H --> I[Boot in ms on Kubernetes]"
+    },
+    {
+      "id": "reactive-dispatch",
+      "title": "RESTEasy Reactive thread dispatch",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n  participant C as Client\n  participant E as Event loop\n  participant W as Worker pool\n  participant D as Database\n  C->>E: GET /orders/42\n  E->>D: async query via Uni\n  D-->>E: row\n  E-->>C: 200 JSON\n  C->>E: POST /orders blocking\n  E->>W: offload Blocking method\n  W->>D: JDBC insert\n  D-->>W: ack\n  W-->>C: 201 Created"
+    },
+    {
+      "id": "native-layers",
+      "title": "Native binary layers vs JVM",
+      "type": "ascii",
+      "content": "  JVM mode                         Native mode\n  +------------------------+       +------------------------+\n  |  Your app bytecode     |       |  AOT-compiled machine  |\n  +------------------------+       |  code (your app)       |\n  |  Framework + libs      |       +------------------------+\n  +------------------------+       |  Substrate VM (GC,     |\n  |  HotSpot JVM (JIT)     |       |  threads) - minimal    |\n  +------------------------+       +------------------------+\n  |  OS                    |       |  OS                    |\n  +------------------------+       +------------------------+\n   ~300MB RSS, ~5s start            ~50MB RSS, ~30ms start"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-buildtime",
+      "question": "What is the core architectural idea that distinguishes Quarkus from traditional Java frameworks?",
+      "answer": "Quarkus shifts metadata processing from runtime to build time. Tasks that frameworks like Spring traditionally do at startup — classpath scanning, building the DI container, generating proxies, parsing persistence units, resolving config — are performed during the Maven/Gradle build by Quarkus extension 'build steps'. Those steps record bytecode and reflection metadata so that at actual startup the app just executes pre-computed wiring. This yields fast startup, low memory, and makes the closed-world GraalVM native image feasible because reachability is largely known ahead of time.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["build-time", "architecture"],
+      "followUps": ["What are the three init phases?", "Why does this help native image?"]
+    },
+    {
+      "id": "q-when-quarkus",
+      "question": "When would you choose Quarkus over Spring Boot, and when not?",
+      "answer": "Choose Quarkus when cold start and memory dominate: serverless/Lambda functions, Knative scale-to-zero, and high-density Kubernetes deployments where packing more pods per node lowers cost. Its native image support is first-class and mature. Avoid it (or weigh carefully) when you rely on the breadth of the Spring ecosystem, when your team is deeply Spring-experienced, or when the service is a long-lived high-throughput monolith where the JVM's JIT reaches higher peak throughput than a non-profiled native binary and rarely restarts so cold start is irrelevant. It is a workload-shape decision, not a quality ranking.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["spring-boot", "tradeoffs"],
+      "followUps": ["How does Graviton/arm64 factor in?", "What about native build time in CI?"]
+    },
+    {
+      "id": "q-arc",
+      "question": "What is Arc and how does its CDI differ from a runtime container?",
+      "answer": "Arc is Quarkus's build-time CDI (Jakarta CDI) implementation. The bean graph is resolved at build time and concrete instantiation/injection bytecode is generated, so there is no runtime classpath scanning. Consequences: unsatisfied or ambiguous dependencies fail the build rather than at runtime; unused beans are dead-code-eliminated by default (override with @Unremovable); and normal-scoped beans use generated subclass client proxies rather than JDK dynamic proxies, which is essential for native image.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["cdi", "arc"],
+      "followUps": ["Why can @Unremovable be necessary?", "What scopes use proxies?"]
+    },
+    {
+      "id": "q-mutiny",
+      "question": "Explain Mutiny's Uni and Multi and how they differ from CompletableFuture and Reactor.",
+      "answer": "Mutiny has two types: Uni<T> represents a single asynchronous result (one item or a failure, lazily evaluated), and Multi<T> represents a stream of 0..N items with backpressure. Unlike CompletableFuture (which is eager and only single-value with a thin API), Uni is lazy and only does work when subscribed. Unlike Reactor's large operator surface, Mutiny emphasizes a navigable, event-driven fluent API (uni.onItem().transform(...), uni.onFailure().recoverWithItem(...)) intended to be readable and discoverable. It integrates natively with Vert.x and RESTEasy Reactive.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["mutiny", "reactive"],
+      "followUps": ["When does a Uni actually execute?", "How is backpressure handled in Multi?"]
+    },
+    {
+      "id": "q-panache-patterns",
+      "question": "Compare Panache active-record and repository patterns. When would you pick each?",
+      "answer": "Active record: the entity extends PanacheEntity, exposes public fields and static finder methods (Product.findById, Product.list(...)). It is concise and great for simple domains. Repository: a separate class implements PanacheRepository<T> and holds the query methods, keeping the entity a plain data holder. Pick active record for speed and simplicity; pick repository when you want a clean DI seam for testing/mocking, separation of persistence from domain, or when entities are shared across modules and you do not want persistence logic on them. Both compile to ordinary Hibernate ORM.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["panache", "hibernate"],
+      "followUps": ["How does Panache handle id?", "Is there a reactive Panache?"]
+    },
+    {
+      "id": "q-dev-services",
+      "question": "What are Dev Services and how do they avoid surprising you in production?",
+      "answer": "Dev Services auto-provision backing infrastructure (PostgreSQL, Kafka, Redis, Keycloak, etc.) during dev and test using Testcontainers, but only when the relevant connection config is absent. So if you set no JDBC URL, Quarkus spins up a throwaway DB and wires it in. To avoid surprises in prod you must supply explicit connection config under the %prod profile; otherwise the build could try to launch Testcontainers (which fails without Docker) or activate unintended containers. Gating prod config explicitly is the safeguard.",
+      "difficulty": "junior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["dev-services", "testcontainers"],
+      "followUps": ["What triggers a Dev Service to start?", "How do profiles interact with it?"]
+    },
+    {
+      "id": "q-live-reload",
+      "question": "How does Quarkus dev mode achieve live reload without a full restart?",
+      "answer": "quarkus:dev runs the app with a background compiler and a dedicated classloader. On the next incoming HTTP request, Quarkus detects changed sources, recompiles only what changed, re-runs augmentation (which is fast), and hot-swaps the affected classes via the deployment classloader — no JVM restart. It also offers continuous testing that re-runs affected tests on save, and a Dev UI. The speed comes from augmentation being incremental and cheap.",
+      "difficulty": "junior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["dev-mode", "live-reload"],
+      "followUps": ["What gets re-run on each change?", "Does it restart the JVM?"]
+    },
+    {
+      "id": "q-native-throughput",
+      "question": "Native images start fast but can have lower peak throughput than the JVM. Why, and how do you mitigate it?",
+      "answer": "By default native (AOT) code has no profile-guided JIT, so it lacks the runtime optimizations HotSpot's C2 applies based on actual execution profiles. For a hot, long-running service the JVM can therefore reach higher steady-state throughput. Mitigations: use GraalVM Enterprise/Oracle PGO (profile-guided optimization) where you collect a profile and feed it back into the native build; tune the GC (e.g. G1 in native where available) and heap; or simply keep that service on the JVM if cold start and memory are not the constraints. The tradeoff is intentional: native optimizes startup and footprint over peak throughput.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["native", "performance"],
+      "followUps": ["What is PGO?", "When does JVM win?"]
+    },
+    {
+      "id": "q-reflection-pitfall",
+      "question": "TRICKY: A DTO works perfectly in JVM mode but comes back with null fields in native mode. What happened?",
+      "answer": "Under GraalVM's closed-world analysis, a class that is only ever accessed reflectively (e.g. populated by a reflective serializer/mapper, instantiated by name, or whose fields are set via reflection) is not seen as reachable in a way that preserves its members. Native-image either drops it or strips reflective access to its fields/constructor, so it instantiates an empty object. The fix is @RegisterForReflection on the DTO (or registering third-party targets via @RegisterForReflection(targets=...) / a reflection config). Many extensions auto-register their known types, which is why some serializers work without it and others do not — the gotcha is the custom/reflective path.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["native", "reflection", "registerforreflection"],
+      "followUps": ["How do you register classes you do not own?", "Why does Jackson sometimes work without it?"]
+    },
+    {
+      "id": "q-static-init",
+      "question": "TRICKY: A class baked a value (a timestamp / open connection / random seed) into the native image and every instance shares it. Why?",
+      "answer": "GraalVM initializes certain classes at build time and snapshots their static state into the image heap. If a class with a static initializer that opens a socket, reads the current time, or seeds a PRNG is initialized at build time, that side effect runs once during the native build and the captured object/value is frozen into the binary. Every running instance then sees the stale build-time value. Fix: force run-time initialization for that class via --initialize-at-run-time (set through quarkus.native.additional-build-args), or refactor so the I/O/time/seed happens lazily at first use rather than in a static block.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["native", "class-initialization", "footgun"],
+      "followUps": ["How do you force run-time init?", "Why is build-time init the default for some classes?"]
+    },
+    {
+      "id": "q-blocking-loop",
+      "question": "TRICKY: A reactive endpoint returns a plain Order and throughput collapses under load with a warning about IO threads. Diagnose and fix.",
+      "answer": "RESTEasy Reactive inspects the method at build time; a non-Uni/Multi return type that it deems non-blocking is dispatched on the Vert.x event loop. If that method internally performs blocking I/O (a JDBC/Panache blocking call, a blocking HTTP client, Thread.sleep), it stalls the event loop, which serves many connections, so concurrency collapses to roughly the number of event-loop threads. Quarkus emits 'attempted to perform a blocking operation on an IO thread'. Fixes: annotate the method @Blocking so it is offloaded to the worker pool, or make it genuinely non-blocking by returning a Uni/Multi backed by reactive datasources/clients. The subtle part is that the return type signals intent to the build-time dispatcher.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["reactive", "event-loop", "blocking"],
+      "followUps": ["How does Quarkus decide blocking vs non-blocking?", "What does @Blocking change?"]
+    },
+    {
+      "id": "q-buildtime-config",
+      "question": "TRICKY: An ops engineer sets QUARKUS_DATASOURCE_DB_KIND via env var in prod but it is ignored. Why?",
+      "answer": "quarkus.datasource.db-kind is a build-time fixed property. Quarkus resolves it during augmentation to decide which JDBC driver/extension behavior to bake into the artifact (especially the native image), so it cannot be changed by a runtime environment variable. Only runtime properties (like quarkus.datasource.jdbc.url, username/password, http.port) are overridable at deploy time. The fix is to set build-time properties at build time and only rely on env vars for runtime ones. Quarkus documents each property's phase; mixing them up is a classic deploy-time surprise.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["config", "build-time", "footgun"],
+      "followUps": ["Which properties are build-time?", "How do you tell from the docs?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-reactive-endpoint",
+      "title": "Build a non-blocking aggregation endpoint with Mutiny",
+      "difficulty": "senior",
+      "category": "Backend",
+      "prompt": "Implement a JAX-RS endpoint GET /customers/{id}/summary that, fully non-blocking on the event loop, fetches a customer and their recent orders in parallel, combines them into a CustomerSummary, and returns 404 if the customer does not exist. Use Mutiny Uni and reactive Panache repositories. Do not block the event loop.",
+      "hints": [
+        "Use Uni.combine().all().unis(...) to run the two lookups concurrently.",
+        "Reactive Panache returns Uni<T>; a missing customer resolves to null — handle it with onItem().ifNull().",
+        "Return Uni<CustomerSummary>; RESTEasy Reactive will serialize it on the event loop without @Blocking."
+      ],
+      "solutionCode": "@Path(\"/customers\")\n@Produces(MediaType.APPLICATION_JSON)\npublic class CustomerResource {\n\n    @Inject CustomerRepository customers;\n    @Inject OrderRepository orders;\n\n    @GET\n    @Path(\"/{id}/summary\")\n    public Uni<CustomerSummary> summary(@RestPath Long id) {\n        Uni<Customer> customerUni = customers.findById(id)\n            .onItem().ifNull()\n                .failWith(() -> new NotFoundException(\"customer \" + id));\n\n        Uni<List<Order>> ordersUni = orders.recentFor(id, 10);\n\n        // Run both concurrently, then combine without blocking.\n        return Uni.combine().all().unis(customerUni, ordersUni)\n            .asTuple()\n            .onItem().transform(t -> {\n                Customer c = t.getItem1();\n                List<Order> recent = t.getItem2();\n                BigDecimal total = recent.stream()\n                    .map(Order::getAmount)\n                    .reduce(BigDecimal.ZERO, BigDecimal::add);\n                return new CustomerSummary(c.id, c.name, recent.size(), total);\n            });\n    }\n}\n\n@ApplicationScoped\nclass CustomerRepository implements PanacheRepositoryBase<Customer, Long> {}\n\n@ApplicationScoped\nclass OrderRepository implements PanacheRepositoryBase<Order, Long> {\n    Uni<List<Order>> recentFor(Long customerId, int limit) {\n        return find(\"customerId = ?1 order by createdAt desc\", customerId)\n                .page(0, limit).list();\n    }\n}",
+      "solutionLanguage": "java",
+      "explanation": "The key design choices: (1) Return Uni<CustomerSummary> so RESTEasy Reactive keeps the request on the event loop and never offloads to a worker — there is no blocking call anywhere in the chain because reactive Panache uses the non-blocking Vert.x SQL client. (2) Uni.combine().all().unis(...) subscribes to both lookups concurrently rather than sequentially, halving latency versus chaining with flatMap. (3) onItem().ifNull().failWith(NotFoundException::new) turns a null result into a failure that RESTEasy Reactive maps to a 404 — handling the not-found case declaratively in the reactive pipeline instead of with an if-statement after blocking. (4) The reduce over recent orders is pure CPU work on already-fetched data, so it is safe inline. If any DB call were blocking JDBC instead of reactive, this whole approach would stall the event loop and we would instead need @Blocking with a worker pool.",
+      "relatedTopic": "quarkus"
+    },
+    {
+      "id": "ch-native-reflection",
+      "title": "Make a reflective DTO survive native compilation",
+      "difficulty": "mid",
+      "category": "Backend",
+      "prompt": "A service uses a custom mapper that populates POJOs via reflection (setting fields by name). The code works in JVM mode but in native mode the resulting objects have null fields. Fix it so the DTO and a third-party token class are correctly populated in native image, and explain how you would verify the fix in CI.",
+      "hints": [
+        "Reflection on a class only-accessed reflectively must be registered explicitly for native image.",
+        "Use @RegisterForReflection on classes you own; use the targets attribute for classes you do not.",
+        "Add a native integration test (@QuarkusIntegrationTest) so the regression is caught by the build, not in prod."
+      ],
+      "solutionCode": "// 1. DTO you own: annotate it directly.\n@RegisterForReflection\npublic class ScoreRequest {\n    public double[] features;\n    public String correlationId;\n}\n\n// 2. Third-party class you cannot annotate: register via targets.\n@RegisterForReflection(targets = { com.vendor.sdk.Token.class })\npublic class ReflectionConfig {\n    // empty marker class; existence registers the targets at build time\n}\n\n// 3. Native integration test that exercises the reflective path.\n//    Runs against the built artifact (native when -Dnative is set).\n@QuarkusIntegrationTest\nclass ScoreReflectionIT {\n\n    @Test\n    void requestIsFullyPopulatedInNative() {\n        ScoreRequest req =\n            given()\n                .contentType(\"application/json\")\n                .body(\"{\\\"features\\\":[0.1,0.9],\\\"correlationId\\\":\\\"abc\\\"}\")\n            .when()\n                .post(\"/score/echo\")\n            .then()\n                .statusCode(200)\n                .extract().as(ScoreRequest.class);\n\n        assertArrayEquals(new double[]{0.1, 0.9}, req.features);\n        assertEquals(\"abc\", req.correlationId); // would be null if unregistered\n    }\n}",
+      "solutionLanguage": "java",
+      "explanation": "GraalVM native-image uses a closed-world reachability analysis. A class that is only ever instantiated or field-mutated via reflection is not provably reachable through those members, so the analysis strips reflective access and you get an empty object. @RegisterForReflection records reflection metadata at build time (via a Quarkus build step) so the constructor and fields remain accessible reflectively in the native binary. For classes you do not own and therefore cannot annotate, the targets attribute on a small marker class registers them the same way. The verification strategy is the important senior detail: a plain @QuarkusTest runs in JVM mode and would pass even with the bug, hiding it; @QuarkusIntegrationTest runs against the actually-built artifact, so when the pipeline builds native (-Dnative) the test exercises the real native binary and asserts the fields are populated. Wiring that test into the merge-to-main pipeline turns a silent prod-only failure into a build failure.",
+      "relatedTopic": "quarkus"
+    }
+  ],
+  "references": [
+    {"label": "Quarkus Guides", "url": "https://quarkus.io/guides/"},
+    {"label": "Quarkus: Building a Native Executable", "url": "https://quarkus.io/guides/building-native-image"},
+    {"label": "Mutiny Reactive Library", "url": "https://smallrye.io/smallrye-mutiny/"},
+    {"label": "Simplified Hibernate ORM with Panache", "url": "https://quarkus.io/guides/hibernate-orm-panache"},
+    {"label": "GraalVM Native Image Reachability Metadata", "url": "https://www.graalvm.org/latest/reference-manual/native-image/metadata/"}
+  ]
+}

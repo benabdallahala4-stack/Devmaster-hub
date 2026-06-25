@@ -1,0 +1,464 @@
+{
+  "id": "system-design",
+  "title": "System Design",
+  "category": "Architecture",
+  "subcategory": "Interview",
+  "difficulty": "senior",
+  "tags": ["system-design", "scalability", "distributed-systems", "caching", "consistency", "interview"],
+  "description": "A staff-level walkthrough of the canonical system design interview problems — URL shortener, chat, payments, food delivery, and notifications — with requirements, architecture, data models, scaling, caching, and failure handling for each.",
+  "estReadMinutes": 32,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {"type": "paragraph", "text": "System design interviews are open-ended on purpose. There is no single correct answer — the interviewer is watching how you reason about trade-offs, how you scope ambiguity, and whether you can connect a back-of-the-envelope number to a concrete architectural decision. This guide treats each classic problem the way a staff engineer would on a whiteboard: start from requirements, derive a capacity estimate, sketch the high-level architecture, then pressure-test it against scale, caching, and failure."},
+        {"type": "paragraph", "text": "The five problems here — URL shortener, real-time chat, a payment system, food delivery, and a notification platform — are not random. Together they exercise nearly every primitive you need: stateless horizontal scaling, sticky stateful connections, strong vs. eventual consistency, geospatial indexing, idempotency, queues with retries, and exactly-once semantics. Master these and most variants reduce to recombinations of the same building blocks."},
+        {"type": "callout", "variant": "info", "text": "A reliable interview structure: (1) clarify functional + non-functional requirements, (2) estimate scale, (3) define the API, (4) draw the high-level diagram, (5) drill into the data model, (6) discuss scaling/caching/failure. Spend the first 5 minutes on requirements — candidates who skip this almost always design the wrong system."}
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {"type": "paragraph", "text": "The design decisions you make in an interview mirror the ones that cause real production incidents. Choosing the wrong consistency model loses money in a payment system. Fanning out a chat message naively melts your message broker. Picking a hash that collides corrupts URL shorteners. Interviews compress these consequences into 45 minutes, but the skill being tested — predicting how a system behaves under load and partial failure — is exactly what separates senior from staff."},
+        {"type": "list", "items": [
+          "Trade-off fluency: every choice (SQL vs NoSQL, sync vs async, strong vs eventual) has a cost; naming both sides signals seniority.",
+          "Capacity intuition: knowing that 1B reads/day is ~12k QPS average and 5-10x at peak tells you whether you need one box or a fleet.",
+          "Failure-first thinking: senior engineers design for the partition, the retry storm, and the poison message before the happy path.",
+          "Communication: a clear diagram and a crisp API contract are worth more than naming twelve AWS services."
+        ]},
+        {"type": "callout", "variant": "success", "text": "The hidden rubric in most companies grades on: requirements scoping, high-level design, deep-dive on one component, scaling, and trade-off justification. Hitting all five is what earns a 'strong hire'."}
+      ]
+    },
+    {
+      "id": "fundamentals",
+      "heading": "Cross-Cutting Fundamentals",
+      "kind": "concept",
+      "blocks": [
+        {"type": "heading", "text": "Capacity estimation"},
+        {"type": "paragraph", "text": "Reduce everything to QPS and bytes. A day has ~86,400 seconds, round to 100,000 for mental math. So 1 billion requests/day ≈ 10,000 QPS average. Apply a peak factor of 2-10x. For storage, multiply object size by write rate by retention. Always state your assumptions out loud — the number matters less than the reasoning."},
+        {"type": "table", "headers": ["Quantity", "Rule of thumb", "Example"], "rows": [
+          ["Requests/day to QPS", "divide by ~100k", "1B/day = 10k QPS avg"],
+          ["Peak QPS", "2-10x average", "10k avg = 50k peak"],
+          ["Storage/year", "size x write QPS x 31.5M s", "500B x 1k QPS = ~16 TB/yr"],
+          ["Read:write ratio", "drives caching", "100:1 means cache hard"]
+        ]},
+        {"type": "heading", "text": "CAP and consistency"},
+        {"type": "paragraph", "text": "Under a network partition you must choose: keep serving and risk stale/divergent data (AP), or reject requests to preserve correctness (CP). It is not a global setting — it is per-operation. A payment ledger write is CP; a chat presence indicator is AP. Latency vs. consistency (PACELC) is the everyday version of this trade-off even when there is no partition."},
+        {"type": "heading", "text": "Consistent hashing"},
+        {"type": "paragraph", "text": "Sharding by hash(key) % N reshuffles almost every key when N changes. Consistent hashing maps both nodes and keys onto a ring; adding a node only moves the keys between it and its predecessor — about 1/N of them. Virtual nodes (multiple ring positions per physical node) smooth out load imbalance and make heterogeneous hardware easy to weight."},
+        {"type": "heading", "text": "Load balancing"},
+        {"type": "list", "items": [
+          "L4 (TCP) balancers are cheap and protocol-agnostic; L7 (HTTP) balancers can route by path/header and terminate TLS.",
+          "Stateless services scale horizontally behind any LB; stateful (WebSocket) services need consistent-hash or session affinity.",
+          "Health checks + connection draining prevent routing to dying nodes; outlier detection ejects slow ones.",
+          "Prefer least-outstanding-requests over round-robin when request cost varies widely."
+        ]},
+        {"type": "callout", "variant": "warning", "text": "Caches introduce a new failure mode: the thundering herd. When a hot key expires, thousands of requests miss simultaneously and stampede the database. Mitigate with request coalescing (single-flight), staggered TTLs, or serving stale while revalidating."}
+      ]
+    },
+    {
+      "id": "url-shortener",
+      "heading": "Design a URL Shortener",
+      "kind": "concept",
+      "blocks": [
+        {"type": "heading", "text": "Requirements"},
+        {"type": "list", "items": [
+          "Functional: shorten a long URL to a short code, redirect a short code to the original, optional custom alias, optional expiry, click analytics.",
+          "Non-functional: redirects must be low latency (<50ms) and highly available; the read:write ratio is roughly 100:1 (everyone clicks, few create); codes must be non-guessable enough to not leak.",
+          "Scale assumption: 100M new URLs/year (~3 writes/s), 10B redirects/year (~300 reads/s, ~3k at peak)."
+        ]},
+        {"type": "heading", "text": "Encoding: base62 and collisions"},
+        {"type": "paragraph", "text": "A 7-character base62 code [a-zA-Z0-9] yields 62^7 ≈ 3.5 trillion combinations — plenty. There are two clean strategies. (1) Counter + base62: a globally unique 64-bit ID (from a sequence or a distributed ID generator) is encoded to base62; collisions are impossible by construction. (2) Hash + truncate: hash the URL (e.g. SHA-256), take the first 7 base62 chars, and handle the rare collision by re-hashing with a salt. The counter approach is preferred in interviews because it is collision-free and the only downside — sequential, guessable codes — is fixed by encoding a Snowflake-style ID or running the counter through a bijective scrambler."},
+        {"type": "code", "language": "typescript", "code": "const ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';\nconst BASE = 62n;\n\nexport function encodeBase62(id: bigint): string {\n  if (id === 0n) return ALPHABET[0];\n  let out = '';\n  while (id > 0n) {\n    out = ALPHABET[Number(id % BASE)] + out;\n    id = id / BASE;\n  }\n  return out;\n}\n\nexport function decodeBase62(code: string): bigint {\n  let id = 0n;\n  for (const ch of code) {\n    id = id * BASE + BigInt(ALPHABET.indexOf(ch));\n  }\n  return id;\n}\n// encodeBase62(125n) -> 'cb' ; collision-free because IDs are unique"},
+        {"type": "heading", "text": "Data model"},
+        {"type": "paragraph", "text": "The mapping table is tiny per-row and read-dominated: short_code (PK), long_url, created_at, expires_at, owner_id, click_count. Because lookups are always by primary key, a key-value store (DynamoDB, or Postgres with the code as PK) is ideal. Analytics events are write-heavy and append-only — stream them to Kafka and aggregate offline rather than incrementing a counter on the hot redirect path."},
+        {"type": "heading", "text": "Architecture, scaling, caching, failure"},
+        {"type": "list", "items": [
+          "Architecture: stateless API behind an L7 LB; a write service that mints IDs and persists the mapping; a read service that resolves codes and issues a 301/302.",
+          "Scaling: the write path is trivial (3/s); the read path scales horizontally and leans on cache. ID generation uses a Snowflake/range-allocator so there is no single counter bottleneck.",
+          "Caching: cache code -> URL in Redis with the popular long tail in memory. Hit rate is huge given Zipfian access. Use 302 (temporary) if you want to keep analytics control; 301 is faster but browsers cache it forever.",
+          "Failure: redirects are read-only and idempotent, so serve from a read replica or cache during a primary outage. The mapping is immutable once written, which makes replication and caching trivially safe."
+        ]},
+        {"type": "callout", "variant": "danger", "text": "Using hash(url) as the code seems elegant but makes the same URL always map to one code — which breaks per-user analytics and custom expiry, and a truncated hash WILL collide (birthday bound at ~62^3.5 for a 7-char code). Always have an explicit collision-resolution path or use a unique-ID source."}
+      ]
+    },
+    {
+      "id": "chat-system",
+      "heading": "Design a Real-Time Chat System",
+      "kind": "concept",
+      "blocks": [
+        {"type": "heading", "text": "Requirements"},
+        {"type": "list", "items": [
+          "Functional: 1:1 and group messaging, delivery + read receipts, online/offline presence, message history, push to offline users.",
+          "Non-functional: low end-to-end latency (<200ms), ordered delivery within a conversation, at-least-once delivery with client-side dedup, horizontal scale to millions of concurrent connections.",
+          "Scale assumption: 50M DAU, 10M concurrent sockets, 40B messages/day (~500k writes/s peak)."
+        ]},
+        {"type": "heading", "text": "Connections and the gateway tier"},
+        {"type": "paragraph", "text": "Clients hold a persistent WebSocket to a stateful gateway. Because a socket is pinned to one gateway box, you need a session registry (user_id -> gateway_id) in Redis so any service can find where a user is connected. The gateway is intentionally dumb: it terminates the socket, authenticates, and hands messages to the message service over an internal queue. This separation lets you scale connection capacity independently of message processing."},
+        {"type": "heading", "text": "Fan-out: write vs read"},
+        {"type": "paragraph", "text": "When Alice sends to a 100-person group, do you fan out on write (push the message into each recipient's inbox immediately) or on read (store once, recipients pull on connect)? Fan-out-on-write gives instant delivery and simple reads but explodes for huge groups (the celebrity/large-channel problem). Fan-out-on-read is cheap to write but slow and chatty to read. The pragmatic answer is hybrid: fan-out-on-write for small conversations and online users; fan-out-on-read for large channels and offline catch-up."},
+        {"type": "code", "language": "typescript", "code": "async function deliver(msg: ChatMessage, recipients: string[]) {\n  // Persist once for history + ordering (monotonic per-conversation seq)\n  const seq = await store.appendMessage(msg.conversationId, msg);\n  msg.seq = seq;\n\n  for (const userId of recipients) {\n    const gatewayId = await sessionRegistry.get(userId); // Redis\n    if (gatewayId) {\n      // online: push via the gateway that owns the socket\n      await broker.publish(`gw.${gatewayId}`, { userId, msg });\n    } else {\n      // offline: queue a push notification, deliver on reconnect\n      await pushQueue.enqueue({ userId, msg });\n    }\n  }\n}"},
+        {"type": "heading", "text": "Data model, presence, scaling, failure"},
+        {"type": "list", "items": [
+          "Data model: messages partitioned by conversation_id, clustered by a per-conversation sequence number for ordering. Use Cassandra/ScyllaDB for the write-heavy append workload. A separate inbox/cursor table tracks each user's last-read seq for unread counts.",
+          "Presence: heartbeat over the socket every ~30s; store presence as a Redis key with a TTL slightly longer than the interval. No heartbeat -> key expires -> offline. This is an AP problem — a few seconds of stale presence is fine.",
+          "Scaling: gateways scale by adding boxes behind a consistent-hash LB; the message broker (Kafka/Redis Streams) partitions by conversation to preserve order; storage shards by conversation_id.",
+          "Failure: on gateway crash, clients reconnect (with backoff) and replay from their last-acked seq, so at-least-once + client dedup gives no data loss. Idempotent message IDs (client-generated UUID) dedup retries."
+        ]},
+        {"type": "callout", "variant": "warning", "text": "Ordering only needs to hold within a conversation, not globally. Trying to enforce a single global order across all messages is a classic over-engineering trap that kills throughput. Partition by conversation_id and you get order for free per partition."}
+      ]
+    },
+    {
+      "id": "payment-system",
+      "heading": "Design a Payment System",
+      "kind": "concept",
+      "blocks": [
+        {"type": "heading", "text": "Requirements"},
+        {"type": "list", "items": [
+          "Functional: charge a customer, transfer funds, record every money movement, refunds, reconciliation with external processors.",
+          "Non-functional: correctness over availability (CP), no double-charge, exactly-once effect on the ledger, full auditability, and the ability to replay/reconcile after any failure.",
+          "Scale assumption: lower QPS than other systems (~thousands/s) but zero tolerance for lost or duplicated money."
+        ]},
+        {"type": "heading", "text": "Idempotency keys"},
+        {"type": "paragraph", "text": "Networks retry. A client that times out will resend the same charge, and a naive system double-charges. The fix is an idempotency key: the client generates a UUID per logical payment and sends it on every retry. The server stores the key with the result; a retry with a seen key returns the original result instead of re-executing. The key must be persisted atomically with the charge in the same transaction, otherwise a crash between insert and charge reopens the double-spend window."},
+        {"type": "code", "language": "sql", "code": "-- Atomically claim the idempotency key and the charge in ONE transaction\nBEGIN;\n  INSERT INTO idempotency_keys (key, request_hash, status)\n  VALUES ($1, $2, 'in_progress')\n  ON CONFLICT (key) DO NOTHING;          -- second caller inserts 0 rows\n\n  -- If 0 rows affected, a concurrent/previous request owns this key:\n  -- read and return its stored response instead of charging again.\n\n  INSERT INTO ledger_entries (txn_id, account_id, amount, direction)\n  VALUES ($3, $4, $5, 'debit'),         -- double-entry: debit + credit\n         ($3, $6, $5, 'credit');         -- must sum to zero\nCOMMIT;"},
+        {"type": "heading", "text": "Ledger and exactly-once"},
+        {"type": "paragraph", "text": "Model money as an immutable, append-only double-entry ledger: every transaction writes balanced debit/credit rows that sum to zero, and balances are derived by summing entries (snapshotted periodically for speed). You never UPDATE a balance in place — you append. 'Exactly-once' in a distributed system is really at-least-once delivery + idempotent processing: the external processor call may be retried, but the idempotency key plus a unique constraint on (txn_id) ensures the ledger effect happens once. Reconciliation jobs compare your ledger against the processor's settlement file to catch any drift."},
+        {"type": "heading", "text": "Double-spend, scaling, failure"},
+        {"type": "list", "items": [
+          "Double-spend prevention: a balance check and debit must be atomic. Use SELECT ... FOR UPDATE row locks or an optimistic-concurrency version column so two concurrent withdrawals can't both pass the check.",
+          "Outbox pattern: to call the external processor reliably, write an outbox row in the same DB transaction, then a relay publishes it. This avoids the dual-write problem of committing the ledger but losing the processor call (or vice versa).",
+          "Scaling: shard by account_id; cross-account transfers use a saga or two-phase pattern. Throughput is modest, so favor strong consistency over partitioning aggressively.",
+          "Failure: every external call is retried with the same idempotency key; a state machine (pending -> authorized -> captured -> settled) makes recovery deterministic. Reconciliation is the safety net of last resort."
+        ]},
+        {"type": "callout", "variant": "danger", "text": "Storing money as a float is a fire-able offense. 0.1 + 0.2 != 0.3 in IEEE-754. Use integer minor units (cents) or an exact decimal type, and always pin the currency. Rounding errors in a ledger compound into reconciliation nightmares."}
+      ]
+    },
+    {
+      "id": "food-delivery",
+      "heading": "Design a Food Delivery System",
+      "kind": "concept",
+      "blocks": [
+        {"type": "heading", "text": "Requirements"},
+        {"type": "list", "items": [
+          "Functional: browse nearby restaurants, place an order, match the order to a courier, dispatch and track the courier in real time, ETA.",
+          "Non-functional: low-latency geo queries, near-real-time courier location updates, fair + efficient matching, resilient to courier/restaurant outages.",
+          "Scale assumption: millions of couriers each emitting a GPS ping every 3-5s (~hundreds of thousands of location writes/s), spiky demand at meal times."
+        ]},
+        {"type": "heading", "text": "Geospatial indexing"},
+        {"type": "paragraph", "text": "Finding 'couriers within 2km of this restaurant' efficiently requires a spatial index. Two common approaches: geohashing (encode lat/lng into a string prefix where shared prefixes mean spatial proximity — query neighbors by prefix) or hierarchical cells like Uber's H3 hexagons / Google S2. Couriers' live locations live in Redis (GEOADD / GEOSEARCH) for sub-millisecond radius queries; the source-of-truth trip data lives in a durable store."},
+        {"type": "code", "language": "typescript", "code": "// Redis-backed live courier index (GEO commands use a sorted set internally)\nasync function updateCourier(id: string, lng: number, lat: number) {\n  await redis.geoadd('couriers:live', lng, lat, id);\n  await redis.expire(`courier:${id}:ttl`, 30); // stale couriers drop out\n}\n\nasync function nearbyCouriers(lng: number, lat: number, radiusKm = 3) {\n  // returns ids sorted by distance, with distance attached\n  return redis.geosearch(\n    'couriers:live',\n    'FROMLONLAT', lng, lat,\n    'BYRADIUS', radiusKm, 'km',\n    'ASC', 'WITHDIST', 'COUNT', 20\n  );\n}"},
+        {"type": "heading", "text": "Matching and dispatch"},
+        {"type": "paragraph", "text": "Matching is an optimization, not a simple nearest-neighbor lookup. The dispatch service scores candidate couriers by ETA-to-restaurant, current load, direction of travel, and acceptance probability, then offers the order. Offers are time-boxed: a courier has N seconds to accept before the system re-offers to the next candidate. Batching offers over short windows (a few seconds) lets the matcher solve a small assignment problem (Hungarian algorithm) rather than greedily, improving global efficiency. The dispatch state machine (created -> offered -> accepted -> picked_up -> delivered) drives the whole lifecycle."},
+        {"type": "heading", "text": "Data model, scaling, failure"},
+        {"type": "list", "items": [
+          "Data model: orders and trips in a transactional store (Postgres), restaurant catalog in a read-optimized store with a search index, live locations in Redis GEO, historical pings streamed to a time-series/columnar store for analytics.",
+          "Scaling: partition geo workloads by region/city so each city is an independent shard; location pings go through a high-throughput ingest pipeline (Kafka) decoupled from matching.",
+          "Caching: restaurant menus and availability are read-heavy and cached aggressively with short TTLs; ETA models are precomputed per cell.",
+          "Failure: if a courier app drops, the TTL on their live key removes them from matching automatically. An offer that times out re-dispatches. Idempotent order creation (client request id) prevents duplicate orders on retry."
+        ]},
+        {"type": "callout", "variant": "warning", "text": "Greedy nearest-courier matching looks fine in a demo and starves the system under load — it can send a courier away from a denser cluster, leaving a high-demand area uncovered. Even a small batching window dramatically improves fleet utilization."}
+      ]
+    },
+    {
+      "id": "notification-platform",
+      "heading": "Design a Notification Platform",
+      "kind": "concept",
+      "blocks": [
+        {"type": "heading", "text": "Requirements"},
+        {"type": "list", "items": [
+          "Functional: send notifications across multiple channels (push, SMS, email, in-app), templating, user preferences/opt-out, scheduling.",
+          "Non-functional: high throughput, per-user and per-channel rate limiting, at-least-once delivery with dedup, graceful handling of flaky downstream providers, observability.",
+          "Scale assumption: bursty — a single broadcast can enqueue tens of millions of notifications in seconds."
+        ]},
+        {"type": "heading", "text": "Queue-based pipeline"},
+        {"type": "paragraph", "text": "A notification request is accepted fast and processed asynchronously. The API validates, applies user preferences and dedup, then enqueues a job. Channel-specific workers pull from per-channel queues so a slow SMS provider never blocks email. This decoupling is what lets you absorb a 10M-message burst: the queue is the shock absorber. Templates are rendered at send time so content can change without re-enqueuing."},
+        {"type": "heading", "text": "Rate limiting, retries, and DLQ"},
+        {"type": "paragraph", "text": "Two kinds of rate limiting matter: user-facing (don't send a user 50 emails an hour) and provider-facing (respect the SMS gateway's TPS quota or you get throttled/banned). A token-bucket per user and per provider handles both. Downstream providers fail transiently, so workers retry with exponential backoff + jitter. After a max retry count, the message goes to a dead-letter queue (DLQ) for inspection rather than being dropped or retried forever — the DLQ is your safety net against poison messages and lets you replay after fixing a bug."},
+        {"type": "code", "language": "typescript", "code": "async function processNotification(job: NotificationJob) {\n  if (await dedup.seen(job.idempotencyKey)) return;        // at-least-once dedup\n  if (!(await userBucket.allow(job.userId))) return defer(job);\n  if (!(await providerBucket.allow(job.channel))) return requeueLater(job);\n\n  try {\n    await providers[job.channel].send(renderTemplate(job));\n    await dedup.mark(job.idempotencyKey);\n  } catch (err) {\n    if (job.attempts >= MAX_RETRIES || isPermanent(err)) {\n      await dlq.publish(job, err);                          // poison -> DLQ\n    } else {\n      const delay = backoffWithJitter(job.attempts);\n      await queue.requeue(job, delay);\n    }\n  }\n}"},
+        {"type": "heading", "text": "Data model, scaling, failure"},
+        {"type": "list", "items": [
+          "Data model: a notifications table (status, channel, attempts, timestamps) for auditing; user preferences keyed by user_id+category; templates versioned for safe rollouts.",
+          "Scaling: per-channel worker pools scale independently; the queue partitions by user_id to keep per-user ordering and make rate-limit state local.",
+          "Caching: user preferences and rendered templates are cached; provider health/circuit state is shared via Redis.",
+          "Failure: circuit breakers stop hammering a dead provider; backoff+jitter prevents synchronized retry storms; the DLQ preserves failed messages for replay; idempotency keys prevent duplicate sends on retry."
+        ]},
+        {"type": "callout", "variant": "danger", "text": "Retrying without jitter creates a thundering-herd retry storm: thousands of workers back off by the same fixed interval and hit the recovering provider simultaneously, knocking it down again. Always add randomized jitter to backoff."}
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: The Black Friday Notification Meltdown",
+      "kind": "example",
+      "blocks": [
+        {"type": "paragraph", "text": "A real-world flavor of how these pieces fail together. A retail company queued a 20M-recipient 'flash sale' push notification at 9:00am. The notification platform accepted it in seconds — the queue did its job. But two design gaps turned a routine broadcast into a two-hour incident."},
+        {"type": "paragraph", "text": "First, the workers had no provider-side rate limit, only a user-side one. They drained the queue as fast as they could and slammed the third-party push provider far past its contracted 5,000 TPS. The provider began returning 429s. Second, the retry logic used fixed-interval backoff with no jitter, so every failed message retried in lockstep, producing a synchronized wave of traffic that kept the provider pinned in failure."},
+        {"type": "code", "language": "typescript", "code": "// The fix: provider token bucket + jittered backoff + circuit breaker\nconst providerBucket = new TokenBucket({ ratePerSec: 5000, burst: 5000 });\n\nasync function send(job: Job) {\n  await providerBucket.take();              // never exceed provider TPS\n  if (breaker.isOpen()) return requeueLater(job, breaker.cooldown());\n  try {\n    await provider.push(job);\n    breaker.recordSuccess();\n  } catch (e) {\n    breaker.recordFailure();\n    const base = Math.min(2 ** job.attempts * 100, 30_000);\n    const delay = base / 2 + Math.random() * (base / 2); // full jitter\n    await queue.requeue(job, delay);\n  }\n}"},
+        {"type": "paragraph", "text": "The remediation was textbook: add a provider-facing token bucket sized to the contract, switch to exponential backoff with full jitter, and wrap the provider call in a circuit breaker so a sustained failure pauses sending instead of amplifying it. After the change, the same 20M broadcast drained smoothly at exactly 5k TPS over ~70 minutes with zero 429s."},
+        {"type": "callout", "variant": "success", "text": "Lesson: the queue protects you from input bursts, but you still need a governor on the output side. Rate-limit toward every downstream dependency, not just toward your users."}
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {"type": "table", "headers": ["Mistake", "Why it bites", "Fix"], "rows": [
+          ["Skipping requirements", "You design the wrong system and run out of time", "Spend 5 min on functional + non-functional scope first"],
+          ["No idempotency on writes", "Retries double-charge / double-send", "Client-generated key persisted with the effect"],
+          ["Cache stampede on hot key", "Expiry causes a DB-killing herd", "Single-flight, staggered TTLs, stale-while-revalidate"],
+          ["Float for money", "Rounding drift, reconciliation failures", "Integer minor units or exact decimal"],
+          ["Fixed-interval retries", "Synchronized retry storm", "Exponential backoff with jitter"],
+          ["Global ordering for chat", "Throughput collapses", "Order per-conversation partition only"],
+          ["hash % N sharding", "Resharding moves nearly all keys", "Consistent hashing with virtual nodes"]
+        ]},
+        {"type": "paragraph", "text": "Most production incidents in these systems are not exotic — they are one of the rows above, triggered by load or partial failure. The senior move is to name the failure mode before it happens and design the mitigation into the first draft, not bolt it on after the postmortem."},
+        {"type": "callout", "variant": "warning", "text": "A subtle one: caching the result of a non-idempotent operation. If you cache a write response keyed on a retried request and the underlying state changed, you serve a lie. Only cache reads, or key write-caches strictly on the idempotency key."}
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {"type": "list", "items": [
+          "Drive from requirements and a capacity estimate; let the numbers justify each choice instead of cargo-culting microservices.",
+          "Pick consistency per operation: CP for money and uniqueness, AP for presence, feeds, and analytics.",
+          "Make every external/write path idempotent with a client-supplied key — it is the single highest-leverage reliability pattern.",
+          "Use queues to decouple acceptance from processing and to absorb bursts; rate-limit toward downstreams, not just users.",
+          "Design failure handling first: retries with jittered backoff, circuit breakers, DLQs, and TTL-based liveness for stateful resources.",
+          "Cache the read-heavy long tail, but defend against stampedes and never cache non-idempotent writes.",
+          "Shard with consistent hashing; partition by the natural locality key (conversation_id, account_id, region) to keep order and state local.",
+          "State your assumptions and trade-offs out loud — the interview grades reasoning, not memorized architectures."
+        ]},
+        {"type": "callout", "variant": "info", "text": "A reusable mental checklist per component: How does it scale horizontally? What happens when it (or its dependency) fails? Is the write idempotent? What is the consistency requirement? What is cached and how does it get invalidated?"}
+      ]
+    },
+    {
+      "id": "wrap-up",
+      "heading": "Note: Interview Day Tactics",
+      "kind": "note",
+      "blocks": [
+        {"type": "paragraph", "text": "Treat the whiteboard as a conversation, not a monologue. Lead with the API and the data model — they pin down the design more concretely than boxes and arrows. When the interviewer pushes (\"what if this fails?\", \"how does it scale to 10x?\"), they are handing you points; meet each pushback with a named pattern and its trade-off."},
+        {"type": "list", "items": [
+          "Keep a running list of assumptions in a corner of the board so you can revisit them.",
+          "Identify the one or two components worth a deep dive and ask which the interviewer wants — don't try to deeply design everything.",
+          "Always close the loop on failure and scaling for the component you deep-dive on.",
+          "If you don't know a specific technology, reason about it from first principles (it's a key-value store, it's an append-only log) rather than bluffing a brand name."
+        ]}
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "url-shortener-flow",
+      "title": "URL Shortener Read/Write Paths",
+      "type": "mermaid",
+      "content": "flowchart TD\n  Client -->|POST long url| API[Write Service]\n  API -->|mint unique id| IDGen[ID Generator]\n  API -->|store mapping| DB[(KV Store)]\n  API -->|return short code| Client\n  Client2[Client] -->|GET short code| Read[Read Service]\n  Read -->|lookup| Cache[(Redis Cache)]\n  Cache -->|miss| DB\n  Read -->|301 or 302 redirect| Client2\n  DB -->|click events| Kafka[Analytics Stream]"
+    },
+    {
+      "id": "chat-architecture",
+      "title": "Chat System Connection and Fan-out",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n  participant A as Alice Socket\n  participant G as Gateway\n  participant M as Message Service\n  participant S as Session Registry\n  participant B as Broker\n  participant G2 as Bob Gateway\n  A->>G: send message\n  G->>M: enqueue\n  M->>M: persist with seq\n  M->>S: lookup Bob gateway\n  S-->>M: gateway id\n  M->>B: publish to gateway topic\n  B->>G2: deliver\n  G2-->>A: ack delivered"
+    },
+    {
+      "id": "payment-ledger",
+      "title": "Payment Idempotent Flow with Outbox",
+      "type": "mermaid",
+      "content": "flowchart TD\n  Client -->|charge with idempotency key| API\n  API -->|key seen| Store[(Idempotency Store)]\n  Store -->|hit| Return[Return prior result]\n  Store -->|miss| Txn[Begin DB Transaction]\n  Txn -->|append| Ledger[(Double Entry Ledger)]\n  Txn -->|write| Outbox[(Outbox)]\n  Outbox --> Relay[Outbox Relay]\n  Relay -->|retry with same key| Processor[External Processor]\n  Processor --> Recon[Reconciliation Job]"
+    },
+    {
+      "id": "notification-pipeline",
+      "title": "Notification Platform Pipeline",
+      "type": "ascii",
+      "content": "  +--------+     +-----------+     +------------------+\n  | Client | --> | Notify API| --> | Prefs + Dedup    |\n  +--------+     +-----------+     +------------------+\n                                          |\n                                          v\n                                 +-----------------+\n                                 |  Channel Queues |\n                                 +-----------------+\n                    +------------------+------------------+\n                    v                  v                  v\n              +---------+        +---------+        +---------+\n              | Push W. |        | SMS W.  |        | Email W.|\n              +---------+        +---------+        +---------+\n                    | rate-limit + backoff + circuit breaker\n                    v\n              +-----------+       on max retries / poison\n              | Provider  | ----------------------------> [ DLQ ]\n              +-----------+"
+    },
+    {
+      "id": "consistent-hashing",
+      "title": "Consistent Hashing Ring",
+      "type": "ascii",
+      "content": "            key K hashes here\n                  |\n         NodeA ---v------ NodeB\n          .                 .\n         .   (hash ring)      .\n        .                      .\n     NodeD ................... NodeC\n\n  K is owned by the first node clockwise (NodeB).\n  Adding NodeE between A and B only moves keys\n  in the A->E arc (~1/N of keys), not all of them.\n  Virtual nodes: each physical node owns many ring\n  positions to balance load and weight capacity."
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-capacity",
+      "question": "How do you do back-of-the-envelope capacity estimation for a system handling 1 billion requests per day?",
+      "answer": "Convert to QPS by dividing by ~100,000 (rounding 86,400 seconds/day up): 1B/day ≈ 10,000 QPS average. Apply a peak multiplier of 2-10x for diurnal/traffic spikes, so plan for ~50-100k peak QPS. For storage, multiply average object size by write QPS by retention seconds. The exact numbers matter less than showing you can connect a scale figure to how many machines, how much cache, and whether a single database can cope.",
+      "difficulty": "junior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["capacity-estimation", "scalability"],
+      "followUps": ["How would the storage estimate change with a 100:1 read:write ratio?", "When does average QPS mislead you versus peak QPS?"]
+    },
+    {
+      "id": "q-base62",
+      "question": "Why is base62 used for URL shorteners, and how many characters do you need?",
+      "answer": "Base62 uses [a-zA-Z0-9], which are all URL-safe characters with no encoding needed, giving a dense, human-readable code. With 7 characters you get 62^7 ≈ 3.5 trillion combinations, far more than the ~100M-1B URLs most systems will ever mint. You encode a globally unique 64-bit ID into base62 so codes are collision-free by construction; 6 chars (~56B) is often enough but 7 leaves comfortable headroom.",
+      "difficulty": "junior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["url-shortener", "base62", "encoding"],
+      "followUps": ["Why might you scramble the ID before encoding?", "What's the downside of base64 here?"]
+    },
+    {
+      "id": "q-cap",
+      "question": "Explain the CAP theorem and give a concrete per-operation example of choosing CP vs AP.",
+      "answer": "CAP says that during a network partition you can have at most two of Consistency, Availability, and Partition tolerance — and since partitions are unavoidable in distributed systems, you really choose C or A under partition. It's per-operation, not global. A payment ledger debit is CP: better to reject the request than risk a double-spend. A chat presence indicator is AP: stay available and tolerate a few seconds of stale 'online' status. PACELC extends this: even without a partition, you trade latency vs consistency.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["cap", "consistency", "distributed-systems"],
+      "followUps": ["How does PACELC refine CAP?", "Where does a quorum read/write fall on this spectrum?"]
+    },
+    {
+      "id": "q-consistent-hashing",
+      "question": "What problem does consistent hashing solve, and what do virtual nodes add?",
+      "answer": "Naive hash(key) % N remaps almost every key when N changes (adding/removing a node), causing massive cache misses or data migration. Consistent hashing places nodes and keys on a ring; a key is owned by the next node clockwise, so adding a node only relocates the ~1/N keys between it and its predecessor. Virtual nodes assign each physical node many ring positions, which evens out load imbalance (a single hash position can land unluckily) and lets you weight heterogeneous hardware by giving bigger nodes more virtual positions.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["consistent-hashing", "sharding", "scalability"],
+      "followUps": ["How does this apply to a distributed cache vs a database?", "What happens to in-flight keys during a node addition?"]
+    },
+    {
+      "id": "q-fanout",
+      "question": "Compare fan-out-on-write vs fan-out-on-read for a chat or feed system. When do you use each?",
+      "answer": "Fan-out-on-write pushes a message into each recipient's inbox at send time: reads are cheap and delivery is instant, but a write to a huge group/channel explodes into millions of writes (the celebrity problem). Fan-out-on-read stores the message once and recipients pull it on access: writes are cheap but reads are expensive and chatty. The production answer is hybrid — fan-out-on-write for small conversations and online users (low latency), and fan-out-on-read for very large channels and offline catch-up, avoiding the write explosion.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["chat", "fan-out", "feed"],
+      "followUps": ["How do you pick the group-size threshold for switching strategies?", "How does this interact with read receipts?"]
+    },
+    {
+      "id": "q-presence",
+      "question": "How do you implement online presence at scale without a presence write storm?",
+      "answer": "Use heartbeats with a TTL. The client (or gateway) writes a Redis key like presence:userId with a TTL slightly longer than the heartbeat interval (e.g. 45s TTL for a 30s heartbeat). Each heartbeat refreshes the TTL; if heartbeats stop, the key expires and the user is implicitly offline — no explicit 'offline' write needed. Presence is an AP concern, so a few seconds of staleness is acceptable. You avoid a write storm by not broadcasting presence changes to everyone; instead you fetch presence lazily or push only to a user's active conversations.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["chat", "presence", "redis"],
+      "followUps": ["How do you notify subscribers when someone goes offline if there's no explicit event?", "What's the cost of a 5s vs 1s heartbeat?"]
+    },
+    {
+      "id": "q-geo",
+      "question": "How would you efficiently find all couriers within 3km of a restaurant?",
+      "answer": "Use a spatial index rather than scanning all couriers. Geohashing encodes lat/lng into a prefix string where shared prefixes mean proximity, so you query a cell and its 8 neighbors. Hierarchical cell systems like Uber's H3 (hexagons) or Google S2 give uniform, hierarchical coverage. For live data, Redis GEO commands (GEOADD/GEOSEARCH) maintain a sorted set internally and answer radius queries in sub-millisecond time. Couriers update their position every few seconds and their entry carries a TTL so stale couriers drop out of matching automatically.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["geo", "food-delivery", "indexing"],
+      "followUps": ["Why hexagons (H3) over square grid cells?", "How do you handle edge cases at cell boundaries?"]
+    },
+    {
+      "id": "q-rate-limit-channels",
+      "question": "In a notification platform, what two kinds of rate limiting do you need and why?",
+      "answer": "User-facing rate limiting protects the recipient — don't send a user 50 emails an hour even if the system technically can. Provider-facing rate limiting protects your relationship with downstream gateways — each SMS/push provider has a contracted TPS quota, and exceeding it gets you throttled (429s) or banned. Implement both as token buckets: one keyed per user, one keyed per provider/channel. The provider-side limit is the one people forget, and forgetting it is what turns a big broadcast into an outage.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["notifications", "rate-limiting", "queues"],
+      "followUps": ["How do you coordinate provider rate limits across many worker instances?", "Where does a circuit breaker fit alongside rate limiting?"]
+    },
+    {
+      "id": "q-dlq",
+      "question": "What is a dead-letter queue and when should a message go there?",
+      "answer": "A DLQ is a separate queue that holds messages which couldn't be processed successfully after exhausting retries, or which are 'poison' (permanently failing — e.g. malformed payload, invalid recipient). Instead of dropping them (data loss) or retrying forever (resource drain and head-of-line blocking), you route them to the DLQ for inspection, alerting, and later replay once the bug or bad data is fixed. It separates transient failures (worth retrying) from terminal ones (need human/automated intervention).",
+      "difficulty": "junior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["queues", "dlq", "reliability"],
+      "followUps": ["How do you distinguish a poison message from a transient failure?", "How would you safely replay a DLQ after a fix?"]
+    },
+    {
+      "id": "q-idempotency-tricky",
+      "question": "A payment API stores an idempotency key in a cache and then calls the processor. Under retries it still occasionally double-charges. Why?",
+      "answer": "The key insertion and the charge effect aren't atomic, and a cache isn't durable. If the process crashes after calling the processor but before durably recording the key (or the cache evicts/loses the key), a retry sees no key and charges again. The fix: persist the idempotency key in the SAME ACID transaction as the ledger write (or use an INSERT ... ON CONFLICT DO NOTHING to atomically claim the key), and use the outbox pattern so the processor call is driven from durably-committed state. Also, the key must be claimed BEFORE the external call, with the call made idempotent via the same key, so a retry that interrupts mid-flight reconciles to a single effect rather than re-executing.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["payments", "idempotency", "consistency"],
+      "followUps": ["How does the outbox pattern close the dual-write gap?", "What status do you store while the charge is in-flight, and how does a concurrent retry behave?"]
+    },
+    {
+      "id": "q-301-tricky",
+      "question": "Your URL shortener uses 301 redirects and now your click analytics have flatlined while the origin gets almost no traffic. What happened?",
+      "answer": "A 301 is a PERMANENT redirect, so browsers (and intermediaries/CDNs) cache it indefinitely. After the first visit, the client redirects straight to the long URL without ever hitting your service again — so you can't count clicks, can't expire the link, and can't change its destination. Switching to 302 (temporary) forces the client to ask your service every time, restoring analytics and control at the cost of an extra round trip. The gotcha is that 301 'feels' more correct/faster but silently disables the very features (analytics, expiry, mutability) the product depends on.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["url-shortener", "http", "caching"],
+      "followUps": ["When is 301 actually the right choice?", "How could you keep analytics while still using long-lived caching?"]
+    },
+    {
+      "id": "q-exactly-once-tricky",
+      "question": "An interviewer says 'I want exactly-once message delivery.' What's your response?",
+      "answer": "Exactly-once delivery is impossible in the general distributed case (the Two Generals problem) — you can't simultaneously guarantee a message is delivered and never duplicated across an unreliable network. What you CAN achieve is exactly-once EFFECT (processing), built from at-least-once delivery plus idempotent consumers and dedup. The sender retries until acked (at-least-once, may duplicate); the receiver dedups on a unique message ID or applies the operation idempotently so duplicates are harmless. So the correct answer reframes the requirement: 'We'll get at-least-once delivery with idempotent processing, which yields exactly-once observable effects.'",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["exactly-once", "messaging", "idempotency"],
+      "followUps": ["Where does Kafka's 'exactly-once semantics' actually apply and where doesn't it?", "How do you dedup at the consumer without unbounded state growth?"]
+    },
+    {
+      "id": "q-stampede-tricky",
+      "question": "A single hot cache key with a TTL keeps taking down the database every few minutes. The cache hit rate is otherwise 99%. What's going on and how do you fix it?",
+      "answer": "Classic cache stampede / thundering herd. When that one hot key's TTL expires, the thousands of concurrent requests for it all miss at once and stampede the database to recompute the same value simultaneously, overwhelming it. Fixes: (1) request coalescing / single-flight so only one request recomputes while others wait for the result; (2) probabilistic early expiration so the key is refreshed slightly before TTL by a single request; (3) stale-while-revalidate — serve the old value and refresh asynchronously; (4) staggered/jittered TTLs so many keys don't expire in lockstep. The 99% hit rate masks the problem because the damage is concentrated at the expiry instant of the hottest key.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["caching", "thundering-herd", "performance"],
+      "followUps": ["How does single-flight behave across multiple app servers?", "Why is jittered TTL alone insufficient for a single hot key?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-base62-codec",
+      "title": "Implement a Collision-Free Base62 URL Codec",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "prompt": "Implement encode(id) and decode(code) for a URL shortener using base62 over [a-z A-Z 0-9]. encode takes a unique non-negative integer ID and returns its base62 string; decode is the exact inverse. Explain why this approach is collision-free, and add a short helper that turns a sequential ID into a less-guessable code without breaking uniqueness.",
+      "hints": [
+        "Base62 is just positional notation with 62 symbols — repeatedly take id % 62 and prepend the symbol, then divide.",
+        "decode reverses it: for each char, result = result * 62 + indexOf(char).",
+        "Collision-freedom comes entirely from the IDs being unique; the codec is a bijection, so unique IDs map to unique codes.",
+        "To de-sequence codes without losing uniqueness, multiply the ID by a constant coprime to the keyspace (a bijective scramble) before encoding."
+      ],
+      "solutionCode": "const ALPHABET =\n  'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';\nconst BASE = 62n;\nconst INDEX: Record<string, number> = {};\nfor (let i = 0; i < ALPHABET.length; i++) INDEX[ALPHABET[i]] = i;\n\nexport function encode(id: bigint): string {\n  if (id < 0n) throw new Error('id must be non-negative');\n  if (id === 0n) return ALPHABET[0];\n  let out = '';\n  while (id > 0n) {\n    out = ALPHABET[Number(id % BASE)] + out;\n    id = id / BASE;\n  }\n  return out;\n}\n\nexport function decode(code: string): bigint {\n  let id = 0n;\n  for (const ch of code) {\n    const v = INDEX[ch];\n    if (v === undefined) throw new Error(`invalid char: ${ch}`);\n    id = id * BASE + BigInt(v);\n  }\n  return id;\n}\n\n// Bijective scramble: multiply by a constant coprime to the modulus.\n// gcd(PRIME, MOD) = 1 guarantees a 1:1 mapping, preserving uniqueness.\nconst MOD = 62n ** 7n;          // 7-char keyspace\nconst PRIME = 2654435761n;       // Knuth multiplicative-hash constant\nexport function scramble(id: bigint): bigint {\n  return (id * PRIME) % MOD;     // still unique, but non-sequential\n}\n\n// Round-trip check\nconst id = 1_000_000n;\nconsole.assert(decode(encode(id)) === id, 'codec must round-trip');\nconst code = encode(scramble(id));\nconsole.log(code); // a non-sequential, collision-free short code",
+      "solutionLanguage": "typescript",
+      "explanation": "Base62 encoding is positional notation in base 62: encode peels off the least-significant digit with id % 62, maps it to a symbol, prepends it, then divides by 62 until the number is exhausted. decode is the exact inverse, accumulating result = result*62 + symbolIndex. Because this pair is a mathematical bijection, two different IDs can never produce the same code — so collision-freedom is inherited entirely from the uniqueness of the input IDs (typically from a database sequence or a Snowflake-style distributed ID generator). No hashing means no birthday-paradox collisions to resolve. The scramble helper addresses the one real downside of sequential IDs — that codes are guessable and enumerable. Multiplying by a constant that is coprime to the modulus (gcd = 1) is a bijection over the residue ring, so it shuffles IDs across the keyspace while still mapping distinct IDs to distinct values. The result is a code that is collision-free AND non-sequential. Edge cases handled: id = 0 maps to the first symbol, negative IDs are rejected, and unknown characters in decode throw rather than silently corrupting the value.",
+      "relatedTopic": "url-shortener"
+    },
+    {
+      "id": "ch-token-bucket",
+      "title": "Implement an Atomic Distributed Token-Bucket Rate Limiter",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "prompt": "Implement a token-bucket rate limiter suitable for limiting calls to a downstream provider from many worker instances. It must (a) refill tokens continuously over time at a fixed rate, (b) be atomic so concurrent workers can't over-consume, and (c) tell the caller how long to wait when no token is available. Implement the core as a single atomic operation (a Redis Lua script) plus a thin client wrapper.",
+      "hints": [
+        "Store two fields per bucket: the current token count and the last-refill timestamp.",
+        "On each call, compute elapsed time, add elapsed * ratePerSec tokens (capped at burst), then try to take one.",
+        "Atomicity across instances requires the whole read-modify-write to run server-side — a Redis Lua script executes atomically.",
+        "If no token is available, return the time until the next token so the caller can back off precisely instead of busy-spinning."
+      ],
+      "solutionCode": "// Lua runs atomically inside Redis: no race between read and write.\nconst BUCKET_LUA = `\nlocal key      = KEYS[1]\nlocal rate     = tonumber(ARGV[1])   -- tokens per second\nlocal burst    = tonumber(ARGV[2])   -- max tokens\nlocal now      = tonumber(ARGV[3])   -- ms epoch\nlocal state    = redis.call('HMGET', key, 'tokens', 'ts')\nlocal tokens   = tonumber(state[1])\nlocal ts       = tonumber(state[2])\nif tokens == nil then tokens = burst; ts = now end\n\nlocal elapsed  = math.max(0, now - ts) / 1000.0\ntokens = math.min(burst, tokens + elapsed * rate)\n\nlocal allowed, wait_ms = 0, 0\nif tokens >= 1 then\n  tokens = tokens - 1\n  allowed = 1\nelse\n  wait_ms = math.ceil((1 - tokens) / rate * 1000)\nend\n\nredis.call('HMSET', key, 'tokens', tokens, 'ts', now)\nredis.call('PEXPIRE', key, math.ceil(burst / rate * 1000) + 1000)\nreturn { allowed, wait_ms }\n`;\n\nexport class TokenBucket {\n  private sha?: string;\n  constructor(\n    private redis: any,\n    private key: string,\n    private ratePerSec: number,\n    private burst: number,\n  ) {}\n\n  async tryTake(): Promise<{ allowed: boolean; waitMs: number }> {\n    if (!this.sha) this.sha = await this.redis.scriptLoad(BUCKET_LUA);\n    const [allowed, waitMs] = await this.redis.evalsha(\n      this.sha, 1, this.key,\n      this.ratePerSec, this.burst, Date.now(),\n    );\n    return { allowed: allowed === 1, waitMs };\n  }\n\n  // Block until a token is available, respecting the server-computed wait.\n  async take(): Promise<void> {\n    for (;;) {\n      const { allowed, waitMs } = await this.tryTake();\n      if (allowed) return;\n      await new Promise((r) => setTimeout(r, waitMs));\n    }\n  }\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "A token bucket models a fixed-rate allowance with burst capacity: tokens accrue continuously at ratePerSec up to a cap of burst, and each request spends one token. The crux for a DISTRIBUTED limiter is atomicity — if many workers read the count, decrement locally, and write back, they race and collectively over-consume, blowing past the provider's quota (exactly the kind of bug that causes 429 storms). Running the entire read-modify-write as a Redis Lua script makes it atomic: Redis executes the script single-threaded with no interleaving, so the refill-and-take is indivisible across all callers. The script computes tokens lazily from elapsed time since the last call (no background timer needed), caps at burst, and either grants a token or returns the precise wait_ms until the next token accrues — so the client backs off exactly long enough instead of busy-spinning or guessing. The PEXPIRE keeps idle buckets from leaking memory. The wrapper caches the script SHA for evalsha efficiency and offers both a non-blocking tryTake (for 'requeue later' semantics in a queue worker) and a blocking take. This is the same primitive you'd use for both per-user limits (key = user id) and per-provider limits (key = provider name) in a notification platform.",
+      "relatedTopic": "notification-platform"
+    }
+  ],
+  "references": [
+    {"label": "Designing Data-Intensive Applications (Kleppmann)", "url": "https://dataintensive.net/"},
+    {"label": "AWS Builders' Library: Timeouts, retries, and backoff with jitter", "url": "https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/"},
+    {"label": "Uber Engineering: H3 Geospatial Indexing", "url": "https://www.uber.com/blog/h3/"},
+    {"label": "Stripe: Designing robust and predictable APIs with idempotency", "url": "https://stripe.com/blog/idempotency"},
+    {"label": "Redis: GEO commands documentation", "url": "https://redis.io/docs/latest/commands/geosearch/"},
+    {"label": "The Two Generals Problem and exactly-once delivery", "url": "https://en.wikipedia.org/wiki/Two_Generals%27_Problem"}
+  ]
+}

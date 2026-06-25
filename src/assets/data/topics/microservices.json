@@ -1,0 +1,610 @@
+{
+  "id": "microservices",
+  "title": "Microservices",
+  "category": "Architecture",
+  "subcategory": "Distributed",
+  "difficulty": "senior",
+  "tags": ["microservices", "distributed-systems", "saga", "api-gateway", "event-driven", "observability"],
+  "description": "A staff-level deep dive into designing, communicating between, and operating microservices without accidentally building a distributed monolith.",
+  "estReadMinutes": 28,
+  "sections": [
+    {
+      "id": "introduction",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Microservices are an architectural style in which a single application is composed of many small, independently deployable services, each owning a distinct business capability and its own data. The defining property is not size in lines of code but independent deployability: you can ship one service without coordinating a release of the others."
+        },
+        {
+          "type": "paragraph",
+          "text": "The promise is organizational scalability — many teams shipping in parallel behind clean contracts — at the cost of operational complexity. Network calls replace function calls, transactions span process boundaries, and 'the database' becomes a fleet of databases. Every benefit of microservices is paid for with a tax in latency, failure modes, and observability surface. The senior skill is knowing whether that trade is worth it for your context."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Conway's Law is the hidden axis of microservices: your architecture will mirror your org chart. Service boundaries that fight the team topology will be eroded by chatty cross-team calls until you have a distributed monolith."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Microservices matter because they let an engineering organization scale past the point where a single shared codebase and a single deploy pipeline become the bottleneck. When 200 engineers commit to one monolith, the merge queue, the test suite runtime, and release coordination dominate cycle time. Splitting along business capabilities lets each team own its release cadence, its on-call, and its tech choices."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Independent deployability: a bug fix in Payments ships in minutes without a full-app regression run.",
+            "Fault isolation: a memory leak in the Recommendations service degrades recommendations, not checkout.",
+            "Independent scaling: scale the stateless Pricing service to 50 pods while Inventory stays at 4.",
+            "Polyglot freedom: a CPU-bound matching engine in Rust, CRUD services in Java/Spring, all behind HTTP/gRPC contracts.",
+            "Team autonomy: clear ownership boundaries reduce cross-team coordination overhead."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "None of these benefits are free, and most appear only at organizational scale. Below ~3-4 teams, a well-modularized monolith ('modular monolith') usually wins on every axis: simpler ops, real transactions, in-process calls, one place to debug."
+        }
+      ]
+    },
+    {
+      "id": "service-boundaries",
+      "heading": "Service Boundaries by Business Capability",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The single most consequential decision in a microservices architecture is where the boundaries fall. Boundaries should follow business capabilities (and the bounded contexts of Domain-Driven Design), not technical layers. A service like 'Orders' or 'Payments' or 'Inventory' owns a cohesive slice of the domain end to end. Slicing by layer ('the database service', 'the validation service') produces tight coupling and chatty traffic."
+        },
+        {
+          "type": "heading",
+          "text": "Heuristics for a good boundary"
+        },
+        {
+          "type": "list",
+          "items": [
+            "High cohesion inside, low coupling across: data and logic that change together live together.",
+            "A service owns its data. No other service reads or writes its tables directly — only through its API or events.",
+            "The boundary aligns with a team that can own it end to end (Conway's Law working for you).",
+            "Cross-boundary consistency can tolerate eventual consistency; if two things must be atomic, they probably belong in one service."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The strongest signal that a boundary is wrong: a single user action requires synchronous calls across three or more services to complete. That chattiness is latency, a coupled failure domain, and usually a sign the data model was split incorrectly."
+        },
+        {
+          "type": "paragraph",
+          "text": "A practical pattern: start with a modular monolith with clean module boundaries, let the domain stabilize, then extract services along the seams that have proven stable. Extracting too early — before the domain is understood — bakes wrong boundaries into network contracts that are 10x harder to change than a function signature."
+        }
+      ]
+    },
+    {
+      "id": "api-gateway-discovery",
+      "heading": "API Gateway and Service Discovery",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Clients should not know about your internal service topology. An API gateway is the single entry point that fronts the mesh of services: it handles TLS termination, authentication, rate limiting, request routing, response aggregation, and protocol translation (e.g. external REST to internal gRPC). It decouples the public API contract from the internal decomposition, so you can split or merge services without breaking clients."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Edge concerns at the gateway: authn/authz, rate limiting, TLS, WAF, request/response shaping.",
+            "Avoid putting business logic in the gateway — it becomes a shared bottleneck and a coupling point owned by no team.",
+            "Backend-for-Frontend (BFF): a dedicated gateway per client type (web, mobile, partner API) to tailor payloads."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Service discovery solves 'where is the Inventory service right now?' in a world of ephemeral pods and autoscaling. Two models: client-side discovery (client queries a registry like Consul/Eureka and load-balances itself) and server-side discovery (client hits a stable virtual address; the platform — Kubernetes DNS + kube-proxy, or a service mesh sidecar — routes). In Kubernetes, a Service object plus cluster DNS gives you server-side discovery for free; a mesh like Istio/Linkerd adds mTLS, retries, and traffic shifting on top."
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "code": "# Kubernetes Service: stable virtual IP + DNS name, platform-managed discovery\napiVersion: v1\nkind: Service\nmetadata:\n  name: inventory\n  namespace: shop\nspec:\n  selector:\n    app: inventory\n  ports:\n    - port: 8080\n      targetPort: 8080\n# Other services reach it at: http://inventory.shop.svc.cluster.local:8080\n# Pods scale up/down behind this name; callers never see pod IPs."
+        }
+      ]
+    },
+    {
+      "id": "sync-vs-async",
+      "heading": "Synchronous vs Asynchronous Communication",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Inter-service communication comes in two flavors, and choosing wrong is one of the most common ways teams build a fragile distributed system. Synchronous (request/response over HTTP or gRPC) is simple and gives an immediate answer, but it creates temporal coupling: the caller is blocked and fails if the callee is down. Asynchronous (messaging/events via Kafka, RabbitMQ, SQS) decouples in time: the producer fires an event and moves on; consumers process when ready."
+        },
+        {
+          "type": "table",
+          "headers": ["Dimension", "Synchronous (REST/gRPC)", "Asynchronous (events/messaging)"],
+          "rows": [
+            ["Coupling", "Temporal — both must be up", "Temporal decoupling via broker"],
+            ["Latency", "Immediate response", "Eventual; no instant answer"],
+            ["Failure blast radius", "Cascades up the call chain", "Absorbed by queue / retried"],
+            ["Consistency", "Easier read-after-write", "Eventual consistency"],
+            ["Backpressure", "None — overload propagates", "Broker buffers, smooths spikes"],
+            ["Best for", "Queries, real-time reads", "Workflows, fan-out, decoupling"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "A long chain of synchronous calls multiplies failure probability and tail latency. If service A calls B calls C, and each is 99.9% available, the chain is ~99.7% available and the p99 latency is the sum of all three p99s. Prefer async for write workflows; reserve sync for reads that genuinely need an immediate answer."
+        },
+        {
+          "type": "paragraph",
+          "text": "A robust default: synchronous for queries (the user is waiting for data), asynchronous for commands that trigger multi-service workflows (place order, process payment, update inventory). This is the foundation for the Saga pattern below."
+        }
+      ]
+    },
+    {
+      "id": "choreography-vs-orchestration",
+      "heading": "Choreography vs Orchestration",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "When a business process spans multiple services, you coordinate it in one of two styles. In orchestration, a central coordinator (an orchestrator) explicitly tells each service what to do and in what order — it owns the workflow state machine. In choreography, there is no central brain: each service reacts to events emitted by others and emits its own events, and the workflow emerges from the chain of reactions."
+        },
+        {
+          "type": "table",
+          "headers": ["Aspect", "Orchestration", "Choreography"],
+          "rows": [
+            ["Workflow logic", "Centralized in orchestrator", "Distributed across services"],
+            ["Coupling", "Services coupled to orchestrator", "Services coupled to event schema"],
+            ["Visibility", "Easy — one place to see state", "Hard — flow scattered across logs"],
+            ["Adding a step", "Edit the orchestrator", "Add a new event subscriber"],
+            ["Failure handling", "Explicit, centralized compensations", "Each service handles its own"],
+            ["Risk", "Orchestrator becomes a god service", "Cyclic event chains, hidden flows"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Choreography shines for loosely coupled fan-out (an OrderPlaced event that 5 services independently react to). Orchestration shines for complex transactional workflows with ordering, conditional branches, and rollback — exactly the case for Sagas with compensations. Many mature systems use both: choreography for notifications and analytics, orchestration for the money-touching critical path."
+        }
+      ]
+    },
+    {
+      "id": "saga-pattern",
+      "heading": "The Saga Pattern and Distributed Transactions",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Because each service owns its own database, you cannot wrap a multi-service operation in a single ACID transaction. The Saga pattern manages a distributed business transaction as a sequence of local transactions, one per service. If step N fails, the saga runs compensating actions to semantically undo steps 1..N-1. A saga gives you atomicity-of-outcome (all complete or all compensated) at the price of intermediate visible states and eventual consistency."
+        },
+        {
+          "type": "heading",
+          "text": "Compensating actions"
+        },
+        {
+          "type": "paragraph",
+          "text": "A compensation is not a rollback — the original local transaction already committed. It is a new transaction that semantically reverses the effect: refund a captured payment, release a reserved stock, cancel a created order. Compensations must be idempotent and should themselves be retryable, because the saga coordinator may crash and replay them."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Orchestration-based saga step definition\ninterface SagaStep<C> {\n  name: string;\n  invoke: (ctx: C) => Promise<void>;     // forward action (local txn)\n  compensate: (ctx: C) => Promise<void>; // semantic undo, idempotent\n}\n\nconst orderSaga: SagaStep<OrderContext>[] = [\n  { name: 'createOrder',\n    invoke: ctx => orders.create(ctx.orderId, 'PENDING'),\n    compensate: ctx => orders.cancel(ctx.orderId) },\n  { name: 'reserveStock',\n    invoke: ctx => inventory.reserve(ctx.orderId, ctx.items),\n    compensate: ctx => inventory.release(ctx.orderId) },\n  { name: 'capturePayment',\n    invoke: ctx => payments.capture(ctx.orderId, ctx.amount),\n    compensate: ctx => payments.refund(ctx.orderId) },\n];"
+        },
+        {
+          "type": "heading",
+          "text": "Why two-phase commit (2PC) is usually the wrong answer"
+        },
+        {
+          "type": "list",
+          "items": [
+            "2PC is a blocking protocol: participants hold locks from prepare until commit, so a slow or crashed coordinator stalls every participant.",
+            "It does not survive coordinator failure gracefully — the classic 'in-doubt' window where participants are blocked indefinitely.",
+            "It demands XA-capable resources; most modern brokers (Kafka, SQS) and many cloud datastores don't support distributed XA well.",
+            "It couples availability: the whole transaction is only as available as the least available participant times the coordinator.",
+            "It scales poorly under contention — long-held locks crush throughput on hot rows."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Sagas trade 2PC's strong isolation for availability and scalability. The cost: you must reason about intermediate states (an order can be PENDING with stock reserved but payment not yet captured) and design compensations. This is a feature, not a bug — it forces you to model the real business semantics of partial failure."
+        }
+      ]
+    },
+    {
+      "id": "idempotency",
+      "heading": "Idempotency in a World of Retries",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "In a distributed system, every message can be delivered more than once. Networks time out after the server already processed the request; brokers guarantee at-least-once delivery; saga coordinators replay steps after a crash. If 'capture payment' runs twice, you double-charge a customer. Idempotency — the property that processing the same operation N times has the same effect as processing it once — is therefore mandatory, not optional, on every write path."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Idempotency key: client/caller sends a unique key per logical operation; the server records processed keys and short-circuits duplicates.",
+            "Natural idempotency: 'set status to SHIPPED' is naturally idempotent; 'increment balance by 10' is not.",
+            "Dedup at the consumer: store processed message IDs (with TTL) and skip ones already seen.",
+            "Make compensations idempotent too — 'release stock' must be safe to call twice."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- Idempotent payment capture: the unique constraint is the guard.\n-- A retried request with the same idempotency_key hits the constraint\n-- and we return the prior result instead of charging again.\nINSERT INTO payment_captures (idempotency_key, order_id, amount, status)\nVALUES ($1, $2, $3, 'CAPTURED')\nON CONFLICT (idempotency_key) DO NOTHING\nRETURNING id;\n-- If RETURNING is empty, the key already existed -> fetch and return\n-- the existing capture rather than performing a second charge."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "A common production incident: payment service times out from the gateway's perspective, the gateway retries, and the customer is charged twice — because the capture endpoint had no idempotency key. The fix is always a server-side dedup keyed on a client-supplied idempotency key, persisted in the same transaction as the side effect."
+        }
+      ]
+    },
+    {
+      "id": "observability",
+      "heading": "Observability: The Tax You Must Pay",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "In a monolith, a stack trace tells you what happened. In microservices, a single user request fans out across a dozen services, and 'why was checkout slow?' has no single answer without distributed tracing. Observability is built on three pillars: structured logs, metrics, and traces — correlated by a trace/correlation ID propagated through every hop (via W3C Trace Context headers)."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Distributed tracing (OpenTelemetry, Jaeger, Tempo): one trace ID stitches the spans across all services so you can see the full request waterfall and where time went.",
+            "Metrics (RED method: Rate, Errors, Duration per service; USE for resources): drive SLOs and alerting.",
+            "Structured logs with the trace ID in every line, so you can jump from a slow trace to its logs.",
+            "Health and readiness probes so the platform stops routing to unhealthy pods.",
+            "Correlation ID propagation is non-negotiable — without it, traces fragment and debugging becomes archaeology."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Propagate W3C trace context across a service hop (OpenTelemetry)\nimport { context, propagation, trace } from '@opentelemetry/api';\n\nasync function callInventory(items: Item[]) {\n  const headers: Record<string, string> = {};\n  // Inject current trace context into outbound headers\n  propagation.inject(context.active(), headers);\n  return fetch('http://inventory.shop.svc:8080/reserve', {\n    method: 'POST',\n    headers: { 'content-type': 'application/json', ...headers },\n    body: JSON.stringify({ items }),\n  });\n  // Inventory extracts traceparent and continues the same trace,\n  // so the whole request shows up as one waterfall in Jaeger.\n}"
+        }
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: The Order Checkout Saga Incident",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Scenario: an e-commerce checkout spans Order, Inventory, and Payment services, coordinated by an orchestration saga. On a Black Friday traffic spike, the Payment service's downstream PSP (payment service provider) started timing out at 8 seconds. The gateway timeout was 5 seconds, so it retried capture requests. The capture endpoint was not idempotent. Result: a subset of customers were charged two or three times, and the saga marked some orders FAILED while the money had actually been taken."
+        },
+        {
+          "type": "paragraph",
+          "text": "Root cause: (1) no idempotency key on capturePayment, so retries double-charged; (2) the saga treated a timeout as a definitive failure and ran the 'cancel order + release stock' compensation, even though the payment may have succeeded — a classic ambiguous-outcome bug. The capture was non-atomic with respect to its own retry semantics."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// The fix: idempotency key + treat timeout as UNKNOWN, then reconcile.\nasync function capturePayment(ctx: OrderContext): Promise<CaptureResult> {\n  const key = `capture:${ctx.orderId}`; // stable per logical operation\n  try {\n    return await psp.capture({ idempotencyKey: key, amount: ctx.amount });\n  } catch (e) {\n    if (isTimeout(e)) {\n      // DO NOT compensate blindly. Outcome is UNKNOWN.\n      // Enqueue a reconciliation job that polls the PSP by idempotencyKey.\n      await reconciliationQueue.enqueue({ orderId: ctx.orderId, key });\n      throw new SagaPendingError('payment outcome unknown, reconciling');\n    }\n    throw e; // a definite decline -> safe to compensate\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Lessons that shipped: (1) every money path got an idempotency key; (2) the saga distinguishes FAILED (definite, compensate) from PENDING/UNKNOWN (reconcile, do not compensate); (3) PSP timeouts trigger an async reconciliation poll rather than an optimistic rollback. Double-charges dropped to zero."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and the Distributed Monolith",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The most dangerous failure mode is building a distributed monolith: you've paid the full operational cost of microservices (network, ops, observability) but kept the coupling of a monolith, so you get none of the benefits. It is the worst of both worlds and it sneaks up on teams gradually."
+        },
+        {
+          "type": "heading",
+          "text": "How a distributed monolith is born"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Shared database: two services read/write the same tables, so a schema change forces a coordinated, lockstep deploy. This is the cardinal sin — it destroys independent deployability instantly.",
+            "Chatty synchronous calls: a single request fans out across many services synchronously, multiplying latency and coupling availability.",
+            "Lockstep deploys: services must be released together in a fixed order because their contracts are versioned together — you've recreated the monolith release.",
+            "Shared libraries with business logic: a 'common' jar that every service depends on means a change there redeploys everyone.",
+            "Synchronous request/response where an event would do, coupling services in time as well as in contract."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Mistake", "Symptom", "Fix"],
+          "rows": [
+            ["Shared database", "Schema change breaks 3 teams", "Database-per-service; integrate via API/events"],
+            ["Premature decomposition", "Boundaries keep moving", "Start with modular monolith; extract later"],
+            ["No idempotency", "Double-charges on retry", "Idempotency keys on every write"],
+            ["Sync chains", "p99 latency = sum of all hops", "Async events; aggregate at gateway"],
+            ["No tracing", "Cannot debug cross-service latency", "OpenTelemetry + correlation IDs"],
+            ["Distributed transactions via 2PC", "Locks, in-doubt stalls", "Sagas with compensations"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Litmus test for a distributed monolith: can you deploy any single service to production right now, alone, without coordinating with another team? If the answer is no, you do not have microservices — you have a monolith with network latency between the modules."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Database-per-service. No shared tables, ever. Integrate via APIs and events, never via the database.",
+            "Start with a modular monolith; extract services along stable, proven seams once the domain is understood.",
+            "Make every write idempotent with caller-supplied idempotency keys; assume at-least-once delivery everywhere.",
+            "Use Sagas (orchestration for money/critical paths) instead of 2PC for cross-service consistency.",
+            "Default to async events for write workflows; reserve sync calls for reads that need an immediate answer.",
+            "Invest in observability from day one: distributed tracing, RED metrics, structured logs with correlation IDs.",
+            "Design for failure: timeouts, retries with jittered backoff, circuit breakers, bulkheads, and graceful degradation.",
+            "Version contracts and evolve them backward-compatibly so services can deploy independently.",
+            "Use the transactional outbox pattern to publish events atomically with the local DB write (avoid dual-write inconsistency).",
+            "Align service boundaries with team boundaries so Conway's Law works for you, not against you."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Transactional outbox: write the event into an 'outbox' table in the same local transaction as your business change, then a relay process (CDC like Debezium, or a poller) publishes it to the broker. This eliminates the dual-write problem where a DB commit succeeds but the event publish fails (or vice versa)."
+        }
+      ]
+    },
+    {
+      "id": "when-not-to-use",
+      "heading": "When NOT to Use Microservices",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Senior judgment is mostly about restraint. Microservices are an organizational scaling tool with a heavy operational tax. If you don't have the problem they solve, you're paying the tax for nothing."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Small team (1-3 squads): a modular monolith ships faster, debugs easier, and needs a fraction of the ops investment.",
+            "Unclear or unstable domain: extracting services bakes wrong boundaries into expensive-to-change network contracts. Let the domain stabilize first.",
+            "Early-stage startup chasing product-market fit: optimize for iteration speed, not for a scale you don't have yet.",
+            "No platform/observability maturity: without tracing, CI/CD, and orchestration, microservices amplify operational pain.",
+            "Strong transactional consistency requirements across the whole flow: a monolith's single ACID transaction is simpler and correct."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Premature decomposition is more common and more damaging than premature monolith. Sam Newman's rule of thumb: if you can't keep a monolith well-structured, you have no chance of keeping a distributed system well-structured. Master modularity first."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "gateway-topology",
+      "title": "API Gateway and Service Topology",
+      "type": "mermaid",
+      "content": "flowchart TD\n  Client[Web and Mobile Clients] --> GW[API Gateway]\n  GW -->|authn rate-limit route| Orders[Order Service]\n  GW --> Inventory[Inventory Service]\n  GW --> Payments[Payment Service]\n  Orders --> OrdersDB[(Orders DB)]\n  Inventory --> InvDB[(Inventory DB)]\n  Payments --> PayDB[(Payments DB)]\n  Orders -.events.-> Broker[Message Broker]\n  Broker -.events.-> Inventory\n  Broker -.events.-> Payments\n  GW --> Registry[Service Discovery]"
+    },
+    {
+      "id": "order-saga-sequence",
+      "title": "Order Saga with Compensation (Orchestration)",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n  participant O as Orchestrator\n  participant Ord as Order Svc\n  participant Inv as Inventory Svc\n  participant Pay as Payment Svc\n  O->>Ord: createOrder PENDING\n  Ord-->>O: ok\n  O->>Inv: reserveStock\n  Inv-->>O: ok\n  O->>Pay: capturePayment\n  Pay-->>O: declined\n  Note over O: payment failed start compensation\n  O->>Inv: releaseStock compensate\n  Inv-->>O: ok\n  O->>Ord: cancelOrder compensate\n  Ord-->>O: ok"
+    },
+    {
+      "id": "saga-state-machine",
+      "title": "Saga State Machine (ASCII)",
+      "type": "ascii",
+      "content": "  +-------------+    reserve ok    +----------------+   capture ok   +-----------+\n  | ORDER       | ---------------> | STOCK          | ------------>  | COMPLETED |\n  | CREATED     |                  | RESERVED       |                |           |\n  +-------------+                  +----------------+                +-----------+\n        |                                 |                                ^\n        | reserve fail                    | capture fail                   |\n        v                                 v                                |\n  +-------------+   compensate     +----------------+   timeout            |\n  | CANCELLED   | <--------------- | COMPENSATING   |---> [RECONCILE]------+\n  +-------------+                  +----------------+   (outcome unknown)"
+    },
+    {
+      "id": "outbox-pipeline",
+      "title": "Transactional Outbox Pipeline (ASCII)",
+      "type": "ascii",
+      "content": "  +-----------+   single local txn   +-------------+     CDC / poll     +---------+\n  | Business  | -------------------> | outbox      | -----------------> | Relay   |\n  | table     |                      | table       |                    | process |\n  +-----------+                      +-------------+                    +----+----+\n         (atomic: row + event written together)                              |\n                                                                  publish    v\n                                                                       +-----------+\n                                                                       |  Broker   |\n                                                                       +-----------+"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-define-microservices",
+      "question": "What actually defines a microservice — is it about being small?",
+      "answer": "No. The defining property is independent deployability, not size. A microservice owns a distinct business capability and its own data, and can be built, tested, and released without coordinating a deploy of other services. 'Small' is a consequence, not the goal; a service that owns a real bounded context may be substantial. If two services must always deploy together, they are not independent services regardless of how small each is.",
+      "difficulty": "junior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["fundamentals", "boundaries"],
+      "followUps": ["What is the relationship to bounded contexts in DDD?", "How does independent deployability constrain your contracts?"]
+    },
+    {
+      "id": "q-boundaries",
+      "question": "How do you decide where to draw service boundaries?",
+      "answer": "Draw boundaries by business capability / DDD bounded context, not by technical layer. Aim for high cohesion inside and low coupling across: data and logic that change together stay together, and each service owns its data exclusively. Align boundaries with teams that can own them end to end (Conway's Law). A strong signal of a wrong boundary is a single user action requiring synchronous calls across three or more services. When in doubt, start with a modular monolith and extract along seams that prove stable.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["boundaries", "ddd"],
+      "followUps": ["What is a sign you split a boundary too early?", "How does data ownership influence boundaries?"]
+    },
+    {
+      "id": "q-gateway",
+      "question": "What is an API gateway responsible for, and what should it NOT do?",
+      "answer": "An API gateway is the single entry point handling edge concerns: TLS termination, authentication/authorization, rate limiting, routing, protocol translation, and sometimes response aggregation. It decouples the public contract from internal decomposition. What it should NOT do is hold business logic — that turns the gateway into a shared bottleneck and a coupling point owned by no team. Keep business rules in the services; use a BFF per client type if payload shaping differs by client.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["gateway", "edge"],
+      "followUps": ["What is a Backend-for-Frontend?", "Where does authentication belong — gateway or service?"]
+    },
+    {
+      "id": "q-discovery",
+      "question": "Explain client-side vs server-side service discovery.",
+      "answer": "In client-side discovery, the client queries a service registry (Consul, Eureka) for instances and load-balances itself — more control but logic in every client. In server-side discovery, the client calls a stable virtual address and the platform routes to a healthy instance — e.g. a Kubernetes Service plus cluster DNS, or a service mesh sidecar. Server-side is the common default in Kubernetes; a mesh adds mTLS, retries, and traffic shifting on top of basic DNS-based discovery.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["discovery", "kubernetes"],
+      "followUps": ["How does a service mesh fit in?", "What problem does cluster DNS solve here?"]
+    },
+    {
+      "id": "q-sync-async",
+      "question": "When do you choose synchronous vs asynchronous communication?",
+      "answer": "Use synchronous (REST/gRPC) for queries where the user is waiting for an immediate answer. Use asynchronous (events/messaging) for write workflows that span services, to decouple in time, absorb spikes with broker backpressure, and contain failure blast radius. Synchronous chains multiply tail latency and failure probability (A->B->C availability is the product, latency is the sum). The robust default: sync for reads, async events for multi-service commands.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["communication", "messaging"],
+      "followUps": ["How does async help with backpressure?", "What consistency guarantees do you give up?"]
+    },
+    {
+      "id": "q-saga",
+      "question": "What is the Saga pattern and how does it handle failure?",
+      "answer": "A Saga manages a distributed transaction as a sequence of local transactions, one per service. If a step fails, the saga executes compensating actions to semantically undo the already-committed prior steps (refund a payment, release reserved stock, cancel an order). It provides atomicity-of-outcome and eventual consistency instead of ACID isolation. Compensations are new transactions, not rollbacks, and must be idempotent and retryable because the coordinator may crash and replay.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["saga", "consistency"],
+      "followUps": ["Orchestration vs choreography for the saga?", "How do you handle an ambiguous step outcome?"]
+    },
+    {
+      "id": "q-choreo-orch",
+      "question": "Compare choreography and orchestration for coordinating a workflow.",
+      "answer": "Orchestration uses a central coordinator that owns the workflow state machine and explicitly drives each step — easy to visualize and to add centralized compensations, but risks a god service. Choreography has no central brain: each service reacts to events and emits its own, so the flow emerges from event chains — great for loose fan-out, but the workflow is scattered and hard to trace, with a risk of cyclic flows. Many systems use both: orchestration for the money-critical path, choreography for notifications/analytics.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["saga", "events"],
+      "followUps": ["When does choreography become unmanageable?", "How do you observe a choreographed flow?"]
+    },
+    {
+      "id": "q-when-not",
+      "question": "When should you NOT adopt microservices?",
+      "answer": "When you lack the problem they solve. With a small team (1-3 squads), an unclear/unstable domain, an early-stage product chasing PMF, or no platform/observability maturity, microservices add operational tax with no payoff. They are an organizational scaling tool; below that scale a modular monolith ships faster and debugs easier. Premature decomposition bakes wrong boundaries into expensive network contracts — more damaging and more common than staying a monolith too long.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["tradeoffs", "judgment"],
+      "followUps": ["What is a modular monolith?", "What maturity must exist before you split?"]
+    },
+    {
+      "id": "q-observability",
+      "question": "Why is observability harder in microservices and what do you need?",
+      "answer": "A single request fans out across many services, so a stack trace no longer tells the whole story. You need the three pillars correlated by a propagated trace ID: distributed tracing (OpenTelemetry/Jaeger) to see the cross-service waterfall, metrics (RED: rate/errors/duration) to drive SLOs and alerts, and structured logs carrying the trace ID. Correlation ID propagation via W3C Trace Context is non-negotiable; without it, traces fragment and debugging cross-service latency becomes archaeology.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["observability", "tracing"],
+      "followUps": ["What is the RED method?", "How does context propagation work across a hop?"]
+    },
+    {
+      "id": "q-distributed-monolith",
+      "question": "Tricky: You split into 8 services but deploys still happen all together in a fixed order. What happened?",
+      "answer": "You built a distributed monolith — you pay the full operational cost of microservices but kept monolithic coupling, so you get none of the benefits. Lockstep, ordered deploys are the tell: it means contracts are versioned together and services depend on each other's internals. The usual culprits are a shared database (a schema change breaks multiple services), chatty synchronous call chains, and 'common' libraries carrying business logic. The litmus test: can you deploy any one service alone right now without coordinating with another team? If not, you don't have microservices. Fix with database-per-service, backward-compatible contract versioning, and async events to break temporal coupling.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["distributed-monolith", "antipattern"],
+      "followUps": ["How does a shared DB destroy independent deployability?", "How do you migrate off a shared database?"]
+    },
+    {
+      "id": "q-2pc-tricky",
+      "question": "Tricky: Why not just use two-phase commit (2PC) across services for a real distributed transaction?",
+      "answer": "2PC is a blocking protocol: participants hold locks from prepare until the coordinator says commit, so a slow or crashed coordinator stalls every participant — the dreaded in-doubt window where resources are locked indefinitely. It couples availability (the transaction is only as available as the least-available participant times the coordinator), scales poorly under contention due to long-held locks, and requires XA-capable resources that most modern brokers and cloud datastores don't support. The senior answer is to trade 2PC's strong isolation for availability and scalability using Sagas with idempotent compensations, explicitly modeling the intermediate states and partial-failure semantics.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["2pc", "saga", "consistency"],
+      "followUps": ["What is the in-doubt window?", "How do sagas handle isolation differently?"]
+    },
+    {
+      "id": "q-idempotency-tricky",
+      "question": "Tricky: A payment endpoint occasionally double-charges customers under load. Walk through the bug and fix.",
+      "answer": "The endpoint isn't idempotent. Under load the PSP responds slower than the caller's timeout; the caller (or broker, with at-least-once delivery) retries, and the second request charges again — the first actually succeeded, the caller just didn't see the response in time. The fix is a server-side idempotency key supplied by the caller, persisted in the SAME transaction as the side effect (e.g. a unique constraint on idempotency_key, INSERT ... ON CONFLICT DO NOTHING; if the key already exists, return the prior result instead of charging). Equally important: a timeout is an UNKNOWN outcome, not a failure — don't blindly compensate; enqueue a reconciliation that polls the PSP by idempotency key. Also make compensations (refunds) idempotent.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["idempotency", "retries", "payments"],
+      "followUps": ["Where exactly do you store the idempotency key?", "Why is a timeout not a failure?"]
+    },
+    {
+      "id": "q-dual-write-tricky",
+      "question": "Tricky: Your service commits to its DB then publishes an event to Kafka. Sometimes the DB row exists but no event was published. Why, and how do you fix it?",
+      "answer": "This is the dual-write problem: writing to two systems (DB and broker) without a shared transaction. If the process crashes after the DB commit but before the publish — or the publish fails — the two diverge, and downstream services never learn about the change. You cannot make a DB commit and a Kafka publish atomic. The fix is the transactional outbox: in the same local DB transaction, write the business row AND an event row into an outbox table. A separate relay (CDC like Debezium, or a poller) reads the outbox and publishes to Kafka with at-least-once delivery, marking rows sent. Consumers must dedup by event ID since delivery is at-least-once. This guarantees the event is eventually published iff the business change committed.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["outbox", "dual-write", "consistency"],
+      "followUps": ["How does Debezium read the outbox?", "Why must consumers still dedup?"]
+    },
+    {
+      "id": "q-versioning",
+      "question": "How do you evolve a service's API without breaking its consumers?",
+      "answer": "Evolve contracts backward-compatibly: add fields rather than remove or rename them, make new fields optional, and never change the meaning of an existing field. Use explicit versioning (URL or media-type) for breaking changes and run versions side by side during migration. Use consumer-driven contract tests (e.g. Pact) so consumers' expectations are verified against the provider in CI, catching breaks before deploy. The goal is that a provider can deploy independently without a coordinated consumer release — without that, you lose independent deployability.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["versioning", "contracts"],
+      "followUps": ["What are consumer-driven contracts?", "How do you retire an old API version safely?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-order-saga",
+      "title": "Design an Orchestration Saga for Order + Payment + Stock",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "prompt": "Implement an orchestration-based saga coordinator for a checkout flow with three steps: createOrder, reserveStock, capturePayment. Each step has a forward action and an idempotent compensation. If any step fails, run the compensations for all successfully completed prior steps in reverse order. The coordinator must be resilient: compensations may be retried, so they must be safe to call more than once. Return the final saga outcome (COMPLETED or COMPENSATED) and never leave the system in a half-applied state.",
+      "hints": [
+        "Model each step as { invoke, compensate } so the engine is generic.",
+        "Track which steps succeeded; on failure, compensate them in reverse order.",
+        "Compensations must be idempotent — wrap them with retry and assume at-least-once.",
+        "Surface the outcome explicitly; a thrown error from a forward step triggers compensation, not a crash."
+      ],
+      "solutionCode": "type Ctx = { orderId: string; items: { sku: string; qty: number }[]; amount: number };\n\ninterface Step {\n  name: string;\n  invoke: (c: Ctx) => Promise<void>;\n  compensate: (c: Ctx) => Promise<void>; // MUST be idempotent\n}\n\nasync function withRetry(fn: () => Promise<void>, tries = 5): Promise<void> {\n  let lastErr: unknown;\n  for (let i = 0; i < tries; i++) {\n    try { return await fn(); }\n    catch (e) { lastErr = e; await sleep(2 ** i * 50 + Math.random() * 50); }\n  }\n  throw lastErr; // exhausted retries -> escalate to dead-letter / on-call\n}\n\nasync function runSaga(steps: Step[], ctx: Ctx): Promise<'COMPLETED' | 'COMPENSATED'> {\n  const done: Step[] = [];\n  try {\n    for (const step of steps) {\n      await step.invoke(ctx); // each is a local txn in its own service\n      done.push(step);\n    }\n    return 'COMPLETED';\n  } catch (err) {\n    // Forward step failed -> compensate completed steps in REVERSE order.\n    for (const step of done.reverse()) {\n      // Compensations are idempotent + retried; never throw out of the loop.\n      await withRetry(() => step.compensate(ctx)).catch(e =>\n        escalate(`compensation failed: ${step.name}`, e));\n    }\n    return 'COMPENSATED';\n  }\n}\n\nconst checkoutSteps: Step[] = [\n  { name: 'createOrder',\n    invoke: c => orders.create(c.orderId, 'PENDING'),\n    compensate: c => orders.cancelIfExists(c.orderId) },\n  { name: 'reserveStock',\n    invoke: c => inventory.reserve(c.orderId, c.items),\n    compensate: c => inventory.releaseIfReserved(c.orderId) },\n  { name: 'capturePayment',\n    invoke: c => payments.capture(c.orderId, c.amount, `cap:${c.orderId}`),\n    compensate: c => payments.refundIfCaptured(c.orderId) },\n];\n\n// Usage: const outcome = await runSaga(checkoutSteps, ctx);",
+      "solutionLanguage": "typescript",
+      "explanation": "The engine is generic: each step bundles a forward action (a local transaction in its owning service) with an idempotent compensation. runSaga executes forward steps, recording the ones that succeed. The moment a forward step throws, it stops and compensates the recorded steps in REVERSE order — releasing stock before cancelling the order, mirroring how you'd unwind a stack. The compensations are named *IfExists / *IfReserved / *IfCaptured to signal idempotency: calling them when nothing was applied is a no-op, so they're safe to retry. withRetry adds jittered exponential backoff because compensations run in a failure context where transient errors are likely; if a compensation exhausts retries we escalate (dead-letter + alert) rather than silently dropping it, since an un-run compensation is real money or stock leaked. Note the payment capture passes an idempotency key (cap:orderId) so a retried forward invocation never double-charges. The function returns an explicit outcome — COMPLETED or COMPENSATED — so callers and the audit log always know the terminal state; the system is never left half-applied. A production version would also persist saga state (which step is current) so the coordinator can resume after its own crash, and would treat a payment-capture timeout as UNKNOWN — reconciling rather than blindly compensating.",
+      "relatedTopic": "microservices"
+    },
+    {
+      "id": "ch-idempotent-consumer",
+      "title": "Build an Idempotent Event Consumer with Dedup",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "prompt": "Brokers deliver at-least-once, so the same event can arrive multiple times. Implement a consumer for an 'OrderPaid' event that updates the order to PAID and decrements a ledger, exactly once in effect, even if the event is delivered three times. The processed-message record and the side effect must commit together so a crash can't leave them inconsistent.",
+      "hints": [
+        "Persist processed event IDs in a dedup table with a unique constraint.",
+        "Do the dedup insert and the business side effect in the SAME database transaction.",
+        "If the event ID already exists, skip the side effect and ack the message.",
+        "Give dedup rows a TTL/cleanup so the table doesn't grow unbounded."
+      ],
+      "solutionCode": "import { Pool } from 'pg';\nconst pool = new Pool();\n\ninterface OrderPaid { eventId: string; orderId: string; amount: number; }\n\nasync function handleOrderPaid(evt: OrderPaid): Promise<void> {\n  const client = await pool.connect();\n  try {\n    await client.query('BEGIN');\n\n    // 1) Dedup guard: insert the event id; conflict => already processed.\n    const dedup = await client.query(\n      `INSERT INTO processed_events (event_id, processed_at)\n       VALUES ($1, now())\n       ON CONFLICT (event_id) DO NOTHING\n       RETURNING event_id`,\n      [evt.eventId],\n    );\n\n    if (dedup.rowCount === 0) {\n      // Duplicate delivery: side effect already applied. Ack and return.\n      await client.query('ROLLBACK');\n      return;\n    }\n\n    // 2) Side effect, in the SAME transaction as the dedup insert.\n    await client.query(\n      `UPDATE orders SET status = 'PAID' WHERE id = $1 AND status <> 'PAID'`,\n      [evt.orderId],\n    );\n    await client.query(\n      `INSERT INTO ledger (order_id, delta) VALUES ($1, $2)`,\n      [evt.orderId, evt.amount],\n    );\n\n    // 3) Commit dedup + side effect atomically.\n    await client.query('COMMIT');\n  } catch (e) {\n    await client.query('ROLLBACK'); // not acked -> broker redelivers, safe\n    throw e;\n  } finally {\n    client.release();\n  }\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "The key insight is that idempotency must be transactional with the side effect, not bolted on beside it. We use a processed_events table with a unique constraint on event_id as the dedup guard. INSERT ... ON CONFLICT DO NOTHING returns zero rows when the event was already processed; in that case we roll back and return (acking the duplicate without re-applying anything). When the insert succeeds, we perform the business mutations — marking the order PAID and appending to the ledger — and then COMMIT, so the dedup record and the side effect land atomically. This closes the crash window: there is no point where the side effect is applied but the dedup row is missing (which would let a redelivery double-apply), nor vice versa, because they share one transaction. If anything throws we ROLLBACK and do NOT ack, so the broker redelivers and we retry safely — exactly the at-least-once contract working as intended. The order UPDATE is additionally guarded with status <> 'PAID' as defense in depth (natural idempotency), and the dedup table needs a periodic cleanup job to prune old event_ids by processed_at so it doesn't grow without bound. This same pattern generalizes to any at-least-once write path, including saga step handlers.",
+      "relatedTopic": "microservices"
+    }
+  ],
+  "references": [
+    {"label": "Sam Newman — Building Microservices (2nd ed.)", "url": "https://www.oreilly.com/library/view/building-microservices-2nd/9781492034018/"},
+    {"label": "Chris Richardson — Microservices Patterns (microservices.io)", "url": "https://microservices.io/patterns/index.html"},
+    {"label": "Saga Pattern — microservices.io", "url": "https://microservices.io/patterns/data/saga.html"},
+    {"label": "Transactional Outbox — microservices.io", "url": "https://microservices.io/patterns/data/transactional-outbox.html"},
+    {"label": "Martin Fowler — Microservices", "url": "https://martinfowler.com/articles/microservices.html"},
+    {"label": "W3C Trace Context", "url": "https://www.w3.org/TR/trace-context/"},
+    {"label": "OpenTelemetry Documentation", "url": "https://opentelemetry.io/docs/"}
+  ]
+}

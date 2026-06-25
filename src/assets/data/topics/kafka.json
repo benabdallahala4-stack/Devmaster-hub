@@ -1,0 +1,388 @@
+{
+  "id": "kafka",
+  "title": "Apache Kafka",
+  "category": "Messaging",
+  "subcategory": "Streaming",
+  "difficulty": "senior",
+  "tags": ["kafka", "streaming", "partitioning", "exactly-once", "consumer-groups", "replication", "idempotency"],
+  "description": "A staff-level deep dive into Apache Kafka's distributed commit log: partitioning and ordering guarantees, replication and ISR, delivery semantics, idempotent producers and transactions, and how to build consumers that survive rebalances, retries, and poison pills.",
+  "estReadMinutes": 28,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "What Kafka Actually Is",
+      "kind": "intro",
+      "blocks": [
+        {"type": "paragraph", "text": "Apache Kafka is a distributed, append-only commit log dressed up as a publish/subscribe messaging system. Unlike a traditional message queue that deletes a message once it is consumed, Kafka durably persists every record to disk and lets many independent consumers read the same log at their own pace. This single design decision — treating the log as the source of truth rather than a transient buffer — is why Kafka became the backbone for event sourcing, stream processing, CDC pipelines, and inter-service messaging at companies running trillions of messages per day."},
+        {"type": "paragraph", "text": "The core abstractions are deliberately small. Producers append records to topics. A topic is split into partitions, each of which is an ordered, immutable sequence of records identified by a monotonically increasing offset. Brokers store partitions and serve reads and writes. Consumers, organized into consumer groups, read records and track their position via committed offsets. Everything else — replication, exactly-once semantics, stream processing — is built on top of that log."},
+        {"type": "list", "items": [
+          "Topic: a named, partitioned, replicated log.",
+          "Partition: the unit of parallelism, ordering, and replication. One leader, N followers.",
+          "Offset: the position of a record within a partition. Never reused, never reordered.",
+          "Producer: appends records, optionally keyed for deterministic partition routing.",
+          "Consumer group: a set of consumers that cooperatively divide a topic's partitions.",
+          "Broker: a server that hosts partition replicas and serves the protocol."
+        ]},
+        {"type": "callout", "variant": "info", "text": "Mental model: a Kafka topic is not a queue, it is a replicated, append-only file split into shards. If you internalize 'it's just a log,' most of Kafka's behavior — retention, replay, ordering, consumer lag — becomes obvious."}
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why Kafka Matters",
+      "kind": "why",
+      "blocks": [
+        {"type": "paragraph", "text": "Kafka matters because it decouples producers from consumers in both time and throughput while still giving you durability and ordering. A payments service can emit 200k events/sec during a flash sale; the fraud, ledger, analytics, and notification consumers each read that stream independently, at their own speed, and can replay history from any point if they have a bug. No producer is blocked by a slow consumer, and no consumer loses data because a downstream system was down."},
+        {"type": "heading", "text": "The throughput story"},
+        {"type": "paragraph", "text": "Kafka is fast not because of clever in-memory tricks but because it embraces the operating system. It writes records sequentially to an append-only segment file, which on spinning disks and SSDs alike is dramatically faster than random I/O. It relies on the OS page cache instead of a JVM heap cache, so reads of recent data never touch disk. And it uses the sendfile syscall (zero-copy) to move bytes from page cache straight to the socket without copying into user space. Combine that with partition-level parallelism and consumer groups, and Kafka scales horizontally by simply adding partitions and brokers."},
+        {"type": "table", "headers": ["Concern", "Traditional MQ (e.g. RabbitMQ)", "Kafka"], "rows": [
+          ["Message lifetime", "Deleted on ack", "Retained by time/size; replayable"],
+          ["Fan-out to N consumers", "Often duplicate queues", "All groups read the same log independently"],
+          ["Ordering", "Per-queue, lost on redelivery", "Strict per-partition"],
+          ["Throughput ceiling", "Tens of thousands msg/s", "Millions msg/s per cluster"],
+          ["Replay / reprocessing", "Not native", "Seek to any offset"]
+        ]},
+        {"type": "callout", "variant": "success", "text": "If your requirement includes durable history, replay, high fan-out, or stream processing, Kafka is usually the right tool. If you need per-message TTL, priority queues, or complex routing topologies, a broker like RabbitMQ may fit better."}
+      ]
+    },
+    {
+      "id": "log-and-partitions",
+      "heading": "The Commit Log, Partitions, and Ordering",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "A partition is a strictly ordered sequence of records. Writes go to the tail; offsets increase by one per record and are never reused. This is the single most important property in Kafka, and it is also the most misunderstood: Kafka guarantees ordering only within a partition, never across partitions of a topic."},
+        {"type": "paragraph", "text": "Which partition a record lands in is decided by the producer. If you set a key, the default partitioner hashes it (murmur2) modulo the partition count, so all records with the same key go to the same partition and are therefore strictly ordered relative to each other. If you do not set a key, the producer spreads records across partitions (sticky partitioning in modern clients) for throughput, and you get no cross-record ordering."},
+        {"type": "code", "language": "java", "code": "// Keyed produce: all events for an order are co-located and ordered.\nProducerRecord<String, OrderEvent> record =\n    new ProducerRecord<>(\"orders\", order.getId(), event);\nproducer.send(record);\n\n// Same key -> same partition -> strict offset order:\n//   orders-7: [ created@100, paid@101, shipped@102 ]\n// A different order may interleave on another partition,\n// but the relative order of THIS order's events is guaranteed."},
+        {"type": "callout", "variant": "warning", "text": "Choosing the partition key is a domain-modeling decision, not a config tweak. Key by the entity whose event order you must preserve (orderId, accountId, deviceId). Keying by something too coarse (e.g. region) creates hot partitions; keying by something with no ordering need wastes the guarantee."},
+        {"type": "paragraph", "text": "Partition count is also your concurrency limit for a single consumer group: at most one consumer in a group can own a given partition at a time. Ten partitions means at most ten actively-consuming members. You can over-provision partitions to allow future scaling, but each partition has memory, file-handle, and replication overhead, so thousands of partitions per broker is a real cost."}
+      ]
+    },
+    {
+      "id": "replication-isr",
+      "heading": "Replication, Leaders, and the ISR",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Durability comes from replication. Each partition has a replication factor (commonly 3): one replica is the leader, the rest are followers. All reads and writes for a partition go through its leader; followers continuously fetch from the leader to stay in sync. The set of replicas that are sufficiently caught up is called the In-Sync Replica set (ISR)."},
+        {"type": "list", "items": [
+          "A follower is in the ISR if it has fetched the leader's latest records within replica.lag.time.max.ms (default 30s).",
+          "A record is considered committed only once all ISR members have it. Committed records survive leader failure.",
+          "If the leader dies, a new leader is elected from the ISR — guaranteeing no committed data is lost (assuming unclean election is disabled)."
+        ]},
+        {"type": "heading", "text": "acks and min.insync.replicas work together"},
+        {"type": "paragraph", "text": "The producer's acks setting controls how many acknowledgements it waits for, while the topic/broker's min.insync.replicas sets the minimum ISR size required to accept a write with acks=all. These two settings together define your durability vs. availability trade-off."},
+        {"type": "table", "headers": ["acks", "Producer waits for", "Risk"], "rows": [
+          ["0", "Nothing (fire and forget)", "Silent data loss; highest throughput"],
+          ["1", "Leader write only", "Loss if leader fails before followers replicate"],
+          ["all (-1)", "All in-sync replicas", "No loss of committed data; lower throughput"]
+        ]},
+        {"type": "callout", "variant": "danger", "text": "acks=all with replication.factor=3 but min.insync.replicas=1 is a trap: if two replicas fall out of the ISR, you are durably writing to a single broker while believing you have a quorum. Set min.insync.replicas=2 for RF=3 so a single broker failure cannot cause acknowledged-data loss, and a write is rejected rather than silently under-replicated."}
+      ]
+    },
+    {
+      "id": "consumer-groups-offsets",
+      "heading": "Consumer Groups, Offsets, and Rebalancing",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "A consumer group is Kafka's load-balancing primitive. Kafka assigns each partition to exactly one consumer in the group. Add consumers and partitions get redistributed; remove a consumer (crash, deploy) and its partitions are reassigned to survivors. This redistribution is a rebalance, coordinated by a broker acting as the group coordinator."},
+        {"type": "paragraph", "text": "Each consumer tracks its position by committing offsets to the internal __consumer_offsets topic. The committed offset means 'the next record I want is this one' — i.e. everything before it is considered processed. Where and when you commit determines your delivery semantics."},
+        {"type": "code", "language": "java", "code": "Properties props = new Properties();\nprops.put(\"group.id\", \"fraud-scoring\");\nprops.put(\"enable.auto.commit\", \"false\"); // commit manually after work\nprops.put(\"isolation.level\", \"read_committed\"); // skip aborted txns\nprops.put(\"max.poll.records\", \"500\");\n\ntry (var consumer = new KafkaConsumer<String, String>(props)) {\n    consumer.subscribe(List.of(\"transactions\"));\n    while (running) {\n        var records = consumer.poll(Duration.ofMillis(200));\n        for (var r : records) process(r);          // do the work first\n        consumer.commitSync();                       // then commit\n    }\n}"},
+        {"type": "heading", "text": "Rebalance protocols"},
+        {"type": "list", "items": [
+          "Eager (stop-the-world): every consumer revokes all partitions, then the whole group is reassigned. Simple but causes a full processing pause.",
+          "Cooperative/incremental: only the partitions that need to move are revoked; others keep processing. The default for modern clients and strongly preferred.",
+          "Static membership (group.instance.id): a consumer that briefly disappears (rolling restart) keeps its assignment if it returns within session.timeout.ms, avoiding a rebalance entirely."
+        ]},
+        {"type": "callout", "variant": "info", "text": "Consumer lag — the gap between the partition's log-end offset and the consumer's committed offset — is your single most important consumer health metric. Rising lag means you are falling behind; alert on it per partition, not just per group, because one slow/stuck partition can hide behind a healthy group average."}
+      ]
+    },
+    {
+      "id": "retention-compaction",
+      "heading": "Retention and Log Compaction",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Kafka does not delete records when they are consumed. Instead, each topic has a retention policy that governs when old log segments are removed. There are two cleanup strategies, and choosing the right one is an architecture decision."},
+        {"type": "table", "headers": ["Policy", "Behavior", "Use case"], "rows": [
+          ["delete (time)", "Drop segments older than retention.ms", "Event streams, metrics, logs"],
+          ["delete (size)", "Drop oldest segments past retention.bytes", "Bounded-disk telemetry"],
+          ["compact", "Keep latest value per key forever", "Changelogs, KTables, config/state topics"],
+          ["compact,delete", "Compact, but also expire by time", "State with TTL semantics"]
+        ]},
+        {"type": "paragraph", "text": "Log compaction is what turns a topic into a durable key-value store. The compactor retains at least the most recent record for every key and removes superseded older versions in the background. A record with a null value (a tombstone) signals deletion and is itself eventually removed after delete.retention.ms. This is exactly how Kafka Streams persists its state stores and how CDC topics represent the current state of a row."},
+        {"type": "callout", "variant": "warning", "text": "Compaction guarantees the latest value per key survives, but it does NOT guarantee a compacted topic is small or that a consumer reading from the start sees only one record per key — records ahead of the cleaner point are uncompacted. Never assume 'compacted' means 'deduplicated on read.'"}
+      ]
+    },
+    {
+      "id": "delivery-semantics",
+      "heading": "Delivery Semantics and Exactly-Once",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Kafka supports three delivery semantics. Most teams think they want exactly-once but actually need at-least-once plus idempotent processing, which is simpler and more robust."},
+        {"type": "list", "items": [
+          "At-most-once: commit the offset before processing. If you crash mid-work, the record is skipped on restart. Data loss, no duplicates.",
+          "At-least-once: process, then commit. A crash between processing and commit replays the record. No loss, possible duplicates. This is the pragmatic default.",
+          "Exactly-once (EOS): the idempotent producer + transactions ensure each record affects downstream state once, even across retries and rebalances — but only for sinks Kafka can transact over (other Kafka topics, or external systems via the outbox/idempotency pattern)."
+        ]},
+        {"type": "heading", "text": "Idempotent producer"},
+        {"type": "paragraph", "text": "Setting enable.idempotence=true (the default since Kafka 3.0) makes the producer attach a producer ID and a per-partition sequence number to every record. The broker deduplicates retries: if a producer's ack is lost and it resends, the broker sees the same sequence number and drops the duplicate. This eliminates duplicates caused by producer-side retries — the classic source of double-published messages."},
+        {"type": "code", "language": "java", "code": "// Read-process-write done atomically with transactions (EOS).\nproducer.initTransactions();\nwhile (running) {\n    var records = consumer.poll(Duration.ofMillis(200));\n    producer.beginTransaction();\n    for (var r : records) {\n        producer.send(transform(r));            // produce derived events\n    }\n    // Commit consumer offsets INSIDE the producer transaction:\n    producer.sendOffsetsToTransaction(offsetsOf(records),\n        consumer.groupMetadata());\n    producer.commitTransaction();               // atomic: offsets + output\n}"},
+        {"type": "callout", "variant": "danger", "text": "Exactly-once is end-to-end only when the entire path stays inside Kafka (read topic -> transform -> write topic, offsets committed in the same transaction). The moment you write to an external database, email service, or HTTP API, Kafka's transaction cannot cover it. For those sinks you must add your own idempotency — there is no magic flag."}
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: The Double-Charge Incident",
+      "kind": "example",
+      "blocks": [
+        {"type": "paragraph", "text": "A payments platform processed a 'payments' topic and called an external PSP (payment service provider) for each captured authorization. During a broker rolling upgrade, consumers rebalanced; a few consumers finished processing a batch (charging customers) but crashed before committing offsets. On restart, those records were redelivered and customers were charged twice. The root cause was textbook at-least-once delivery meeting a non-idempotent side effect."},
+        {"type": "heading", "text": "What actually happened"},
+        {"type": "list", "items": [
+          "Consumer polled records, called PSP.charge() for each (successful, money moved).",
+          "Before commitSync() ran, the JVM received SIGTERM from the orchestrator and exited.",
+          "Offsets were never committed, so the new owner of those partitions re-polled the same offsets.",
+          "PSP.charge() was called again — duplicate charges, because the PSP request carried no idempotency key."
+        ]},
+        {"type": "paragraph", "text": "The fix had three layers. First, an idempotency key derived deterministically from the event (topic-partition-offset, or better, a business key like paymentId) was sent to the PSP, which de-duplicated server-side. Second, the consumer wrote a row to a processed_keys table inside the same database transaction as the business effect, and skipped any key already present. Third, enable.idempotence=true was turned on for the upstream producer so the platform never double-published the source event in the first place."},
+        {"type": "code", "language": "java", "code": "void handle(ConsumerRecord<String, Payment> r) {\n    String idemKey = r.value().getPaymentId(); // stable business key\n    try (var tx = db.begin()) {\n        if (db.exists(\"SELECT 1 FROM processed WHERE key=?\", idemKey)) {\n            return; // already done; safe to skip and commit offset\n        }\n        psp.charge(r.value(), idemKey);           // PSP dedups on idemKey\n        db.exec(\"INSERT INTO processed(key) VALUES(?)\", idemKey);\n        tx.commit();   // effect + dedup row land together, atomically\n    }\n}"},
+        {"type": "callout", "variant": "success", "text": "Outcome: duplicates dropped to zero even under aggressive rebalancing. The team did NOT need Kafka transactions for this — the external sink (PSP + DB) was made idempotent. EOS would not have helped because the charge lived outside Kafka."}
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {"type": "heading", "text": "Assuming global ordering"},
+        {"type": "paragraph", "text": "A team keyed events by a random UUID 'for even distribution' and then filed a bug that events arrived out of order. They were spread across 12 partitions with no ordering relationship. Ordering is per-partition; if you need order, you must co-locate by key."},
+        {"type": "heading", "text": "Rebalance storms"},
+        {"type": "paragraph", "text": "Slow processing inside the poll loop is the classic cause. If the time between poll() calls exceeds max.poll.interval.ms (default 5 min), the coordinator assumes the consumer is dead and rebalances — which moves the partition to another consumer that is also slow, triggering another rebalance, and so on. The cluster spends all its time rebalancing and no time processing."},
+        {"type": "list", "items": [
+          "Symptom: 'commit failed, possibly because the consumer is no longer part of the group' in logs, lag climbing.",
+          "Fixes: reduce max.poll.records, raise max.poll.interval.ms, move heavy work off the poll thread, use cooperative rebalancing and static membership.",
+          "Never block indefinitely (synchronous HTTP with no timeout) inside the loop — it starves the heartbeat."
+        ]},
+        {"type": "heading", "text": "Poison-pill messages"},
+        {"type": "paragraph", "text": "A single malformed record (bad Avro, schema mismatch, oversized payload) that throws during deserialization or processing will, in a naive at-least-once loop, be retried forever. The consumer never commits past it, lag grows unbounded, and the partition is effectively stuck. The fix is a dead-letter topic: catch the failure, publish the raw bytes plus error metadata to a DLT, and commit past the offset so the rest of the partition keeps flowing."},
+        {"type": "callout", "variant": "danger", "text": "Enabling unclean.leader.election (allowing an out-of-sync replica to become leader to restore availability) silently discards committed records. It trades durability for availability. Leave it disabled unless you have explicitly decided availability beats data integrity for that topic."},
+        {"type": "heading", "text": "Auto-commit eating data"},
+        {"type": "paragraph", "text": "With enable.auto.commit=true, offsets are committed on a timer regardless of whether your processing succeeded. If you poll 500 records, the auto-committer fires after the 50th is processed, then you crash — records 51-500 are skipped because their offsets were committed but never processed. For anything that matters, commit manually after the work is durably done."}
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {"type": "list", "items": [
+          "Default to acks=all, RF=3, min.insync.replicas=2, enable.idempotence=true. This is the safe baseline; deviate only with a stated reason.",
+          "Make consumers idempotent regardless of EOS. Idempotent processing survives redelivery from any cause; transactions only cover Kafka-to-Kafka paths.",
+          "Commit after processing, in batches, and tie offset commits to the durability of side effects (DB transaction, outbox).",
+          "Choose partition keys by the entity whose order matters; size partition count for peak parallelism plus headroom, but avoid thousands of tiny partitions.",
+          "Use a dead-letter topic with retry/backoff metadata for poison pills; never let one bad record stall a partition.",
+          "Prefer cooperative rebalancing and static membership; keep poll-loop work short and offload heavy I/O.",
+          "Monitor consumer lag per partition, under-replicated partitions, ISR shrink/expand, and request latency. Alert on lag trend, not absolute value.",
+          "Pin a schema registry with compatibility rules (backward/forward) so producers and consumers can evolve independently."
+        ]},
+        {"type": "callout", "variant": "info", "text": "A useful rule of thumb: design every consumer as if every message will be delivered at least twice and may be delivered out of order relative to other keys. If your code is correct under those assumptions, Kafka's edge cases stop being incidents."}
+      ]
+    },
+    {
+      "id": "scaling-note",
+      "heading": "Note: Why Kafka Scales",
+      "kind": "note",
+      "blocks": [
+        {"type": "paragraph", "text": "When an interviewer asks why Kafka is fast, the staff-level answer names four mechanisms and how they compose, not just 'it's distributed.'"},
+        {"type": "list", "items": [
+          "Partitioning: horizontal sharding of a topic; throughput scales by adding partitions/brokers and consumers.",
+          "Sequential disk I/O: append-only segment writes turn writes into sequential I/O, far faster than random access.",
+          "Page cache + zero-copy: recent data is served from the OS page cache via sendfile, moving bytes from disk to socket without user-space copies or serialization overhead.",
+          "Consumer groups: parallel, independent consumption with automatic partition assignment, so adding consumers (up to partition count) linearly increases consumption throughput."
+        ]},
+        {"type": "paragraph", "text": "The interplay matters: zero-copy only helps because Kafka stores records in the same wire format on disk and over the network; sequential I/O only helps because the log is append-only; and partitioning only helps because ordering is scoped per-partition. The constraints are the performance features."}
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "topic-partitions-arch",
+      "title": "Producers, Partitions, Brokers, and Consumer Groups",
+      "type": "mermaid",
+      "content": "flowchart TD\n  P1[Producer A] -->|key orderId| T\n  P2[Producer B] -->|key orderId| T\n  subgraph Topic orders\n    direction LR\n    T --> PA[Partition 0]\n    T --> PB[Partition 1]\n    T --> PC[Partition 2]\n  end\n  PA --> CG1A[Consumer 1]\n  PB --> CG1B[Consumer 2]\n  PC --> CG1B\n  PA --> CG2[Analytics Consumer]\n  PB --> CG2\n  PC --> CG2\n  CG1A -.group fraud.-> G1[Group fraud]\n  CG1B -.group fraud.-> G1\n  CG2 -.group analytics.-> G2[Group analytics]"
+    },
+    {
+      "id": "replication-isr-seq",
+      "title": "Replication and ISR Commit Flow with acks=all",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n  participant Pr as Producer\n  participant L as Leader broker\n  participant F1 as Follower 1\n  participant F2 as Follower 2\n  Pr->>L: append record acks=all\n  L->>L: write to local log\n  F1->>L: fetch\n  L-->>F1: record\n  F2->>L: fetch\n  L-->>F2: record\n  Note over L,F2: record committed once all ISR have it\n  L-->>Pr: ack\n  Note over Pr,F2: if leader dies new leader elected from ISR no loss"
+    },
+    {
+      "id": "log-segments-ascii",
+      "title": "Partition Log: Segments, Offsets, and the Commit Point",
+      "type": "ascii",
+      "content": "Partition orders-0 (append-only log)\n\n  +--------- segment 0 ---------+--------- segment 1 (active) ---------+\n  | off0 | off1 | off2 | off3   | off4 | off5 | off6 | off7 |  <-- tail\n  +-----------------------------+--------------------------------------+\n     ^                    ^                         ^            ^\n     |                    |                         |            |\n  log-start         committed offset           consumer       log-end\n  (retention)       (consumer position)        in-flight      (latest)\n\n  consumer lag = log-end-offset  -  committed-offset"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-what-is-partition",
+      "question": "What is a partition in Kafka and why does it exist?",
+      "answer": "A partition is an ordered, immutable, append-only sequence of records within a topic, identified by monotonically increasing offsets. It is simultaneously the unit of ordering (records are ordered only within a partition), the unit of parallelism (each partition is consumed by at most one consumer per group), and the unit of replication (each partition has a leader and followers). Partitions exist so a topic can be sharded across brokers and consumers, allowing horizontal scaling while preserving strict ordering within each shard.",
+      "difficulty": "junior",
+      "category": "fundamentals",
+      "tricky": false,
+      "tags": ["partition", "ordering"],
+      "followUps": ["How do you decide the number of partitions?", "What determines which partition a record goes to?"]
+    },
+    {
+      "id": "q-acks-meaning",
+      "question": "Explain producer acks 0, 1, and all, and how they interact with min.insync.replicas.",
+      "answer": "acks=0 means the producer does not wait for any acknowledgement (fire-and-forget, highest throughput, possible silent loss). acks=1 means it waits only for the leader to persist the record; if the leader fails before followers replicate, that record is lost. acks=all means it waits until all in-sync replicas have the record, so no committed data is lost on leader failure. acks=all is only as strong as min.insync.replicas: that setting defines the minimum ISR size required to accept the write. With RF=3 you set min.insync.replicas=2 so a single broker failure still leaves a quorum, and a write is rejected (rather than under-replicated) if the ISR shrinks below 2.",
+      "difficulty": "mid",
+      "category": "durability",
+      "tricky": false,
+      "tags": ["acks", "isr", "durability"],
+      "followUps": ["What happens to a producer when ISR drops below min.insync.replicas?", "What is unclean leader election?"]
+    },
+    {
+      "id": "q-why-kafka-fast",
+      "question": "Why is Kafka able to achieve such high throughput?",
+      "answer": "Four composing mechanisms: (1) partitioning shards a topic across brokers and consumers for horizontal scale; (2) append-only segment files turn writes into sequential disk I/O, which is far faster than random I/O; (3) Kafka serves recent reads from the OS page cache and uses zero-copy (sendfile) to move bytes from page cache to socket without copying into the JVM heap or re-serializing; (4) consumer groups parallelize consumption with automatic partition assignment. Crucially these reinforce each other — zero-copy works because the on-disk format matches the wire format, and that only works because the log is append-only and ordering is per-partition.",
+      "difficulty": "mid",
+      "category": "performance",
+      "tricky": false,
+      "tags": ["performance", "zero-copy", "page-cache"],
+      "followUps": ["Why does Kafka avoid a JVM heap cache for records?", "How does zero-copy break if you enable SSL or compression transforms?"]
+    },
+    {
+      "id": "q-delivery-semantics",
+      "question": "Compare at-most-once, at-least-once, and exactly-once delivery in Kafka.",
+      "answer": "At-most-once commits the offset before processing: a crash skips the record (no duplicates, possible loss). At-least-once processes then commits: a crash between the two replays the record (no loss, possible duplicates) — the pragmatic default. Exactly-once (EOS) uses the idempotent producer plus transactions so a read-process-write that stays within Kafka affects downstream state once, even across retries and rebalances, by committing consumer offsets inside the same producer transaction as the output. EOS is end-to-end only while the path stays inside Kafka; external sinks require your own idempotency.",
+      "difficulty": "senior",
+      "category": "semantics",
+      "tricky": false,
+      "tags": ["delivery-semantics", "exactly-once"],
+      "followUps": ["How does sendOffsetsToTransaction make it atomic?", "When would you choose at-least-once over EOS?"]
+    },
+    {
+      "id": "q-rebalance",
+      "question": "What triggers a consumer rebalance and how do cooperative rebalancing and static membership reduce its cost?",
+      "answer": "A rebalance is triggered when group membership or topic metadata changes: a consumer joins or leaves, a consumer is deemed dead (heartbeat missed beyond session.timeout.ms, or poll() not called within max.poll.interval.ms), or partitions are added. Eager rebalancing is stop-the-world: all consumers revoke all partitions then get reassigned, pausing processing. Cooperative (incremental) rebalancing only revokes the partitions that must move, so unaffected partitions keep processing. Static membership (group.instance.id) lets a consumer that briefly leaves and returns within the session timeout keep its assignment, avoiding a rebalance entirely during rolling restarts.",
+      "difficulty": "senior",
+      "category": "consumers",
+      "tricky": false,
+      "tags": ["rebalance", "consumer-group"],
+      "followUps": ["How would you diagnose a rebalance storm?", "What is the difference between session.timeout.ms and max.poll.interval.ms?"]
+    },
+    {
+      "id": "q-compaction",
+      "question": "What is log compaction and when would you use it?",
+      "answer": "Log compaction is a cleanup policy that retains at least the most recent record for each key and removes superseded older versions, while a null-valued record (tombstone) marks a key for deletion and is itself removed after delete.retention.ms. This turns a topic into a durable, replayable key-value changelog. Use it for state topics: Kafka Streams state stores, CDC current-state topics, configuration/feature-flag topics, and KTables. Use time/size-based deletion instead for event streams where you want history to expire, not be deduplicated by key.",
+      "difficulty": "mid",
+      "category": "retention",
+      "tricky": false,
+      "tags": ["compaction", "retention", "tombstone"],
+      "followUps": ["Does compaction guarantee one record per key on read?", "How do tombstones get cleaned up?"]
+    },
+    {
+      "id": "q-offset-meaning",
+      "question": "What exactly does a committed offset represent, and where is it stored?",
+      "answer": "A committed offset is the offset of the next record the consumer group wants to read for a given partition — i.e. it is the position 'one past the last processed record,' not the last processed offset itself. It is stored in the internal compacted topic __consumer_offsets, keyed by (group, topic, partition), so the latest commit per partition survives. On startup or after a rebalance, a consumer resumes from the committed offset (or falls back to auto.offset.reset = earliest/latest if none exists).",
+      "difficulty": "junior",
+      "category": "consumers",
+      "tricky": false,
+      "tags": ["offsets", "consumer-group"],
+      "followUps": ["What does auto.offset.reset control?", "Why is __consumer_offsets a compacted topic?"]
+    },
+    {
+      "id": "q-idempotent-producer-tricky",
+      "question": "Does enable.idempotence=true give you exactly-once delivery to consumers?",
+      "answer": "No — this is the classic trap. The idempotent producer only deduplicates retries on the producer-to-broker path within a single producer session, using a producer ID and per-partition sequence numbers. It prevents the same producer from writing a duplicate when an ack is lost and it retries. It does NOT deduplicate across different producer instances, does NOT make consumers process records exactly once, and does NOT span multiple partitions atomically (that needs transactions). End-to-end exactly-once requires transactions for Kafka-to-Kafka paths and application-level idempotency for external sinks. Idempotent producer is necessary for EOS but nowhere near sufficient.",
+      "difficulty": "senior",
+      "category": "semantics",
+      "tricky": true,
+      "tags": ["idempotence", "exactly-once", "gotcha"],
+      "followUps": ["What happens to the producer ID after a producer restart?", "How do transactions extend idempotence across partitions?"]
+    },
+    {
+      "id": "q-ordering-tricky",
+      "question": "You enabled the idempotent producer and set acks=all, but you still see records within one key occasionally out of order. What could cause this?",
+      "answer": "If max.in.flight.requests.per.connection is greater than 1 AND idempotence is disabled, an earlier in-flight batch can fail and be retried after a later batch already succeeded, reordering records. With enable.idempotence=true the broker uses sequence numbers to reject out-of-order batches, so ordering is preserved even with up to 5 in-flight requests. So if you see reordering despite acks=all, the likely culprits are: idempotence not actually active (overridden by an incompatible config), records for the 'same key' actually landing on different partitions because the key or partitioner changed, or a downstream consumer parallelizing work across threads after the poll and losing per-partition order. Per-partition ordering on the broker is intact; the reordering is almost always introduced by configuration or by consumer-side concurrency.",
+      "difficulty": "senior",
+      "category": "ordering",
+      "tricky": true,
+      "tags": ["ordering", "in-flight", "gotcha"],
+      "followUps": ["Why does idempotence allow up to 5 in-flight requests safely?", "How can consumer thread pools break ordering?"]
+    },
+    {
+      "id": "q-poison-pill-tricky",
+      "question": "A single record causes a deserialization exception and your consumer's lag is now climbing without bound. What is happening and how do you fix it without losing data?",
+      "answer": "This is a poison pill. In an at-least-once loop, the failing record throws before you commit, so on the next poll the same offset is redelivered and fails again — an infinite retry that pins the consumer at that offset while the partition's tail keeps growing, so lag rises forever. The fix is a dead-letter topic: catch the failure, publish the raw bytes plus error context (exception, offset, timestamp) to a DLT, then commit past the poisoned offset so the rest of the partition flows. Add a bounded retry with backoff before DLT for transient errors, and alert on DLT volume. Do not skip the offset silently without capturing the record, or you have turned a stuck consumer into invisible data loss.",
+      "difficulty": "senior",
+      "category": "reliability",
+      "tricky": true,
+      "tags": ["poison-pill", "dead-letter", "gotcha"],
+      "followUps": ["How do you distinguish a transient error from a poison pill?", "Where should the retry/backoff live — in-process or a separate retry topic?"]
+    },
+    {
+      "id": "q-rf-vs-partitions",
+      "question": "What is the difference between replication factor and partition count, and how does each affect scaling?",
+      "answer": "Partition count is the unit of parallelism and ordering: more partitions allow more concurrent consumers in a group and higher aggregate throughput, but increase metadata, open file handles, and leader-election overhead. Replication factor is the number of copies of each partition for durability and availability: RF=3 means three brokers each hold a copy, tolerating up to two broker failures (with appropriate min.insync.replicas). Increasing partitions scales throughput; increasing RF scales durability/availability at the cost of more inter-broker replication traffic and disk. They are orthogonal knobs — you tune partitions for performance and RF for fault tolerance.",
+      "difficulty": "mid",
+      "category": "fundamentals",
+      "tricky": false,
+      "tags": ["replication", "partition", "scaling"],
+      "followUps": ["Can you decrease partition count later?", "What is the replication traffic cost of RF=3?"]
+    },
+    {
+      "id": "q-consumer-lag",
+      "question": "How do you define and monitor consumer lag, and why monitor it per partition?",
+      "answer": "Consumer lag for a partition is the log-end offset minus the consumer group's committed offset — the number of records produced but not yet processed. You monitor it via the consumer group's offset metadata (e.g. kafka-consumer-groups --describe, Burrow, or JMX records-lag-max). Monitor per partition, not just per group, because a group's total or average lag can look healthy while one partition is completely stuck (poison pill, a slow consumer owning a hot partition, or a crashed consumer whose partition was reassigned to an overloaded one). Alert on the lag trend (sustained growth) rather than an absolute threshold, since steady-state lag varies with load.",
+      "difficulty": "mid",
+      "category": "operations",
+      "tricky": false,
+      "tags": ["lag", "monitoring"],
+      "followUps": ["What metric exposes lag without committing offsets?", "Why is alerting on absolute lag fragile?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-idempotent-consumer",
+      "title": "Design an Idempotent Consumer",
+      "difficulty": "senior",
+      "category": "reliability",
+      "prompt": "Kafka delivers at-least-once, so your consumer may see the same record more than once after a crash or rebalance. Implement a consumer-side handler that applies a side effect (e.g. crediting a wallet) exactly once per business event, even under redelivery. You have a relational database available. The record key is a stable business id. Make the dedup decision and the side effect atomic so a crash cannot leave one applied without the other, and ensure the Kafka offset is only committed after the work is durable.",
+      "hints": [
+        "Use a deterministic idempotency key from the business event, not the offset, so duplicates from different sources still collapse.",
+        "Persist a 'processed' marker in the SAME database transaction as the side effect — never in two separate commits.",
+        "Disable auto-commit and commit the Kafka offset only after the DB transaction commits.",
+        "A unique constraint on the idempotency key turns a duplicate into a cheap, catchable error rather than a race."
+      ],
+      "solutionCode": "// Idempotent consumer: dedup marker + side effect in one DB transaction.\nProperties props = new Properties();\nprops.put(ConsumerConfig.GROUP_ID_CONFIG, \"wallet-credits\");\nprops.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, \"false\");\nprops.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, \"200\");\n\ntry (var consumer = new KafkaConsumer<String, WalletEvent>(props)) {\n    consumer.subscribe(List.of(\"wallet-credits\"));\n    while (running) {\n        var records = consumer.poll(Duration.ofMillis(200));\n        for (var r : records) {\n            applyOnce(r.value());        // idempotent unit of work\n        }\n        if (!records.isEmpty()) {\n            consumer.commitSync();       // commit ONLY after work is durable\n        }\n    }\n}\n\nvoid applyOnce(WalletEvent e) {\n    String idemKey = e.getEventId();     // stable business id, not offset\n    try (Connection c = pool.get()) {\n        c.setAutoCommit(false);\n        try {\n            // INSERT first: unique constraint is the dedup gate.\n            try (var ins = c.prepareStatement(\n                \"INSERT INTO processed_events(event_id) VALUES (?)\")) {\n                ins.setString(1, idemKey);\n                ins.executeUpdate();\n            }\n            // Side effect lives in the SAME transaction as the marker.\n            try (var upd = c.prepareStatement(\n                \"UPDATE wallets SET balance = balance + ? WHERE id = ?\")) {\n                upd.setLong(1, e.getAmount());\n                upd.setString(2, e.getWalletId());\n                upd.executeUpdate();\n            }\n            c.commit();                  // atomic: marker + effect together\n        } catch (SQLException dup) {\n            c.rollback();\n            if (isUniqueViolation(dup)) {\n                return;                  // already processed -> safe no-op\n            }\n            throw new RuntimeException(dup); // real error: do NOT commit offset\n        }\n    } catch (SQLException io) {\n        throw new RuntimeException(io);\n    }\n}",
+      "solutionLanguage": "java",
+      "explanation": "The design makes processing idempotent rather than relying on exactly-once delivery, because the side effect (a wallet balance) lives outside Kafka where transactions cannot reach. The dedup marker (processed_events) and the side effect (wallet balance update) are written in a single database transaction, so a crash either commits both or neither — there is no window where the credit is applied but the marker is missing. The idempotency key is a stable business id (eventId), so a duplicate caused by producer retries, consumer redelivery after a rebalance, or even a re-publish of the same event all collapse to the same key. Inserting the marker first means the database's unique constraint is the concurrency gate: if two consumer instances race on the same event (which can happen briefly during a rebalance), exactly one INSERT succeeds and the other gets a unique-violation that we catch and treat as a no-op. Finally, enable.auto.commit is off and commitSync runs only after the work is durable, so a crash before commit safely replays records — and replay is harmless precisely because the handler is idempotent. If a genuine (non-duplicate) SQL error occurs, we throw and skip the offset commit, so the record is retried rather than lost. This composes correctly under every at-least-once edge case Kafka can produce.",
+      "relatedTopic": "kafka"
+    },
+    {
+      "id": "ch-dlt-poison-pill",
+      "title": "Survive Poison Pills with a Dead-Letter Topic",
+      "difficulty": "mid",
+      "category": "reliability",
+      "prompt": "Your consumer occasionally receives records that always fail processing (corrupt payload, schema mismatch). In a naive at-least-once loop these block the partition forever and lag grows without bound. Implement a poll loop that retries transient failures a bounded number of times with backoff, routes permanently-failing records to a dead-letter topic with error context, and always makes forward progress by committing past handled records. Do not lose the raw record, and do not stall the partition.",
+      "hints": [
+        "Distinguish transient (timeout, downstream 503) from permanent (deserialization, validation) failures so you do not DLT something that would have succeeded on retry.",
+        "Send the original key and raw value to the DLT, plus headers with the exception, source topic-partition-offset, and a timestamp.",
+        "Commit the offset after each record is either processed or sent to the DLT so the partition keeps advancing.",
+        "Make the DLT producer durable (acks=all) and flush before committing the offset, or you can lose the failed record."
+      ],
+      "solutionCode": "// Bounded retry then dead-letter, with guaranteed forward progress.\nvoid runLoop(KafkaConsumer<String, byte[]> consumer,\n             KafkaProducer<String, byte[]> dltProducer) {\n    consumer.subscribe(List.of(\"orders\"));\n    while (running) {\n        var records = consumer.poll(Duration.ofMillis(200));\n        for (var r : records) {\n            handleWithRetry(r, dltProducer);\n        }\n        if (!records.isEmpty()) consumer.commitSync();\n    }\n}\n\nvoid handleWithRetry(ConsumerRecord<String, byte[]> r,\n                     KafkaProducer<String, byte[]> dlt) {\n    int maxAttempts = 3;\n    for (int attempt = 1; ; attempt++) {\n        try {\n            process(r.value());        // throws PermanentException or transient\n            return;                    // success -> offset advances on commit\n        } catch (PermanentException pe) {\n            deadLetter(r, dlt, pe);    // never retry a poison pill\n            return;\n        } catch (TransientException te) {\n            if (attempt >= maxAttempts) {\n                deadLetter(r, dlt, te); // give up after bounded retries\n                return;\n            }\n            sleepBackoff(attempt);     // e.g. 200ms * 2^attempt, capped\n        }\n    }\n}\n\nvoid deadLetter(ConsumerRecord<String, byte[]> r,\n                KafkaProducer<String, byte[]> dlt, Exception cause) {\n    var rec = new ProducerRecord<>(\"orders.DLT\", r.key(), r.value());\n    rec.headers()\n       .add(\"x-error\", cause.toString().getBytes(UTF_8))\n       .add(\"x-source\", (r.topic()+\"-\"+r.partition()+\"-\"+r.offset()).getBytes(UTF_8))\n       .add(\"x-ts\", Long.toString(System.currentTimeMillis()).getBytes(UTF_8));\n    dlt.send(rec);\n    dlt.flush();   // ensure DLT write is durable BEFORE we commit past it\n}",
+      "solutionLanguage": "java",
+      "explanation": "The loop guarantees forward progress: every record is either successfully processed or written to the dead-letter topic, and only then does commitSync advance past the whole batch, so no single record can pin the partition. Permanent failures (deserialization, validation) are dead-lettered immediately because retrying them is pure waste and is exactly what causes unbounded lag; transient failures (timeouts, 503s) get a bounded exponential backoff and are dead-lettered only after exhausting attempts, so a brief downstream blip does not flood the DLT. The DLT record preserves the original key and raw value plus headers carrying the exception, the exact source topic-partition-offset (so the message is traceable and re-playable), and a timestamp. Critically, dlt.flush() runs before the offset is committed: if we committed past the poisoned offset while the DLT write was still buffered and the consumer then crashed, the record would be gone from both the source (offset committed) and the DLT (never sent) — silent data loss. Flushing first closes that window. Operationally you would alert on DLT throughput, since a spike means either a producer regression or a schema-compatibility break upstream, and you would build a separate reprocessing tool that reads the DLT after the bug is fixed.",
+      "relatedTopic": "kafka"
+    }
+  ],
+  "references": [
+    {"label": "Apache Kafka Documentation", "url": "https://kafka.apache.org/documentation/"},
+    {"label": "Kafka Design: The Log", "url": "https://kafka.apache.org/documentation/#design"},
+    {"label": "Exactly-Once Semantics in Apache Kafka", "url": "https://www.confluent.io/blog/exactly-once-semantics-are-possible-heres-how-apache-kafka-does-it/"},
+    {"label": "Confluent: Consumer Rebalance Protocol", "url": "https://www.confluent.io/blog/cooperative-rebalancing-in-kafka-streams-consumer-ksqldb/"},
+    {"label": "The Log: What every software engineer should know (Jay Kreps)", "url": "https://engineering.linkedin.com/distributed-systems/log-what-every-software-engineer-should-know-about-real-time-datas-unifying"}
+  ]
+}

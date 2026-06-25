@@ -1,0 +1,504 @@
+{
+  "id": "ddd",
+  "title": "Domain-Driven Design",
+  "category": "Architecture",
+  "subcategory": "Modeling",
+  "difficulty": "senior",
+  "tags": ["ddd", "aggregates", "bounded-context", "value-objects", "domain-events", "modeling", "anti-corruption-layer"],
+  "description": "A pragmatic, staff-level guide to Domain-Driven Design — from ubiquitous language and bounded contexts down to aggregates, invariants, and the transactional consistency boundaries that make or break a model.",
+  "estReadMinutes": 28,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Domain-Driven Design (DDD), introduced by Eric Evans in 2003, is an approach to building software where the structure and language of the code match the business domain it serves. It is not a framework, a folder layout, or a checklist of patterns — it is a way of collaborating with domain experts to distill a deep model of the problem, and then letting that model drive the design."
+        },
+        {
+          "type": "paragraph",
+          "text": "DDD is split into two halves that are easy to conflate. Strategic DDD deals with the big picture: how you carve a large system into bounded contexts, how those contexts relate, and how teams own them. Tactical DDD is the toolbox inside a single context: entities, value objects, aggregates, repositories, and domain events. The strategic decisions are where most of the leverage — and most of the failures — actually live."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The single most valuable idea in DDD is the bounded context. If you only adopt one thing, make it the discipline of drawing explicit boundaries around models so a word like 'Customer' means exactly one thing inside each boundary."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Most large systems don't rot because of bad algorithms — they rot because the model of the business is implicit, inconsistent, and scattered. A 'shipment' means three different things in three different modules, business rules leak into controllers, and every new feature requires a tour of the entire codebase. DDD attacks this by making the model explicit, shared, and enforced by the type system."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Reduces translation cost: when code uses the same words as the business, conversations between engineers and experts have no impedance mismatch.",
+            "Localizes change: bounded contexts mean a pricing change touches the Pricing context, not 40 files across the monolith.",
+            "Protects invariants: aggregates give you a single, enforceable place where business rules cannot be violated.",
+            "Enables team autonomy: contexts map cleanly onto service and team boundaries (Conway's Law working for you, not against you).",
+            "Makes eventual consistency a deliberate design choice rather than an accidental bug."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "DDD has a real cost. The modeling, the conversations, the extra indirection — none of it is free. Apply it to your complex core domain, not to a CRUD admin screen. Using DDD everywhere is as much a mistake as using it nowhere."
+        }
+      ]
+    },
+    {
+      "id": "strategic-ddd",
+      "heading": "Strategic DDD: Bounded Contexts, Ubiquitous Language, Context Mapping",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Strategic DDD is about boundaries and language. Before you write a single value object, you decide how the domain is partitioned and how those partitions communicate."
+        },
+        {
+          "type": "heading",
+          "text": "Ubiquitous Language"
+        },
+        {
+          "type": "paragraph",
+          "text": "A ubiquitous language is a rigorous, shared vocabulary used identically in conversation, documentation, and code, scoped to a single bounded context. If the domain expert says 'a policy lapses', then there is a method or event named lapse — not deactivate, not setStatus('INACTIVE'). The language is ubiquitous within a context, not across the whole company; 'account' in Billing is not 'account' in Identity."
+        },
+        {
+          "type": "heading",
+          "text": "Bounded Contexts"
+        },
+        {
+          "type": "paragraph",
+          "text": "A bounded context is an explicit boundary within which a particular model and language apply. It is the linguistic and conceptual equivalent of a fence. The same real-world concept can have completely different models in different contexts, and that is correct, not duplication to be eliminated."
+        },
+        {
+          "type": "table",
+          "headers": ["Concept", "Sales context", "Shipping context", "Support context"],
+          "rows": [
+            ["Customer", "Lead with credit limit and discount tier", "Delivery address and signature rules", "Ticket history and entitlements"],
+            ["Product", "Price, margin, upsell bundle", "Weight, dimensions, hazmat class", "Known issues and warranty terms"],
+            ["Order", "Quote that became a commitment", "Pick list and tracking number", "Subject of a complaint"]
+          ]
+        },
+        {
+          "type": "heading",
+          "text": "Context Mapping"
+        },
+        {
+          "type": "paragraph",
+          "text": "A context map documents the relationships and integration patterns between contexts, and crucially the power dynamics between the teams that own them."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Partnership: two contexts succeed or fail together; teams coordinate releases.",
+            "Shared Kernel: a small shared model both contexts depend on — powerful but creates tight coupling, use sparingly.",
+            "Customer-Supplier: downstream context's needs are prioritized in upstream's backlog.",
+            "Conformist: downstream simply adopts the upstream model as-is (no translation, no leverage).",
+            "Anti-Corruption Layer (ACL): downstream builds a translation layer to keep an external/legacy model from leaking in.",
+            "Open Host Service / Published Language: upstream offers a stable, well-documented protocol (e.g., a REST API + schema) for many consumers."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "entities-value-objects",
+      "heading": "Tactical DDD: Entities and Value Objects",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Inside a context, the two foundational building blocks are entities and value objects. The distinction is about identity."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Entity: defined by a stable identity that persists through changes. Two entities are equal if their IDs are equal, even if every other attribute differs. An Order with id 42 today is the same Order tomorrow after its lines change.",
+            "Value Object: defined entirely by its attributes, has no identity, and is immutable. Two Money(10, 'USD') values are interchangeable. Changing a value object means replacing it, not mutating it."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Value objects are where most of your domain logic should live. They are side-effect-free, trivially testable, and self-validating: a Money cannot exist with a negative amount or a null currency, and an EmailAddress cannot exist without an '@'. Pushing logic into value objects shrinks your entities dramatically."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Value Object: immutable, self-validating, equality by value\nexport class Money {\n  private constructor(\n    public readonly amount: bigint,   // minor units (cents) — never floats\n    public readonly currency: string\n  ) {}\n\n  static of(amount: bigint, currency: string): Money {\n    if (amount < 0n) throw new Error('Money cannot be negative');\n    if (!/^[A-Z]{3}$/.test(currency)) throw new Error('Invalid currency');\n    return new Money(amount, currency);\n  }\n\n  add(other: Money): Money {\n    if (other.currency !== this.currency)\n      throw new Error('Currency mismatch');\n    return new Money(this.amount + other.amount, this.currency);\n  }\n\n  equals(other: Money): boolean {\n    return this.amount === other.amount && this.currency === other.currency;\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Never represent money as a floating-point number. 0.1 + 0.2 !== 0.3 in IEEE 754. Use integer minor units (cents) or a decimal type. This is a classic production-incident waiting to happen in any pricing or billing domain."
+        }
+      ]
+    },
+    {
+      "id": "aggregates",
+      "heading": "Aggregates, Aggregate Roots and Consistency Boundaries",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "An aggregate is a cluster of entities and value objects treated as a single unit for the purpose of data changes. One entity is the aggregate root — the only object outside code is allowed to hold a reference to, and the only entry point for mutating anything inside the aggregate. The root is responsible for enforcing the aggregate's invariants."
+        },
+        {
+          "type": "paragraph",
+          "text": "The aggregate is a transactional consistency boundary. Everything inside an aggregate must be consistent at the end of every transaction; everything between aggregates is allowed to be eventually consistent. This single sentence is the most important and most misunderstood idea in tactical DDD."
+        },
+        {
+          "type": "heading",
+          "text": "Rules of thumb for aggregate design"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Protect true invariants inside one aggregate. If a rule must always hold (an order's total must equal the sum of its lines), the data it depends on must live in one aggregate.",
+            "Reference other aggregates by identity, not by object reference. An Order holds a CustomerId, not a Customer object. This keeps aggregates small and load boundaries clear.",
+            "One aggregate per transaction. A command should create or modify exactly one aggregate instance and commit it atomically.",
+            "Keep aggregates small. Large aggregates cause contention, big loads, and lock conflicts. Prefer many small aggregates over one god-aggregate.",
+            "Use eventual consistency between aggregates, coordinated by domain events."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "If you find yourself wanting to modify two aggregates in one transaction to 'keep them in sync', that is a strong signal your aggregate boundaries are wrong, or that the synchronization should be eventual (via a domain event) rather than immediate."
+        }
+      ]
+    },
+    {
+      "id": "repositories-events",
+      "heading": "Repositories and Domain Events",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "heading",
+          "text": "Repositories"
+        },
+        {
+          "type": "paragraph",
+          "text": "A repository provides the illusion of an in-memory collection of aggregate roots. There is exactly one repository per aggregate type, and it deals only in whole aggregates — you save and load the root, never a child entity directly. The repository abstracts persistence so the domain layer never imports SQL, an ORM, or HTTP."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// One repository per aggregate root. Deals in whole aggregates only.\nexport interface OrderRepository {\n  findById(id: OrderId): Promise<Order | null>;\n  save(order: Order): Promise<void>;   // persists the whole aggregate atomically\n  nextIdentity(): OrderId;             // ids are minted by the domain, not the DB\n}\n\n// Notice what is NOT here: no findOrderLineById, no updateOrderStatus.\n// You load the Order, mutate it through its root, and save the Order."
+        },
+        {
+          "type": "heading",
+          "text": "Domain Events"
+        },
+        {
+          "type": "paragraph",
+          "text": "A domain event records something meaningful that happened in the domain, named in past tense in the ubiquitous language: OrderPlaced, PaymentCaptured, ShipmentDispatched. Events are how aggregates and bounded contexts communicate without direct coupling. An aggregate raises events as part of handling a command; after the aggregate is committed, those events are dispatched to interested handlers."
+        },
+        {
+          "type": "paragraph",
+          "text": "Domain events are the mechanism that makes 'one aggregate per transaction' practical. When placing an order must also reserve inventory (a different aggregate), the Order aggregate raises OrderPlaced, and an inventory handler reserves stock in a separate transaction — eventually consistent, decoupled, and resilient to partial failure."
+        }
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: Splitting the 'Customer' God-Aggregate",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Scenario: a B2B SaaS billing platform. The original model had a single Customer aggregate that owned the customer profile, every Subscription, every Invoice, and the full payment-method list. As tenants grew to thousands of invoices, the system started throwing serialization and lock-timeout errors during month-end billing runs."
+        },
+        {
+          "type": "paragraph",
+          "text": "Root cause: because Customer was one aggregate, the ORM loaded and version-locked the entire object graph on every write. Two concurrent operations — a support agent updating the billing address and the nightly job appending an invoice — collided on the same optimistic-concurrency version, and one was rolled back. Under load, retries stacked up and the billing run blew past its window."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// BEFORE: one god-aggregate — every write locks the whole graph\nclass Customer {\n  profile: Profile;\n  subscriptions: Subscription[];   // could be hundreds\n  invoices: Invoice[];             // could be thousands\n  paymentMethods: PaymentMethod[];\n}\n\n// AFTER: separate aggregates, referenced by identity\nclass Customer { id: CustomerId; profile: Profile; }\nclass Subscription { id: SubscriptionId; customerId: CustomerId; /* ... */ }\nclass Invoice { id: InvoiceId; customerId: CustomerId; lines: InvoiceLine[]; }\n// Appending an invoice now locks ONE Invoice, not the whole customer."
+        },
+        {
+          "type": "paragraph",
+          "text": "The fix was to recognize that an invoice does not need to be transactionally consistent with the billing address. They were forced into one aggregate purely because the ORM made it convenient. After splitting, each Invoice became its own small aggregate referencing CustomerId. Lock contention vanished, the billing run dropped from 90 minutes to under 10, and 'update address' could never again be blocked by 'generate invoice'."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The lesson: aggregate boundaries are a performance and concurrency decision as much as a modeling one. Ask 'what truly must be consistent right now?' — not 'what objects belong to the same noun?'."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Anemic domain model: entities are bags of getters/setters and all logic lives in 'service' classes. This is procedural code wearing an object costume — it throws away DDD's main benefit.",
+            "God-aggregate: cramming everything reachable from a noun into one aggregate, causing lock contention and huge loads (see the billing example).",
+            "Modifying multiple aggregates per transaction: works in a demo, deadlocks and fails partially in production. Use domain events and eventual consistency instead.",
+            "Treating bounded contexts as a single shared model: one canonical 'Customer' class imported everywhere recreates the big ball of mud DDD was meant to avoid.",
+            "Leaking persistence into the domain: ORM annotations and lazy-loading proxies dictating your model, instead of the model dictating persistence.",
+            "Skipping the ubiquitous language: if engineers and experts use different words, you are translating constantly and bugs hide in the translation.",
+            "Applying DDD to simple CRUD: the ceremony costs more than it saves when there are no real invariants to protect."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Incident pattern: a team enforced 'order total equals sum of lines' by reading the Order, reading a separate Pricing aggregate, computing, and writing both in one transaction. Under concurrent edits, lost updates corrupted totals. The invariant belonged inside the Order aggregate; pricing inputs should have been passed in as value objects, not co-mutated."
+        }
+      ]
+    },
+    {
+      "id": "when-to-use",
+      "heading": "When to Use DDD — and When Not To",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "DDD pays off in proportion to domain complexity. The decision is not 'do we like clean code' — it's 'does this subdomain have rich, evolving business rules that justify the modeling investment?'"
+        },
+        {
+          "type": "table",
+          "headers": ["Use full DDD when", "Skip / go lightweight when"],
+          "rows": [
+            ["The subdomain is your core domain — your competitive advantage", "The subdomain is generic (auth, notifications) — buy or use a library"],
+            ["Rules are complex, numerous, and change often", "It's CRUD: forms in, rows out, no real invariants"],
+            ["Domain experts are available to collaborate", "No expert engagement is possible or warranted"],
+            ["Multiple teams need clear boundaries and ownership", "A single small team owns everything and coordination is cheap"],
+            ["Invariants must be protected under concurrency", "Eventual inconsistency has no business impact"]
+          ]
+        },
+        {
+          "type": "list",
+          "items": [
+            "Best practice: classify subdomains as core, supporting, or generic. Invest tactical DDD in the core; use simple CRUD or off-the-shelf for generic.",
+            "Best practice: start with strategic DDD (bounded contexts, ubiquitous language) even if you defer tactical patterns — boundaries are the high-leverage decision.",
+            "Best practice: keep the domain layer free of frameworks. Persistence, HTTP, and messaging are details that depend on the domain, never the reverse.",
+            "Best practice: one aggregate per transaction; make all cross-aggregate consistency eventual and explicit via domain events.",
+            "Best practice: model invariants as code in the aggregate root, not as database constraints or validation in controllers."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "anti-corruption-layer",
+      "heading": "Anti-Corruption Layers in Practice",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "When your clean context must integrate with a legacy system or a third-party API whose model is messy, an Anti-Corruption Layer (ACL) translates between their model and yours so their concepts never leak into your domain. The ACL is a deliberate seam: adapters, translators, and façades that speak the foreign language on one side and your ubiquitous language on the other."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// ACL: a legacy ERP returns a flat, cryptic payload.\n// The translator converts it into our domain's value objects.\nclass ErpCustomerTranslator {\n  toDomain(raw: ErpCustomerRecord): Customer {\n    return Customer.rehydrate({\n      id: new CustomerId(raw.CUST_NO.trim()),\n      tier: this.mapTier(raw.PRC_GRP),            // 'A1' -> Tier.Gold\n      creditLimit: Money.of(BigInt(raw.CR_LMT_C), raw.CUR_CD),\n    });\n  }\n  private mapTier(code: string): Tier {\n    const m: Record<string, Tier> = { A1: Tier.Gold, B2: Tier.Silver };\n    return m[code] ?? Tier.Standard;   // fail soft, never leak 'A1' inward\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Without an ACL, the legacy model's quirks (CUST_NO, magic status codes, null semantics) spread through your code like a virus. The ACL is the immune system at the boundary."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "context-map",
+      "title": "Context Map for an E-Commerce Platform",
+      "type": "mermaid",
+      "content": "flowchart TD\n  Sales[Sales Context] -->|OrderPlaced event| Fulfillment[Fulfillment Context]\n  Sales -->|publishes prices| Pricing[Pricing Context]\n  Fulfillment -->|reserve stock| Inventory[Inventory Context]\n  Sales -->|customer id| Identity[Identity Context]\n  Fulfillment -->|ACL| Carrier[Legacy Carrier System]\n  Billing[Billing Context] -->|PaymentCaptured event| Sales\n  Pricing -->|published language| Sales"
+    },
+    {
+      "id": "order-aggregate",
+      "title": "Order Aggregate Internal Structure",
+      "type": "mermaid",
+      "content": "flowchart TD\n  Root[Order - Aggregate Root] --> Line1[OrderLine]\n  Root --> Line2[OrderLine]\n  Line1 --> Money1[Money VO]\n  Line2 --> Money2[Money VO]\n  Root --> Status[OrderStatus VO]\n  Root -. references by id .-> Customer[CustomerId]\n  Root -. raises .-> Event[OrderPlaced Event]"
+    },
+    {
+      "id": "transaction-boundary",
+      "title": "One Aggregate Per Transaction with Eventual Consistency",
+      "type": "ascii",
+      "content": "  Command: PlaceOrder\n       |\n       v\n  +----------------------+        TX 1 (atomic)\n  |  Order Aggregate     |  <-- load, enforce invariants, save\n  |  + OrderLines        |      raises -> OrderPlaced\n  +----------------------+\n       |  domain event (after commit)\n       v\n  +----------------------+        TX 2 (separate, eventual)\n  |  Inventory Aggregate |  <-- handler reserves stock\n  +----------------------+\n       |\n       v\n  +----------------------+        TX 3 (separate, eventual)\n  |  Billing Aggregate   |  <-- handler authorizes payment\n  +----------------------+"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-entity-vs-vo",
+      "question": "What is the difference between an entity and a value object, and how do you decide which one to use?",
+      "answer": "An entity has a distinct identity that persists across state changes — equality is based on its ID, not its attributes. A value object has no identity; it is defined entirely by its attributes, is immutable, and two instances with equal attributes are interchangeable. Decision rule: ask whether you care about continuity and identity over time. An Order is an entity because order #42 is still order #42 after its lines change. A Money or DateRange is a value object because there is no meaningful notion of 'the same money instance' — only equal values. Default to value objects; they are immutable, self-validating, and side-effect-free, which makes them trivial to test and reason about.",
+      "difficulty": "junior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["entity", "value-object"],
+      "followUps": ["Can a value object contain another value object?", "Why should value objects be immutable?"]
+    },
+    {
+      "id": "q-aggregate-root",
+      "question": "What is an aggregate root and why does it exist?",
+      "answer": "An aggregate root is the single entity that serves as the entry point to an aggregate — the only object outside code may reference, and the only object through which the aggregate may be mutated. It exists to enforce invariants: by funneling all changes through the root, you guarantee there is exactly one place where the aggregate's consistency rules are checked, so the aggregate can never be left in an invalid state. It also defines the unit of persistence (repositories load and save whole aggregate roots) and the transactional consistency boundary.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["aggregate", "invariants"],
+      "followUps": ["How do other aggregates reference this one?", "Where do you put logic that spans two aggregates?"]
+    },
+    {
+      "id": "q-bounded-context",
+      "question": "Explain bounded contexts and why having the same concept modeled differently in two contexts is correct rather than duplication.",
+      "answer": "A bounded context is an explicit boundary within which a single model and ubiquitous language apply consistently. The same real-world concept legitimately has different models in different contexts because each context cares about different aspects. A 'product' in the Sales context is about price, margin, and bundling; in Shipping it is about weight, dimensions, and hazmat class. Forcing them into one canonical model creates a bloated class coupling unrelated concerns and reintroduces the big ball of mud. The 'duplication' is only superficial — the contexts share a name, not a reason to change. Translation between contexts happens at the boundary, often via published language or an anti-corruption layer.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["bounded-context", "context-mapping"],
+      "followUps": ["How do two contexts integrate?", "What is a shared kernel and when is it dangerous?"]
+    },
+    {
+      "id": "q-repository-scope",
+      "question": "Why is there exactly one repository per aggregate root, and not one per entity?",
+      "answer": "Because the aggregate is the unit of consistency and persistence. Child entities have no independent lifecycle — they exist only as part of their aggregate and can only be reached and modified through the root. If you had a repository for a child entity, callers could load and mutate it directly, bypassing the root and breaking the aggregate's invariants. So repositories deal exclusively in whole aggregate roots: you load the root (which brings its children), mutate through the root, and save the whole thing atomically.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["repository", "aggregate"],
+      "followUps": ["How do you query a list of child entities for a read screen?", "Should repositories return DTOs or domain objects?"]
+    },
+    {
+      "id": "q-when-not-ddd",
+      "question": "When should you NOT use DDD?",
+      "answer": "When the domain is simple and lacks meaningful invariants — straightforward CRUD where data goes in and comes out with little business logic. Also for generic subdomains that are not your competitive advantage (authentication, notifications, file storage) — buy or use a library rather than modeling them deeply. DDD's tactical patterns add indirection and ceremony that only pay off when there are complex, evolving rules to protect and domain experts to collaborate with. The honest staff-level answer is to classify subdomains as core, supporting, or generic, and invest tactical DDD only in the core.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["strategic-ddd", "core-domain"],
+      "followUps": ["Can you use strategic DDD without tactical DDD?", "What is a supporting subdomain?"]
+    },
+    {
+      "id": "q-domain-events",
+      "question": "What are domain events and what problem do they solve in aggregate design?",
+      "answer": "A domain event records something significant that happened in the domain, named in past tense (OrderPlaced, PaymentCaptured). They solve the cross-aggregate consistency problem. Because you should only modify one aggregate per transaction, you cannot synchronously update a second aggregate. Instead, the first aggregate raises a domain event during command handling; after it commits, the event is dispatched and a handler updates the other aggregate in a separate transaction. This gives you decoupling between aggregates and bounded contexts, and turns cross-aggregate consistency into deliberate eventual consistency rather than fragile multi-aggregate transactions.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["domain-events", "eventual-consistency"],
+      "followUps": ["When are events dispatched relative to the transaction commit?", "What is the outbox pattern?"]
+    },
+    {
+      "id": "q-acl",
+      "question": "What is an anti-corruption layer and when do you reach for one?",
+      "answer": "An anti-corruption layer (ACL) is a translation layer between your bounded context and an external or legacy system whose model differs from yours. It contains adapters and translators that convert the foreign model into your domain's value objects and entities (and back), so the external system's quirks — cryptic codes, odd null semantics, denormalized shapes — never leak into your clean model. You reach for one whenever you integrate with a system you don't control and don't want to conform to: legacy ERPs, third-party APIs, or another team's context whose model you can't or shouldn't adopt directly.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["anti-corruption-layer", "integration"],
+      "followUps": ["How is an ACL different from a conformist relationship?", "Where does the ACL live in a hexagonal architecture?"]
+    },
+    {
+      "id": "q-strategic-vs-tactical",
+      "question": "Distinguish strategic from tactical DDD and explain which delivers more value.",
+      "answer": "Strategic DDD concerns the large-scale structure: identifying subdomains, drawing bounded contexts, defining the ubiquitous language, and mapping relationships between contexts and teams. Tactical DDD is the in-context toolkit: entities, value objects, aggregates, repositories, factories, and domain events. Strategic DDD almost always delivers more value, because getting boundaries right determines coupling, team autonomy, and where complexity is allowed to live. Teams often jump straight to tactical patterns (the 'building blocks') and get an elegant model in the wrong boundaries — which is a far more expensive and harder-to-reverse mistake than a slightly clumsy aggregate.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["strategic-ddd", "tactical-ddd"],
+      "followUps": ["How do bounded contexts relate to microservices?", "Can you have multiple bounded contexts in one deployable?"]
+    },
+    {
+      "id": "q-tricky-two-aggregates",
+      "question": "TRICKY: A teammate writes a command that, in one database transaction, modifies the Order aggregate and the Customer aggregate to keep a denormalized 'lifetime spend' field accurate. What's wrong, and what would you do instead?",
+      "answer": "Modifying two aggregates in one transaction violates the core rule of one aggregate per transaction, and the violation is not academic. Each aggregate is its own consistency and concurrency boundary; locking both couples their contention, increases deadlock probability, hurts scalability, and makes the boundaries meaningless. Under concurrent edits you get lost updates and lock timeouts. The fix: the Order aggregate raises an OrderPlaced (or OrderTotalChanged) domain event in its own transaction. A separate handler updates the Customer's lifetime spend in a second transaction — eventual consistency. The subtle trap is that the denormalized field made it *look* like the two must be consistent immediately, but the business almost never requires lifetime-spend to be accurate to the millisecond. If it genuinely must be atomic, that's a signal the two concepts belong in the same aggregate — but they rarely do.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["aggregate", "transactional-consistency", "eventual-consistency"],
+      "followUps": ["How do you guarantee the event is published even if the process crashes after commit?", "What if a handler fails — how do you avoid losing the update?"]
+    },
+    {
+      "id": "q-tricky-orm-proxy",
+      "question": "TRICKY: Your aggregate's invariant 'an order may have at most 50 lines' passes all unit tests but is occasionally violated in production. The Order uses an ORM with lazy-loaded collections. What's the likely cause?",
+      "answer": "Lazy-loading. The invariant check counts order.lines.length, but with a lazy ORM proxy the collection may not be fully materialized — or, worse, the check runs against a stale or partially loaded snapshot. If two requests load the same Order concurrently, each sees, say, 49 lines, each adds one, and each saves 50 — but the union is 51, and without optimistic concurrency control (a version column) the second write silently overwrites and corrupts the count. Two fixes are needed: (1) ensure the aggregate is fully loaded before enforcing invariants so the count is real, not a lazy proxy; and (2) add optimistic locking (version/ETag) so concurrent modifications to the same aggregate are detected and one is rejected for retry. The deeper lesson: invariants must be enforced against a fully consistent in-memory aggregate, and concurrency control is part of protecting them — the type system alone doesn't save you.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["aggregate", "orm", "concurrency", "race-condition"],
+      "followUps": ["How does optimistic concurrency control interact with aggregate boundaries?", "Why are lazy-loading proxies a domain-model smell?"]
+    },
+    {
+      "id": "q-tricky-vo-equality",
+      "question": "TRICKY: You store value objects in a HashSet (or use them as map keys) and find duplicates appearing. The class has all the right fields. What did you forget, and what's the secondary footgun?",
+      "answer": "You forgot to override equals/hashCode (or in JS, value objects don't have structural equality at all — reference identity is used by Set/Map). Value objects are equal by value, but language collections compare by reference unless you implement value equality. The secondary footgun: even after implementing equals/hashCode, if the value object is *mutable*, changing a field after insertion changes its hashCode, and it becomes unreachable in the hash bucket — a silent leak / lookup failure. This is exactly why value objects must be immutable: immutability makes value equality safe and hash-stable. In JS specifically, you cannot get structural keying from a native Map/Set, so you serialize the value object to a canonical string key, or use a library — and that canonical form must be stable and unambiguous.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["value-object", "equality", "immutability"],
+      "followUps": ["How do you implement a canonical key for a Money value object?", "Why does immutability matter for thread safety too?"]
+    },
+    {
+      "id": "q-aggregate-size",
+      "question": "How do you decide how big an aggregate should be?",
+      "answer": "Start from invariants and concurrency, not from object graphs. Include in one aggregate only the data that must be transactionally consistent to protect a true invariant. Everything else should be a separate aggregate referenced by identity. Prefer small aggregates: they reduce lock contention, shrink the data loaded per operation, and lower the chance of concurrent-edit conflicts. A good test is to ask, 'if two users act on different parts of this noun at the same time, must one block the other?' If not, those parts probably belong in different aggregates. The classic failure mode is the god-aggregate that owns hundreds of children purely because they share a parent noun, which serializes unrelated operations.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["aggregate", "performance", "concurrency"],
+      "followUps": ["How does aggregate size affect read models?", "When is it acceptable to have a large aggregate?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-order-aggregate",
+      "title": "Design the Order Aggregate",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "prompt": "Design and implement an Order aggregate for an order-management system. The Order is the aggregate root and contains OrderLine entities. Use a Money value object (integer minor units + currency). Enforce these invariants at all times: (1) an order in DRAFT status may add or remove lines; once PLACED it is immutable; (2) every line must have quantity >= 1; (3) all lines must share the order's currency; (4) the order total must always equal the sum of its lines; (5) an order cannot be placed with zero lines. Placing the order must raise an OrderPlaced domain event. Reference the customer by id only.",
+      "hints": [
+        "All mutation must go through the Order root — OrderLine must not be mutable from outside the aggregate.",
+        "Don't store the total as a free-standing mutable field that can drift; compute it or recompute it on every change so invariant (4) can never be violated.",
+        "Guard state transitions: every mutating method should assert the order is still in DRAFT.",
+        "Money is a value object — immutable, equality by value, no floats. Add a same-currency guard.",
+        "Collect domain events on the aggregate and expose them so the application layer can dispatch after commit."
+      ],
+      "solutionCode": "type OrderStatus = 'DRAFT' | 'PLACED';\n\nclass Money {\n  private constructor(readonly amount: bigint, readonly currency: string) {}\n  static of(amount: bigint, currency: string): Money {\n    if (amount < 0n) throw new Error('Money cannot be negative');\n    if (!/^[A-Z]{3}$/.test(currency)) throw new Error('Bad currency');\n    return new Money(amount, currency);\n  }\n  static zero(currency: string) { return new Money(0n, currency); }\n  add(o: Money): Money {\n    if (o.currency !== this.currency) throw new Error('Currency mismatch');\n    return new Money(this.amount + o.amount, this.currency);\n  }\n  multiply(q: number): Money {\n    return new Money(this.amount * BigInt(q), this.currency);\n  }\n  equals(o: Money) { return this.amount === o.amount && this.currency === o.currency; }\n}\n\n// Child entity — only the Order root may construct/mutate it.\nclass OrderLine {\n  constructor(\n    readonly sku: string,\n    readonly unitPrice: Money,\n    readonly quantity: number\n  ) {\n    if (quantity < 1) throw new Error('Quantity must be >= 1');\n  }\n  subtotal(): Money { return this.unitPrice.multiply(this.quantity); }\n}\n\nclass OrderPlaced {\n  readonly occurredAt = new Date();\n  constructor(readonly orderId: string, readonly total: Money) {}\n}\n\nclass Order {\n  private status: OrderStatus = 'DRAFT';\n  private lines: OrderLine[] = [];\n  private events: object[] = [];\n\n  constructor(\n    readonly id: string,\n    readonly customerId: string,\n    readonly currency: string\n  ) {}\n\n  private assertDraft() {\n    if (this.status !== 'DRAFT')\n      throw new Error('Order is immutable once placed');\n  }\n\n  addLine(sku: string, unitPrice: Money, quantity: number): void {\n    this.assertDraft();\n    if (unitPrice.currency !== this.currency)\n      throw new Error('Line currency must match order currency');\n    this.lines.push(new OrderLine(sku, unitPrice, quantity));\n  }\n\n  removeLine(sku: string): void {\n    this.assertDraft();\n    this.lines = this.lines.filter(l => l.sku !== sku);\n  }\n\n  // Invariant (4): total is always derived, never stored mutably.\n  total(): Money {\n    return this.lines.reduce(\n      (sum, l) => sum.add(l.subtotal()),\n      Money.zero(this.currency)\n    );\n  }\n\n  place(): void {\n    this.assertDraft();\n    if (this.lines.length === 0)\n      throw new Error('Cannot place an order with no lines');\n    this.status = 'PLACED';\n    this.events.push(new OrderPlaced(this.id, this.total()));\n  }\n\n  pullEvents(): object[] {\n    const e = this.events; this.events = []; return e;\n  }\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "This solution makes every invariant unbreakable by construction. (1) State transitions are guarded by assertDraft(), called at the top of every mutating method, so a PLACED order rejects any change — immutability is enforced behaviorally, not by hoping callers behave. (2) Quantity >= 1 is validated in the OrderLine constructor, so an invalid line literally cannot be instantiated. (3) addLine compares the line's currency to the order's currency and rejects mismatches; Money.add also independently guards currency, giving defense in depth. (4) The total is *derived* via total() that folds over the lines using Money.add, rather than stored in a mutable field that could drift out of sync — there is no way for total to disagree with the lines because there is no separate total to disagree. (5) place() refuses an empty order. Crucially, OrderLine is only ever created and mutated inside Order's methods; external code holds only the Order root and cannot reach in and mutate a line, so the root retains its monopoly on enforcing invariants — the defining property of an aggregate. Money is a proper value object: immutable, integer minor units (never floats), equality by value, with a same-currency guard. Finally, place() records an OrderPlaced event on the aggregate; the application layer calls pullEvents() after the repository commits, so cross-aggregate work (reserve inventory, authorize payment) happens in separate transactions via eventual consistency — respecting one-aggregate-per-transaction. Reference to the customer is by customerId, keeping the aggregate small.",
+      "relatedTopic": "ddd"
+    },
+    {
+      "id": "ch-domain-event-dispatch",
+      "title": "Dispatch Domain Events After Commit (Application Service)",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "prompt": "Write an application service method placeOrder(orderId) that loads an Order aggregate via its repository, calls place() on it, persists it, and then dispatches the resulting domain events to handlers. The key requirement: events must only be dispatched AFTER the aggregate is durably committed, never before — otherwise a downstream handler could react to an order that was rolled back. Sketch the event dispatcher and show how you'd avoid the dual-write problem at a high level.",
+      "hints": [
+        "Load the aggregate, mutate it, save it, THEN pull and dispatch events. Order matters.",
+        "If you dispatch events before save() commits, a rollback leaves handlers reacting to a phantom state.",
+        "Even dispatching right after commit has a gap: the process can crash between commit and dispatch. Mention the transactional outbox pattern.",
+        "Keep the domain layer free of the dispatcher — wire it in the application/infrastructure layer."
+      ],
+      "solutionCode": "interface DomainEventHandler { handle(event: object): Promise<void>; }\n\nclass EventDispatcher {\n  private handlers = new Map<string, DomainEventHandler[]>();\n  register(eventName: string, h: DomainEventHandler) {\n    const list = this.handlers.get(eventName) ?? [];\n    list.push(h);\n    this.handlers.set(eventName, list);\n  }\n  async dispatch(events: object[]): Promise<void> {\n    for (const e of events) {\n      const name = e.constructor.name;\n      for (const h of this.handlers.get(name) ?? []) {\n        await h.handle(e);\n      }\n    }\n  }\n}\n\nclass PlaceOrderService {\n  constructor(\n    private readonly orders: OrderRepository,\n    private readonly dispatcher: EventDispatcher\n  ) {}\n\n  async placeOrder(orderId: string): Promise<void> {\n    const order = await this.orders.findById(orderId);\n    if (!order) throw new Error('Order not found');\n\n    order.place();                 // mutate aggregate, raises OrderPlaced\n\n    await this.orders.save(order); // TX commits HERE — durable first\n\n    // Only now is it safe to react. Pull events AFTER commit.\n    await this.dispatcher.dispatch(order.pullEvents());\n  }\n}\n\n// Production-grade: avoid the dual-write gap with an outbox.\n// In the SAME transaction as save(order), insert event rows into an\n// 'outbox' table. A separate relay polls the outbox and publishes,\n// marking rows sent. Commit atomicity guarantees no lost or phantom\n// events even if the app crashes right after commit.\ninterface OrderRepository {\n  findById(id: string): Promise<Order | null>;\n  save(order: Order): Promise<void>;\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "The ordering is the whole point: load -> mutate -> save (commit) -> dispatch. Calling place() raises an OrderPlaced event onto the aggregate, but the service does NOT dispatch until after orders.save() has durably committed. If you dispatched before commit and the transaction then rolled back, a handler might reserve inventory or charge a card for an order that never existed — a classic phantom-state bug. Pulling events after commit closes that window. However, a subtler problem remains: the process can crash in the gap between the commit and the dispatch loop, losing events entirely (the dual-write problem — you're writing to the database and to the message bus, and those two writes aren't atomic). The robust fix is the transactional outbox: within the same database transaction that saves the aggregate, you also insert the events into an outbox table, so they are committed atomically with the state change. A separate relay process then reads the outbox and publishes events at-least-once, marking them dispatched. This guarantees that every committed state change eventually produces its events, and no event is ever emitted for rolled-back state. Handlers must be idempotent because at-least-once delivery means an event may be processed more than once. The dispatcher itself is deliberately kept in the application/infrastructure layer; the domain layer only raises and exposes events via pullEvents(), keeping the model free of messaging concerns.",
+      "relatedTopic": "ddd"
+    }
+  ],
+  "references": [
+    {"label": "Eric Evans — Domain-Driven Design (the Blue Book)", "url": "https://www.domainlanguage.com/ddd/"},
+    {"label": "Vaughn Vernon — Implementing Domain-Driven Design", "url": "https://www.informit.com/store/implementing-domain-driven-design-9780321834577"},
+    {"label": "Vaughn Vernon — Effective Aggregate Design (3-part essay)", "url": "https://www.dddcommunity.org/library/vernon_2011/"},
+    {"label": "Martin Fowler — Bounded Context", "url": "https://martinfowler.com/bliki/BoundedContext.html"},
+    {"label": "Martin Fowler — Anemic Domain Model", "url": "https://martinfowler.com/bliki/AnemicDomainModel.html"},
+    {"label": "Microsoft — DDD-oriented microservices", "url": "https://learn.microsoft.com/en-us/dotnet/architecture/microservices/microservice-ddd-cqrs-patterns/"}
+  ]
+}

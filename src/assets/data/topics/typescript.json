@@ -1,0 +1,510 @@
+{
+  "id": "typescript",
+  "title": "TypeScript",
+  "category": "Frontend",
+  "subcategory": "Language",
+  "difficulty": "senior",
+  "tags": ["typescript", "type-system", "generics", "structural-typing", "utility-types", "narrowing"],
+  "description": "A staff-level tour of TypeScript's structural type system, from generics and conditional/mapped types to the footguns of any, as, and declaration merging that bite teams in production.",
+  "estReadMinutes": 28,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "TypeScript is a statically typed superset of JavaScript that compiles to plain JS. Its job is not to change runtime behavior but to model the shapes and contracts of your program at compile time, catching a large class of bugs before code ships. The mental model that matters most is that TypeScript's type system is structural, not nominal: two types are compatible if their shapes are compatible, regardless of their declared names."
+        },
+        {
+          "type": "paragraph",
+          "text": "The other essential fact: types are fully erased at compile time. There is no TypeScript at runtime. Every guarantee the compiler gives you depends on the type information being accurate. The moment you reach for any, as, or an untyped boundary (network, JSON.parse, the DOM), you punch a hole in those guarantees that no amount of downstream typing can repair."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Think of TypeScript as a fast, exhaustive proof checker for invariants you would otherwise verify by hand. The value is proportional to how honestly your types describe reality."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "At scale, the cost of a codebase is dominated by change, not initial authorship. TypeScript turns refactors that would be terrifying in JavaScript (rename a field, change a function signature, narrow an enum) into mechanical, compiler-guided operations. The compiler becomes a living, always-correct map of every call site."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Refactoring safety: rename or reshape a type and the compiler enumerates every place that must change.",
+            "Self-documenting contracts: a function signature is an executable spec that cannot drift from the implementation.",
+            "Editor intelligence: autocomplete, go-to-definition, and inline errors come from the same type graph that powers the compiler.",
+            "Domain modeling: discriminated unions and template literal types let you make illegal states unrepresentable.",
+            "Reduced test surface: many validation tests become unnecessary because the type system encodes the invariant."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "TypeScript does not validate runtime data. A type assertion on the result of fetch() is a promise you make to the compiler, not a check. Treat every system boundary as untrusted and validate with a runtime schema (zod, io-ts) before the value enters your typed world."
+        }
+      ]
+    },
+    {
+      "id": "types-vs-interfaces",
+      "heading": "Types vs Interfaces and Structural Typing",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "interface and type alias overlap heavily for object shapes, but they are not identical. interface supports declaration merging and is open for extension; a type alias is closed and can express things an interface cannot (unions, tuples, mapped and conditional types, primitives)."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// interface: open, mergeable, extendable\ninterface User { id: string; name: string; }\ninterface User { email: string; } // declaration merging -> User now has all three\n\n// type alias: closed, but expressive\ntype Id = string | number;            // unions\ntype Pair = [number, number];         // tuples\ntype Nullable<T> = T | null;          // generic alias\ntype Handler = (e: Event) => void;    // function type\n\n// Both can model an object; pick interface for public, extensible contracts.\ninterface Point { x: number; y: number; }\ntype PointAlias = { x: number; y: number };"
+        },
+        {
+          "type": "paragraph",
+          "text": "Structural typing means compatibility is determined by members, not names. A value of one type is assignable to another if it has at least the required members with compatible types. This enables duck typing but also surprises people coming from nominal languages like Java or C#."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "interface Named { name: string; }\nclass Dog { constructor(public name: string, public breed: string) {} }\n\nfunction greet(n: Named) { return `Hi ${n.name}`; }\n\n// Dog was never declared to implement Named, but structurally it fits.\ngreet(new Dog('Rex', 'Lab')); // OK\n\n// Excess property checks apply only to fresh object literals:\ngreet({ name: 'A', extra: 1 }); // ERROR: object literal may only specify known props\nconst obj = { name: 'A', extra: 1 };\ngreet(obj); // OK: not a fresh literal, structural width is fine"
+        },
+        {
+          "type": "table",
+          "headers": ["Capability", "interface", "type alias"],
+          "rows": [
+            ["Declaration merging", "Yes", "No"],
+            ["Unions / tuples / primitives", "No", "Yes"],
+            ["extends / implements ergonomics", "Native", "Via intersection (&)"],
+            ["Mapped & conditional types", "No", "Yes"],
+            ["Better error messages for objects", "Often", "Sometimes inlined"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Team rule of thumb: use interface for object shapes that form a public API or may be augmented; use type for unions, function types, and anything computed. Stay consistent rather than mixing arbitrarily."
+        }
+      ]
+    },
+    {
+      "id": "generics-constraints",
+      "heading": "Generics and Constraints",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Generics let you write functions and types that are parametric over types while preserving the relationship between inputs and outputs. Constraints (extends) bound a type parameter so you can safely access members or relate parameters to each other."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Constrain K to be a key of T; return type tracks the chosen property.\nfunction getProp<T, K extends keyof T>(obj: T, key: K): T[K] {\n  return obj[key];\n}\n\nconst user = { id: 1, name: 'Ada' };\nconst name = getProp(user, 'name'); // inferred as string\n// getProp(user, 'missing'); // ERROR: 'missing' not assignable to 'id' | 'name'\n\n// Default type parameters and constraints together:\ninterface Repo<T extends { id: string } = { id: string }> {\n  findById(id: string): Promise<T | null>;\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "A subtle but important point: prefer letting TypeScript infer type parameters from arguments rather than annotating them explicitly. Over-constraining or specifying type arguments by hand often discards the precise inference the compiler would have produced."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "A generic parameter that appears only once in a signature is usually a code smell. If <T> shows up only in the return position, it is effectively an any in disguise and the caller can pick anything. Make sure each type parameter constrains a real relationship between inputs and outputs."
+        }
+      ]
+    },
+    {
+      "id": "utility-and-mapped-types",
+      "heading": "Utility Types, Mapped and Conditional Types",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "TypeScript ships a library of utility types built from mapped and conditional types. Understanding how they are implemented lets you compose your own. Partial<T> makes every property optional; Pick and Omit select or remove keys; Record builds a dictionary; ReturnType and Awaited extract from functions and promises."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "interface Config { host: string; port: number; tls: boolean; }\n\ntype PartialConfig = Partial<Config>;            // all optional\ntype Conn = Pick<Config, 'host' | 'port'>;       // { host; port }\ntype NoTls = Omit<Config, 'tls'>;                // { host; port }\ntype Flags = Record<string, boolean>;            // dictionary\n\nasync function load() { return { ok: true }; }\ntype R = ReturnType<typeof load>;                // Promise<{ ok: boolean }>\ntype A = Awaited<R>;                             // { ok: boolean }"
+        },
+        {
+          "type": "heading",
+          "text": "Mapped types"
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// A mapped type iterates over keys and remaps each property.\ntype MyPartial<T> = { [K in keyof T]?: T[K] };\ntype MyReadonly<T> = { readonly [K in keyof T]: T[K] };\n\n// Key remapping with 'as' lets you rename or filter keys:\ntype Getters<T> = {\n  [K in keyof T as `get${Capitalize<string & K>}`]: () => T[K];\n};\ntype UserGetters = Getters<{ name: string; age: number }>;\n// { getName: () => string; getAge: () => number }"
+        },
+        {
+          "type": "heading",
+          "text": "Conditional types and distribution"
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "type NonNull<T> = T extends null | undefined ? never : T;\ntype Elem<T> = T extends (infer U)[] ? U : T; // infer extracts element type\n\n// Conditional types distribute over naked union type parameters:\ntype Distributed = NonNull<string | null | number>; // string | number\n// Wrap in a tuple to prevent distribution:\ntype NoDistribute<T> = [T] extends [null] ? true : false;"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The distributive behavior of conditional types over naked unions is the single most common source of confusing results. T extends U ? X : Y applied to A | B becomes (A extends U ? ...) | (B extends U ? ...). Wrap both sides in [ ] to opt out."
+        }
+      ]
+    },
+    {
+      "id": "template-literals-discriminated-unions",
+      "heading": "Template Literal Types and Discriminated Unions",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Template literal types compute string types from other types, enabling typed event names, route params, and CSS units. Discriminated unions are the cornerstone of modeling state: a shared literal tag lets the compiler narrow the union exhaustively."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "type Method = 'GET' | 'POST';\ntype Route = `/api/${string}`;\ntype Endpoint = `${Method} ${Route}`; // 'GET /api/...' | 'POST /api/...'\n\n// Discriminated union: 'status' is the discriminant.\ntype Result<T> =\n  | { status: 'loading' }\n  | { status: 'success'; data: T }\n  | { status: 'error'; error: Error };\n\nfunction render<T>(r: Result<T>): string {\n  switch (r.status) {\n    case 'loading': return 'spinner';\n    case 'success': return `data: ${r.data}`; // r.data is T here\n    case 'error':   return r.error.message;   // r.error is Error here\n    default: {\n      const _exhaustive: never = r; // compile error if a case is missed\n      return _exhaustive;\n    }\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The never assignment in the default branch gives you exhaustiveness checking for free. Add a new variant to the union and every switch that forgot to handle it fails to compile."
+        }
+      ]
+    },
+    {
+      "id": "narrowing-and-async",
+      "heading": "Narrowing and Async Programming",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Narrowing is how TypeScript refines a broad type within a code path using control flow: typeof, instanceof, in, equality, and custom type guards. Async code interacts with narrowing because await unwraps a Promise<T> to T, and error handling at the catch boundary is always typed as unknown under modern config."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Custom type guard returns a type predicate.\ninterface Cat { meow(): void }\ninterface Dog { bark(): void }\nfunction isCat(a: Cat | Dog): a is Cat {\n  return 'meow' in a;\n}\n\nasync function fetchUser(id: string): Promise<{ name: string }> {\n  const res = await fetch(`/users/${id}`);\n  if (!res.ok) throw new Error(`HTTP ${res.status}`);\n  // res.json() is Promise<any>; validate at the boundary in real code.\n  return (await res.json()) as { name: string };\n}\n\ntry {\n  await fetchUser('1');\n} catch (e) {\n  // e is 'unknown' under useUnknownInCatchVariables (default in strict).\n  if (e instanceof Error) console.error(e.message);\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "A type guard like 'a is Cat' is trusted blindly by the compiler. If the boolean it returns does not actually correspond to the asserted type, you have created a silent unsoundness that surfaces as a runtime crash far from the lie."
+        }
+      ]
+    },
+    {
+      "id": "decorators",
+      "heading": "Decorators",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Decorators are functions that annotate and modify classes and their members. They power frameworks like Angular and NestJS. Note there are two flavors: the legacy experimentalDecorators (used by Angular/Nest, reflect-metadata based) and the TC39 Stage 3 decorators supported natively in TypeScript 5.0+. They are not source compatible, so know which your toolchain uses."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// TC39 Stage 3 method decorator (TS 5.0+, no experimentalDecorators flag).\nfunction logged<This, Args extends any[], Return>(\n  target: (this: This, ...args: Args) => Return,\n  ctx: ClassMethodDecoratorContext\n) {\n  return function (this: This, ...args: Args): Return {\n    console.log(`call ${String(ctx.name)}`);\n    return target.call(this, ...args);\n  };\n}\n\nclass Service {\n  @logged\n  fetch(id: string) { return id; }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Mixing Stage 3 decorators with reflect-metadata dependency injection will silently break. Angular and current NestJS still require experimentalDecorators and emitDecoratorMetadata in tsconfig. Verify the flags before adopting new decorator syntax."
+        }
+      ]
+    },
+    {
+      "id": "production-incident",
+      "heading": "Production Example: The any That Ate a Release",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Scenario: a payments service deserialized webhook payloads from a third party. A single helper parsed the body and returned any to avoid 'fighting the compiler'. Three months later the provider renamed amount_cents to amount_minor. Nothing in the typed codebase complained, because any erases every downstream check. The bug shipped, and refunds were computed against undefined, producing NaN charges."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// BEFORE: the hole. parse() returns any, poisoning every caller.\nfunction parse(body: string): any { return JSON.parse(body); }\nconst evt = parse(raw);\nconst refund = evt.amount_cents * 0.5; // amount_cents is now undefined -> NaN\n\n// AFTER: validate at the boundary, type flows from the schema.\nimport { z } from 'zod';\nconst WebhookSchema = z.object({\n  amount_minor: z.number().int().nonnegative(),\n  currency: z.string().length(3),\n});\ntype Webhook = z.infer<typeof WebhookSchema>;\n\nfunction parseWebhook(body: string): Webhook {\n  return WebhookSchema.parse(JSON.parse(body)); // throws on drift, loudly\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "The fix was not 'more types' downstream; it was moving validation to the boundary so the unknown shape of external data is forced into a verified type before it propagates. After this change, the same provider rename produced an immediate, alerting parse failure in staging instead of silent NaN in production."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "any is contagious and silent. unknown is contagious and loud. At every external boundary prefer unknown plus a runtime check; never let any be the return type of a deserialization helper."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Using `as` to silence errors instead of fixing the type. `as` is an assertion, not a conversion; the compiler trusts you and you have removed its protection at exactly the risky spot.",
+            "Returning `any` from boundary code (JSON.parse, fetch, localStorage, DOM queries) which silently disables checking for every downstream consumer.",
+            "Relying on declaration merging accidentally: a duplicate interface name in a global scope or an ambient .d.ts can augment a type without anyone noticing, widening it unexpectedly.",
+            "Forgetting that conditional types distribute over unions, producing surprising results from a 'simple' helper type.",
+            "Not enabling strict mode (or disabling strictNullChecks), which lets null and undefined flow everywhere and reintroduces the billion-dollar mistake.",
+            "Treating type guards as validation. A wrong `a is T` predicate is an unsound promise the compiler cannot catch.",
+            "Mutating an object typed as readonly via an aliased non-readonly reference; readonly is shallow and compile-time only."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Incident pattern: enum drift. A backend added a new status string; the frontend modeled status as a closed union and used a non-exhaustive switch with no never check. The new value fell through to a default that hid the bug. Always pair closed unions with exhaustiveness checks."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Turn on strict (and noUncheckedIndexedAccess, exactOptionalPropertyTypes) from day one; retrofitting is far more expensive.",
+            "Validate all external input with a runtime schema and derive your types from the schema, not the other way around.",
+            "Ban `any` via eslint (no-explicit-any); reach for `unknown` and narrow deliberately.",
+            "Use discriminated unions plus a `never` exhaustiveness check to make illegal states unrepresentable.",
+            "Prefer inference: annotate function parameters and public return types, let locals and generics be inferred.",
+            "Keep `as` rare and localized; when unavoidable, isolate it behind a well-named, tested helper.",
+            "Model domain primitives with branded types (e.g. type UserId = string & { __brand: 'UserId' }) to prevent mixing up structurally identical strings.",
+            "Treat .d.ts and global augmentation as API surface; review them as carefully as runtime code."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "code": "{\n  \"compilerOptions\": {\n    \"strict\": true,\n    \"noUncheckedIndexedAccess\": true,\n    \"exactOptionalPropertyTypes\": true,\n    \"noImplicitOverride\": true,\n    \"verbatimModuleSyntax\": true,\n    \"target\": \"ES2022\",\n    \"moduleResolution\": \"bundler\"\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Branded types cost almost nothing at runtime and eliminate an entire class of bugs where a userId and orderId are both strings and get swapped at a call site."
+        }
+      ]
+    },
+    {
+      "id": "note-erasure",
+      "heading": "Note: Types Are Erased",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Because all type information disappears after compilation, you cannot do `if (x instanceof MyInterface)` or reflect over a type at runtime. Anything you need at runtime (validation, discrimination, serialization) must be encoded in actual values: discriminant fields, schemas, or classes. The exception is emitDecoratorMetadata, which emits limited design-time type metadata for reflect-metadata, and that is exactly why DI frameworks depend on it."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "compile-pipeline",
+      "title": "TypeScript Compilation and Type-Check Flow",
+      "type": "mermaid",
+      "content": "flowchart TD\n  A[TS Source] --> B[Parser builds AST]\n  B --> C[Binder builds symbol table]\n  C --> D[Type Checker]\n  D -->|errors| E[Diagnostics in editor and CI]\n  D -->|no blocking errors| F[Emitter]\n  F --> G[Plain JavaScript]\n  F --> H[Declaration .d.ts files]\n  G --> I[Runtime: types fully erased]"
+    },
+    {
+      "id": "boundary-validation",
+      "title": "Trusted vs Untrusted Type Boundaries",
+      "type": "mermaid",
+      "content": "flowchart LR\n  N[Network or JSON] -->|unknown| V[Runtime schema validate]\n  V -->|typed value| C[Core domain logic]\n  C --> O[Serialize at edge]\n  X[any escape hatch] -.poisons.-> C"
+    },
+    {
+      "id": "type-narrowing-flow",
+      "title": "Control Flow Narrowing of a Discriminated Union",
+      "type": "ascii",
+      "content": "+-----------------------------+\n|  Result<T> (broad union)    |\n+-------------+---------------+\n              |\n        switch (r.status)\n              |\n   +----------+----------+-----------+\n   |          |          |           |\n loading   success     error      default\n   |          |          |           |\n  {}      data: T     error: Error   never\n   |          |          |           |\n   v          v          v           v\n  spinner   render     report     compile-time\n                                  exhaustiveness"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-interface-vs-type",
+      "question": "What is the difference between an interface and a type alias, and when would you pick each?",
+      "answer": "Both describe object shapes and are largely interchangeable for that purpose. interface supports declaration merging (multiple declarations with the same name combine) and is conventionally used for public, extensible contracts. A type alias is closed and cannot be merged, but it can express things an interface cannot: unions, tuples, primitives, mapped types, and conditional types. Practical rule: use interface for object shapes that form an API or may be augmented; use type for unions, function types, and computed types. There is no meaningful performance difference; the choice is about expressiveness and merge semantics.",
+      "difficulty": "junior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["interface", "type", "structural-typing"],
+      "followUps": ["Can an interface extend a type alias and vice versa?", "Which produces better error messages?"]
+    },
+    {
+      "id": "q-structural-typing",
+      "question": "Explain structural typing and how excess property checks interact with it.",
+      "answer": "TypeScript determines type compatibility by structure (members), not by declared name (nominal). A value is assignable to a target type if it has at least the required members with compatible types. The wrinkle is excess property checking: when you assign a fresh object literal directly, TypeScript additionally flags properties that do not exist on the target, to catch typos. This check only applies to fresh literals; assign the literal to a variable first and only structural width is checked, so extra properties are allowed. This is intentional: the typo-catch is heuristic, the underlying model is purely structural.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["structural-typing", "excess-property-check"],
+      "followUps": ["How do you opt into nominal typing?", "Why does an intermediate variable bypass the check?"]
+    },
+    {
+      "id": "q-generics-constraints",
+      "question": "How do generic constraints work and why is keyof T extends K a powerful pattern?",
+      "answer": "A constraint (T extends U) bounds a type parameter so the compiler knows it has certain members and so multiple parameters can relate to each other. The classic getProp<T, K extends keyof T>(obj: T, key: K): T[K] ties the key argument to the actual keys of the object and ties the return type to the indexed property type. This gives compile-time safety against invalid keys and precise return types via indexed access (T[K]). The pattern generalizes to any API where one argument selects into another, like form field accessors or ORM column pickers.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["generics", "keyof", "constraints"],
+      "followUps": ["What is a default type parameter?", "When should you avoid generics?"]
+    },
+    {
+      "id": "q-utility-types",
+      "question": "Implement Partial, Pick, and Omit from scratch.",
+      "answer": "Partial<T> = { [K in keyof T]?: T[K] } maps over keys adding the optional modifier. Pick<T, K extends keyof T> = { [P in K]: T[P] } maps over a restricted key set. Omit<T, K extends keyof any> = Pick<T, Exclude<keyof T, K>> computes the remaining keys via Exclude (a conditional type) and reuses Pick. Knowing these implementations matters because it lets you build domain-specific variants, like a DeepPartial or a RequireKeys helper, by composing the same mapped/conditional primitives.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["utility-types", "mapped-types"],
+      "followUps": ["Why does Omit use keyof any rather than keyof T?", "How would you write DeepPartial?"]
+    },
+    {
+      "id": "q-discriminated-union",
+      "question": "What makes a discriminated union work and how do you guarantee exhaustiveness?",
+      "answer": "A discriminated (tagged) union is a union of object types that share a common literal property (the discriminant). When you check that property, control flow analysis narrows the union to the matching member, giving access to its other fields safely. To guarantee exhaustiveness, add a default branch that assigns the narrowed value to a variable typed never; if any union member is unhandled the value will not be never and compilation fails. This converts forgotten cases into compile errors, which is invaluable when the union grows over time.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["discriminated-union", "narrowing", "exhaustiveness"],
+      "followUps": ["What happens if two members share the same discriminant value?", "How is this different from a class hierarchy?"]
+    },
+    {
+      "id": "q-async-await-types",
+      "question": "How does TypeScript type async functions, and what is the type of a catch variable?",
+      "answer": "An async function always returns a Promise; if you return T the function type is Promise<T>, and TypeScript flattens nested promises (returning a Promise<T> still yields Promise<T>, not Promise<Promise<T>>). await unwraps Promise<T> to T, modeled by the Awaited<T> utility. Under strict mode (useUnknownInCatchVariables), a catch clause variable is typed unknown rather than any, forcing you to narrow (e instanceof Error) before using it. This prevents the common bug of accessing .message on a thrown non-Error value.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["async", "promises", "awaited", "unknown"],
+      "followUps": ["What does Awaited do with a thenable?", "How do you type Promise.all results as a tuple?"]
+    },
+    {
+      "id": "q-template-literal-types",
+      "question": "Give a real use case for template literal types.",
+      "answer": "Template literal types compute string literal types from other types. A strong use case is typed event systems or route definitions: type EventName = `on${Capitalize<keyof Events & string>}` derives handler names from an events map, or type Path = `/users/${string}/posts` constrains route strings. Combined with key remapping in mapped types you can generate getter/setter names, prefix/suffix CSS variables, or build a typed query-string parser. The payoff is catching typos in string-keyed APIs at compile time.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["template-literal-types", "mapped-types"],
+      "followUps": ["How do intrinsic types like Capitalize work?", "What are the performance limits of large literal unions?"]
+    },
+    {
+      "id": "q-decorators-flavors",
+      "question": "What are the two decorator systems in TypeScript and why does it matter?",
+      "answer": "There is the legacy experimentalDecorators implementation (an older proposal, paired with emitDecoratorMetadata and reflect-metadata, used by Angular and current NestJS) and the TC39 Stage 3 decorators that TypeScript 5.0 supports natively without flags. They have different signatures and capabilities; Stage 3 decorators receive a context object and cannot rely on emitted parameter metadata. It matters because the two are not source compatible: adopting Stage 3 syntax in an Angular/Nest project that depends on metadata-based DI will break injection silently. Always confirm which system your build targets.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["decorators", "metadata", "dependency-injection"],
+      "followUps": ["Why can't Stage 3 decorators emit parameter type metadata?", "How does NestJS DI use reflect-metadata?"]
+    },
+    {
+      "id": "q-readonly-depth",
+      "question": "Is readonly deep or shallow, and what does it guarantee at runtime?",
+      "answer": "readonly in TypeScript is shallow and compile-time only. readonly on a property prevents reassignment of that property through that reference, but nested objects remain mutable, and the guarantee is erased at runtime, so an aliased non-readonly reference or a cast can mutate freely. ReadonlyArray prevents push/splice through the typed reference but the underlying array is a normal mutable array. For real immutability you need Object.freeze (runtime, also shallow) or an immutable data structure library. A DeepReadonly mapped type can express deep readonly at the type level but still offers no runtime enforcement.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["readonly", "immutability"],
+      "followUps": ["How would you implement DeepReadonly?", "Does as const make something deeply readonly?"]
+    },
+    {
+      "id": "q-unknown-any-never",
+      "question": "Contrast unknown, any, and never. When does each appear and which is safe?",
+      "answer": "any opts out of type checking entirely: it is assignable to and from everything, and it silently disables checking for any value derived from it, making it contagious and dangerous. unknown is the type-safe top type: anything is assignable to unknown, but unknown is assignable to nothing without narrowing, so it forces a check before use. never is the bottom type: it is assignable to every type but nothing (except never) is assignable to it; it represents the impossible and appears as the type of a function that always throws, the result of impossible narrowing, or the empty-union exhaustiveness guard. Safe boundary code uses unknown and narrows; never is used to prove unreachability. any should be banned in most codebases.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["unknown", "any", "never", "top-type", "bottom-type"],
+      "followUps": ["What is the type of [] when inferred?", "Why is never the element type of an empty array literal sometimes?"]
+    },
+    {
+      "id": "q-as-dangerous",
+      "question": "Why is the `as` type assertion dangerous, and how does it differ from a cast in other languages?",
+      "answer": "as is not a conversion; it is an unchecked promise to the compiler that a value has a given type, with no runtime check whatsoever (unlike a C# or Java cast, which performs a runtime type check and can throw). TypeScript only verifies that the assertion is plausible (the source and target overlap), and you can defeat even that with as unknown as T. So `x as Foo` removes the compiler's protection precisely where data is uncertain, typically at boundaries, which is the worst place to lie. The real bug surfaces later and far away when the assumed shape does not hold. The dangerous idiom value as unknown as Target is a double assertion that bypasses all overlap checks; treat its presence in a code review as a red flag.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["as", "type-assertion", "footgun"],
+      "followUps": ["When is `as const` legitimately useful?", "How do you replace `as` with a type guard?"]
+    },
+    {
+      "id": "q-declaration-merging",
+      "question": "What is declaration merging and how can it cause subtle production bugs?",
+      "answer": "Declaration merging is TypeScript combining multiple declarations with the same name into one definition. Two interfaces with the same name merge their members; namespaces merge; an interface can merge with a namespace or a class. This is intentional for augmenting library types (e.g. adding to Express's Request) but becomes a footgun when it is accidental: a duplicated interface name, a global augmentation in a stray .d.ts, or a third-party @types package can silently widen a type with members you never declared, and the compiler will not warn because merging is a feature, not an error. The classic incident is a global declare global { interface Window {...} } in two libraries that conflict or over-broaden window typing, masking real misuse. Mitigate by scoping augmentations in modules, reviewing .d.ts files as API surface, and preferring unique names.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["declaration-merging", "ambient", "augmentation", "footgun"],
+      "followUps": ["How do you safely augment a third-party module's types?", "Why does a module-scoped interface not merge globally?"]
+    },
+    {
+      "id": "q-conditional-distribution",
+      "question": "Why does a conditional type sometimes return a union you did not expect?",
+      "answer": "Conditional types distribute over naked (unwrapped) union type parameters. If T is A | B then T extends U ? X : Y is evaluated as (A extends U ? X : Y) | (B extends U ? X : Y). This is why Exclude and NonNullable work, but it surprises people writing helpers that should treat the union as a whole. To suppress distribution, wrap both sides in a one-tuple: [T] extends [U] ? X : Y compares the union atomically. Forgetting this leads to types that 'mysteriously' collapse to never or expand to unexpected unions.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["conditional-types", "distribution", "footgun"],
+      "followUps": ["How does this interact with boolean which is true | false?", "Why does T extends any ? T[] : never behave oddly?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-api-response",
+      "title": "Implement a generic ApiResponse<T> wrapper",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "prompt": "Design a discriminated-union type ApiResponse<T> that models the result of an HTTP call: it is either a success carrying typed data and an HTTP status, or a failure carrying an error code and message. Then write a typed helper handleResponse that, given an ApiResponse<T>, returns the data on success or throws a typed ApiError on failure, with full narrowing and exhaustiveness.",
+      "hints": [
+        "Use a literal discriminant field like ok: true | false.",
+        "Make the success and failure branches carry different payloads so narrowing reveals the right fields.",
+        "Add a never-typed default branch to prove exhaustiveness if you switch instead of if/else."
+      ],
+      "solutionCode": "type ApiSuccess<T> = {\n  ok: true;\n  status: number;\n  data: T;\n};\n\ntype ApiFailure = {\n  ok: false;\n  status: number;\n  error: { code: string; message: string };\n};\n\nexport type ApiResponse<T> = ApiSuccess<T> | ApiFailure;\n\nexport class ApiError extends Error {\n  constructor(public code: string, message: string, public status: number) {\n    super(message);\n    this.name = 'ApiError';\n  }\n}\n\nexport function handleResponse<T>(res: ApiResponse<T>): T {\n  if (res.ok) {\n    // narrowed to ApiSuccess<T>: res.data is T\n    return res.data;\n  }\n  // narrowed to ApiFailure: res.error is available\n  throw new ApiError(res.error.code, res.error.message, res.status);\n}\n\n// Typed factory helpers keep call sites honest.\nexport const ok = <T>(data: T, status = 200): ApiResponse<T> => ({ ok: true, status, data });\nexport const fail = (code: string, message: string, status = 500): ApiResponse<never> =>\n  ({ ok: false, status, error: { code, message } });\n\n// Usage\nconst r: ApiResponse<{ id: string }> = ok({ id: 'u1' });\nconst user = handleResponse(r); // user: { id: string }",
+      "solutionLanguage": "typescript",
+      "explanation": "The core idea is a discriminated union keyed on ok. Because true and false are distinct literal types, an if (res.ok) check narrows res to ApiSuccess<T> inside the branch (exposing data: T) and to ApiFailure in the else branch (exposing error). The generic parameter T flows from the success payload through handleResponse's return type, so callers get precise data typing with no casts. ApiError subclasses Error so it integrates with normal try/catch and instanceof narrowing. The ok and fail factories return ApiResponse<T> and ApiResponse<never> respectively; never is assignable to any T, so a failure can stand in for any expected response type without weakening callers. This pattern eliminates the classic bug of accessing .data on an error response, because outside the narrowed branch the field simply does not exist on the type.",
+      "relatedTopic": "typescript"
+    },
+    {
+      "id": "ch-deep-readonly",
+      "title": "Implement a typesafe DeepReadonly<T> mapped type",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "prompt": "Write a DeepReadonly<T> mapped type that recursively marks every property of an object (and nested objects and arrays) as readonly at the type level. It must leave primitives and functions untouched, handle arrays by producing ReadonlyArray of DeepReadonly elements, and not infinitely loop on functions. Provide a usage example proving that nested mutation is rejected by the compiler.",
+      "hints": [
+        "Use a conditional type to special-case functions and arrays before the generic object mapping.",
+        "For arrays, recurse into the element type and wrap in ReadonlyArray.",
+        "Functions should pass through unchanged; mapping over their keys would mangle them.",
+        "Remember readonly is compile-time and shallow at runtime, so this is purely a type-level guarantee."
+      ],
+      "solutionCode": "type Primitive = string | number | boolean | bigint | symbol | null | undefined;\n\nexport type DeepReadonly<T> =\n  T extends Primitive\n    ? T\n    : T extends (...args: any[]) => any\n      ? T // leave functions as-is\n      : T extends ReadonlyArray<infer U>\n        ? ReadonlyArray<DeepReadonly<U>>\n        : T extends Map<infer K, infer V>\n          ? ReadonlyMap<DeepReadonly<K>, DeepReadonly<V>>\n          : T extends Set<infer M>\n            ? ReadonlySet<DeepReadonly<M>>\n            : { readonly [K in keyof T]: DeepReadonly<T[K]> };\n\n// Usage / proof\ninterface Profile {\n  id: string;\n  prefs: { theme: 'light' | 'dark'; tags: string[] };\n  greet: () => string;\n}\n\nconst p: DeepReadonly<Profile> = {\n  id: 'u1',\n  prefs: { theme: 'dark', tags: ['a'] },\n  greet: () => 'hi',\n};\n\n// p.id = 'x';                 // ERROR: id is readonly\n// p.prefs.theme = 'light';    // ERROR: nested prop is readonly\n// p.prefs.tags.push('b');     // ERROR: push does not exist on ReadonlyArray\np.greet();                     // OK: functions still callable",
+      "solutionLanguage": "typescript",
+      "explanation": "DeepReadonly is a recursive conditional type. The conditional order matters: we short-circuit primitives first (nothing to make readonly), then functions (mapping over a function's keys would destroy its call signature, so we pass it through), then collection types. For arrays we infer the element type U and produce ReadonlyArray<DeepReadonly<U>>, which both removes mutating methods like push and recurses into element shape. Map and Set get their ReadonlyMap/ReadonlySet counterparts with recursively readonly keys/values. Only after eliminating those cases do we reach the general object branch, a mapped type that adds the readonly modifier to every key while recursing into the property type via DeepReadonly<T[K]>. The recursion terminates because every branch eventually hits a primitive. The usage block proves the guarantee: reassigning id, mutating the nested theme, or calling push on tags are all compile errors, while the greet function remains callable. Crucially, this is a type-level guarantee only; at runtime the object is a normal mutable object, so for runtime immutability you would additionally Object.freeze (which is itself shallow).",
+      "relatedTopic": "typescript"
+    }
+  ],
+  "references": [
+    {"label": "TypeScript Handbook", "url": "https://www.typescriptlang.org/docs/handbook/intro.html"},
+    {"label": "TypeScript Handbook: Mapped Types", "url": "https://www.typescriptlang.org/docs/handbook/2/mapped-types.html"},
+    {"label": "TypeScript Handbook: Conditional Types", "url": "https://www.typescriptlang.org/docs/handbook/2/conditional-types.html"},
+    {"label": "TypeScript 5.0 Decorators", "url": "https://www.typescriptlang.org/docs/handbook/release-notes/typescript-5-0.html"},
+    {"label": "Total TypeScript by Matt Pocock", "url": "https://www.totaltypescript.com/"}
+  ]
+}

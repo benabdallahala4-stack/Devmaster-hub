@@ -1,0 +1,405 @@
+{
+  "id": "data-structures-algorithms",
+  "title": "Data Structures & Algorithms",
+  "category": "Computer Science",
+  "subcategory": "Fundamentals",
+  "difficulty": "mid",
+  "tags": ["algorithms", "data-structures", "big-o", "hashmaps", "dynamic-programming", "graphs", "interview"],
+  "description": "A staff-level walkthrough of the data structures and algorithmic patterns that decide whether your system scales gracefully or melts under load.",
+  "estReadMinutes": 32,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {"type": "paragraph", "text": "Data structures and algorithms are not an academic ritual you survive to pass interviews and then forget. They are the vocabulary you use to reason about cost. Every time you choose a list over a set, an array over a linked list, or a nested loop over a hashmap, you are making a performance decision that compounds at scale. The difference between an O(n) and an O(n squared) lookup is invisible on 100 rows and catastrophic on 10 million."},
+        {"type": "paragraph", "text": "This guide treats DSA the way a senior engineer actually uses it: as a toolkit for picking the right cost model for the access pattern in front of you. We cover the asymptotic foundations, the core structures, the canonical algorithmic patterns (two pointers, sliding window, binary search, BFS/DFS, dynamic programming), and the subtle gotchas that separate someone who memorized LeetCode from someone who understands why a hashmap is O(1) on average but O(n) in the worst case."},
+        {"type": "callout", "variant": "info", "text": "Mental model: a data structure is a contract about which operations are cheap. Pick the structure whose cheap operations match your hot path."}
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {"type": "paragraph", "text": "In production, the wrong data structure rarely throws an error. It just quietly burns CPU, allocates garbage, and degrades as your data grows until a 3am page tells you the p99 latency tripled. The cost is real money and real reliability, and it is almost always traceable to a complexity mismatch."},
+        {"type": "list", "items": [
+          "Scalability: an O(n squared) algorithm that ships fine in a demo will time out once a customer uploads a large dataset.",
+          "Latency budgets: shaving a lookup from O(log n) to O(1) can be the difference between hitting and missing a 10ms SLA on a hot path.",
+          "Memory pressure: choosing a structure with poor locality or excessive per-node overhead (linked lists, deep trees) triggers GC pauses and cache misses.",
+          "Correctness under concurrency: knowing whether your structure is mutated during iteration prevents heisenbugs.",
+          "Communication: complexity notation is the lingua franca for design reviews. Saying 'this is O(n log n) dominated by the sort' ends debates fast."
+        ]},
+        {"type": "callout", "variant": "success", "text": "The senior move is to know the cost of an operation before you write it, not to profile after the incident."}
+      ]
+    },
+    {
+      "id": "big-o",
+      "heading": "Big-O: The Cost Model",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Big-O describes how an algorithm's resource use grows as input size n grows toward infinity. It deliberately discards constants and lower-order terms because, at scale, the dominant term wins. O(2n + 50) is just O(n). What matters is the shape of the growth curve."},
+        {"type": "table", "headers": ["Notation", "Name", "Example operation", "n=1M feels like"],
+         "rows": [
+           ["O(1)", "constant", "hashmap get, array index", "instant"],
+           ["O(log n)", "logarithmic", "binary search, balanced BST lookup", "~20 steps"],
+           ["O(n)", "linear", "single loop, linear scan", "1M steps"],
+           ["O(n log n)", "linearithmic", "merge sort, heapsort", "~20M steps"],
+           ["O(n^2)", "quadratic", "nested loop, naive pair comparison", "1 trillion steps, dead"],
+           ["O(2^n)", "exponential", "naive recursive subsets/fibonacci", "heat death of universe"]
+         ]},
+        {"type": "heading", "text": "Time vs space, best vs average vs worst"},
+        {"type": "paragraph", "text": "Two distinct axes matter. Time complexity counts operations; space complexity counts extra memory beyond the input. They often trade against each other: dynamic programming spends O(n) space to cut time from exponential to polynomial. Separately, every operation has best, average, and worst case bounds. Quicksort is O(n log n) average but O(n squared) worst case on an adversarial pivot. Treat the worst case as your safety margin and the average case as your typical experience."},
+        {"type": "callout", "variant": "warning", "text": "Amortized is not the same as average. Amortized analysis guarantees the cost averaged over a sequence of operations, even in the worst case. A dynamic array push is amortized O(1) by a rigorous accounting argument, not by probabilistic luck."}
+      ]
+    },
+    {
+      "id": "linear-structures",
+      "heading": "Linear Structures: Arrays, Lists, Stacks, Queues",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Arrays give O(1) indexed access and excellent cache locality because elements sit contiguously in memory. The price is O(n) insertion or deletion in the middle, since everything after the gap must shift. Dynamic arrays (Java ArrayList, C++ vector, JS Array, Python list) hide a growth strategy: when full, they allocate a larger backing buffer (typically 1.5x or 2x) and copy. That copy is O(n), but it happens rarely enough that appends are amortized O(1)."},
+        {"type": "paragraph", "text": "Linked lists invert the tradeoff: O(1) insertion or deletion given a node reference, but O(n) to find that node and terrible cache behavior because nodes are scattered. Use them when you do many splices and rarely random-access. A doubly linked list also enables O(1) removal of an arbitrary node, which is exactly why it pairs with a hashmap to build an LRU cache."},
+        {"type": "table", "headers": ["Operation", "Array", "Dynamic array", "Singly linked list", "Doubly linked list"],
+         "rows": [
+           ["Index access", "O(1)", "O(1)", "O(n)", "O(n)"],
+           ["Append", "n/a fixed", "O(1) amortized", "O(1) with tail ptr", "O(1) with tail ptr"],
+           ["Insert at head", "O(n)", "O(n)", "O(1)", "O(1)"],
+           ["Delete given node", "O(n)", "O(n)", "O(n) prev unknown", "O(1)"],
+           ["Cache locality", "excellent", "excellent", "poor", "poor"]
+         ]},
+        {"type": "paragraph", "text": "Stacks (LIFO) and queues (FIFO) are access disciplines, not new storage. A stack underpins call frames, undo, and DFS. A queue underpins BFS, task scheduling, and buffering. A deque (double-ended queue) supports both ends in O(1) and is the right backing for sliding-window-maximum problems."},
+        {"type": "code", "language": "typescript", "code": "// Stack and queue via a single array-backed deque\nclass Deque<T> {\n  private items: T[] = [];\n  pushBack(x: T) { this.items.push(x); }\n  pushFront(x: T) { this.items.unshift(x); }      // O(n) - avoid in hot loops\n  popBack(): T | undefined { return this.items.pop(); }\n  popFront(): T | undefined { return this.items.shift(); } // O(n) - avoid\n  get size() { return this.items.length; }\n}\n// For O(1) front ops at scale, use a ring buffer or a linked-list deque\n// instead of Array.shift/unshift, which are O(n)."}
+      ]
+    },
+    {
+      "id": "hashmaps",
+      "heading": "Hashmaps and Sets: The O(1) Workhorse",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "A hashmap stores key-value pairs in an array of buckets, indexed by hash(key) mod capacity. With a good hash function and a low load factor, get, put, and delete are O(1) on average. This is the single most useful structure in practical algorithm work: it converts an O(n) 'have I seen this' scan into an O(1) check, which is the trick behind two-sum, deduplication, frequency counting, and memoization."},
+        {"type": "heading", "text": "Why average O(1) and worst-case O(n)"},
+        {"type": "paragraph", "text": "Collisions are the catch. When two keys hash to the same bucket, the implementation chains them (linked list or, in modern JDKs, a balanced tree past a threshold) or probes for another slot. If every key collides into one bucket, lookups degrade to O(n) because you scan the chain. This is not hypothetical: an attacker who knows your hash function can craft colliding keys to force O(n) per operation, turning an O(n) workload into O(n squared) and DoS-ing your service. That is the hash-flooding attack, mitigated by randomized seeds (SipHash) in modern runtimes."},
+        {"type": "table", "headers": ["Operation", "Average", "Worst case", "Cause of worst case"],
+         "rows": [
+           ["get / put / delete", "O(1)", "O(n)", "all keys collide into one bucket"],
+           ["iterate all", "O(n)", "O(n + capacity)", "sparse table walks empty buckets"],
+           ["resize / rehash", "O(n) amortized", "O(n) one-time", "load factor exceeded, rehash all"]
+         ]},
+        {"type": "callout", "variant": "danger", "text": "Mutable objects as keys are a footgun. If a key's hashCode changes after insertion (you mutated a field used in the hash), you can never find it again. The entry is stranded in the wrong bucket. Use immutable keys."},
+        {"type": "paragraph", "text": "Sets are hashmaps without values: O(1) membership testing. Reach for a set whenever you find yourself writing 'if x not in list' inside a loop, because 'in list' is O(n) and 'in set' is O(1)."}
+      ]
+    },
+    {
+      "id": "trees-heaps",
+      "heading": "Trees, Heaps, and Tries",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "A binary search tree keeps keys ordered so that lookup, insert, and delete are O(log n) when balanced. The catch is the word 'balanced': insert sorted data into a naive BST and it degenerates into a linked list with O(n) operations. Self-balancing variants (red-black trees, AVL trees) rotate on insert to guarantee O(log n) height. Java's TreeMap and C++ std::map are red-black trees; they give you sorted iteration and range queries that a hashmap cannot."},
+        {"type": "paragraph", "text": "A heap is a complete binary tree maintaining the heap property (parent <= children for a min-heap), stored compactly in an array. It gives O(1) peek at the min/max and O(log n) insert and extract. This is the priority queue: the backbone of Dijkstra, task schedulers, and top-k problems. To get the k largest of n items, keep a min-heap of size k for O(n log k) rather than sorting everything at O(n log n)."},
+        {"type": "code", "language": "java", "code": "// Top-K largest elements with a bounded min-heap: O(n log k) time, O(k) space\nint[] topK(int[] nums, int k) {\n    PriorityQueue<Integer> heap = new PriorityQueue<>(); // min-heap\n    for (int x : nums) {\n        heap.offer(x);\n        if (heap.size() > k) heap.poll(); // evict the smallest\n    }\n    int[] out = new int[k];\n    for (int i = k - 1; i >= 0; i--) out[i] = heap.poll();\n    return out;\n}"},
+        {"type": "paragraph", "text": "A trie (prefix tree) stores strings by sharing common prefixes. Lookup and insert are O(L) where L is the key length, independent of how many keys are stored. Tries power autocomplete, IP routing tables, and spell-checkers. They trade memory for prefix-query speed."}
+      ]
+    },
+    {
+      "id": "graphs",
+      "heading": "Graphs: Traversal, Shortest Paths, Ordering",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "A graph is vertices connected by edges, usually stored as an adjacency list (O(V + E) space, efficient for sparse graphs) or adjacency matrix (O(V squared) space, O(1) edge lookup, good for dense graphs). Most real-world graphs (social networks, dependency graphs, road networks) are sparse, so adjacency lists dominate."},
+        {"type": "list", "items": [
+          "BFS explores level by level using a queue. It finds the shortest path in an unweighted graph and runs in O(V + E).",
+          "DFS explores as deep as possible using a stack or recursion. It powers cycle detection, connected components, and topological sort, also O(V + E).",
+          "Dijkstra finds shortest paths in a graph with non-negative weights using a min-heap, running in O((V + E) log V). It fails with negative edges; use Bellman-Ford there.",
+          "Topological sort orders a DAG so every edge points forward, via DFS post-order or Kahn's in-degree algorithm. It schedules tasks with dependencies and detects cycles (a cycle means no valid order exists)."
+        ]},
+        {"type": "code", "language": "python", "code": "from collections import deque\n\ndef bfs_shortest(graph, start, goal):\n    # graph: dict[node] -> list[neighbor]; unweighted shortest path\n    seen = {start}\n    q = deque([(start, 0)])\n    while q:\n        node, dist = q.popleft()\n        if node == goal:\n            return dist\n        for nxt in graph[node]:\n            if nxt not in seen:\n                seen.add(nxt)          # mark on enqueue, not dequeue,\n                q.append((nxt, dist + 1))  # to avoid duplicate work\n    return -1  # unreachable"},
+        {"type": "callout", "variant": "warning", "text": "Mark nodes visited on enqueue, not on dequeue. Marking on dequeue lets the same node enter the queue multiple times before it is processed, inflating memory and work, and can cause exponential blowup on dense graphs."}
+      ]
+    },
+    {
+      "id": "patterns",
+      "heading": "Core Patterns: Two Pointers, Sliding Window, Binary Search, DP",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Most interview and real-world algorithm problems collapse into a handful of patterns. Recognizing the pattern is 80% of the solution."},
+        {"type": "heading", "text": "Two pointers"},
+        {"type": "paragraph", "text": "Two indices move through a (usually sorted) array to find pairs or partition data in O(n) without nested loops. Classic uses: pair-with-target-sum on a sorted array, reversing in place, removing duplicates, and merging sorted sequences."},
+        {"type": "heading", "text": "Sliding window"},
+        {"type": "paragraph", "text": "A window [left, right] expands and contracts over a sequence to answer 'best contiguous subarray/substring' questions in O(n) instead of O(n squared). Examples: longest substring without repeats, minimum window covering a target set, max sum of size-k subarray."},
+        {"type": "code", "language": "typescript", "code": "// Longest substring without repeating characters: O(n) sliding window\nfunction lengthOfLongestSubstring(s: string): number {\n  const lastSeen = new Map<string, number>();\n  let left = 0, best = 0;\n  for (let right = 0; right < s.length; right++) {\n    const c = s[right];\n    if (lastSeen.has(c) && lastSeen.get(c)! >= left) {\n      left = lastSeen.get(c)! + 1; // jump past the previous duplicate\n    }\n    lastSeen.set(c, right);\n    best = Math.max(best, right - left + 1);\n  }\n  return best;\n}"},
+        {"type": "heading", "text": "Binary search"},
+        {"type": "paragraph", "text": "On any monotonic search space, binary search halves the candidates each step for O(log n). Beyond sorted arrays, it generalizes to 'binary search on the answer': if a predicate is monotonic (false, false, true, true), you can binary-search the boundary, which solves problems like minimum capacity to ship within D days."},
+        {"type": "heading", "text": "Recursion and dynamic programming"},
+        {"type": "paragraph", "text": "DP applies when a problem has optimal substructure (the optimal answer is built from optimal sub-answers) and overlapping subproblems (the same sub-answers recur). You cache subproblem results, either top-down (memoized recursion) or bottom-up (iterative table), turning exponential recursion into polynomial time. The canonical tell: a naive recursion recomputes the same arguments, like fib(n) calling fib(n-2) along two paths."},
+        {"type": "callout", "variant": "info", "text": "Reach for DP when you see 'count the ways', 'min/max cost', or 'can you reach', combined with choices at each step and reusable subresults. If subproblems do not overlap, you want divide-and-conquer or greedy instead, not DP."}
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: The Feed Dedup Incident",
+      "kind": "example",
+      "blocks": [
+        {"type": "paragraph", "text": "A real scenario from a content feed service. The endpoint merged posts from several upstream sources and removed duplicates before returning a page. The original code checked membership against a growing result list:"},
+        {"type": "code", "language": "typescript", "code": "// BEFORE: ships fine in staging, melts in production\nfunction dedupe(posts: Post[]): Post[] {\n  const out: Post[] = [];\n  for (const p of posts) {\n    if (!out.some(q => q.id === p.id)) { // O(n) scan inside O(n) loop\n      out.push(p);\n    }\n  }\n  return out; // total: O(n^2)\n}"},
+        {"type": "paragraph", "text": "With 200 posts in staging this was a sub-millisecond non-event. In production a viral event pushed some users' merged candidate sets to 40,000 posts. The O(n squared) scan became 1.6 billion comparisons per request, CPU saturated, the thread pool starved, and p99 latency jumped from 30ms to 9 seconds. The fix was a one-line structural change: track seen ids in a Set."},
+        {"type": "code", "language": "typescript", "code": "// AFTER: O(n) with a Set, p99 back to ~30ms\nfunction dedupe(posts: Post[]): Post[] {\n  const seen = new Set<string>();\n  const out: Post[] = [];\n  for (const p of posts) {\n    if (!seen.has(p.id)) {  // O(1) average\n      seen.add(p.id);\n      out.push(p);\n    }\n  }\n  return out;\n}"},
+        {"type": "callout", "variant": "danger", "text": "The lesson: any 'is x already in this collection' check inside a loop is a latent O(n squared). It is invisible at small n and fatal at large n. Grep your hot paths for .includes, .some, and 'in list' inside loops."}
+      ]
+    },
+    {
+      "id": "mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {"type": "list", "items": [
+          "Nested membership checks: 'if x in list' inside a loop is O(n squared). Switch to a set or hashmap. This is the single most common scalability bug.",
+          "Sorting when you only need the top k: full sort is O(n log n); a size-k heap is O(n log k). For top-10 of a billion rows, the difference is enormous.",
+          "Unbounded recursion: deep recursion (long linked lists, skewed trees, large DP) blows the stack. Convert to iteration or increase the stack deliberately.",
+          "Mutating a collection while iterating it: triggers ConcurrentModificationException in Java or silent skips in other languages. Iterate a copy or collect changes and apply after.",
+          "Assuming hashmap iteration order: most hashmaps make no order guarantee. Relying on it produces flaky tests and nondeterministic output.",
+          "Mutable hashmap keys: changing a field used in hashCode after insertion strands the entry. The key becomes unfindable.",
+          "Premature O(1) obsession: replacing a clean O(n) scan over 10 items with a hashmap adds allocation and indirection for zero benefit. Optimize the hot path, not the cold one."
+        ]},
+        {"type": "callout", "variant": "warning", "text": "A subtle one: Array.prototype.shift and unshift in JavaScript are O(n) because they reindex the whole array. Building a queue on a plain array with shift gives you an accidental O(n squared) consumer loop."}
+      ]
+    },
+    {
+      "id": "bestpractices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {"type": "list", "items": [
+          "State the complexity of the operation before writing it. If the hot path runs millions of times, an O(n) inner step is your enemy.",
+          "Default to a hashmap or set for membership and counting. They turn quadratic scans into linear ones with one line.",
+          "Use the structure whose cheap operations match your access pattern: array for indexed/iteration-heavy, hashmap for lookups, heap for repeated min/max, balanced tree for ordered range queries.",
+          "Prefer iterative solutions or explicit stacks over deep recursion in production code paths that can hit large inputs.",
+          "Keep hashmap keys immutable and use language-provided value-equality keys (records, tuples) for composite keys.",
+          "When sorting is your bottleneck, ask whether you actually need a full sort or just the top-k, the median, or a partition.",
+          "Measure on production-scale data. Big-O tells you the shape; a benchmark tells you the constants and where the curve actually bites.",
+          "Comment the complexity of non-obvious algorithms inline. 'O(n log n), dominated by the sort' saves the next reviewer five minutes."
+        ]},
+        {"type": "callout", "variant": "success", "text": "The discipline that pays off: every time you reach for a loop inside a loop, pause and ask whether a hashmap, sort, or two-pointer sweep collapses it to linear or linearithmic."}
+      ]
+    },
+    {
+      "id": "complexity-cheatsheet",
+      "heading": "Note: Quick Complexity Cheat Sheet",
+      "kind": "note",
+      "blocks": [
+        {"type": "table", "headers": ["Structure", "Access", "Search", "Insert", "Delete"],
+         "rows": [
+           ["Array (dynamic)", "O(1)", "O(n)", "O(1) amortized end", "O(n)"],
+           ["Hashmap / Set", "n/a", "O(1) avg, O(n) worst", "O(1) avg", "O(1) avg"],
+           ["Linked list", "O(n)", "O(n)", "O(1) at known node", "O(1) at known node"],
+           ["Balanced BST", "O(log n)", "O(log n)", "O(log n)", "O(log n)"],
+           ["Binary heap", "O(1) peek", "O(n)", "O(log n)", "O(log n) extract"],
+           ["Trie", "n/a", "O(L)", "O(L)", "O(L)"]
+         ]},
+        {"type": "callout", "variant": "info", "text": "L is key length. 'avg' assumes a good hash and low load factor. Memorize this table; it answers half of all DSA interview questions on the spot."}
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "lru-cache-arch",
+      "title": "LRU Cache: Hashmap + Doubly Linked List",
+      "type": "mermaid",
+      "content": "flowchart LR\n  GET[get key] --> MAP[Hashmap key to node]\n  PUT[put key value] --> MAP\n  MAP -->|hit| MOVE[Move node to front]\n  MAP -->|miss on put| ADD[Insert node at front]\n  ADD --> CHECK{Over capacity}\n  CHECK -->|yes| EVICT[Remove tail node]\n  CHECK -->|no| DONE[Done]\n  MOVE --> DLL[Doubly linked list head to tail]\n  ADD --> DLL\n  EVICT --> DLL"
+    },
+    {
+      "id": "bfs-flow",
+      "title": "BFS Traversal Control Flow",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n  participant Q as Queue\n  participant V as Visited Set\n  participant N as Node\n  Q->>N: dequeue front node\n  N->>N: process node\n  N->>V: for each neighbor check membership\n  alt neighbor unseen\n    V->>V: mark visited\n    N->>Q: enqueue neighbor\n  else neighbor seen\n    N->>N: skip\n  end\n  Note over Q,V: repeat until queue empty"
+    },
+    {
+      "id": "decision-tree",
+      "title": "Choosing a Data Structure (ASCII)",
+      "type": "ascii",
+      "content": "+-------------------------------+\n| What is the dominant access?  |\n+---------------+---------------+\n                |\n   +------------+-------------+--------------------+\n   |            |             |                    |\n   v            v             v                    v\n+--------+  +---------+  +-----------+        +-----------+\n| index/ |  | lookup  |  | repeated  |        | ordered   |\n| iterate|  | by key  |  | min/max   |        | range     |\n+---+----+  +----+----+  +-----+-----+        +-----+-----+\n    |            |             |                    |\n    v            v             v                    v\n  ARRAY      HASHMAP/SET     HEAP              BALANCED BST\n  O(1) idx   O(1) avg get   O(log n) push     O(log n) range"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-bigo-basic",
+      "question": "What does Big-O notation describe, and why do we drop constants and lower-order terms?",
+      "answer": "Big-O describes the asymptotic upper bound on how an algorithm's time or space grows as input size n approaches infinity. We drop constants and lower-order terms because they become negligible at scale: O(3n + 100) and O(n) have the same growth shape, and the dominant term determines behavior on large inputs. The notation captures the shape of the curve, not the exact runtime, which lets us compare algorithms independent of hardware and language constants.",
+      "difficulty": "junior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["big-o", "complexity"],
+      "followUps": ["When would the dropped constant actually matter in practice?", "What is the difference between O, Omega, and Theta?"]
+    },
+    {
+      "id": "q-hashmap-ops",
+      "question": "What is the time complexity of hashmap get, put, and delete, and what causes the worst case?",
+      "answer": "On average all three are O(1), assuming a good hash function and a low load factor so collisions are rare. The worst case is O(n), occurring when many or all keys collide into the same bucket, forcing a linear scan of that bucket's chain. Causes include a poor hash function, an adversary crafting colliding keys (hash flooding), or a pathological data distribution. Modern implementations mitigate this: Java treeifies long buckets into balanced trees (O(log n) instead of O(n)), and many runtimes use randomized hash seeds like SipHash to defeat hash-flooding attacks.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["hashmaps", "complexity"],
+      "followUps": ["What is a load factor and when does a hashmap resize?", "How does open addressing differ from chaining?"]
+    },
+    {
+      "id": "q-when-dp",
+      "question": "When should you reach for dynamic programming versus greedy or divide-and-conquer?",
+      "answer": "Use DP when the problem has two properties: optimal substructure (the optimal solution is composed of optimal solutions to subproblems) and overlapping subproblems (the same subproblems recur, so caching saves work). If subproblems overlap, DP via memoization or tabulation turns exponential recursion into polynomial time. If subproblems do not overlap, divide-and-conquer (like merge sort) is the right tool, since caching buys nothing. Greedy applies when a locally optimal choice provably leads to a global optimum (matroid structure), which is stronger and rarer than DP's requirements. The tell for DP: a naive recursion recomputes identical arguments.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["dynamic-programming", "recursion"],
+      "followUps": ["How do you decide between top-down memoization and bottom-up tabulation?", "How do you reduce DP space from O(n) to O(1)?"]
+    },
+    {
+      "id": "q-array-vs-linkedlist",
+      "question": "When would you choose a linked list over a dynamic array, and what is the hidden cost?",
+      "answer": "Choose a linked list when you do frequent insertions or deletions in the middle or at the head given a node reference, and you rarely need random access by index. Each splice is O(1) versus O(n) for an array shift. The hidden cost is cache locality: linked-list nodes are scattered across the heap, so traversal incurs cache misses and pointer chasing, often making a linked list slower in practice than an array even for operations where its Big-O looks better. Each node also carries pointer overhead. In modern systems, arrays win far more often than their Big-O suggests because of memory hierarchy effects.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["linked-list", "arrays", "data-structures"],
+      "followUps": ["Why does a doubly linked list pair so well with a hashmap?", "How does CPU cache behavior change your structure choice?"]
+    },
+    {
+      "id": "q-bfs-vs-dfs",
+      "question": "When do you use BFS versus DFS on a graph?",
+      "answer": "Use BFS when you need the shortest path in an unweighted graph or want to explore level by level, since BFS visits nodes in order of distance from the source. Use DFS when you need to explore deeply, detect cycles, find connected components, do topological sorting, or enumerate paths. BFS uses a queue and more memory (it holds an entire frontier, up to O(V) wide); DFS uses a stack or recursion and uses memory proportional to the longest path depth. Both run in O(V + E). For weighted shortest paths, neither plain BFS nor DFS works; use Dijkstra.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["graphs", "bfs", "dfs"],
+      "followUps": ["How do you adapt BFS to a weighted graph?", "Why does Dijkstra fail with negative edge weights?"]
+    },
+    {
+      "id": "q-binary-search-answer",
+      "question": "What does 'binary search on the answer' mean and when does it apply?",
+      "answer": "It means binary-searching over the space of possible answers rather than over an array of values. It applies when there is a monotonic predicate over the answer space: a function feasible(x) that is false for all x below some threshold and true for all x at or above it (or vice versa). You binary-search for the boundary where feasible flips. Classic examples: minimum ship capacity to deliver packages within D days, minimum eating speed to finish bananas in H hours, or the smallest divisor under a threshold. Each feasibility check is some O(n) computation, so total time is O(n log(range)).",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["binary-search", "patterns"],
+      "followUps": ["How do you avoid the off-by-one bug in the binary search boundary?", "How do you pick the search bounds lo and hi?"]
+    },
+    {
+      "id": "q-heap-topk",
+      "question": "How would you find the k largest elements in a stream of n numbers efficiently?",
+      "answer": "Maintain a min-heap of size k. For each incoming number, push it onto the heap; if the heap exceeds size k, pop the smallest. After processing all n numbers, the heap holds the k largest. This is O(n log k) time and O(k) space, which beats sorting everything at O(n log n) when k is much smaller than n, and crucially works on a stream where you never hold all n elements in memory at once. The min-heap's root is always the smallest of the current top-k candidates, so it is exactly the element to evict.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["heaps", "priority-queue"],
+      "followUps": ["Why a min-heap and not a max-heap for top-k largest?", "How would you find the median of a stream?"]
+    },
+    {
+      "id": "q-amortized-tricky",
+      "question": "A dynamic array push is described as O(1), but a single push can trigger an O(n) copy. How is it O(1)?",
+      "answer": "It is amortized O(1), which is a rigorous worst-case guarantee over a sequence of operations, not a probabilistic average. When the backing array fills, it doubles in capacity and copies all n elements, an O(n) operation. But doubling means that expensive resize happens only after at least n cheap O(1) pushes since the last resize. The total cost of inserting n elements is at most n + (1 + 2 + 4 + ... + n), and the geometric series sums to less than 2n. Dividing total cost 3n by n operations gives O(1) per push amortized. The accounting (or banker's) method makes this precise: each cheap push prepays a constant credit that funds the future copy. Critically, if the array grew by a fixed amount instead of doubling, resizes would happen every constant number of pushes and the amortized cost would degrade to O(n).",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["arrays", "amortized", "big-o"],
+      "followUps": ["Why does growing by a fixed increment break the amortized guarantee?", "What is the difference between amortized and average-case complexity?"]
+    },
+    {
+      "id": "q-avg-vs-worst-hashmap",
+      "question": "Why do we report hashmap operations as average O(1) instead of their true worst case O(n)? Isn't that dishonest?",
+      "answer": "It is honest as long as you state the assumption. Average O(1) holds under the simple uniform hashing assumption: keys distribute roughly evenly across buckets, which a good hash function and a maintained load factor deliver in practice. The worst case O(n) requires either an adversarial input crafted to collide or a broken hash function. For typical workloads, the average case is what you experience essentially always, so reporting O(1) reflects real behavior. The subtlety a senior engineer adds: the worst case is not merely theoretical for untrusted input, because hash-flooding attacks deliberately trigger it to cause denial of service, which is why production runtimes randomize hash seeds. So the correct framing is O(1) amortized average for trusted data, with O(n) as a security-relevant tail you must defend against for adversarial input.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["hashmaps", "complexity", "security"],
+      "followUps": ["What is hash flooding and how do runtimes defend against it?", "How does treeifying buckets change the worst case?"]
+    },
+    {
+      "id": "q-bfs-visited-marking",
+      "question": "In BFS, does it matter whether you mark a node visited when you enqueue it or when you dequeue it?",
+      "answer": "Yes, it matters significantly. You must mark visited on enqueue. If you mark on dequeue, the same node can be enqueued multiple times before it is ever processed, because several of its neighbors may all add it to the queue while it sits waiting. This inflates queue memory and redundant work, and on dense graphs it can blow up toward exponential queue size. Marking on enqueue guarantees each node enters the queue exactly once, preserving the O(V + E) bound and correct shortest-path distances. This is a classic subtle bug that passes on small test graphs and explodes on large dense ones.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["graphs", "bfs", "race-conditions"],
+      "followUps": ["Does the same reasoning apply to Dijkstra with a priority queue?", "How do you reconstruct the actual path, not just its length?"]
+    },
+    {
+      "id": "q-sort-stability",
+      "question": "What is a stable sort and when does stability actually matter in production?",
+      "answer": "A stable sort preserves the relative order of elements that compare equal. It matters when you sort by multiple keys in sequence: to sort users by department, then by name within department, you sort by name first, then by department with a stable sort, and the name order survives within each department. It also matters when equal elements carry hidden state (like insertion order or a timestamp) that must be preserved. Merge sort and Timsort (Python, Java objects) are stable; heapsort and typical quicksort are not. If you rely on stability and your language's default sort is unstable for primitives (Java's Arrays.sort on int[] uses dual-pivot quicksort), you can get subtle ordering bugs.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["sorting", "stability"],
+      "followUps": ["Which common language sorts are stable versus unstable?", "How do you make any sort stable using the original index?"]
+    },
+    {
+      "id": "q-recursion-stack",
+      "question": "What risks does deep recursion introduce, and how do you mitigate them?",
+      "answer": "Deep recursion consumes one stack frame per call, so recursion depth proportional to input size (a million-node linked list, a skewed tree, or a long DP chain) can overflow the stack and crash the process, since stack space is far smaller than heap. Mitigations: convert the recursion to an explicit iterative loop with your own stack data structure on the heap; use tail-call optimization where the language guarantees it (most do not, notably not Java or Python); restructure as bottom-up iteration (tabulated DP instead of memoized recursion); or, as a last resort, raise the stack size deliberately. The senior instinct is to assume any recursion whose depth scales with input is a production liability until proven bounded.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["recursion", "memory"],
+      "followUps": ["Why don't Python and Java do tail-call optimization?", "How do you convert tree DFS recursion to iteration?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-two-sum",
+      "title": "Two Sum with a Hashmap",
+      "difficulty": "junior",
+      "category": "Computer Science",
+      "prompt": "Given an array of integers nums and a target, return the indices of the two numbers that add up to target. Each input has exactly one solution and you may not use the same element twice. Solve it in a single pass with O(n) time.",
+      "hints": [
+        "The brute force is two nested loops: O(n squared). What lets you avoid the inner loop?",
+        "As you scan, for each number x you need to know if you have already seen target - x. A hashmap gives you that lookup in O(1).",
+        "Store value to index as you go, and check for the complement before inserting the current element."
+      ],
+      "solutionCode": "function twoSum(nums: number[], target: number): [number, number] {\n  // value -> index of values seen so far\n  const seen = new Map<number, number>();\n  for (let i = 0; i < nums.length; i++) {\n    const complement = target - nums[i];\n    if (seen.has(complement)) {\n      // found a pair; return earlier index first\n      return [seen.get(complement)!, i];\n    }\n    seen.set(nums[i], i);\n  }\n  throw new Error('no solution'); // guaranteed not to hit per problem constraints\n}\n\n// twoSum([2, 7, 11, 15], 9) -> [0, 1]\n// twoSum([3, 2, 4], 6)      -> [1, 2]",
+      "solutionLanguage": "typescript",
+      "explanation": "The brute-force solution checks every pair in O(n squared). The hashmap solution trades O(n) space for O(n) time. The key insight is reframing 'find a pair summing to target' as 'for each x, have I already seen target - x'. A hashmap answers that membership question in O(1) average. We check for the complement before inserting the current element, which elegantly prevents using the same element twice without an extra guard. We store value-to-index so we can return indices. The complexity is O(n) time (one pass, O(1) work per element) and O(n) space (the map holds up to n entries). This pattern, converting a nested-loop pair search into a single-pass hashmap lookup, is the most reused trick in practical algorithm work.",
+      "relatedTopic": "data-structures-algorithms"
+    },
+    {
+      "id": "ch-lru-cache",
+      "title": "LRU Cache in O(1)",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "prompt": "Design a Least Recently Used (LRU) cache with capacity C. get(key) returns the value or -1 if absent and marks the key as most recently used. put(key, value) inserts or updates, and if the cache is over capacity, evicts the least recently used key. Both operations must be O(1).",
+      "hints": [
+        "You need O(1) lookup by key AND O(1) reordering to track recency. No single structure gives both.",
+        "Combine two structures: a hashmap for O(1) key lookup, and a doubly linked list to maintain recency order with O(1) move and remove.",
+        "Most-recently-used at the head, least-recently-used at the tail. On get or put, move the node to the head. On overflow, drop the tail.",
+        "Use dummy head and tail sentinel nodes to avoid null checks when splicing."
+      ],
+      "solutionCode": "class Node {\n  constructor(public key: number, public val: number,\n              public prev: Node | null = null,\n              public next: Node | null = null) {}\n}\n\nclass LRUCache {\n  private map = new Map<number, Node>();\n  private head: Node; // dummy: most-recently-used side\n  private tail: Node; // dummy: least-recently-used side\n\n  constructor(private capacity: number) {\n    this.head = new Node(0, 0);\n    this.tail = new Node(0, 0);\n    this.head.next = this.tail;\n    this.tail.prev = this.head;\n  }\n\n  private remove(n: Node) {\n    n.prev!.next = n.next;\n    n.next!.prev = n.prev;\n  }\n\n  private addFront(n: Node) {\n    n.next = this.head.next;\n    n.prev = this.head;\n    this.head.next!.prev = n;\n    this.head.next = n;\n  }\n\n  get(key: number): number {\n    const n = this.map.get(key);\n    if (!n) return -1;\n    this.remove(n);      // detach\n    this.addFront(n);    // mark most-recently-used\n    return n.val;\n  }\n\n  put(key: number, value: number): void {\n    const existing = this.map.get(key);\n    if (existing) {\n      existing.val = value;\n      this.remove(existing);\n      this.addFront(existing);\n      return;\n    }\n    if (this.map.size >= this.capacity) {\n      const lru = this.tail.prev!;   // node just before tail sentinel\n      this.remove(lru);\n      this.map.delete(lru.key);\n    }\n    const node = new Node(key, value);\n    this.map.set(key, node);\n    this.addFront(node);\n  }\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "The challenge is achieving O(1) for two competing requirements: fast lookup by key and fast reordering by recency. No single data structure does both, so we compose two. The hashmap maps key to the corresponding list node, giving O(1) lookup. The doubly linked list maintains usage order, with most-recently-used near the head and least-recently-used near the tail; because it is doubly linked, we can remove any node in O(1) given its reference (which the hashmap hands us) and we can splice it to the front in O(1). The dummy head and tail sentinels eliminate edge-case null checks when the list is empty or when removing the first or last real node. On get, we look up the node, unlink it, and re-add it at the front. On put, we either update and promote an existing node, or insert a new one and, if over capacity, evict the node just before the tail sentinel (the true LRU) and delete its key from the map. Every path is a constant number of pointer updates plus O(1) average hashmap operations, so both get and put are O(1). Total space is O(C). This hashmap-plus-doubly-linked-list composition is the canonical example of combining structures to get the best operation from each, and it appears in real cache implementations everywhere.",
+      "relatedTopic": "data-structures-algorithms"
+    },
+    {
+      "id": "ch-cycle-detection",
+      "title": "Detect a Cycle in a Linked List (Floyd's Algorithm)",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "prompt": "Given the head of a singly linked list, determine whether it contains a cycle (some node's next pointer points back to an earlier node). Solve it in O(n) time and O(1) extra space.",
+      "hints": [
+        "The obvious solution stores visited nodes in a set: O(n) time but O(n) space. Can you avoid the extra memory?",
+        "Use two pointers moving at different speeds: slow advances one node, fast advances two.",
+        "If there is a cycle, the fast pointer eventually laps the slow one and they meet. If fast reaches null, there is no cycle.",
+        "Think of two runners on a circular track: the faster one always catches the slower one."
+      ],
+      "solutionCode": "class ListNode {\n  val: number;\n  next: ListNode | null = null;\n  constructor(val: number) { this.val = val; }\n}\n\nfunction hasCycle(head: ListNode | null): boolean {\n  let slow = head;\n  let fast = head;\n  while (fast !== null && fast.next !== null) {\n    slow = slow!.next;        // one step\n    fast = fast.next.next;    // two steps\n    if (slow === fast) {      // pointers met -> cycle exists\n      return true;\n    }\n  }\n  return false;               // fast ran off the end -> no cycle\n}\n\n// Optional: find the cycle's start node after a meeting.\nfunction cycleStart(head: ListNode | null): ListNode | null {\n  let slow = head, fast = head;\n  while (fast && fast.next) {\n    slow = slow!.next;\n    fast = fast.next.next;\n    if (slow === fast) {\n      let p = head;\n      while (p !== slow) { p = p!.next; slow = slow!.next; }\n      return p; // node where the cycle begins\n    }\n  }\n  return null;\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "The naive approach records every visited node in a hashset and returns true on the first repeat: correct, but O(n) space. Floyd's tortoise-and-hare algorithm achieves O(1) space using two pointers at different speeds. Slow advances one node per step, fast advances two. If the list is acyclic, fast reaches the end (null) and we return false. If there is a cycle, both pointers eventually enter the loop, and since fast gains one node of distance on slow each step, the gap shrinks by one until they collide; they must meet within the cycle, so we return true. The meeting is guaranteed because the relative speed is exactly one node per iteration, so fast cannot jump over slow. The bonus cycleStart function uses Floyd's elegant follow-up: after the meeting, reset one pointer to the head and advance both one step at a time; they meet exactly at the cycle's entry, a consequence of the distance arithmetic where the distance from head to the loop start equals the distance from the meeting point to the loop start (modulo loop length). Time is O(n) because slow visits each node at most once before the meeting, and space is O(1) since we hold only two pointers.",
+      "relatedTopic": "data-structures-algorithms"
+    }
+  ],
+  "references": [
+    {"label": "Introduction to Algorithms (CLRS), 4th Edition", "url": "https://mitpress.mit.edu/9780262046305/introduction-to-algorithms/"},
+    {"label": "Big-O Cheat Sheet", "url": "https://www.bigocheatsheet.com/"},
+    {"label": "MIT 6.006 Introduction to Algorithms (OCW)", "url": "https://ocw.mit.edu/courses/6-006-introduction-to-algorithms-spring-2020/"},
+    {"label": "Java HashMap treeification (JEP / OpenJDK source)", "url": "https://openjdk.org/"},
+    {"label": "Floyd's Cycle Detection Algorithm", "url": "https://en.wikipedia.org/wiki/Cycle_detection"}
+  ]
+}

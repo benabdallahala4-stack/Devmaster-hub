@@ -1,0 +1,562 @@
+{
+  "id": "grpc",
+  "title": "gRPC & Protobuf",
+  "category": "Backend",
+  "subcategory": "RPC",
+  "difficulty": "mid",
+  "tags": ["grpc", "protobuf", "http2", "rpc", "streaming", "microservices", "serialization"],
+  "description": "A staff-level deep dive into gRPC and Protocol Buffers: schema design, HTTP/2 multiplexing, the four RPC types, deadlines, interceptors, and the wire-compatibility rules that keep distributed systems from breaking.",
+  "estReadMinutes": 28,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "gRPC is a high-performance, contract-first RPC framework that lets a client call a method on a server in another process — often another machine, datacenter, or language — as if it were a local function. The contract is expressed in Protocol Buffers (protobuf): a language-neutral Interface Definition Language (IDL) that describes both the service methods and the message types they exchange. From a single .proto file, a code generator emits strongly-typed client stubs and server skeletons in Go, Java, Python, C++, TypeScript, Rust, and more."
+        },
+        {
+          "type": "paragraph",
+          "text": "Under the hood, gRPC runs over HTTP/2 and serializes messages with protobuf's compact binary encoding. That combination — multiplexed streams, header compression, and a tight binary wire format — is what gives gRPC its latency and throughput edge over JSON-over-HTTP/1.1 for service-to-service traffic."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Contract-first: the .proto is the single source of truth shared by every service and client.",
+            "Strongly typed: no hand-written request parsing; the generated code enforces the schema.",
+            "Polyglot: one schema, stubs in a dozen languages.",
+            "Streaming-native: bidirectional streams are first-class, not bolted on."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "why",
+      "heading": "Why gRPC Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "In a microservices architecture, the dominant cost is often not business logic but the overhead of services talking to each other: serialization, connection setup, and the absence of a shared contract. REST-over-JSON is human-friendly but pays for it with verbose text encoding, weak typing, per-request connection churn on HTTP/1.1, and contracts that live in tribal knowledge or out-of-date docs. gRPC attacks all of those."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Latency: protobuf binary payloads are typically 3-10x smaller than equivalent JSON, and HTTP/2 multiplexing removes head-of-line blocking at the connection level.",
+            "Throughput: a single long-lived HTTP/2 connection carries many concurrent in-flight RPCs without the cost of opening new sockets.",
+            "Evolvability: field-number-based wire compatibility lets you add fields without breaking old clients — a property that is hard to guarantee with ad-hoc JSON.",
+            "Tooling: deadlines, cancellation, retries, load balancing, and observability are baked into the framework rather than reinvented per team."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Rule of thumb: gRPC shines for internal east-west traffic between services where you control both ends. For public-facing, browser-consumed, or third-party APIs, REST/JSON (or gRPC-Web behind a proxy) is usually the pragmatic choice."
+        }
+      ]
+    },
+    {
+      "id": "protobuf-schema",
+      "heading": "Protocol Buffers: The Schema",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A protobuf schema defines messages (structured records) and services (collections of RPC methods). Every field carries a field number — the tag that is actually written on the wire. Field names exist only in the .proto and generated code; on the wire, only the number and wire type are encoded. This is the single most important fact about protobuf evolution."
+        },
+        {
+          "type": "code",
+          "language": "protobuf",
+          "code": "syntax = \"proto3\";\npackage market.v1;\n\nimport \"google/protobuf/timestamp.proto\";\n\nmessage Quote {\n  string symbol = 1;\n  double bid = 2;\n  double ask = 3;\n  int64 volume = 4;\n  google.protobuf.Timestamp as_of = 5;\n}\n\nmessage SubscribeRequest {\n  repeated string symbols = 1;\n}\n\nservice PriceFeed {\n  // Server-streaming: client subscribes once, server pushes quotes.\n  rpc Subscribe(SubscribeRequest) returns (stream Quote);\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "proto3 makes all scalar fields optionally-present with implicit defaults (0, empty string, false). There is no 'required' in proto3 — and that is intentional. Required fields in proto2 were a notorious footgun: once a field is required, you can never remove it without breaking every old reader, and a missing required field makes the entire message unparseable. proto3 sidesteps this by making presence the application's concern (or using the explicit `optional` keyword when you genuinely need to distinguish 'unset' from 'zero')."
+        },
+        {
+          "type": "table",
+          "headers": ["Wire type", "Used for", "Encoding"],
+          "rows": [
+            ["VARINT (0)", "int32, int64, bool, enum", "Base-128 variable-length integer"],
+            ["I64 (1)", "fixed64, double", "8 bytes little-endian"],
+            ["LEN (2)", "string, bytes, messages, repeated", "Length prefix then payload"],
+            ["I32 (5)", "fixed32, float", "4 bytes little-endian"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Use sint32/sint64 (zigzag encoding) for fields that are frequently negative. A plain int32 of -1 encodes as 10 bytes because the sign bit forces a maximal varint; sint32 encodes it as 1 byte."
+        }
+      ]
+    },
+    {
+      "id": "http2-multiplexing",
+      "heading": "HTTP/2 Multiplexing",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Each gRPC call maps to one HTTP/2 stream. A single TCP connection carries many independent streams concurrently, each identified by a stream ID. Because frames from different streams are interleaved, a slow or large response on one stream does not block others at the application layer — this is the multiplexing that HTTP/1.1 lacked (where you got one request per connection or pipelining with head-of-line blocking)."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Request metadata (gRPC's equivalent of headers) is sent in HPACK-compressed HTTP/2 HEADERS frames.",
+            "Message payloads travel in DATA frames: a 5-byte gRPC prefix (1 compression flag byte + 4-byte big-endian length) followed by the serialized protobuf.",
+            "The trailing status (grpc-status, grpc-message) is sent as HTTP/2 trailers after the last DATA frame — which is why gRPC needs trailers and why browsers can't speak native gRPC.",
+            "Flow control is per-stream and per-connection via WINDOW_UPDATE frames, giving backpressure for free in streaming RPCs."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "TCP-level head-of-line blocking still exists: HTTP/2 multiplexes over a single TCP connection, so a lost packet stalls ALL streams until retransmission. This is the limitation HTTP/3 (QUIC) solves. For most internal datacenter networks with low loss, HTTP/2 is fine."
+        }
+      ]
+    },
+    {
+      "id": "four-rpc-types",
+      "heading": "The Four RPC Types",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "gRPC supports four method shapes, distinguished by the `stream` keyword on the request and/or response side of the .proto declaration."
+        },
+        {
+          "type": "table",
+          "headers": ["Type", "Signature", "Use case"],
+          "rows": [
+            ["Unary", "rpc M(Req) returns (Resp)", "Classic request/response: GetUser, PlaceOrder"],
+            ["Server streaming", "rpc M(Req) returns (stream Resp)", "Subscriptions, large result sets, progress updates"],
+            ["Client streaming", "rpc M(stream Req) returns (Resp)", "Uploads, metric batches, aggregation"],
+            ["Bidirectional", "rpc M(stream Req) returns (stream Resp)", "Chat, real-time sync, interactive protocols"]
+          ]
+        },
+        {
+          "type": "code",
+          "language": "go",
+          "code": "// Server-streaming handler in Go.\nfunc (s *feedServer) Subscribe(req *pb.SubscribeRequest, stream pb.PriceFeed_SubscribeServer) error {\n  ch := s.bus.Subscribe(req.GetSymbols())\n  defer s.bus.Unsubscribe(ch)\n\n  for {\n    select {\n    case <-stream.Context().Done():\n      // Client cancelled or deadline expired.\n      return stream.Context().Err()\n    case q, ok := <-ch:\n      if !ok {\n        return nil // bus closed\n      }\n      if err := stream.Send(q); err != nil {\n        return err // transport error / client gone\n      }\n    }\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Bidirectional streams are full-duplex: the client and server read and write independently. Do NOT assume request N produces response N. If your protocol needs that pairing, encode a correlation/sequence id in the messages."
+        }
+      ]
+    },
+    {
+      "id": "codegen",
+      "heading": "Code Generation",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The protobuf compiler `protoc` (or modern wrappers like buf) reads .proto files and invokes language plugins to emit message classes and gRPC service stubs. The contract — not the generated code — is checked into source control and shared; each service regenerates its own stubs from the same .proto."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "# Go: generate message types and gRPC service code\nprotoc \\\n  --go_out=. --go_opt=paths=source_relative \\\n  --go-grpc_out=. --go-grpc_opt=paths=source_relative \\\n  market/v1/price_feed.proto\n\n# Modern alternative with buf (lint + breaking-change detection built in)\nbuf lint\nbuf breaking --against '.git#branch=main'\nbuf generate"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Treat generated code as build artifacts, not hand-edited source — regenerate, never patch.",
+            "Pin the protoc/plugin versions in CI so every service emits compatible code.",
+            "Use `buf breaking` (or equivalent) in CI to mechanically block incompatible schema changes before they merge.",
+            "Version your package (market.v1, market.v2) so a breaking change becomes a new namespace rather than a silent break."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "deadlines-cancellation",
+      "heading": "Deadlines & Cancellation",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "gRPC has first-class deadlines, not timeouts. A deadline is an absolute point in time that propagates across service hops via the grpc-timeout header. When service A calls B with a 2s deadline and B calls C, the remaining budget travels with the call — so C knows it has, say, 1.4s left, not a fresh 2s. This prevents the classic cascade where each hop resets the clock and a request lives far longer than the user is willing to wait."
+        },
+        {
+          "type": "code",
+          "language": "go",
+          "code": "ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)\ndefer cancel() // always cancel to release resources, even on success\n\nresp, err := client.PlaceOrder(ctx, &pb.OrderRequest{Symbol: \"ACME\", Qty: 10})\nif err != nil {\n  if status.Code(err) == codes.DeadlineExceeded {\n    // budget exhausted somewhere downstream\n  }\n  return err\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Every server handler must respect ctx.Done(). A deadline only cancels the wire-level call; if your handler ignores the context and keeps grinding on a query, you leak work and threads. Always pass ctx into DB calls, downstream RPCs, and loops."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Set deadlines on EVERY call. A missing deadline is effectively an infinite one — a single hung dependency can exhaust the caller's connection pool and take the whole service down."
+        }
+      ]
+    },
+    {
+      "id": "interceptors",
+      "heading": "Interceptors",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Interceptors are gRPC's middleware. They wrap every RPC, giving you a single place to add auth, logging, metrics, tracing, retries, and panic recovery without touching business logic. There are unary and streaming variants on both client and server."
+        },
+        {
+          "type": "code",
+          "language": "go",
+          "code": "// Server-side unary interceptor: auth + latency metric.\nfunc authMetricsInterceptor(\n  ctx context.Context, req interface{},\n  info *grpc.UnaryServerInfo, handler grpc.UnaryHandler,\n) (interface{}, error) {\n  md, _ := metadata.FromIncomingContext(ctx)\n  if !validToken(md.Get(\"authorization\")) {\n    return nil, status.Error(codes.Unauthenticated, \"invalid token\")\n  }\n  start := time.Now()\n  resp, err := handler(ctx, req)\n  rpcLatency.WithLabelValues(info.FullMethod, status.Code(err).String()).\n    Observe(time.Since(start).Seconds())\n  return resp, err\n}\n\nsrv := grpc.NewServer(grpc.ChainUnaryInterceptor(\n  recoveryInterceptor, authMetricsInterceptor,\n))"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Interceptor order matters and is subtle: ChainUnaryInterceptor runs them in registration order on the way in. Put panic recovery OUTERMOST (first) so it catches panics from inner interceptors too, and auth before anything expensive."
+        }
+      ]
+    },
+    {
+      "id": "wire-compat",
+      "heading": "Backward & Forward Compatibility",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Because the wire format is keyed by field number, protobuf gives you remarkable evolvability — IF you follow the rules. A reader that encounters an unknown field number simply skips it (preserving it for re-serialization in proto3 since 3.5). This is what lets new and old binaries coexist during a rolling deploy."
+        },
+        {
+          "type": "list",
+          "items": [
+            "SAFE: adding a new field with a fresh, never-before-used number. Old readers ignore it; new readers see the default when old writers omit it.",
+            "SAFE: renaming a field (the name is not on the wire) — though it breaks JSON mapping and source compatibility.",
+            "SAFE: deleting a field — but you MUST reserve its number so nobody reuses it.",
+            "BREAKING: changing a field's number — old data is now misinterpreted under the new number.",
+            "BREAKING: changing a field's type in an incompatible way (e.g. string to int64).",
+            "BREAKING: reusing a deleted field's number for a new, differently-typed field — silent data corruption."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "protobuf",
+          "code": "message Quote {\n  string symbol = 1;\n  double bid = 2;\n  double ask = 3;\n  reserved 4;                 // old 'volume' field removed; number 4 is now poison\n  reserved \"volume\";          // also reserve the name to prevent reuse\n  google.protobuf.Timestamp as_of = 5;\n  string exchange = 6;        // new field: safe, uses a brand-new number\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "NEVER renumber or reuse a field tag. If you delete field 4 and later add a new field 4 of a different type, every persisted message and every in-flight request from an old client will be silently misparsed. Always `reserved` the old number. This is the cardinal sin of protobuf."
+        }
+      ]
+    },
+    {
+      "id": "grpc-vs-rest-graphql",
+      "heading": "gRPC vs REST vs GraphQL",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "These are not strictly competitors; they optimize for different boundaries. The senior answer is 'it depends on the boundary': internal vs edge, machine-to-machine vs human-driven, fixed schema vs flexible client-shaped queries."
+        },
+        {
+          "type": "table",
+          "headers": ["Dimension", "gRPC", "REST/JSON", "GraphQL"],
+          "rows": [
+            ["Wire format", "Binary protobuf", "Text JSON", "Text JSON"],
+            ["Transport", "HTTP/2 (trailers)", "HTTP/1.1 or 2", "HTTP/1.1 or 2"],
+            ["Contract", "Strict .proto", "OpenAPI (optional)", "GraphQL SDL (strict)"],
+            ["Streaming", "Native, 4 modes", "SSE / chunked hacks", "Subscriptions"],
+            ["Browser support", "Needs gRPC-Web proxy", "Native", "Native"],
+            ["Best fit", "Internal low-latency, streaming", "Public/CRUD APIs", "Client-driven aggregation"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "When to choose gRPC: internal service-to-service calls where you control both ends and care about latency, payload size, and strong contracts; any streaming workload; polyglot environments needing one shared schema. When to avoid: public APIs consumed by browsers or third parties (use REST or gRPC-Web), or when the client needs to shape arbitrary query selections (GraphQL)."
+        }
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: Price-Feed Incident",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Scenario: A trading platform runs a market-data service exposing a server-streaming Subscribe RPC. Thousands of front-end gateways subscribe to thousands of symbols. During a volatile market open, the service's memory climbed steadily until pods were OOM-killed, cascading into a feed outage."
+        },
+        {
+          "type": "paragraph",
+          "text": "Root cause: clients on slow networks couldn't drain quotes as fast as the server produced them. The server's Send() was being called in a tight loop without honoring HTTP/2 flow control feedback or the per-subscriber buffer bound, so unsent quotes piled up in an unbounded in-memory channel per subscriber. Volatile open = 50x the message rate = unbounded buffers = OOM."
+        },
+        {
+          "type": "code",
+          "language": "go",
+          "code": "// BAD: unbounded buffering, ignores backpressure.\nfunc (s *feedServer) Subscribe(req *pb.SubscribeRequest, stream pb.PriceFeed_SubscribeServer) error {\n  ch := make(chan *pb.Quote) // unbounded fan-in below\n  go s.bus.FirehoseInto(ch, req.GetSymbols())\n  for q := range ch {\n    stream.Send(q) // blocks on slow client while ch keeps filling -> OOM\n  }\n  return nil\n}\n\n// GOOD: bounded buffer + conflation; drop stale quotes for slow clients.\nfunc (s *feedServer) Subscribe(req *pb.SubscribeRequest, stream pb.PriceFeed_SubscribeServer) error {\n  buf := make(chan *pb.Quote, 256) // bounded\n  sub := s.bus.Subscribe(req.GetSymbols(), buf, conflateBySymbol)\n  defer sub.Close()\n  for {\n    select {\n    case <-stream.Context().Done():\n      return stream.Context().Err()\n    case q := <-buf:\n      if err := stream.Send(q); err != nil {\n        return err\n      }\n    }\n  }\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "The fix combined a bounded per-subscriber channel, conflation (for a price feed, only the latest quote per symbol matters — drop intermediate ticks for slow consumers), and reliance on HTTP/2 flow control so Send() naturally blocks when the client's receive window is full. They also added a max-subscriptions-per-connection limit and a metric on per-subscriber queue depth to alert before OOM."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Lesson: streaming RPCs are a backpressure problem in disguise. A correct streaming server is built around 'what do I do when the consumer is slower than the producer?' — bound the buffer, conflate or drop, and let flow control do its job."
+        }
+      ]
+    },
+    {
+      "id": "mistakes",
+      "heading": "Common Mistakes & Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Reusing or renumbering field tags after deleting a field — silently corrupts persisted and in-flight data. Always `reserved` the old number.",
+            "Calling client constructors per-request: gRPC channels are expensive and meant to be long-lived and shared. Creating a new channel per call destroys connection reuse and HTTP/2 multiplexing.",
+            "No deadlines: an unbounded call against a hung dependency exhausts the connection pool and takes down the caller.",
+            "Ignoring ctx cancellation in handlers: the wire call is cancelled but server-side work keeps running, leaking goroutines/threads.",
+            "Unbounded buffering in streaming servers: ignoring backpressure leads to OOM under load (the price-feed incident).",
+            "Load balancing at L4 only: a single long-lived HTTP/2 connection pins all RPCs to one backend, so a connection-level LB never rebalances. Use L7/gRPC-aware LB or client-side round-robin over resolved endpoints.",
+            "Assuming proto3 distinguishes 'absent' from 'zero': for scalars it does not (without `optional`). Don't use 0/\"\" as a sentinel for 'unset'.",
+            "Treating large unary responses as fine: gRPC has a default 4MB max message size. Huge responses should be server-streamed and chunked, not bumped to a giant limit."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The connection-stickiness gotcha is a classic on-call surprise: you deploy 10 new replicas, but existing clients keep hammering the old 2 because their HTTP/2 connections never broke. You need gRPC-aware load balancing (e.g. round_robin policy + a resolver, or a service mesh) so RPCs — not just connections — are distributed."
+        }
+      ]
+    },
+    {
+      "id": "bestpractices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Version your package (foo.v1) so breaking changes become a new namespace, never an in-place mutation.",
+            "Enforce schema compatibility mechanically in CI (buf breaking) — don't rely on review discipline.",
+            "Reserve deleted field numbers and names immediately, in the same PR that removes the field.",
+            "Always set a deadline on every client call and propagate the context through every downstream hop and DB query.",
+            "Share one long-lived channel per (target, credentials); never build channels per request.",
+            "Use interceptors for cross-cutting concerns: recovery (outermost), auth, tracing, metrics, retries.",
+            "Design streaming servers around backpressure: bound buffers, conflate or drop, lean on HTTP/2 flow control.",
+            "Return rich, typed errors via google.rpc.Status details rather than stuffing context into a string message.",
+            "Prefer gRPC-Web + a proxy (Envoy) for browser clients rather than forcing native gRPC into the browser.",
+            "Keep messages flat-ish and avoid deeply nested optional graphs; model presence explicitly with `optional` where it matters."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Adopt a 'schema as API' mindset: the .proto is your most important contract. Review it like you'd review a database migration, because a bad field-number change has the same blast radius as a destructive migration."
+        }
+      ]
+    },
+    {
+      "id": "note-grpc-web",
+      "heading": "A Note on gRPC-Web and the Browser",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Browsers cannot speak native gRPC because the Fetch/XHR APIs don't expose HTTP/2 trailers or raw frame control. gRPC-Web is a variant that encodes trailers into the response body and requires a proxy (commonly Envoy) to translate between gRPC-Web and native gRPC. It supports unary and server-streaming, but not client-streaming or bidi over the standard transport. For browser-facing real-time needs, evaluate gRPC-Web server-streaming vs WebSocket/SSE based on your proxy and observability stack."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "grpc-stack",
+      "title": "gRPC Request Path",
+      "type": "mermaid",
+      "content": "flowchart TD\n  A[Client App] --> B[Generated Stub]\n  B --> C[Interceptors client]\n  C --> D[Protobuf Marshal]\n  D --> E[HTTP2 Channel]\n  E -->|multiplexed streams| F[HTTP2 Server]\n  F --> G[Protobuf Unmarshal]\n  G --> H[Interceptors server]\n  H --> I[Service Handler]\n  I --> H\n  H --> F"
+    },
+    {
+      "id": "streaming-sequence",
+      "title": "Server-Streaming Subscribe with Deadline",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n  participant C as Client\n  participant S as PriceFeed Server\n  participant B as Quote Bus\n  C->>S: Subscribe symbols ACME BBLE\n  S->>B: register subscriber\n  loop until deadline or cancel\n    B-->>S: new quote\n    S-->>C: stream Quote\n  end\n  C--xS: deadline exceeded\n  S->>B: unregister subscriber\n  S-->>C: grpc-status DEADLINE_EXCEEDED"
+    },
+    {
+      "id": "frame-layout",
+      "title": "gRPC over HTTP/2 Frame Layout",
+      "type": "ascii",
+      "content": "+----------------------------------------------------------+\n| HTTP/2 Connection (single TCP socket)                     |\n|                                                          |\n|  +--------------------+   +--------------------+         |\n|  | Stream 1 (RPC A)   |   | Stream 3 (RPC B)   |  ...    |\n|  | HEADERS  (HPACK)   |   | HEADERS  (HPACK)   |         |\n|  | DATA: [flag|len|pb]|   | DATA: [flag|len|pb]|         |\n|  | TRAILERS grpc-stat |   | TRAILERS grpc-stat |         |\n|  +--------------------+   +--------------------+         |\n|         ^ interleaved frames, per-stream flow control    |\n+----------------------------------------------------------+\n\n  DATA payload prefix: [1B compressed flag][4B big-endian length][protobuf bytes]"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-what-is-grpc",
+      "question": "What is gRPC and how does it differ from a traditional REST API?",
+      "answer": "gRPC is a contract-first RPC framework where you define services and messages in a Protocol Buffers .proto file and generate typed client/server code. It runs over HTTP/2 and serializes messages as compact binary protobuf. Compared to REST/JSON over HTTP/1.1, gRPC gives smaller payloads, multiplexed concurrent calls over one connection, native streaming, strict typed contracts, and built-in deadlines/cancellation. REST is text-based, human-readable, browser-native, and resource-oriented; gRPC is method/RPC-oriented and optimized for internal machine-to-machine traffic.",
+      "difficulty": "junior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["grpc", "rest", "fundamentals"],
+      "followUps": ["When would you still choose REST over gRPC?", "Why can't browsers speak native gRPC?"]
+    },
+    {
+      "id": "q-four-rpc-types",
+      "question": "Name the four RPC types in gRPC and give a use case for each.",
+      "answer": "Unary (request/response) for classic calls like GetUser. Server-streaming (one request, many responses) for subscriptions or large result sets. Client-streaming (many requests, one response) for uploads or batched metrics aggregated into a summary. Bidirectional streaming (independent read/write streams) for chat or real-time sync. They are distinguished by the `stream` keyword on the request and/or response side in the .proto.",
+      "difficulty": "junior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["grpc", "streaming"],
+      "followUps": ["In bidi streaming, is response N guaranteed to correspond to request N?"]
+    },
+    {
+      "id": "q-field-numbers",
+      "question": "Why are field numbers, not field names, what matters in protobuf?",
+      "answer": "On the wire, protobuf encodes each field as a tag derived from the field number and wire type, followed by the value — names are never transmitted. This is why renaming a field is wire-safe but changing its number is catastrophic: the number is the identity. It also enables forward compatibility, because a reader that sees an unknown number simply skips it. The whole evolution model (add fields freely, reserve deleted numbers) hinges on numbers being the stable identity.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["protobuf", "compatibility"],
+      "followUps": ["What must you do when you delete a field?", "Why are large negative int32 values expensive to encode?"]
+    },
+    {
+      "id": "q-deadlines",
+      "question": "How do gRPC deadlines work and why are they better than per-hop timeouts?",
+      "answer": "A deadline is an absolute time that propagates across hops via the grpc-timeout header. When A calls B with a deadline, B calls C with the remaining budget rather than a fresh timeout. This prevents the cascade where each hop resets the clock and a request lives far longer than intended. Handlers must respect ctx.Done() and pass the context to downstream calls and DB queries; otherwise the wire call cancels but server work continues, leaking resources. Every call should set a deadline — a missing one is effectively infinite.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["grpc", "deadlines", "reliability"],
+      "followUps": ["What happens if a handler ignores ctx cancellation?"]
+    },
+    {
+      "id": "q-when-grpc",
+      "question": "When would you choose gRPC over REST or GraphQL in a system design?",
+      "answer": "Choose gRPC for internal east-west service-to-service traffic where you control both ends and care about latency, payload size, and strong contracts — and for any streaming workload (subscriptions, telemetry, real-time feeds). It excels in polyglot environments needing one shared schema. Choose REST for public/CRUD APIs and browser/third-party consumers. Choose GraphQL when clients need to shape arbitrary query selections and aggregate across resources. The decision is about the boundary: internal/low-latency/streaming favors gRPC; public/flexible/human-facing favors REST or GraphQL.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["grpc", "architecture", "rest", "graphql"],
+      "followUps": ["How would you expose a gRPC service to a browser?"]
+    },
+    {
+      "id": "q-http2-benefit",
+      "question": "What does HTTP/2 specifically buy gRPC over HTTP/1.1?",
+      "answer": "Multiplexing: many concurrent RPCs as independent streams over one TCP connection, eliminating application-level head-of-line blocking and per-request connection churn. HPACK header compression reduces metadata overhead. Per-stream flow control (WINDOW_UPDATE) gives backpressure for streaming RPCs for free. Trailers carry the final grpc-status after the response body, enabling streaming where the status isn't known until the end. The cost: TCP-level head-of-line blocking still affects all streams on a connection, which HTTP/3/QUIC addresses.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["http2", "performance"],
+      "followUps": ["Does HTTP/2 fully eliminate head-of-line blocking?"]
+    },
+    {
+      "id": "q-interceptors",
+      "question": "What are interceptors and where would you use them?",
+      "answer": "Interceptors are gRPC middleware that wrap every RPC, with unary and streaming variants on both client and server. They centralize cross-cutting concerns: authentication, authorization, structured logging, metrics, distributed tracing, retries, rate limiting, and panic recovery. Ordering matters — panic recovery should be outermost so it catches panics from inner interceptors, and auth should run before expensive work. They keep business handlers clean and make policy consistent across all methods.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["grpc", "interceptors", "middleware"],
+      "followUps": ["Why should recovery be the outermost interceptor?"]
+    },
+    {
+      "id": "q-lb-stickiness",
+      "question": "You scale a gRPC service from 2 to 10 replicas but the new pods get almost no traffic. Why?",
+      "answer": "Because gRPC uses long-lived HTTP/2 connections and multiplexes all RPCs over them. An L4/connection-level load balancer pins each connection to one backend, so existing clients keep sending to the original replicas and never establish connections to the new ones. The fix is gRPC-aware (L7) load balancing: client-side round_robin over resolved endpoints, a look-aside LB, or a service mesh that distributes individual RPCs rather than connections. You may also need connection max-age to force periodic re-resolution.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["grpc", "load-balancing", "http2", "incident"],
+      "followUps": ["How does MAX_CONNECTION_AGE help here?", "Why doesn't this happen with HTTP/1.1 behind an L4 LB?"]
+    },
+    {
+      "id": "q-field-reuse",
+      "question": "TRICKY: An engineer deletes field 4 (volume, int64) and a month later adds a new field 4 (currency, string). What happens?",
+      "answer": "Silent data corruption. Field 4 is now reused with a different wire type and meaning. Any persisted message or in-flight request written by an old client still carries an int64 under tag 4; the new code interprets those bytes as a string field 4 (or fails to decode), and old readers of new messages misread the string as a volume. Because protobuf identity is the field number, reuse is undetectable at compile time and corrupts data at runtime. The correct procedure is to `reserved 4;` (and `reserved \"volume\";`) when deleting, and give the new field a brand-new number. This is the single most dangerous protobuf mistake.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["protobuf", "compatibility", "gotcha"],
+      "followUps": ["How do you mechanically prevent this in CI?", "Does reserving the name matter if only the number is on the wire?"]
+    },
+    {
+      "id": "q-required-pitfall",
+      "question": "TRICKY: Why did proto3 remove the `required` keyword, and what was the original pitfall?",
+      "answer": "In proto2, a `required` field could never be safely removed: every reader rejects a message lacking it, so the moment any producer or consumer drops it, parsing fails system-wide — and you can't roll it out incrementally. It made schemas brittle and effectively un-evolvable. proto3 removed required entirely; presence is an application concern (or you use the explicit `optional` keyword for scalar presence tracking). The gotcha that replaces it: in proto3, scalars default to zero values and you cannot distinguish 'absent' from 'zero' for a plain scalar — so don't use 0 or empty string as a sentinel for 'unset'; mark the field `optional` if presence matters.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["protobuf", "proto3", "gotcha"],
+      "followUps": ["How do you distinguish unset from zero in proto3?", "What is a google.protobuf.Int64Value wrapper for?"]
+    },
+    {
+      "id": "q-streaming-backpressure",
+      "question": "TRICKY: In a server-streaming feed, your pods OOM under load even though each message is tiny. What's the likely cause and fix?",
+      "answer": "The producer is faster than the slowest consumer and you're buffering unsent messages without bound. If you push into an unbounded channel and call Send() in a loop, a slow client causes Send to block while the channel keeps filling, so memory grows until OOM. The fix is to design around backpressure: bound the per-subscriber buffer, and either rely on HTTP/2 flow control (Send naturally blocks when the client's receive window is full) or conflate/drop stale messages — for a price feed, only the latest quote per symbol matters. Add a metric on per-subscriber queue depth and a max-subscriptions limit to alert before OOM.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["grpc", "streaming", "backpressure", "incident"],
+      "followUps": ["What is conflation and when is it acceptable?", "How does HTTP/2 flow control surface to your Send call?"]
+    },
+    {
+      "id": "q-channel-reuse",
+      "question": "Should you create a new gRPC channel/client per request? Why or why not?",
+      "answer": "No. A gRPC channel manages one or more HTTP/2 connections and is designed to be long-lived and shared across the application. Creating one per request destroys connection reuse, defeats HTTP/2 multiplexing, and pays TCP+TLS handshake cost on every call — a major latency and resource regression. Construct one channel per (target, credentials) at startup, share it across goroutines/threads (channels are concurrency-safe), and reuse the generated stub. Tear it down only at shutdown.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["grpc", "channels", "performance"],
+      "followUps": ["Are gRPC stubs safe to share across threads?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-price-feed",
+      "title": "Design a Streaming Price-Feed Service",
+      "difficulty": "senior",
+      "category": "Backend",
+      "prompt": "Design and implement a gRPC server-streaming price-feed. Clients call Subscribe with a list of symbols and receive a stream of Quote messages. Requirements: (1) honor client cancellation and deadlines, (2) bound per-subscriber memory so a slow client cannot OOM the server, (3) conflate so a slow consumer always gets the latest quote per symbol rather than a backlog, (4) clean up subscriptions on disconnect. Write the .proto and the Go server handler.",
+      "hints": [
+        "Use `returns (stream Quote)` for server streaming in the .proto.",
+        "Loop on a select over stream.Context().Done() and a bounded buffered channel.",
+        "Conflation: keep a map[symbol]latestQuote and only forward the newest per symbol when the consumer is behind.",
+        "Always unsubscribe in a defer so disconnects clean up bus registrations.",
+        "Return stream.Context().Err() when the context is done so the status is correct."
+      ],
+      "solutionCode": "// price_feed.proto\nsyntax = \"proto3\";\npackage market.v1;\nimport \"google/protobuf/timestamp.proto\";\n\nmessage Quote {\n  string symbol = 1;\n  double bid = 2;\n  double ask = 3;\n  google.protobuf.Timestamp as_of = 4;\n}\nmessage SubscribeRequest { repeated string symbols = 1; }\n\nservice PriceFeed {\n  rpc Subscribe(SubscribeRequest) returns (stream Quote);\n}\n\n// server.go\npackage feed\n\nimport (\n  \"context\"\n  pb \"example.com/market/v1\"\n)\n\ntype Bus interface {\n  // Subscribe returns a channel of conflated quotes and a cancel func.\n  Subscribe(symbols []string) (<-chan *pb.Quote, func())\n}\n\ntype Server struct {\n  pb.UnimplementedPriceFeedServer\n  Bus Bus\n}\n\nfunc (s *Server) Subscribe(req *pb.SubscribeRequest, stream pb.PriceFeed_SubscribeServer) error {\n  if len(req.GetSymbols()) == 0 {\n    return status.Error(codes.InvalidArgument, \"symbols required\")\n  }\n  // Bus internally conflates by symbol into a BOUNDED channel.\n  quotes, cancel := s.Bus.Subscribe(req.GetSymbols())\n  defer cancel() // clean up on any return path\n\n  ctx := stream.Context()\n  for {\n    select {\n    case <-ctx.Done():\n      return ctx.Err() // deadline exceeded or client cancelled\n    case q, ok := <-quotes:\n      if !ok {\n        return nil // bus closed gracefully\n      }\n      if err := stream.Send(q); err != nil {\n        return err // client gone / transport error\n      }\n    }\n  }\n}\n\n// conflatingBus: bounded buffer + latest-wins per symbol.\nfunc (b *memBus) fanOut(sub *subscriber) {\n  latest := map[string]*pb.Quote{}\n  for q := range sub.raw {\n    latest[q.Symbol] = q // overwrite stale tick\n    select {\n    case sub.out <- latest[q.Symbol]: // delivered\n      delete(latest, q.Symbol)\n    default:\n      // consumer behind: keep only the newest, drop nothing extra,\n      // it will be sent on the next non-blocking opportunity.\n    }\n  }\n  close(sub.out)\n}",
+      "solutionLanguage": "go",
+      "explanation": "The handler is built entirely around backpressure and lifecycle. The core loop selects on two channels: ctx.Done() so the server stops the instant the client cancels or the deadline expires (returning ctx.Err() yields the correct gRPC status), and the bounded quotes channel. Because the bus channel is bounded, the server can never accumulate unbounded backlog for a slow client — the OOM failure mode is structurally impossible. Conflation (latest-wins per symbol in the fanOut map plus a non-blocking send) ensures a lagging consumer skips intermediate ticks and always converges to the most recent price, which is exactly the right semantics for a price feed where stale quotes are worthless. The defer cancel() guarantees the subscription is removed from the bus on every exit path — normal completion, client disconnect, deadline, or transport error — preventing the goroutine/registration leak that plagues naive implementations. Finally, Send() respects HTTP/2 flow control: if the client's receive window is full, Send blocks, which propagates backpressure to the bounded channel rather than to unbounded memory. Together these four properties (cancellation, bounded buffering, conflation, deterministic cleanup) are what separate a toy streaming demo from a production-grade feed.",
+      "relatedTopic": "grpc"
+    },
+    {
+      "id": "ch-safe-evolution",
+      "title": "Safely Evolve a Protobuf Schema",
+      "difficulty": "mid",
+      "category": "Backend",
+      "prompt": "You have a deployed User message. Product wants to: (a) remove the deprecated `ssn` field (number 3, string) for compliance, (b) add an `email_verified` boolean, and (c) add a `phone` field. Old clients are still in production during a multi-week rolling deploy. Write the evolved .proto so that NO old or new client ever misreads data, and explain why each step is wire-safe.",
+      "hints": [
+        "Removing a field is only safe if you stop reusing its number.",
+        "Use the `reserved` keyword for both the deleted number AND name.",
+        "New fields must use brand-new numbers that were never previously assigned.",
+        "Remember proto3 booleans default to false for old writers that omit the field."
+      ],
+      "solutionCode": "syntax = \"proto3\";\npackage account.v1;\n\nmessage User {\n  string id = 1;\n  string display_name = 2;\n\n  // (a) ssn removed for compliance. We MUST reserve 3 forever so no\n  // future field reuses the number and misreads old persisted data.\n  reserved 3;\n  reserved \"ssn\";\n\n  // (b) new field, brand-new number. Old writers omit it; new readers\n  // see the proto3 default `false`, which is the safe interpretation.\n  bool email_verified = 4;\n\n  // (c) another new, never-before-used number. Old readers seeing this\n  // field simply skip the unknown tag and preserve it on re-serialize.\n  string phone = 5;\n}",
+      "solutionLanguage": "protobuf",
+      "explanation": "Each change is wire-safe for a specific reason rooted in field-number identity. (a) Deleting `ssn` is only safe because we `reserved 3` and `reserved \"ssn\"`: reserving the NUMBER guarantees no future schema reuses tag 3 (which would misinterpret any still-circulating old message that carries an int/string under tag 3), and reserving the NAME prevents an accidental source-level reuse that would also corrupt JSON mapping. Without the reservation, a teammate could later add a differently-typed field 3 and silently corrupt data — the cardinal protobuf sin. (b) `email_verified` uses brand-new number 4. During the rolling deploy, old writers don't set it, and proto3's implicit default means new readers correctly see `false` rather than an error; new writers that set it produce a message old readers safely ignore (unknown field skipped and, since proto3.5, preserved on re-serialization). (c) `phone` at number 5 is identical reasoning. The key invariant: backward and forward compatibility hold as long as you only ADD with fresh numbers and only REMOVE with reservations — never renumber, never reuse, never change a field's type. A CI gate like `buf breaking` mechanically enforces exactly these rules so compliance with them doesn't depend on reviewer vigilance.",
+      "relatedTopic": "grpc"
+    }
+  ],
+  "references": [
+    {"label": "gRPC Official Documentation", "url": "https://grpc.io/docs/"},
+    {"label": "Protocol Buffers Language Guide (proto3)", "url": "https://protobuf.dev/programming-guides/proto3/"},
+    {"label": "Protobuf: Updating a Message Type / Compatibility", "url": "https://protobuf.dev/programming-guides/proto3/#updating"},
+    {"label": "gRPC Core Concepts: RPC life cycle", "url": "https://grpc.io/docs/what-is-grpc/core-concepts/"},
+    {"label": "Buf: Breaking Change Detection", "url": "https://buf.build/docs/breaking/overview"},
+    {"label": "RFC 7540 - HTTP/2", "url": "https://www.rfc-editor.org/rfc/rfc7540"}
+  ]
+}

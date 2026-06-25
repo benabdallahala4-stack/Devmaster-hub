@@ -1,0 +1,136 @@
+@if (status() === 'loading') {
+  <div class="page td-loading">
+    <div class="td-skel td-skel--title"></div>
+    <div class="td-skel td-skel--line"></div>
+    <div class="td-skel td-skel--block"></div>
+  </div>
+} @else if (status() === 'error' || !topic()) {
+  <div class="page">
+    <div class="td-error">
+      <app-icon name="warning" [size]="28" />
+      <h2>Topic not found</h2>
+      <p>We couldn't load this topic. It may not exist yet.</p>
+      <a class="btn btn--primary" routerLink="/topics"><app-icon name="arrow-left" [size]="16" /> Back to topics</a>
+    </div>
+  </div>
+} @else {
+  <article class="page td" [class]="'cat-' + topic()!.category">
+    <a class="td__back" routerLink="/topics"><app-icon name="arrow-left" [size]="15" /> All topics</a>
+
+    <header class="td__hero">
+      <div class="td__hero-main">
+        <span class="page__eyebrow">{{ topic()!.category }}@if (topic()!.subcategory) { · {{ topic()!.subcategory }} }</span>
+        <h1 class="page__title">{{ topic()!.title }}</h1>
+        <p class="page__subtitle">{{ topic()!.description }}</p>
+        <div class="td__hero-meta">
+          <app-difficulty-badge [level]="topic()!.difficulty" />
+          <span class="chip"><app-icon name="clock" [size]="14" /> {{ topic()!.estReadMinutes }} min read</span>
+          <span class="chip"><app-icon name="interview" [size]="14" /> {{ topic()!.questions.length }} questions</span>
+          <span class="chip"><app-icon name="challenges" [size]="14" /> {{ topic()!.challenges.length }} challenges</span>
+        </div>
+        <div class="td__tags">
+          @for (tag of topic()!.tags; track tag) { <span class="td__tag">#{{ tag }}</span> }
+        </div>
+      </div>
+      <button class="btn td__complete" [class.btn--primary]="!done()" [class.is-done]="done()" (click)="toggleComplete()">
+        <app-icon [name]="done() ? 'check' : 'target'" [size]="16" />
+        {{ done() ? 'Completed' : 'Mark complete' }}
+      </button>
+    </header>
+
+    <div class="td__layout">
+      <!-- TOC -->
+      <nav class="td__toc">
+        <span class="td__toc-label">On this page</span>
+        @for (s of topic()!.sections; track s.id) {
+          <button class="td__toc-link" (click)="scrollTo(s.id)">{{ s.heading }}</button>
+        }
+        @if (topic()!.diagrams.length) { <button class="td__toc-link" (click)="scrollTo('diagrams')">Architecture diagrams</button> }
+        @if (topic()!.questions.length) { <button class="td__toc-link" (click)="scrollTo('questions')">Interview questions</button> }
+        @if (trickyQuestions().length) { <button class="td__toc-link" (click)="scrollTo('tricky')">Tricky questions</button> }
+        @if (topic()!.challenges.length) { <button class="td__toc-link" (click)="scrollTo('challenges')">Coding challenges</button> }
+      </nav>
+
+      <div class="td__content">
+        <!-- Sections -->
+        @for (s of topic()!.sections; track s.id) {
+          <section class="td__section" [id]="s.id">
+            <h2 class="td__section-title">
+              <span class="td__section-icon" [attr.data-kind]="s.kind"><app-icon [name]="sectionIcon(s.kind)" [size]="17" /></span>
+              {{ s.heading }}
+            </h2>
+            <app-content-blocks [blocks]="s.blocks" />
+          </section>
+        }
+
+        <!-- Diagrams -->
+        @if (topic()!.diagrams.length) {
+          <section class="td__section" id="diagrams">
+            <h2 class="td__section-title">
+              <span class="td__section-icon" data-kind="diagram"><app-icon name="architecture" [size]="17" /></span>
+              Architecture Diagrams
+            </h2>
+            <div class="td__diagrams">
+              @for (d of topic()!.diagrams; track d.id) { <app-diagram [diagram]="d" /> }
+            </div>
+          </section>
+        }
+
+        <!-- Questions -->
+        @if (regularQuestions().length) {
+          <section class="td__section" id="questions">
+            <h2 class="td__section-title">
+              <span class="td__section-icon" data-kind="why"><app-icon name="interview" [size]="17" /></span>
+              Interview Questions
+            </h2>
+            <div class="td__qlist">
+              @for (q of regularQuestions(); track q.id) { <app-question-card [question]="q" /> }
+            </div>
+          </section>
+        }
+
+        <!-- Tricky -->
+        @if (trickyQuestions().length) {
+          <section class="td__section" id="tricky">
+            <h2 class="td__section-title">
+              <span class="td__section-icon" data-kind="mistake"><app-icon name="flame" [size]="17" /></span>
+              Tricky Questions
+            </h2>
+            <div class="td__qlist">
+              @for (q of trickyQuestions(); track q.id) { <app-question-card [question]="q" /> }
+            </div>
+          </section>
+        }
+
+        <!-- Challenges -->
+        @if (topic()!.challenges.length) {
+          <section class="td__section" id="challenges">
+            <h2 class="td__section-title">
+              <span class="td__section-icon" data-kind="example"><app-icon name="challenges" [size]="17" /></span>
+              Coding Challenges
+            </h2>
+            <div class="td__challenges">
+              @for (c of topic()!.challenges; track c.id) {
+                <div class="card td__challenge"><app-challenge-view [challenge]="c" /></div>
+              }
+            </div>
+          </section>
+        }
+
+        <!-- References -->
+        @if (topic()!.references?.length) {
+          <section class="td__section">
+            <h2 class="td__section-title">
+              <span class="td__section-icon"><app-icon name="external" [size]="16" /></span> References
+            </h2>
+            <ul class="td__refs">
+              @for (r of topic()!.references; track r.url) {
+                <li><a [href]="r.url" target="_blank" rel="noopener">{{ r.label }} <app-icon name="external" [size]="13" /></a></li>
+              }
+            </ul>
+          </section>
+        }
+      </div>
+    </div>
+  </article>
+}

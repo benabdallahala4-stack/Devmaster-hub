@@ -1,0 +1,444 @@
+{
+  "id": "databases-sql",
+  "title": "Databases & SQL",
+  "category": "Computer Science",
+  "subcategory": "Data",
+  "difficulty": "senior",
+  "tags": ["sql", "indexes", "transactions", "isolation-levels", "mvcc", "query-optimization", "sharding", "acid"],
+  "description": "A staff-level deep dive into relational modeling, indexing, query planning, transactions and isolation, MVCC, and scaling SQL databases under real production load.",
+  "estReadMinutes": 32,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {"type": "paragraph", "text": "Relational databases are the durable, consistent core of most production systems. SQL is declarative: you describe the result you want and the query planner decides how to fetch it. The gap between a junior and a staff engineer is rarely knowing JOIN syntax — it is understanding what the engine does underneath: how an index is chosen (or ignored), why a transaction blocks, what isolation level you actually run at, and how the system behaves when one node becomes ten."},
+        {"type": "paragraph", "text": "This topic walks through relational modeling and normalization, the mechanics of B-tree indexes and the leftmost-prefix rule, reading an EXPLAIN plan, the ACID guarantees and the anomalies that isolation levels prevent, MVCC and locking, deadlocks, the N+1 query problem, and how replication and sharding change the consistency story."},
+        {"type": "callout", "variant": "info", "text": "Examples use PostgreSQL and MySQL/InnoDB conventions, the two engines you are most likely to be quizzed on. Where their behavior diverges (e.g. default isolation level, gap locks), the difference is called out explicitly."}
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {"type": "paragraph", "text": "The database is almost always the first thing to fall over under load, and it is the hardest tier to scale horizontally because it holds state. A missing index turns a 2ms lookup into a 2-second sequential scan; under concurrency that scan holds connections, exhausts the pool, and cascades into timeouts across every service. A wrong isolation assumption corrupts money: a lost update on an account balance is a real outage, not a theoretical one."},
+        {"type": "list", "items": [
+          "Performance: indexing and query planning are the highest-leverage levers you have — often a 100-1000x win with zero application changes.",
+          "Correctness: isolation levels decide whether concurrent transactions can silently overwrite each other's work.",
+          "Availability: replication topology and failover behavior determine your RPO/RTO and whether you can serve reads during an outage.",
+          "Cost: a well-modeled schema with the right indexes runs on a fraction of the hardware of a poorly designed one."
+        ]},
+        {"type": "callout", "variant": "warning", "text": "Most 'the database is slow' incidents are not the database being slow. They are a query doing far more work than it should because of a missing index, a non-sargable predicate, or an N+1 access pattern from the ORM."}
+      ]
+    },
+    {
+      "id": "modeling-normalization",
+      "heading": "Relational Modeling & Normalization",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Normalization removes redundancy so that each fact is stored exactly once, which prevents update anomalies. The practical targets are the first three normal forms."},
+        {"type": "list", "items": [
+          "1NF: every column holds a single atomic value; no repeating groups or arrays masquerading as columns (col1, col2, col3).",
+          "2NF: 1NF plus every non-key column depends on the whole primary key, not just part of a composite key.",
+          "3NF: 2NF plus no transitive dependencies — non-key columns depend only on the key, not on other non-key columns."
+        ]},
+        {"type": "paragraph", "text": "The informal mnemonic: every non-key column depends on the key, the whole key, and nothing but the key. In practice you normalize to 3NF by default, then selectively denormalize for read performance — duplicating a denormalized count or a cached display name — accepting that you now own keeping the duplicate in sync."},
+        {"type": "code", "language": "sql", "code": "-- Normalized (3NF): orders reference customers by id, no duplicated customer data\nCREATE TABLE customers (\n  id          BIGSERIAL PRIMARY KEY,\n  email       CITEXT UNIQUE NOT NULL,\n  name        TEXT NOT NULL\n);\n\nCREATE TABLE orders (\n  id          BIGSERIAL PRIMARY KEY,\n  customer_id BIGINT NOT NULL REFERENCES customers(id),\n  status      TEXT NOT NULL,\n  total_cents BIGINT NOT NULL,\n  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()\n);"},
+        {"type": "callout", "variant": "info", "text": "Denormalization is a deliberate trade, not a default. Denormalize when read amplification from joins is measured and material, and put the sync logic somewhere you control (triggers, application transactions, or a CDC pipeline) rather than hoping it stays consistent."}
+      ]
+    },
+    {
+      "id": "indexes",
+      "heading": "Indexes: B-tree, Composite, Covering, Leftmost Prefix",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "The default index in every relational engine is a B-tree (technically a B+tree): a balanced, sorted, multi-way tree giving O(log n) lookups, range scans, and ordered traversal. Because the leaves are sorted, a B-tree serves equality lookups, range predicates (>, <, BETWEEN), prefix LIKE 'abc%', and ORDER BY without a sort."},
+        {"type": "heading", "text": "Composite indexes and the leftmost-prefix rule"},
+        {"type": "paragraph", "text": "A composite index on (a, b, c) is sorted by a, then b within equal a, then c within equal (a,b). The engine can use it only for a leftmost prefix of the columns: (a), (a,b), or (a,b,c). It cannot efficiently use it to filter on b alone, because the b values are not globally sorted — they are only sorted within each a group."},
+        {"type": "table", "headers": ["Query predicate", "Index (a, b, c) usable?", "Why"],
+          "rows": [
+            ["WHERE a = 1", "Yes", "Leftmost prefix (a)"],
+            ["WHERE a = 1 AND b = 2", "Yes", "Leftmost prefix (a, b)"],
+            ["WHERE b = 2", "No (not for seek)", "b is not a leftmost column"],
+            ["WHERE a = 1 AND c = 3", "Partly", "Seeks on a, then filters c without index help on b"],
+            ["WHERE a = 1 ORDER BY b", "Yes", "Rows already ordered by b within a = 1"]
+          ]},
+        {"type": "heading", "text": "Covering indexes"},
+        {"type": "paragraph", "text": "A covering index contains every column the query needs (in the key or as INCLUDE columns), so the engine answers from the index alone and never visits the heap/clustered table. This eliminates the random I/O of the table lookup — often the dominant cost. In EXPLAIN you will see 'Index Only Scan' (Postgres) or 'Using index' (MySQL)."},
+        {"type": "code", "language": "sql", "code": "-- Query: latest open orders for a customer, only need id + total\nSELECT id, total_cents FROM orders\nWHERE customer_id = 42 AND status = 'open'\nORDER BY created_at DESC;\n\n-- Covering composite index. Key columns drive the seek + sort;\n-- INCLUDE carries the payload so no heap fetch is needed.\nCREATE INDEX idx_orders_cust_status_created\n  ON orders (customer_id, status, created_at DESC)\n  INCLUDE (total_cents);"},
+        {"type": "callout", "variant": "success", "text": "Column order in a composite index is the single most impactful design decision: put equality predicates first, then the range/sort column last. Here (customer_id, status) are equality and created_at is the ordering column — exactly the right shape."}
+      ]
+    },
+    {
+      "id": "explain-query-planning",
+      "heading": "Query Planning & EXPLAIN",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "SQL is declarative; a cost-based optimizer turns your query into a physical plan. It estimates row counts from table statistics (histograms, n_distinct) and picks the access method and join strategy with the lowest estimated cost. EXPLAIN shows the chosen plan; EXPLAIN ANALYZE actually runs it and shows real timings and the gap between estimated and actual rows."},
+        {"type": "list", "items": [
+          "Seq Scan / Full Table Scan: read every row. Fine for small tables; a red flag for selective predicates on large ones.",
+          "Index Scan: seek the B-tree then fetch matching heap rows (random I/O).",
+          "Index Only Scan: answered entirely from a covering index, no heap fetch.",
+          "Bitmap Index Scan: build a bitmap of matching pages, then read them in physical order — good for medium-selectivity predicates.",
+          "Nested Loop / Hash Join / Merge Join: the three join strategies, picked by relative table sizes and available indexes."
+        ]},
+        {"type": "code", "language": "sql", "code": "EXPLAIN (ANALYZE, BUFFERS)\nSELECT o.id, c.email\nFROM orders o JOIN customers c ON c.id = o.customer_id\nWHERE o.status = 'open' AND o.created_at >= now() - interval '7 days';\n\n-- Read it bottom-up. The thing to compare is estimated vs actual rows:\n--   Index Scan ... (cost=0.43..812 rows=1200 width=16)\n--                  (actual time=0.03..4.1 rows=98000 loops=1)\n-- rows=1200 estimated vs 98000 actual => stale stats; run ANALYZE."},
+        {"type": "callout", "variant": "warning", "text": "When estimated rows differ from actual by an order of magnitude, the planner is flying blind. The usual fix is ANALYZE (refresh statistics) or raising the statistics target on a skewed column — not adding query hints."}
+      ]
+    },
+    {
+      "id": "joins",
+      "heading": "Joins and Join Strategies",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Logical join types (INNER, LEFT/RIGHT OUTER, FULL OUTER, CROSS) describe which rows survive. Physical join strategies describe how the engine computes them, and the optimizer chooses based on cardinality and indexes."},
+        {"type": "table", "headers": ["Strategy", "How it works", "Best when"],
+          "rows": [
+            ["Nested Loop", "For each outer row, probe inner (ideally via index)", "Outer side small, inner has an index on the join key"],
+            ["Hash Join", "Build a hash table on the smaller side, probe with the larger", "Large unsorted inputs, equality join, no useful index"],
+            ["Merge Join", "Sort both inputs then walk in lockstep", "Inputs already sorted on the join key (e.g. both indexed)"]
+          ]},
+        {"type": "paragraph", "text": "A classic failure mode: a nested loop chosen because the planner under-estimated the outer side. With 100 outer rows a nested loop is fine; with 10 million it executes 10 million index probes and runs for minutes. Fixing the statistics lets the planner switch to a hash join."},
+        {"type": "callout", "variant": "info", "text": "An OUTER join can defeat predicate pushdown: a WHERE condition on the right table of a LEFT JOIN silently turns it into an INNER join (because NULLs fail the predicate). Put those conditions in the ON clause instead if you want to preserve unmatched left rows."}
+      ]
+    },
+    {
+      "id": "transactions-acid",
+      "heading": "Transactions & ACID",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "A transaction groups statements into an all-or-nothing unit with the ACID guarantees."},
+        {"type": "list", "items": [
+          "Atomicity: all statements commit or none do; a failure rolls back partial work.",
+          "Consistency: the transaction moves the database from one valid state to another, respecting constraints (PK, FK, CHECK).",
+          "Isolation: concurrent transactions behave as if they ran in some serial order — to the degree the isolation level promises.",
+          "Durability: once COMMIT returns, the change survives a crash, typically via a write-ahead log (WAL / redo log) flushed to stable storage."
+        ]},
+        {"type": "code", "language": "sql", "code": "BEGIN;\n  UPDATE accounts SET balance = balance - 100 WHERE id = 1;\n  UPDATE accounts SET balance = balance + 100 WHERE id = 2;\n  -- A CHECK (balance >= 0) constraint enforces the invariant.\n  -- If the second UPDATE fails, the first is rolled back atomically.\nCOMMIT;"},
+        {"type": "callout", "variant": "warning", "text": "Durability is only as strong as your fsync settings. Postgres synchronous_commit=off and MySQL innodb_flush_log_at_trx_commit=2 trade a small window of committed-but-lost transactions for throughput. Know which mode your production cluster runs in before you promise 'we never lose data'."}
+      ]
+    },
+    {
+      "id": "isolation-anomalies",
+      "heading": "Isolation Levels & Concurrency Anomalies",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Isolation levels are defined by which anomalies they permit. Stricter isolation prevents more anomalies at the cost of more blocking or more serialization failures (retries)."},
+        {"type": "table", "headers": ["Level", "Dirty read", "Non-repeatable read", "Phantom read"],
+          "rows": [
+            ["Read Uncommitted", "Possible", "Possible", "Possible"],
+            ["Read Committed", "Prevented", "Possible", "Possible"],
+            ["Repeatable Read", "Prevented", "Prevented", "Possible (per SQL standard)"],
+            ["Serializable", "Prevented", "Prevented", "Prevented"]
+          ]},
+        {"type": "list", "items": [
+          "Dirty read: reading another transaction's uncommitted change that may later roll back.",
+          "Non-repeatable read: re-reading the same row in one transaction returns a different value because another transaction committed an update in between.",
+          "Phantom read: re-running the same range query returns new rows that another transaction inserted.",
+          "Lost update: two transactions read-modify-write the same row and one overwrites the other's change. Notably NOT in the standard table but a real hazard at Read Committed."
+        ]},
+        {"type": "paragraph", "text": "Engine specifics matter. PostgreSQL defaults to Read Committed and implements Repeatable Read as Snapshot Isolation, which already prevents phantoms for the rows in its snapshot but can still hit write skew — solved by its Serializable Snapshot Isolation (SSI). MySQL/InnoDB defaults to Repeatable Read and uses next-key (gap) locks to prevent phantoms."},
+        {"type": "callout", "variant": "danger", "text": "Lost update under Read Committed is the classic interview trap. If you SELECT a balance into the app, compute new = old - amount, then UPDATE ... SET balance = $new, two concurrent transactions can both read 100, both write 50, and 50 is lost. Fix it with an atomic UPDATE (SET balance = balance - amount), SELECT ... FOR UPDATE, or optimistic concurrency via a version column."}
+      ]
+    },
+    {
+      "id": "mvcc-locking-deadlocks",
+      "heading": "MVCC, Locking & Deadlocks",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "MVCC (Multi-Version Concurrency Control) lets readers and writers avoid blocking each other. Instead of overwriting a row in place, a write creates a new version tagged with the transaction's id; each transaction sees the version visible to its snapshot. This is why in Postgres and InnoDB 'readers don't block writers and writers don't block readers' — but two writers to the same row still serialize."},
+        {"type": "paragraph", "text": "MVCC has a cost: old row versions accumulate. Postgres needs VACUUM to reclaim dead tuples; neglecting it causes table bloat and, in the worst case, transaction-id wraparound. InnoDB keeps old versions in the undo log / rollback segment, which can grow if a long-running transaction pins them."},
+        {"type": "heading", "text": "Deadlocks"},
+        {"type": "paragraph", "text": "A deadlock is a cycle of lock waits: T1 holds lock A and wants B; T2 holds B and wants A. The engine's deadlock detector picks a victim and rolls it back with a serialization error. Deadlocks are usually a lock-ordering bug — different code paths acquire the same rows in different orders."},
+        {"type": "code", "language": "sql", "code": "-- T1                                  -- T2\nBEGIN;                                 BEGIN;\nUPDATE accounts WHERE id = 1;          UPDATE accounts WHERE id = 2;\nUPDATE accounts WHERE id = 2;  -- waits UPDATE accounts WHERE id = 1;  -- DEADLOCK\n-- Fix: always lock rows in a deterministic order, e.g. ascending id:\n--   UPDATE ... WHERE id IN (1,2) ORDER BY id  (in app logic)\n-- so every transaction grabs id=1 before id=2."},
+        {"type": "callout", "variant": "info", "text": "Deadlocks are not a bug to eliminate entirely; they are expected under contention. Make transactions short, acquire locks in a consistent order, and wrap write transactions in a retry loop that catches the serialization/deadlock error and re-runs."}
+      ]
+    },
+    {
+      "id": "n-plus-one",
+      "heading": "The N+1 Query Problem",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "N+1 is the most common ORM-induced performance bug: one query to fetch N parent rows, then one additional query per parent to load a relation — N+1 round trips. Each round trip is cheap in isolation but the network latency dominates, and 1 + 500 queries on a page is a 500ms+ stall that no index can fix."},
+        {"type": "code", "language": "typescript", "code": "// N+1: 1 query for orders, then 1 per order for its customer\nconst orders = await orderRepo.find({ where: { status: 'open' } });\nfor (const o of orders) {\n  o.customer = await customerRepo.findOne({ where: { id: o.customerId } }); // N queries\n}\n\n// Fixed: eager-load with a JOIN (one round trip)\nconst orders = await orderRepo.find({\n  where: { status: 'open' },\n  relations: { customer: true },   // emits a single JOIN\n});\n// Or batch the children: SELECT * FROM customers WHERE id IN (...ids)"},
+        {"type": "callout", "variant": "warning", "text": "Eager-loading everything is the opposite footgun: a single query with five nested JOINs can multiply rows combinatorially (a cartesian explosion across to-many relations). Prefer a separate batched IN (...) query per collection (the 'dataloader' pattern) over deep JOIN fan-out."}
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: A Dashboard That Fell Over",
+      "kind": "example",
+      "blocks": [
+        {"type": "paragraph", "text": "Incident: an internal analytics dashboard for a SaaS billing system began timing out at p99 every morning when finance ran reports. The endpoint listed the most recent open orders per large customer. Latency had crept from 40ms to 9s over six months as the orders table grew to 80 million rows."},
+        {"type": "code", "language": "sql", "code": "-- The offending query (orders: 80M rows, no suitable index)\nSELECT id, customer_id, total_cents, created_at\nFROM orders\nWHERE customer_id = $1\n  AND status = 'open'\n  AND created_at >= now() - interval '30 days'\nORDER BY created_at DESC\nLIMIT 50;\n\n-- EXPLAIN showed: Seq Scan on orders (rows=80M) + Sort\n-- 9.2s, reading the entire table on every request."},
+        {"type": "paragraph", "text": "The only index was the primary key on id and a single-column index on customer_id. The single-column index was technically usable but had low selectivity for the largest customers (one customer owned 12M rows), so the planner often chose a sequential scan, and even when it used the index it then did a separate sort of millions of rows."},
+        {"type": "code", "language": "sql", "code": "-- Fix: one covering composite index matching the access pattern.\n-- Equality columns first, sort column last (DESC to match ORDER BY),\n-- payload via INCLUDE so it is an Index Only Scan.\nCREATE INDEX CONCURRENTLY idx_orders_open_recent\n  ON orders (customer_id, status, created_at DESC)\n  INCLUDE (total_cents)\n  WHERE status = 'open';   -- partial: index only the rows we ever query\n\n-- New plan: Index Only Scan, no Sort, returns 50 rows in 1.8ms."},
+        {"type": "callout", "variant": "success", "text": "Three techniques compounded: composite ordering (equality then sort), INCLUDE for covering (no heap fetch), and a partial index WHERE status='open' (smaller index, and it skips the 95% of rows that are 'paid'). p99 dropped from 9.2s to under 3ms and the index was built with CONCURRENTLY to avoid locking writes."}
+      ]
+    },
+    {
+      "id": "mistakes-incidents",
+      "heading": "Common Mistakes & Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {"type": "list", "items": [
+          "Non-sargable predicates: WHERE DATE(created_at) = '2026-01-01' or WHERE lower(email) = $1 applies a function to the indexed column, so the plain index can't be used. Rewrite as a range (created_at >= ... AND < ...) or build an expression index on lower(email).",
+          "Implicit type casts: comparing an indexed VARCHAR column to an integer literal (or a bigint column to a string) forces a cast that disables the index. Match types exactly.",
+          "Leading wildcard LIKE '%term%': cannot use a B-tree prefix; needs a trigram (pg_trgm) or full-text index.",
+          "Wrapping a long-running read inside a write transaction: pins MVCC versions, blocks VACUUM, and bloats the table for everyone.",
+          "SELECT * in hot paths: defeats covering indexes and ships columns you don't need over the wire.",
+          "Forgetting CONCURRENTLY when creating an index on a hot table: a plain CREATE INDEX takes an ACCESS EXCLUSIVE lock and blocks all writes for the duration.",
+          "Connection pool exhaustion: a slow query holds a connection; under load every connection is busy and the app reports 'database down' when the database is merely slow."
+        ]},
+        {"type": "callout", "variant": "danger", "text": "Real incident pattern: a migration ran ALTER TABLE ... ADD COLUMN ... DEFAULT <expr> on an old engine version, which rewrote a 200GB table under an exclusive lock and took the service down for 40 minutes. Always check whether a DDL operation is metadata-only or a full table rewrite on your specific engine version before shipping it."}
+      ]
+    },
+    {
+      "id": "sql-vs-nosql-scaling",
+      "heading": "SQL vs NoSQL, Replication & Sharding",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "SQL gives you a rich relational model, joins, and ACID transactions across rows; it scales up easily and out with effort. NoSQL families (document, key-value, wide-column, graph) trade some of those guarantees for horizontal scale and flexible schemas. The honest framing is not 'SQL vs NoSQL' but 'what consistency, query, and scale shape does this workload need.'"},
+        {"type": "heading", "text": "Replication"},
+        {"type": "paragraph", "text": "Replication copies data to standby nodes for read scaling and failover. Asynchronous replication is fast but lets replicas lag, so a read-after-write on a replica can return stale data (and a failover can lose the un-replicated tail — non-zero RPO). Synchronous replication waits for a replica to acknowledge, giving zero data loss but higher write latency and reduced availability if the replica is down."},
+        {"type": "heading", "text": "Sharding"},
+        {"type": "paragraph", "text": "Sharding partitions data across nodes by a shard key so each node owns a subset. It is the path to scaling writes beyond one machine, but it costs you: cross-shard joins and transactions become hard or impossible, and a bad shard key creates hot spots. Choose a high-cardinality, evenly-distributed key aligned with your most common query (e.g. customer_id if queries are per-customer)."},
+        {"type": "table", "headers": ["Concern", "Replication", "Sharding"],
+          "rows": [
+            ["Scales", "Reads", "Reads and writes"],
+            ["Main cost", "Replica lag / stale reads", "No cross-shard joins/transactions"],
+            ["Key risk", "Failover data loss (async)", "Hot shard from skewed key"],
+            ["Complexity", "Low to moderate", "High"]
+          ]},
+        {"type": "callout", "variant": "info", "text": "Default order of operations: optimize queries and indexes, then add read replicas, then partition (declarative partitioning within one node), and only shard across nodes when a single primary genuinely cannot keep up with writes. Sharding is a one-way door — exhaust the cheaper options first."}
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {"type": "list", "items": [
+          "Design indexes from your actual query patterns: equality columns first, range/sort column last, INCLUDE the payload to make it covering.",
+          "Read EXPLAIN ANALYZE on real production-sized data; trust measured plans over intuition, and watch the estimated-vs-actual row gap.",
+          "Keep write transactions short and acquire locks in a deterministic order to minimize lock contention and deadlocks.",
+          "Make read-modify-write atomic (SET col = col - x), or use SELECT ... FOR UPDATE, or an optimistic version column — never read-then-write at Read Committed.",
+          "Wrap write paths in a retry loop that catches serialization/deadlock errors and re-runs the transaction.",
+          "Build indexes on hot tables with CREATE INDEX CONCURRENTLY (Postgres) or pt-online-schema-change (MySQL) to avoid blocking writes.",
+          "Keep statistics fresh (autovacuum/ANALYZE) and raise the statistics target on skewed columns the planner mis-estimates.",
+          "Eager-load relations with batched IN queries (dataloader) to kill N+1 without exploding rows via deep JOINs.",
+          "Use explicit transaction isolation per use case; reserve Serializable for the few correctness-critical paths and design them to tolerate retries."
+        ]},
+        {"type": "callout", "variant": "success", "text": "The senior instinct: before adding hardware, look at the plan. The vast majority of database performance problems are solved by a better index or a rewritten predicate, not a bigger instance."}
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "btree-lookup",
+      "title": "B-tree Index Lookup",
+      "type": "mermaid",
+      "content": "flowchart TD\n  Q[Query WHERE customer_id eq 42] --> R[Root node]\n  R -->|key range| I[Internal node]\n  I -->|narrow range| L[Leaf node sorted]\n  L -->|covering INCLUDE| A[Return from index only]\n  L -->|not covering| H[Fetch heap row by tid]\n  H --> A"
+    },
+    {
+      "id": "mvcc-snapshot",
+      "title": "MVCC Snapshot Visibility",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n  participant T1 as Txn1 reader\n  participant DB as Row versions\n  participant T2 as Txn2 writer\n  T1->>DB: read row v1\n  T2->>DB: update creates v2 uncommitted\n  T1->>DB: re-read still sees v1 snapshot\n  T2->>DB: COMMIT v2 visible\n  Note over T1,DB: New txns see v2 old versions vacuumed later"
+    },
+    {
+      "id": "replication-sharding",
+      "title": "Replication and Sharding Topology",
+      "type": "ascii",
+      "content": "                      +-------------------+\n   writes ----------->|   Primary (W)     |\n                      +---------+---------+\n                                | async/sync replication\n              +-----------------+-----------------+\n              v                                   v\n      +---------------+                   +---------------+\n      |  Replica R1   |  <-- reads        |  Replica R2   |\n      +---------------+                   +---------------+\n\n   SHARDED (by customer_id hash):\n   +-------------+   +-------------+   +-------------+\n   |  Shard 0    |   |  Shard 1    |   |  Shard 2    |\n   | cust 0..N/3 |   | cust N/3..  |   | cust 2N/3.. |\n   +-------------+   +-------------+   +-------------+\n     no cross-shard joins; route by shard key"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-index-basics",
+      "question": "What is a B-tree index and why is it the default index type in relational databases?",
+      "answer": "A B-tree (B+tree) is a balanced, sorted, multi-way search tree giving O(log n) lookups regardless of where the value sits. Because leaves are kept in sorted order, one structure serves equality lookups, range scans (>, <, BETWEEN), prefix matches (LIKE 'abc%'), and ORDER BY without a separate sort. It stays shallow even for huge tables (a few levels for billions of rows) and supports efficient inserts/deletes via node splits and merges, which is why it is the general-purpose default over more specialized structures like hash or GiST indexes.",
+      "difficulty": "junior",
+      "category": "Indexes",
+      "tricky": false,
+      "tags": ["indexes", "b-tree"],
+      "followUps": ["When would a hash index beat a B-tree?", "Why can't a B-tree serve LIKE '%abc'?"]
+    },
+    {
+      "id": "q-leftmost-prefix",
+      "question": "You have an index on (a, b, c). Which of these queries can use it for an index seek: WHERE a=1, WHERE b=2, WHERE a=1 AND b=2, WHERE a=1 AND c=3?",
+      "answer": "The leftmost-prefix rule governs this. WHERE a=1 uses it (prefix a). WHERE a=1 AND b=2 uses it (prefix a,b). WHERE a=1 AND c=3 seeks on a, then filters c without index help on the skipped b — useful but not a full multi-column seek. WHERE b=2 alone cannot seek the index because b values are only sorted within each a group, not globally; the engine would have to scan the whole index. The fix for that case is a separate index leading with b.",
+      "difficulty": "mid",
+      "category": "Indexes",
+      "tricky": false,
+      "tags": ["indexes", "composite", "leftmost-prefix"],
+      "followUps": ["How do you order columns in a composite index?", "Does column order matter for a covering index?"]
+    },
+    {
+      "id": "q-covering",
+      "question": "What is a covering index and how does it change the query plan?",
+      "answer": "A covering index contains every column a query references (in the key or via INCLUDE), so the engine answers entirely from the index and never visits the table heap. That eliminates the random I/O of the heap fetch, which is frequently the dominant cost. You see it as 'Index Only Scan' in Postgres or 'Using index' in MySQL. The trade-off is a wider index that costs more to write and store, so you cover only hot read paths.",
+      "difficulty": "mid",
+      "category": "Indexes",
+      "tricky": false,
+      "tags": ["indexes", "covering"],
+      "followUps": ["Why use INCLUDE columns instead of adding them to the key?", "What's the write-amplification cost of a wide covering index?"]
+    },
+    {
+      "id": "q-explain",
+      "question": "Walk me through how you'd diagnose a slow query using EXPLAIN.",
+      "answer": "Run EXPLAIN ANALYZE (with BUFFERS in Postgres) to get the real executed plan with timings. Read it bottom-up: find the most expensive node and whether it's a Seq Scan where you expected an index. Compare estimated rows to actual rows — a large gap means stale statistics (fix with ANALYZE or a higher statistics target). Check the join strategy: a nested loop over a huge outer side is a classic mis-estimate. Look for an unexpected Sort node (a missing index that could provide order) or a heap fetch where a covering index would give an Index Only Scan. Then form a hypothesis, add the index or rewrite the predicate, and re-measure.",
+      "difficulty": "senior",
+      "category": "Query Planning",
+      "tricky": false,
+      "tags": ["explain", "query-optimization"],
+      "followUps": ["What does BUFFERS tell you?", "How do you fix a planner row mis-estimate?"]
+    },
+    {
+      "id": "q-isolation-tradeoffs",
+      "question": "Compare Read Committed, Repeatable Read, and Serializable. How do you choose for a given use case?",
+      "answer": "Read Committed (Postgres default) sees only committed data but each statement gets a fresh snapshot, so non-repeatable and phantom reads are possible — fine for most CRUD where you don't re-read within a transaction. Repeatable Read gives a stable snapshot for the whole transaction (Postgres implements it as Snapshot Isolation, preventing non-repeatable reads and most phantoms, but allowing write skew); use it for multi-statement reads that must be consistent, like reports. Serializable guarantees the result is equivalent to some serial order, preventing all anomalies including write skew; use it for correctness-critical invariants (financial constraints, inventory) but design those paths to retry on serialization failures. The rule: use the weakest level that is still correct, because stronger levels mean more blocking or more retries.",
+      "difficulty": "senior",
+      "category": "Transactions",
+      "tricky": false,
+      "tags": ["isolation-levels", "acid", "transactions"],
+      "followUps": ["What is write skew and which level prevents it?", "Why does Postgres Repeatable Read prevent phantoms when the SQL standard allows them?"]
+    },
+    {
+      "id": "q-anomalies",
+      "question": "Define dirty read, non-repeatable read, and phantom read, and give the lowest isolation level that prevents each.",
+      "answer": "Dirty read: reading another transaction's uncommitted change that may roll back — prevented at Read Committed. Non-repeatable read: re-reading the same row returns a different value because another transaction committed an update in between — prevented at Repeatable Read. Phantom read: re-running the same range query returns new rows another transaction inserted — prevented at Serializable per the SQL standard (though Postgres Snapshot Isolation prevents it at Repeatable Read for the snapshot, and InnoDB prevents it with next-key locks at Repeatable Read).",
+      "difficulty": "mid",
+      "category": "Transactions",
+      "tricky": false,
+      "tags": ["isolation-levels", "anomalies"],
+      "followUps": ["Where does lost update fit in this taxonomy?", "How do gap locks prevent phantoms in InnoDB?"]
+    },
+    {
+      "id": "q-mvcc",
+      "question": "Explain MVCC and one operational cost it imposes.",
+      "answer": "MVCC (Multi-Version Concurrency Control) avoids read/write blocking by keeping multiple versions of a row. A write creates a new version tagged with the writing transaction's id; each transaction reads the version visible to its snapshot, so readers never block writers and vice versa. The operational cost is dead-version accumulation: Postgres needs VACUUM to reclaim dead tuples (neglect causes bloat and risks transaction-id wraparound), and InnoDB keeps old versions in the undo log, which grows if a long-running transaction holds open a snapshot. Long transactions are the enemy of MVCC cleanup.",
+      "difficulty": "senior",
+      "category": "Concurrency",
+      "tricky": false,
+      "tags": ["mvcc", "concurrency", "vacuum"],
+      "followUps": ["What is transaction-id wraparound?", "Why does a long-running read transaction cause table bloat?"]
+    },
+    {
+      "id": "q-n-plus-one",
+      "question": "What is the N+1 query problem and how do you fix it without creating a new problem?",
+      "answer": "N+1 is when fetching N parent rows triggers one additional query per parent to load a relation, so N+1 round trips. Per-trip network latency dominates, making the page slow no matter how good the indexes are. Fix it by eager-loading: either a JOIN to fetch parents and children together, or — better for to-many relations — a single batched query with WHERE child_fk IN (...parent_ids) and stitch in memory (the dataloader pattern). The new problem to avoid is the opposite extreme: JOIN-ing several to-many relations multiplies rows combinatorially (cartesian explosion), so prefer separate batched IN queries over deep nested JOINs.",
+      "difficulty": "mid",
+      "category": "Performance",
+      "tricky": false,
+      "tags": ["n+1", "orm", "query-optimization"],
+      "followUps": ["When is a JOIN better than a batched IN query?", "How does GraphQL dataloader batch and dedupe?"]
+    },
+    {
+      "id": "q-sharding-key",
+      "question": "How do you choose a shard key, and what do you lose by sharding?",
+      "answer": "Choose a high-cardinality, evenly-distributed key that aligns with your dominant query so most operations hit a single shard — e.g. customer_id when access is per-customer. Hashing the key spreads load and avoids range hot spots, though it sacrifices efficient range scans. What you lose: cross-shard joins and multi-shard transactions become hard or impossible (you push that logic into the application or accept eventual consistency), rebalancing is operationally painful, and a skewed key creates a hot shard that bottlenecks the whole system. Because sharding is a one-way door, you exhaust query tuning, read replicas, and single-node partitioning first.",
+      "difficulty": "senior",
+      "category": "Scaling",
+      "tricky": false,
+      "tags": ["sharding", "scaling", "replication"],
+      "followUps": ["How would you reshard live with minimal downtime?", "When is a single-node partition enough vs a real shard?"]
+    },
+    {
+      "id": "q-replication-lag",
+      "question": "You added read replicas and now users sometimes don't see their own writes. What's happening and how do you handle it?",
+      "answer": "Asynchronous replication lag: the write committed on the primary but hasn't reached the replica yet, so a read routed to the replica returns stale data — a read-after-write consistency violation. Options: route reads that must reflect a just-completed write to the primary (read-your-writes), pin a session to the primary for a short window after it writes, or track the write LSN/position and wait for the replica to catch up before reading (causal/monotonic reads). For paths that tolerate staleness, leave them on replicas. The deeper trade-off is that synchronous replication would eliminate lag at the cost of write latency and availability.",
+      "difficulty": "senior",
+      "category": "Scaling",
+      "tricky": false,
+      "tags": ["replication", "consistency", "scaling"],
+      "followUps": ["What's the failover data-loss window with async replication?", "How does synchronous replication affect availability?"]
+    },
+    {
+      "id": "q-tricky-index-ignored",
+      "question": "Your query has a perfectly matching index but EXPLAIN shows a sequential scan. Give two distinct reasons the planner might correctly ignore the index.",
+      "answer": "First, low selectivity: if the predicate matches a large fraction of the table (say a status that's true for 60% of rows), an index scan would do that many random heap fetches plus the index traversal, which is more expensive than reading the table sequentially. The planner correctly chooses the Seq Scan. Second, a non-sargable predicate: applying a function to the column — WHERE lower(email)=$1, WHERE DATE(created_at)=..., or an implicit type cast like an int column compared to a string — means the stored index keys don't match the computed values, so the plain index is unusable. (Fixes: an expression index on lower(email), or rewriting to a range so the raw column is compared directly.) A third subtle case is stale statistics causing the planner to mis-estimate selectivity. The key insight: an ignored index is often the planner being right, not wrong.",
+      "difficulty": "senior",
+      "category": "Query Planning",
+      "tricky": true,
+      "tags": ["indexes", "explain", "selectivity"],
+      "followUps": ["How do you make WHERE lower(email)=$1 use an index?", "Why does a bitmap index scan exist between an index scan and a seq scan?"]
+    },
+    {
+      "id": "q-tricky-lost-update",
+      "question": "Two requests transfer money from the same account at Read Committed: each does SELECT balance, computes new = balance - amount in the app, then UPDATE SET balance = new. Walk through the bug and three ways to fix it.",
+      "answer": "This is a lost update, which Read Committed does NOT prevent. Both transactions SELECT balance=100. T1 computes 100-30=70 and writes 70; T2, having read 100 before T1 committed, computes 100-50=50 and writes 50, overwriting T1's deduction. The 30 withdrawal is lost; the account shows 50 instead of 20. Fixes: (1) atomic update — UPDATE accounts SET balance = balance - $amount WHERE id=$id, which re-reads the current value under the row lock so the second write blocks until the first commits, then operates on the correct value (add a CHECK or guard for overdraft). (2) Pessimistic lock — SELECT balance ... FOR UPDATE before computing, serializing the two transactions on that row. (3) Optimistic concurrency — add a version column and UPDATE ... WHERE id=$id AND version=$v; if zero rows update, someone else won, so retry. The footgun is that read-then-write in application code looks correct in single-threaded testing and silently corrupts data under concurrency.",
+      "difficulty": "senior",
+      "category": "Transactions",
+      "tricky": true,
+      "tags": ["lost-update", "isolation-levels", "concurrency"],
+      "followUps": ["Would Repeatable Read prevent this in Postgres? What happens?", "How does optimistic locking behave under high contention?"]
+    },
+    {
+      "id": "q-tricky-deadlock-retry",
+      "question": "Under load you see intermittent deadlock errors on a two-row UPDATE. Is this a bug to eliminate, and what's the correct response?",
+      "answer": "It's usually a lock-ordering inconsistency, not random bad luck: different code paths (or different orderings within a single multi-row statement) acquire the same rows in opposite orders, forming a wait cycle that the detector breaks by rolling back a victim. The correct response has two parts. First, remove the cause where you can: acquire locks in a deterministic order — e.g. always update rows sorted by primary key ascending — so no cycle can form, and keep transactions short to shrink the contention window. Second, accept that deadlocks are expected under contention and make write transactions idempotent and retryable: catch the serialization/deadlock error (SQLSTATE 40P01/40001 in Postgres) and re-run the whole transaction with a small backoff. The subtle trap is trying to eliminate deadlocks entirely with coarser locks, which just trades deadlocks for worse throughput.",
+      "difficulty": "senior",
+      "category": "Concurrency",
+      "tricky": true,
+      "tags": ["deadlock", "locking", "retry"],
+      "followUps": ["Why can a single UPDATE ... WHERE id IN (...) deadlock with itself across sessions?", "How does lock_timeout interact with a retry loop?"]
+    },
+    {
+      "id": "q-tricky-outer-join",
+      "question": "A teammate writes SELECT * FROM orders o LEFT JOIN refunds r ON r.order_id=o.id WHERE r.status='approved' and is surprised it dropped all orders without refunds. Why?",
+      "answer": "The WHERE clause filters AFTER the join produces NULLs for unmatched left rows. For an order with no refund, r.status is NULL, and NULL='approved' is unknown (not true), so the WHERE clause discards that row — silently converting the LEFT JOIN into an INNER JOIN. To preserve unmatched orders, move the refund condition into the ON clause: LEFT JOIN refunds r ON r.order_id=o.id AND r.status='approved'. Now the condition restricts which refunds match, but unmatched orders survive with NULL refund columns. The general rule: predicates on the right table of an outer join belong in ON, not WHERE, unless you specifically want to filter out the NULL-extended rows.",
+      "difficulty": "mid",
+      "category": "Joins",
+      "tricky": true,
+      "tags": ["joins", "outer-join", "null"],
+      "followUps": ["When would you intentionally put a right-table predicate in WHERE?", "How do you find orders WITHOUT an approved refund?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-optimize-query",
+      "title": "Optimize a Slow Reporting Query and Design Its Index",
+      "difficulty": "senior",
+      "category": "Query Optimization",
+      "prompt": "An events table has 50M rows. This dashboard query runs a sequential scan and takes 6 seconds:\n\nSELECT user_id, event_type, occurred_at\nFROM events\nWHERE tenant_id = $1\n  AND event_type = 'purchase'\n  AND occurred_at >= now() - interval '7 days'\nORDER BY occurred_at DESC\nLIMIT 100;\n\nDesign the index (or indexes) that makes this query fast, explain the column ordering, and identify any predicate that might prevent index use. Assume most rows are NOT purchases and tenants vary widely in size.",
+      "hints": [
+        "Order composite index columns: equality predicates first, then the range/sort column.",
+        "The query only needs three columns — can the index be covering so it avoids heap fetches?",
+        "Most rows aren't purchases. Could a partial index shrink the structure and skip irrelevant rows?",
+        "Make sure the ORDER BY direction matches the index so the planner can skip the Sort node."
+      ],
+      "solutionCode": "-- Composite, covering, partial index matching the access pattern.\n-- Equality columns (tenant_id, event_type) first, then the range/sort\n-- column occurred_at DESC last so ORDER BY ... DESC needs no Sort.\n-- INCLUDE user_id so the query is answered Index-Only (no heap fetch).\n-- Partial WHERE event_type='purchase' keeps the index small since\n-- most rows are not purchases.\nCREATE INDEX CONCURRENTLY idx_events_purchase_recent\n  ON events (tenant_id, occurred_at DESC)\n  INCLUDE (user_id)\n  WHERE event_type = 'purchase';\n\n-- Verify the new plan: expect an Index Only Scan + Limit, no Seq Scan,\n-- no Sort node.\nEXPLAIN (ANALYZE, BUFFERS)\nSELECT user_id, event_type, occurred_at\nFROM events\nWHERE tenant_id = $1\n  AND event_type = 'purchase'\n  AND occurred_at >= now() - interval '7 days'\nORDER BY occurred_at DESC\nLIMIT 100;\n\n-- Pitfall to avoid: a non-sargable predicate would defeat this index.\n-- BAD:  WHERE date(occurred_at) >= current_date - 7   (function on column)\n-- GOOD: WHERE occurred_at >= now() - interval '7 days' (raw column, range)",
+      "solutionLanguage": "sql",
+      "explanation": "The query has two equality predicates (tenant_id, event_type) and one range+sort column (occurred_at). The optimal B-tree layout puts equality columns first so the seek narrows to a contiguous range, then the sort column last. Because event_type is fixed to 'purchase' for every row this query cares about, we lift it out of the key into a partial-index WHERE clause: the index physically contains only purchase rows, making it dramatically smaller and cheaper to scan, and the key becomes (tenant_id, occurred_at DESC). occurred_at DESC matches the ORDER BY direction, so the planner returns the first 100 rows straight from the index leaves with no Sort. INCLUDE (user_id) carries the only remaining projected column so the engine never touches the heap — an Index Only Scan. The result is a 6s sequential scan replaced by a millisecond index range scan. The key teaching point on predicates: occurred_at >= now() - interval '7 days' keeps the raw indexed column on the left of the comparison (sargable); wrapping it as date(occurred_at) >= ... applies a function to the column and makes the index unusable, forcing a scan again. Build it with CONCURRENTLY so creating the index doesn't take an exclusive lock and block writes on a 50M-row table.",
+      "relatedTopic": "databases-sql"
+    },
+    {
+      "id": "ch-safe-transfer",
+      "title": "Implement a Concurrency-Safe Money Transfer",
+      "difficulty": "senior",
+      "category": "Transactions",
+      "prompt": "Write a transfer(fromId, toId, amount) function that moves money between two accounts and is correct under concurrent execution at the default Read Committed isolation level. It must: never lose updates, never let a balance go negative, and not deadlock when two opposite transfers (A->B and B->A) run at the same time. Show the SQL/transaction logic and explain why it is safe.",
+      "hints": [
+        "Read-then-write in application code loses updates at Read Committed — make the balance change atomic in SQL.",
+        "Enforce non-negative balance in the same statement (or with a CHECK constraint) so the guard can't be raced.",
+        "Two opposite transfers locking rows in opposite orders deadlock — lock the rows in a deterministic order (e.g. ascending id).",
+        "Wrap the whole thing in a retry loop for the rare serialization/deadlock error."
+      ],
+      "solutionCode": "// TypeScript + node-postgres. Atomic updates + deterministic lock order.\nimport { Pool, PoolClient } from 'pg';\nconst pool = new Pool();\n\nasync function transfer(fromId: number, toId: number, amount: number) {\n  if (amount <= 0) throw new Error('amount must be positive');\n\n  for (let attempt = 0; attempt < 3; attempt++) {\n    const client: PoolClient = await pool.connect();\n    try {\n      await client.query('BEGIN');\n\n      // Lock both rows in a DETERMINISTIC order (ascending id) so that\n      // an A->B transfer and a concurrent B->A transfer acquire row\n      // locks in the same order and cannot form a deadlock cycle.\n      const [first, second] = [fromId, toId].sort((a, b) => a - b);\n      await client.query('SELECT id FROM accounts WHERE id = ANY($1) ORDER BY id FOR UPDATE', [[first, second]]);\n\n      // Atomic debit with a non-negative guard. The guard is in the\n      // WHERE clause so it is evaluated against the locked, current value;\n      // it cannot be raced by another transaction.\n      const debit = await client.query(\n        'UPDATE accounts SET balance = balance - $1 WHERE id = $2 AND balance >= $1',\n        [amount, fromId]\n      );\n      if (debit.rowCount === 0) {\n        await client.query('ROLLBACK');\n        throw new Error('insufficient funds');\n      }\n\n      await client.query('UPDATE accounts SET balance = balance + $1 WHERE id = $2', [amount, toId]);\n      await client.query('COMMIT');\n      return;\n    } catch (err: any) {\n      await client.query('ROLLBACK').catch(() => {});\n      // 40P01 deadlock, 40001 serialization failure -> retry\n      if ((err.code === '40P01' || err.code === '40001') && attempt < 2) continue;\n      throw err;\n    } finally {\n      client.release();\n    }\n  }\n  throw new Error('transfer failed after retries');\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "Three independent hazards are addressed. (1) Lost update: instead of SELECT balance into the app, compute, then write — which loses updates at Read Committed because both transactions read the same stale value — the debit is a single atomic statement, balance = balance - $1. The row lock acquired by the UPDATE forces the second transaction to wait and re-read the committed value, so deductions compose correctly. (2) Negative balance: the guard balance >= $1 lives in the WHERE clause of the same UPDATE, so it is checked against the current locked value and cannot be bypassed by a race; rowCount === 0 means the guard failed (insufficient funds) and we roll back. A CHECK (balance >= 0) constraint is a good belt-and-suspenders backstop. (3) Deadlock between opposite transfers: A->B and B->A would, naively, lock rows in opposite orders and cycle. We sort the ids and SELECT ... FOR UPDATE both rows in ascending id order up front, so every transfer grabs the lower id first — no cycle can form. Finally, since deadlocks and serialization failures are expected under contention rather than bugs, the whole transaction is wrapped in a bounded retry loop keyed on SQLSTATE 40P01/40001. The transaction is kept short (a few statements) to minimize the lock-hold window. This pattern — atomic write, in-statement guard, deterministic lock order, retry — is the standard senior answer to safe concurrent mutation.",
+      "relatedTopic": "databases-sql"
+    }
+  ],
+  "references": [
+    {"label": "PostgreSQL Documentation: Transaction Isolation", "url": "https://www.postgresql.org/docs/current/transaction-iso.html"},
+    {"label": "PostgreSQL Documentation: Indexes and Index-Only Scans", "url": "https://www.postgresql.org/docs/current/indexes-index-only-scans.html"},
+    {"label": "Use The Index, Luke! (B-tree indexing explained)", "url": "https://use-the-index-luke.com/"},
+    {"label": "MySQL InnoDB Locking and Transaction Model", "url": "https://dev.mysql.com/doc/refman/8.0/en/innodb-locking-transaction-model.html"},
+    {"label": "PostgreSQL EXPLAIN Documentation", "url": "https://www.postgresql.org/docs/current/sql-explain.html"},
+    {"label": "Martin Kleppmann, Designing Data-Intensive Applications", "url": "https://dataintensive.net/"}
+  ]
+}

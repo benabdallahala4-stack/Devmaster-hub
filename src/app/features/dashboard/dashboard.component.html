@@ -1,0 +1,122 @@
+<div class="page dash">
+  <header class="page__head">
+    <span class="page__eyebrow"><app-icon name="bolt" [size]="15" /> {{ greeting() }}</span>
+    <h1 class="page__title">Your engineering command center</h1>
+    <p class="page__subtitle">Track your mastery, drill interview questions, and ship daily challenges — everything you need before your next technical interview.</p>
+  </header>
+
+  <!-- Overview -->
+  <section class="dash__overview">
+    <div class="card dash__progress">
+      <app-progress-ring [value]="overallRatio()" [size]="128" caption="complete" />
+      <div class="dash__progress-info">
+        <h2>Learning progress</h2>
+        <p class="muted">{{ completedCount() }} of {{ totalTopics() }} topics completed</p>
+        <a class="btn btn--sm" routerLink="/topics">Continue learning <app-icon name="arrow-right" [size]="15" /></a>
+      </div>
+    </div>
+
+    <div class="dash__stats">
+      <a class="card dash__stat" routerLink="/topics">
+        <span class="dash__stat-icon"><app-icon name="topics" [size]="20" /></span>
+        <span class="dash__stat-num">{{ totalTopics() }}</span>
+        <span class="dash__stat-label">Topics</span>
+      </a>
+      <a class="card dash__stat" routerLink="/interview">
+        <span class="dash__stat-icon"><app-icon name="interview" [size]="20" /></span>
+        <span class="dash__stat-num">{{ totalQuestions() }}</span>
+        <span class="dash__stat-label">Interview Qs</span>
+      </a>
+      <a class="card dash__stat" routerLink="/challenges">
+        <span class="dash__stat-icon"><app-icon name="challenges" [size]="20" /></span>
+        <span class="dash__stat-num">{{ totalChallenges() }}</span>
+        <span class="dash__stat-label">Challenges</span>
+      </a>
+      <a class="card dash__stat" routerLink="/progress">
+        <span class="dash__stat-icon"><app-icon name="trophy" [size]="20" /></span>
+        <span class="dash__stat-num">{{ progress.solvedCount() }}</span>
+        <span class="dash__stat-label">Solved</span>
+      </a>
+    </div>
+  </section>
+
+  <div class="dash__grid">
+    <!-- Daily interview question -->
+    <section class="card dash__daily">
+      <div class="dash__daily-head">
+        <span class="dash__badge dash__badge--accent"><app-icon name="brain" [size]="14" /> Today's senior interview question</span>
+        @if (dailyQuestion()) { <app-difficulty-badge [level]="dailyQuestion()!.difficulty" /> }
+      </div>
+      @if (dailyQuestion(); as q) {
+        <h3 class="dash__daily-q">{{ q.question }}</h3>
+        @if (q.topicTitle) { <span class="dash__daily-src">from {{ q.topicTitle }}</span> }
+        @if (answerRevealed()) {
+          <p class="dash__daily-a">{{ q.answer }}</p>
+        } @else {
+          <button class="btn btn--primary" (click)="answerRevealed.set(true)">
+            <app-icon name="bolt" [size]="16" /> Reveal answer
+          </button>
+        }
+      } @else {
+        <div class="dash__placeholder">Loading today's question…</div>
+      }
+    </section>
+
+    <!-- Daily challenge -->
+    <section class="card dash__challenge">
+      <div class="dash__daily-head">
+        <span class="dash__badge dash__badge--warn"><app-icon name="flame" [size]="14" /> Daily challenge</span>
+      </div>
+      @if (dailyChallenge(); as c) {
+        <h3 class="dash__daily-q">{{ c.title }}</h3>
+        <div class="dash__daily-meta">
+          <app-difficulty-badge [level]="c.difficulty" />
+          <span class="chip">{{ c.category }}</span>
+        </div>
+        <p class="dash__challenge-prompt">{{ c.prompt }}</p>
+        <a class="btn btn--sm" [routerLink]="['/challenges', c.id]">Solve it <app-icon name="arrow-right" [size]="15" /></a>
+      } @else {
+        <div class="dash__placeholder">Loading challenge…</div>
+      }
+    </section>
+
+    <!-- Category progress -->
+    <section class="card dash__cats">
+      <h3 class="dash__card-title"><app-icon name="layers" [size]="17" /> Topic completion</h3>
+      <div class="dash__cat-list">
+        @for (c of categoryProgress(); track c.name) {
+          <div class="dash__cat">
+            <div class="dash__cat-row">
+              <span class="dash__cat-name">{{ c.name }}</span>
+              <span class="dash__cat-count">{{ c.done }}/{{ c.total }}</span>
+            </div>
+            <div class="dash__cat-bar"><span [style.width.%]="c.ratio * 100"></span></div>
+          </div>
+        } @empty {
+          <p class="muted">Loading…</p>
+        }
+      </div>
+    </section>
+
+    <!-- Recently viewed -->
+    <section class="card dash__recent">
+      <h3 class="dash__card-title"><app-icon name="clock" [size]="17" /> Recently viewed</h3>
+      @if (recentTopics().length) {
+        <div class="dash__recent-list">
+          @for (t of recentTopics(); track t.id) {
+            <a class="dash__recent-item" [routerLink]="['/topics', t.id]">
+              <span class="dash__recent-mono">{{ initials(t.title) }}</span>
+              <span class="dash__recent-main">
+                <span class="dash__recent-title">{{ t.title }}</span>
+                <span class="dash__recent-cat">{{ t.category }}</span>
+              </span>
+              <app-icon name="chevron-right" [size]="16" />
+            </a>
+          }
+        </div>
+      } @else {
+        <p class="muted dash__recent-empty">Topics you open will appear here. <a routerLink="/topics">Start exploring →</a></p>
+      }
+    </section>
+  </div>
+</div>

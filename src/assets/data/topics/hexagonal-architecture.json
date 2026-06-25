@@ -1,0 +1,541 @@
+{
+  "id": "hexagonal-architecture",
+  "title": "Hexagonal Architecture",
+  "category": "Architecture",
+  "subcategory": "Architecture",
+  "difficulty": "senior",
+  "tags": ["hexagonal", "ports-and-adapters", "ddd", "clean-architecture", "testability", "spring"],
+  "description": "Master Ports & Adapters: isolate your domain from frameworks, databases, and transports so business logic stays testable, replaceable, and durable.",
+  "estReadMinutes": 28,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction: What Hexagonal Architecture Actually Is",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Hexagonal Architecture, coined by Alistair Cockburn in 2005 and also known as Ports & Adapters, is a structural pattern whose single goal is to keep your application's core logic independent of the technologies that drive it and the technologies it drives. The 'hexagon' shape is incidental — Cockburn chose it only to have room to draw multiple ports on different edges and to break the mental habit of thinking in horizontal layers stacked top-to-bottom."
+        },
+        {
+          "type": "paragraph",
+          "text": "The core idea is symmetry. On the left you have driving actors (a human clicking a UI, a REST client, a Kafka consumer, a scheduled job) that want to use your application. On the right you have driven actors (a Postgres database, a payment gateway, an email service, a message broker) that your application uses. Both sides are kept at arm's length by interfaces called ports. The concrete technology lives in adapters that plug into those ports."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Inside the hexagon: the domain model (entities, value objects, domain services) and the application layer (use cases / application services).",
+            "Ports: interfaces owned by the inside. Inbound (driving) ports are the API the outside calls; outbound (driven) ports are the SPI the inside calls.",
+            "Outside the hexagon: adapters — REST controllers, JPA repositories, Kafka producers — that implement or invoke ports.",
+            "The Dependency Rule: source-code dependencies always point inward. The domain depends on nothing; adapters depend on the domain, never the reverse."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Hexagonal, Clean Architecture (Uncle Bob), and Onion Architecture (Jeffrey Palermo) are three formulations of the same dependency-inversion principle. If you understand ports & adapters, you understand all three."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The cost of getting this wrong is not visible on day one — it surfaces 18 months later when your @Service classes are 800 lines long, every test needs a running database and an embedded Kafka, and a 'simple' migration from JPA to jOOQ touches 200 files because Hibernate annotations leaked onto your domain entities. Hexagonal architecture is an investment that pays off in change velocity over the life of the system."
+        },
+        {
+          "type": "heading",
+          "text": "Concrete payoffs"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Testability: use cases are tested in milliseconds with in-memory fakes for outbound ports — no Spring context, no Testcontainers, no network. You can drive thousands of business-rule tests per second.",
+            "Replaceability: swap Postgres for DynamoDB, REST for gRPC, or SendGrid for SES by writing a new adapter. The domain does not change because it never knew the technology existed.",
+            "Delayed decisions: you can build and validate the entire business logic before choosing a database, deferring infrastructure commitments until you actually understand the load profile.",
+            "Parallel work: once ports are agreed, one team builds the REST adapter while another builds the persistence adapter while a third builds the domain — they only need the interface.",
+            "Resistance to framework churn: Spring 5 to 6, javax to jakarta, Hibernate to EclipseLink — these become adapter-local migrations instead of company-wide rewrites."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Hexagonal architecture is not free. It adds indirection (interfaces, mappers, DTOs vs domain objects). For a CRUD-only microservice with no real business logic, it can be over-engineering. Apply it where the domain has genuine behavior and a long expected lifetime."
+        }
+      ]
+    },
+    {
+      "id": "core-the-inside",
+      "heading": "Core Concept: The Inside — Domain and Application",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The inside of the hexagon has two distinct rings, and conflating them is one of the most common mistakes. The domain ring holds the model: entities and value objects that enforce invariants, plus pure domain services for logic that doesn't belong to a single entity. The application ring holds use cases — orchestrators that coordinate the domain to fulfill a specific user intent, manage transactions, and talk to the outside world exclusively through outbound ports."
+        },
+        {
+          "type": "heading",
+          "text": "Domain model — protects invariants, knows nothing else"
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// Pure domain. No Spring, no JPA, no Jackson. Just business rules.\npublic final class Account {\n    private final AccountId id;\n    private Money balance;\n\n    public Account(AccountId id, Money opening) {\n        if (opening.isNegative()) {\n            throw new DomainException(\"Opening balance cannot be negative\");\n        }\n        this.id = id;\n        this.balance = opening;\n    }\n\n    // The invariant lives WITH the data it protects.\n    public void withdraw(Money amount) {\n        if (amount.isNegativeOrZero()) {\n            throw new DomainException(\"Withdrawal must be positive\");\n        }\n        if (balance.isLessThan(amount)) {\n            throw new InsufficientFundsException(id, balance, amount);\n        }\n        this.balance = balance.minus(amount);\n    }\n\n    public Money balance() { return balance; }\n    public AccountId id() { return id; }\n}"
+        },
+        {
+          "type": "heading",
+          "text": "Application service — orchestrates, owns the transaction boundary"
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// Implements an inbound port; depends ONLY on outbound ports (interfaces).\npublic class TransferMoneyService implements TransferMoneyUseCase {\n    private final LoadAccountPort loadAccount;   // outbound port\n    private final SaveAccountPort saveAccount;   // outbound port\n    private final AccountLock accountLock;\n\n    public TransferMoneyService(LoadAccountPort loadAccount,\n                                SaveAccountPort saveAccount,\n                                AccountLock accountLock) {\n        this.loadAccount = loadAccount;\n        this.saveAccount = saveAccount;\n        this.accountLock = accountLock;\n    }\n\n    @Override\n    public void transfer(TransferCommand cmd) {\n        Account source = loadAccount.load(cmd.sourceId());\n        Account target = loadAccount.load(cmd.targetId());\n        accountLock.lock(source.id());\n        accountLock.lock(target.id());\n        try {\n            source.withdraw(cmd.amount());   // domain enforces the rule\n            target.deposit(cmd.amount());\n            saveAccount.save(source);\n            saveAccount.save(target);\n        } finally {\n            accountLock.release(source.id());\n            accountLock.release(target.id());\n        }\n    }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Notice TransferMoneyService imports zero framework types. You can unit test it with a HashMap-backed LoadAccountPort/SaveAccountPort and assert on balances — no database, no @SpringBootTest."
+        }
+      ]
+    },
+    {
+      "id": "core-ports",
+      "heading": "Core Concept: Ports — Inbound vs Outbound",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A port is just an interface, but its direction determines who owns it and who implements it. Getting the direction right is the whole game, because it's what makes the dependency arrows point inward."
+        },
+        {
+          "type": "table",
+          "headers": ["Aspect", "Inbound (driving) port", "Outbound (driven) port"],
+          "rows": [
+            ["Also called", "Primary / API / use-case interface", "Secondary / SPI / repository interface"],
+            ["Who defines it", "The application core", "The application core"],
+            ["Who implements it", "The application core (a use-case service)", "An outside adapter (JPA, Kafka, HTTP client)"],
+            ["Who calls it", "An inbound adapter (REST controller, listener)", "The application core (use-case service)"],
+            ["Example", "TransferMoneyUseCase.transfer(cmd)", "LoadAccountPort.load(id), SendEmailPort.send(msg)"],
+            ["Dependency direction", "Adapter -> port -> core", "Core -> port; adapter implements port"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The outbound port is where Dependency Inversion does its work. Without it, your application service would import a JpaAccountRepository and the arrow would point outward to infrastructure. By defining LoadAccountPort inside the core and having the adapter implement it, the compile-time dependency flips: infrastructure now depends on the core."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// Inbound port: the contract the outside world uses to drive the app.\npublic interface TransferMoneyUseCase {\n    void transfer(TransferCommand cmd);\n}\n\n// Outbound ports: contracts the app needs the outside to fulfill.\npublic interface LoadAccountPort {\n    Account load(AccountId id);   // returns a DOMAIN object, not a JPA entity\n}\npublic interface SaveAccountPort {\n    void save(Account account);\n}\npublic interface AccountEventPublisher {\n    void published(MoneyTransferred event);\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Outbound ports should speak the domain's language, not the technology's. LoadAccountPort returns Account (domain), not AccountJpaEntity. If your port signature leaks ResultSet, Page<Entity>, or a Kafka ConsumerRecord, the abstraction has failed."
+        }
+      ]
+    },
+    {
+      "id": "core-the-outside",
+      "heading": "Core Concept: The Outside — Adapters",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Adapters are the only place where framework and infrastructure code is allowed. They translate between the messy outside world (HTTP requests, SQL rows, Kafka records) and the clean inside world (commands and domain objects). There are two kinds, mirroring the two kinds of ports."
+        },
+        {
+          "type": "heading",
+          "text": "Inbound adapter: REST controller calls an inbound port"
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "@RestController\n@RequestMapping(\"/api/transfers\")\nclass TransferController {\n    private final TransferMoneyUseCase transferMoney;  // inbound PORT, not the impl\n\n    TransferController(TransferMoneyUseCase transferMoney) {\n        this.transferMoney = transferMoney;\n    }\n\n    @PostMapping\n    ResponseEntity<Void> transfer(@RequestBody @Valid TransferRequest req) {\n        // INPUT validation (shape, ranges) lives here, at the edge.\n        var cmd = new TransferCommand(\n            new AccountId(req.sourceId()),\n            new AccountId(req.targetId()),\n            Money.of(req.amount(), req.currency()));\n        transferMoney.transfer(cmd);          // hand off to the core\n        return ResponseEntity.accepted().build();\n    }\n}"
+        },
+        {
+          "type": "heading",
+          "text": "Outbound adapter: JPA repository implements an outbound port"
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "@Component\nclass AccountPersistenceAdapter implements LoadAccountPort, SaveAccountPort {\n    private final AccountJpaRepository repo;   // Spring Data interface\n    private final AccountMapper mapper;        // entity <-> domain\n\n    AccountPersistenceAdapter(AccountJpaRepository repo, AccountMapper mapper) {\n        this.repo = repo;\n        this.mapper = mapper;\n    }\n\n    @Override\n    public Account load(AccountId id) {\n        AccountJpaEntity entity = repo.findById(id.value())\n            .orElseThrow(() -> new AccountNotFoundException(id));\n        return mapper.toDomain(entity);        // translate at the boundary\n    }\n\n    @Override\n    public void save(Account account) {\n        repo.save(mapper.toJpaEntity(account));\n    }\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "The mapper is the unglamorous but critical piece. It keeps Hibernate's @Entity, @Id, and lazy-loading proxies entirely inside the persistence adapter. The domain Account never sees them, so the domain can never accidentally depend on a Hibernate session being open."
+        }
+      ]
+    },
+    {
+      "id": "core-validation-and-transactions",
+      "heading": "Core Concept: Where Validation and Transactions Belong",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Two questions come up in every hexagonal design review, and they have crisp answers. Knowing them cold is a strong senior signal in an interview."
+        },
+        {
+          "type": "heading",
+          "text": "Validation: two different kinds, two different homes"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Input/syntactic validation (is the field present? is amount a positive number? is the currency a valid ISO code?) belongs at the INBOUND ADAPTER. This is about the shape of external input and is technology-specific (Bean Validation @Valid, JSON schema). Reject malformed requests with a 400 before they ever reach the core.",
+            "Domain invariants and business rules (a withdrawal cannot exceed the balance; an account cannot be closed twice) belong INSIDE the domain model. These are true regardless of who calls — REST, Kafka, a batch job — so they must be enforced in one place the domain owns, typically in the entity's constructor and methods.",
+            "Use-case-level validation (does this account exist? is the user authorized to transfer from it?) belongs in the APPLICATION service, because answering it requires loading state via outbound ports."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Anti-pattern: anemic domain. If your Account is a bag of getters/setters and the balance-check lives in TransferService, you have not protected the invariant — any future code path can create an invalid account. Invariants belong with the data they constrain."
+        },
+        {
+          "type": "heading",
+          "text": "Transactions: the use case is the boundary"
+        },
+        {
+          "type": "paragraph",
+          "text": "The transaction boundary is the application/use-case layer, not the adapter and not the domain. A single use-case method represents one atomic business operation, so it is the natural unit of work. In Spring this means @Transactional on the application service method, never on a controller (too coarse, ties HTTP to the DB) and never on the domain entity (which must not know transactions exist)."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// Transaction declared at the use-case boundary in a thin infrastructure wrapper,\n// OR via @Transactional on the application service if you accept that one\n// framework annotation. Purists wrap it; pragmatists annotate the service.\n@Transactional\npublic void transfer(TransferCommand cmd) {\n    Account source = loadAccount.load(cmd.sourceId());\n    Account target = loadAccount.load(cmd.targetId());\n    source.withdraw(cmd.amount());\n    target.deposit(cmd.amount());\n    saveAccount.save(source);   // both saves commit or roll back together\n    saveAccount.save(target);\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Strict purists keep even @Transactional out of the application service by introducing a TransactionPort or wrapping the use case in a decorator. Most teams accept @Transactional as a tolerable framework dependency because the alternative adds significant ceremony for little practical gain."
+        }
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: A Payment Service That Survived a Provider Migration",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Scenario: a fintech runs a payments service that charges cards via Stripe. Eighteen months in, a commercial deal forces a migration to Adyen for European traffic while keeping Stripe for the US. Because the team had modeled charging as an outbound port, the migration was a two-week adapter project instead of a quarter-long rewrite."
+        },
+        {
+          "type": "heading",
+          "text": "The outbound port (defined in the core, provider-agnostic)"
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// Core owns this. It speaks money and intent, not Stripe or Adyen.\npublic interface PaymentGatewayPort {\n    ChargeResult charge(ChargeRequest request);\n    RefundResult refund(PaymentReference ref, Money amount);\n}\n\npublic record ChargeRequest(\n    Money amount, PaymentMethodToken token, IdempotencyKey key) {}\n\npublic record ChargeResult(\n    PaymentReference reference, ChargeStatus status) {}"
+        },
+        {
+          "type": "heading",
+          "text": "Two adapters implementing the same port"
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "@Component\nclass StripePaymentAdapter implements PaymentGatewayPort {\n    private final StripeClient stripe;\n    @Override public ChargeResult charge(ChargeRequest req) {\n        PaymentIntent intent = stripe.paymentIntents().create(\n            PaymentIntentCreateParams.builder()\n                .setAmount(req.amount().minorUnits())\n                .setCurrency(req.amount().currency().code())\n                .setPaymentMethod(req.token().value())\n                .setIdempotencyKey(req.key().value())   // provider-specific detail\n                .build());\n        return new ChargeResult(\n            new PaymentReference(intent.getId()), map(intent.getStatus()));\n    }\n    // refund(...) omitted\n}\n\n@Component\nclass AdyenPaymentAdapter implements PaymentGatewayPort {\n    private final AdyenCheckout checkout;\n    @Override public ChargeResult charge(ChargeRequest req) {\n        var payment = checkout.payments(buildAdyenRequest(req));\n        return new ChargeResult(\n            new PaymentReference(payment.getPspReference()),\n            map(payment.getResultCode()));\n    }\n    // refund(...) omitted\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Routing between adapters became a single composition-root decision (a Spring @Configuration that picks the bean by region), and crucially the use-case service and the domain Payment entity were never touched. The incident that validated the design: Adyen briefly returned a result code the team hadn't mapped, throwing inside the adapter — but because the adapter translated it into a domain-level PaymentDeclinedException, the use case handled it identically to a Stripe decline, and no business logic needed a hotfix."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The real test of a port is a provider swap. If switching vendors only requires a new adapter plus a wiring change, your boundary was drawn correctly."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "heading",
+          "text": "1. Leaking JPA entities as domain objects"
+        },
+        {
+          "type": "paragraph",
+          "text": "The most frequent failure: skipping the mapper and using @Entity classes as the domain model. It feels DRY, but now your invariants compete with Hibernate's no-arg constructor and setter requirements, lazy-loading proxies leak into business logic, and a LazyInitializationException can be thrown from deep inside a domain method when the session is closed. Incident: a team's nightly batch job NPE'd because a domain method walked a relationship that was lazy and detached — a bug that is structurally impossible when the domain holds plain objects mapped at the boundary."
+        },
+        {
+          "type": "heading",
+          "text": "2. Outbound ports that leak technology"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Port method returns Page<UserEntity> (Spring Data) instead of a domain List<User> plus a PageInfo value object.",
+            "Port method takes a Specification<T> or a Pageable — now the core depends on Spring Data semantics.",
+            "Kafka adapter exposes ConsumerRecord<K,V> to the use case instead of a translated domain command."
+          ]
+        },
+        {
+          "type": "heading",
+          "text": "3. Business logic in the controller or repository"
+        },
+        {
+          "type": "paragraph",
+          "text": "Validation rules drift into controllers and queries grow business conditions ('WHERE status = ACTIVE AND balance > 0' encoding a rule). When a second inbound adapter (a Kafka listener) is added, the rule isn't applied because it lived in the REST controller. Result: the same operation behaves differently depending on how it was triggered — a classic consistency bug."
+        },
+        {
+          "type": "heading",
+          "text": "4. The 'fat service' anti-pattern"
+        },
+        {
+          "type": "paragraph",
+          "text": "A single @Service grows to orchestrate, validate, map DTOs, build SQL, call three HTTP clients, and publish events — all in one 600-line class with @Autowired fields. It is impossible to unit test without booting Spring and mocking ten collaborators. This is precisely the smell hexagonal architecture cures, and it is the subject of the refactoring challenge below."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Incident pattern: 'we can't write a unit test without Testcontainers'. If testing one business rule requires a real database, the rule is entangled with infrastructure. That coupling is the bug; the missing test is just the symptom."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Package by feature and direction, not by layer. Prefer com.app.account.domain / account.application / account.adapter.in.web / account.adapter.out.persistence over global controller/service/repository folders. This makes the dependency direction visible in the package structure.",
+            "Enforce the dependency rule mechanically. Use ArchUnit or Spring Modulith to fail the build if the domain imports anything from adapters, Spring, or javax.persistence.",
+            "Always map at the boundary. Domain objects in, DTOs out at inbound adapters; domain objects in, persistence entities out at outbound adapters. Pay the mapping tax — it buys independence.",
+            "Name ports by intent, not technology. SendNotificationPort, not EmailServicePort; LoadAccountPort, not AccountJpaRepository.",
+            "Keep one inbound port per use case (or a small cohesive group). A SendMoneyUseCase with one method beats a god-interface AccountService with twenty.",
+            "Test pyramid by ring: thousands of fast domain/use-case unit tests with in-memory fakes; a thin layer of adapter integration tests (Testcontainers for the JPA adapter, WireMock for HTTP adapters); a handful of end-to-end tests.",
+            "Put the wiring in a composition root (Spring @Configuration). Constructors take ports; the framework only appears where beans are assembled.",
+            "Don't over-apply it. For a pure CRUD proxy with no behavior, a thin layered design is fine. Reserve the full hexagon for domains with real rules and long lifetimes."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A practical litmus test for any class: could you move it to a brand-new project that uses a different web framework and a different database without changing a single line? If yes, it belongs inside the hexagon. If no, it's an adapter."
+        }
+      ]
+    },
+    {
+      "id": "note-relationship",
+      "heading": "Note: Hexagonal vs DDD, CQRS, and Microservices",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Hexagonal architecture is orthogonal to but synergistic with these. DDD gives you the inside (entities, value objects, aggregates, domain services); hexagonal gives you the boundary discipline that keeps that model pure. CQRS often splits inbound ports into command and query interfaces, and may let the query side bypass the domain for read performance. In microservices, each service is its own hexagon, and inter-service calls are just more outbound ports (an HTTP/gRPC adapter). None of these replace hexagonal — they compose with it."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "layers-ascii",
+      "title": "Concentric Rings: Dependencies Point Inward",
+      "type": "ascii",
+      "content": "+-------------------------------------------------------------+\n|  ADAPTERS (frameworks, I/O)                                 |\n|   REST Controller   Kafka Listener   JPA Repo   HTTP Client |\n|        |                  |             ^           ^        |\n|        v                  v             |           |        |\n|  +-------------------------------------------------------+   |\n|  |  PORTS                                                |   |\n|  |   Inbound (driving)        Outbound (driven)          |   |\n|  |   TransferMoneyUseCase     LoadAccountPort            |   |\n|  |   PlaceOrderUseCase        PaymentGatewayPort         |   |\n|  |  +-------------------------------------------------+  |   |\n|  |  |  APPLICATION  (use cases / app services)        |  |   |\n|  |  |   TransferMoneyService  -> orchestrates +       |  |   |\n|  |  |   owns the transaction boundary                 |  |   |\n|  |  |  +-------------------------------------------+  |  |   |\n|  |  |  |  DOMAIN (entities, value objects,         |  |  |   |\n|  |  |  |  domain services) - invariants live here  |  |  |   |\n|  |  |  |  Account.withdraw() enforces the rule     |  |  |   |\n|  |  |  +-------------------------------------------+  |  |   |\n|  |  +-------------------------------------------------+  |   |\n|  +-------------------------------------------------------+   |\n+-------------------------------------------------------------+\n   Dependency rule: arrows of SOURCE dependency point INWARD.\n   Domain depends on nothing. Adapters depend on ports + domain."
+    },
+    {
+      "id": "request-flow-mermaid",
+      "title": "Request Flow Through Ports and Adapters",
+      "type": "mermaid",
+      "content": "flowchart TD\n    Client[REST Client] --> Ctrl[TransferController inbound adapter]\n    Ctrl -->|TransferCommand| InPort[TransferMoneyUseCase inbound port]\n    InPort --> Svc[TransferMoneyService application service]\n    Svc -->|enforces invariants| Domain[Account domain entity]\n    Svc -->|load and save| OutPort[LoadAccountPort and SaveAccountPort]\n    OutPort --> PAdapter[AccountPersistenceAdapter outbound adapter]\n    PAdapter --> DB[(Postgres)]\n    Svc -->|publish| EvtPort[AccountEventPublisher outbound port]\n    EvtPort --> KAdapter[KafkaEventAdapter]\n    KAdapter --> Kafka[[Kafka]]"
+    },
+    {
+      "id": "test-strategy-mermaid",
+      "title": "Test Strategy Aligned to the Rings",
+      "type": "mermaid",
+      "content": "graph LR\n    A[Domain unit tests] -->|pure, milliseconds| B[Use-case tests with in-memory fakes]\n    B -->|no Spring, no DB| C[Adapter integration tests]\n    C -->|Testcontainers and WireMock| D[End-to-end tests]\n    D -->|few, slow, full stack| E[Confidence]"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-what-is-hexagonal",
+      "question": "What is Hexagonal Architecture and what problem does it solve?",
+      "answer": "Hexagonal (Ports & Adapters) is a structural pattern that isolates the application core (domain + use cases) from the technologies that drive it (UI, REST, messaging) and the technologies it drives (databases, external services). The core defines interfaces called ports; concrete technology lives in adapters that plug into those ports. The problem it solves is coupling business logic to frameworks and infrastructure, which destroys testability and makes technology changes ripple through the whole codebase. With a clean boundary, you test business rules in milliseconds with in-memory fakes and swap a database or transport by writing a new adapter.",
+      "difficulty": "junior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["fundamentals", "ports-and-adapters"],
+      "followUps": ["How is it different from a traditional layered architecture?", "What is the dependency rule?"]
+    },
+    {
+      "id": "q-inbound-vs-outbound",
+      "question": "Explain the difference between inbound (driving) and outbound (driven) ports, including who implements each.",
+      "answer": "Both ports are interfaces defined by the application core. An inbound port (e.g. TransferMoneyUseCase) is the API the outside world uses to drive the application; it is implemented by the core (an application service) and called by an inbound adapter such as a REST controller. An outbound port (e.g. LoadAccountPort, PaymentGatewayPort) is the SPI the core needs the outside to fulfill; it is implemented by an outbound adapter (a JPA repository, an HTTP client) and called by the core. The asymmetry of who implements is the key: for inbound ports the core implements, for outbound ports the adapter implements. Outbound ports are what make Dependency Inversion work, flipping the compile-time dependency so infrastructure depends on the core.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["ports", "dependency-inversion"],
+      "followUps": ["Why must outbound ports return domain types rather than entities?", "Give an example of each from a real service."]
+    },
+    {
+      "id": "q-validation-location",
+      "question": "Where should validation happen in a hexagonal architecture?",
+      "answer": "It depends on the kind of validation. Syntactic/input validation (required fields, value ranges, ISO currency codes) belongs at the inbound adapter, rejected with a 400 before reaching the core — this is technology-specific (Bean Validation, JSON schema). Domain invariants and business rules (a withdrawal cannot exceed the balance, an order cannot be confirmed twice) belong inside the domain model, enforced in entity constructors and methods, because they must hold regardless of which adapter triggered the operation. Validation that needs loaded state (does this account exist, is the caller authorized) belongs in the application service, since it requires outbound ports. Putting domain invariants only in the controller is a classic bug: a second inbound adapter would bypass them.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["validation", "domain-model"],
+      "followUps": ["What is an anemic domain model and why is it a smell here?", "How do you avoid duplicating validation between adapter and domain?"]
+    },
+    {
+      "id": "q-transaction-boundary",
+      "question": "Where should the transaction boundary live, and why not the controller or the domain?",
+      "answer": "The transaction boundary belongs at the application/use-case layer, because a use-case method represents exactly one atomic business operation — the natural unit of work. The controller is too coarse and would couple HTTP request scope to database transactions, and it can't express that two adapters (REST and Kafka) share the same transactional semantics. The domain must stay ignorant of transactions entirely, since transactions are an infrastructure concern. In Spring this is @Transactional on the application service method. Purists go further and inject a TransactionPort or wrap the use case in a transactional decorator to keep even that annotation out of the core, but most teams accept @Transactional on the service as a pragmatic compromise.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["transactions", "use-cases"],
+      "followUps": ["How would you keep @Transactional out of the core entirely?", "How do transactions interact with publishing domain events?"]
+    },
+    {
+      "id": "q-why-not-frameworks",
+      "question": "Why must business logic not depend on frameworks?",
+      "answer": "Three reasons. Testability: framework-free logic is tested in milliseconds with plain objects and in-memory fakes, with no Spring context or database to boot, enabling thousands of fast business-rule tests. Replaceability: when logic doesn't import a framework, you can swap Hibernate for jOOQ or REST for gRPC by writing a new adapter without touching rules. Longevity: frameworks churn (Spring 5 to 6, javax to jakarta) far faster than business rules change, so coupling them forces costly migrations across logic that should have been stable. The mechanism is the dependency rule — source dependencies point inward — enforced via outbound ports so infrastructure depends on the core, never the reverse.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["testability", "decoupling"],
+      "followUps": ["How do you enforce this rule mechanically?", "What's the cost of this decoupling?"]
+    },
+    {
+      "id": "q-vs-clean-onion",
+      "question": "How does Hexagonal Architecture relate to Clean Architecture and Onion Architecture?",
+      "answer": "All three are formulations of the same principle: the dependency rule, where source-code dependencies point toward a framework-independent core, achieved via dependency inversion at the boundaries. Hexagonal (Cockburn) emphasizes the symmetry of ports and adapters and a single application boundary with many ports. Onion (Palermo) draws concentric layers — domain model, domain services, application services, infrastructure — with dependencies pointing inward. Clean Architecture (Martin) adds named rings (entities, use cases, interface adapters, frameworks) and the explicit rule that crossing a boundary inward requires inverting the dependency. They differ in vocabulary and diagram shape, not in substance; if you understand ports & adapters you understand all three.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["clean-architecture", "onion", "comparison"],
+      "followUps": ["Where does DDD fit in?", "Does CQRS change the picture?"]
+    },
+    {
+      "id": "q-enforce-mechanically",
+      "question": "How do you mechanically prevent the domain from depending on frameworks over time?",
+      "answer": "Convention alone erodes, so enforce it in the build. Use ArchUnit to write tests asserting that the domain package imports nothing from org.springframework, jakarta.persistence, or the adapter packages, and that adapters may depend on ports but not vice versa. Spring Modulith can verify module boundaries similarly. Package by feature and direction (domain / application / adapter.in / adapter.out) so violations are visible. You can also split into separate Gradle/Maven modules where the domain module simply has no framework dependencies on its classpath, making a violation a compile error rather than a runtime test failure. The strongest setups combine module separation with an ArchUnit gate in CI.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["archunit", "enforcement", "modularity"],
+      "followUps": ["Show an ArchUnit rule for this.", "What are the trade-offs of multi-module vs single-module?"]
+    },
+    {
+      "id": "q-when-not-to-use",
+      "question": "When would you NOT use hexagonal architecture?",
+      "answer": "When the service has no real domain behavior. For a thin CRUD proxy that maps HTTP requests directly to database rows with no invariants, the ports, mappers, and DTO/domain duplication add indirection without payoff — a simple layered design or even an active-record style is more honest. It's also questionable for short-lived prototypes where you'll throw the code away before any technology migration could matter. The cost of hexagonal is real: extra interfaces, mapping at every boundary, and more files. Apply it where the domain has genuine, evolving business rules and the system is expected to live for years and outlast its current frameworks. Senior judgment is knowing it's a tool with a cost, not a default for everything.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["trade-offs", "pragmatism"],
+      "followUps": ["How do you incrementally adopt it in a legacy system?", "What's the minimum viable version of it?"]
+    },
+    {
+      "id": "q-tricky-jpa-entity-as-domain",
+      "question": "A teammate argues you should use the JPA @Entity class directly as your domain model to avoid mapping boilerplate. What subtle problems will this cause?",
+      "answer": "It conflates a persistence concern with the domain and creates several footguns. (1) Hibernate requires a no-arg constructor and mutable fields, which fights the domain's need for invariant-protecting constructors and immutability. (2) Lazy-loading proxies leak into business logic: calling a domain method that walks a lazy association on a detached entity throws LazyInitializationException from deep inside business code, and the failure depends on whether a session happens to be open. (3) Hibernate may return a proxy subclass, breaking equals/instanceof and final classes. (4) Dirty checking can persist domain changes you never explicitly saved, creating spooky-action writes. (5) The domain now can't be reused without a JPA classpath. The boilerplate of a mapper is the price for making all of these structurally impossible.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["jpa", "hibernate", "footgun", "lazy-loading"],
+      "followUps": ["How does dirty checking cause unexpected writes?", "What if you use records for the domain and entities for persistence?"]
+    },
+    {
+      "id": "q-tricky-self-injection-tx",
+      "question": "An application service calls another @Transactional method on itself (this.otherMethod()) expecting a new transaction. Why might the transaction settings be silently ignored, and how does this relate to adapters?",
+      "answer": "Spring's @Transactional works via a proxy that wraps the bean. When you call this.otherMethod(), you invoke the raw object directly, bypassing the proxy, so the transactional advice never runs — Propagation.REQUIRES_NEW or even the transaction itself is silently ignored. This is the classic self-invocation gotcha. It connects to hexagonal/adapter thinking because the cleanest fix is structural: the proxy/AOP machinery is a framework concern, so transaction demarcation ideally lives in a thin infrastructure wrapper (a decorator implementing the inbound port) rather than being threaded through self-calls inside the core. Alternative fixes are injecting the bean into itself, splitting the second method into its own bean, or using TransactionTemplate explicitly. The deeper lesson: relying on invisible proxy behavior inside your core logic is exactly the kind of framework coupling hexagonal architecture pushes to the edges.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["spring", "proxy", "transactions", "self-invocation"],
+      "followUps": ["Why doesn't @Async work on self-calls either?", "How would a transactional decorator on the inbound port look?"]
+    },
+    {
+      "id": "q-tricky-port-direction",
+      "question": "You need your service to call an external fraud-check API. A junior puts the FraudCheckPort interface in the adapter package next to the HTTP client. Why is this subtly wrong?",
+      "answer": "An outbound port must be owned by the core, not the adapter, otherwise the dependency arrow points the wrong way and the whole point is lost. If FraudCheckPort lives in the adapter package, then the application service must import the adapter package to reference the interface, so the core depends on infrastructure — the opposite of the dependency rule. The correct placement is the interface in the core (e.g. application.port.out.FraudCheckPort) and the HTTP implementation in the adapter (adapter.out.fraud.HttpFraudCheckAdapter implements FraudCheckPort). The mnemonic: the core declares what it needs; the outside supplies how. Ownership of the interface, not just its existence, is what inverts the dependency.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["dependency-inversion", "ports", "footgun"],
+      "followUps": ["How does package-by-feature make this mistake obvious?", "What would ArchUnit catch here?"]
+    },
+    {
+      "id": "q-tricky-event-tx-consistency",
+      "question": "Your use case saves an order to Postgres and then publishes an OrderPlaced event to Kafka via an outbound port. Both are in the @Transactional method. What consistency problem lurks, and how do you fix it?",
+      "answer": "The database commit and the Kafka publish are not atomic — they are two separate systems with no shared transaction. If you publish inside the transaction and the DB commit then fails, you've emitted an event for an order that doesn't exist. If you publish after commit and the process crashes in between, the order exists but no event was sent. This dual-write problem is a dropped or phantom event. The standard fix is the Transactional Outbox pattern: within the same DB transaction, write the event row to an outbox table; a separate relay process (or Debezium CDC) reads the outbox and publishes to Kafka with at-least-once delivery, making the event effectively atomic with the order. In hexagonal terms the use case calls an outbound EventPublisherPort whose adapter writes to the outbox, keeping the core unaware of the outbox mechanics.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["dual-write", "outbox", "kafka", "consistency"],
+      "followUps": ["How does the outbox achieve idempotent consumption downstream?", "Why is publishing before commit even worse than after?"]
+    },
+    {
+      "id": "q-domain-service-vs-app-service",
+      "question": "What's the difference between a domain service and an application service?",
+      "answer": "An application service (use case) is an orchestrator: it lives in the application ring, depends on outbound ports, manages the transaction boundary, loads and saves aggregates, and coordinates a user intent end to end. It contains no business rules itself — it delegates them to the domain. A domain service lives inside the domain ring and contains business logic that doesn't naturally belong to a single entity or value object — for example a TransferPolicy that needs two accounts, or a pricing calculation spanning several domain objects. A domain service is pure: no ports, no transactions, no I/O, just domain types in and out. The smell to avoid is business rules in the application service (which makes it a fat orchestrator) or orchestration/I/O in the domain service (which pollutes the pure core).",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["domain-service", "application-service", "ddd"],
+      "followUps": ["Give an example where a domain service is justified.", "Can a domain service call an outbound port?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-refactor-fat-service",
+      "title": "Refactor a Fat Spring @Service into Ports & Adapters",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "prompt": "You inherit this OrderService. It is a controller-less god class: it autowires a JPA repository and a REST client, validates, applies the business rule (orders over 10000 require approval), persists, and calls a payment provider — all in one method that imports Spring and JPA throughout. Refactor it into a hexagonal design: define an inbound port for the use case, outbound ports for persistence and payment, a framework-free domain Order that owns its invariant, an application service that orchestrates and owns the transaction boundary, and outbound adapters that implement the ports. Show how the use case becomes unit-testable without Spring or a database.",
+      "hints": [
+        "Identify the actors: who drives this (inbound) and what does it drive (outbound)? Each driven dependency becomes an outbound port owned by the core.",
+        "Move the 'orders over 10000 require approval' rule INTO the domain Order, not the service. The service should read like prose and contain no if-statements about money thresholds.",
+        "The outbound ports must return/accept domain types (Order), never JPA entities. Put a mapper inside the persistence adapter.",
+        "Put @Transactional on the application service method (the use-case boundary), not on a controller and not on the domain.",
+        "Prove decoupling by writing a unit test that supplies HashMap-backed and stub implementations of the outbound ports — no Spring context."
+      ],
+      "solutionCode": "// ===== BEFORE: the fat service (anti-pattern) =====\n// @Service\n// class OrderService {\n//   @Autowired OrderJpaRepository repo;\n//   @Autowired PaymentRestClient payments;\n//   @Transactional\n//   public OrderEntity place(OrderRequest req) {\n//     if (req.getItems().isEmpty()) throw new RuntimeException(\"no items\");\n//     OrderEntity e = new OrderEntity();\n//     e.setTotal(req.total());\n//     if (req.total() > 10000) e.setStatus(\"PENDING_APPROVAL\");\n//     else e.setStatus(\"CONFIRMED\");\n//     repo.save(e);\n//     payments.charge(e.getId(), req.total());\n//     return e;\n//   }\n// }\n\n// ===== AFTER: ports & adapters =====\n\n// --- domain (no framework imports) ---\npublic final class Order {\n    private final OrderId id;\n    private final Money total;\n    private OrderStatus status;\n\n    private Order(OrderId id, Money total, OrderStatus status) {\n        this.id = id; this.total = total; this.status = status;\n    }\n\n    // Factory enforces the invariant: the rule lives WITH the data.\n    public static Order place(OrderId id, List<LineItem> items) {\n        if (items.isEmpty()) throw new DomainException(\"Order must have items\");\n        Money total = items.stream().map(LineItem::subtotal)\n            .reduce(Money.ZERO, Money::plus);\n        OrderStatus status = total.isGreaterThan(Money.of(10_000))\n            ? OrderStatus.PENDING_APPROVAL : OrderStatus.CONFIRMED;\n        return new Order(id, total, status);\n    }\n\n    public boolean requiresPaymentNow() { return status == OrderStatus.CONFIRMED; }\n    public OrderId id() { return id; }\n    public Money total() { return total; }\n    public OrderStatus status() { return status; }\n}\n\n// --- inbound port (defined by core, implemented by core) ---\npublic interface PlaceOrderUseCase {\n    Order place(PlaceOrderCommand cmd);\n}\npublic record PlaceOrderCommand(List<LineItem> items) {}\n\n// --- outbound ports (defined by core, implemented by adapters) ---\npublic interface SaveOrderPort { void save(Order order); }\npublic interface ChargePaymentPort { void charge(OrderId id, Money amount); }\npublic interface OrderIdGenerator { OrderId next(); }\n\n// --- application service (orchestrates, owns the transaction) ---\npublic class PlaceOrderService implements PlaceOrderUseCase {\n    private final SaveOrderPort saveOrder;\n    private final ChargePaymentPort chargePayment;\n    private final OrderIdGenerator ids;\n\n    public PlaceOrderService(SaveOrderPort saveOrder,\n                             ChargePaymentPort chargePayment,\n                             OrderIdGenerator ids) {\n        this.saveOrder = saveOrder;\n        this.chargePayment = chargePayment;\n        this.ids = ids;\n    }\n\n    @Override\n    @org.springframework.transaction.annotation.Transactional\n    public Order place(PlaceOrderCommand cmd) {\n        Order order = Order.place(ids.next(), cmd.items()); // domain decides status\n        saveOrder.save(order);\n        if (order.requiresPaymentNow()) {\n            chargePayment.charge(order.id(), order.total());\n        }\n        return order;\n    }\n}\n\n// --- inbound adapter ---\n@org.springframework.web.bind.annotation.RestController\nclass OrderController {\n    private final PlaceOrderUseCase placeOrder;\n    OrderController(PlaceOrderUseCase placeOrder) { this.placeOrder = placeOrder; }\n\n    @org.springframework.web.bind.annotation.PostMapping(\"/orders\")\n    OrderResponse create(@jakarta.validation.Valid @org.springframework.web.bind.annotation.RequestBody PlaceOrderRequest req) {\n        Order order = placeOrder.place(new PlaceOrderCommand(req.toLineItems()));\n        return OrderResponse.from(order);\n    }\n}\n\n// --- outbound adapter ---\n@org.springframework.stereotype.Component\nclass OrderPersistenceAdapter implements SaveOrderPort {\n    private final OrderJpaRepository repo;\n    private final OrderMapper mapper;\n    OrderPersistenceAdapter(OrderJpaRepository repo, OrderMapper mapper) {\n        this.repo = repo; this.mapper = mapper;\n    }\n    @Override public void save(Order order) { repo.save(mapper.toEntity(order)); }\n}\n\n// --- unit test: NO Spring, NO database ---\nclass PlaceOrderServiceTest {\n    @org.junit.jupiter.api.Test\n    void largeOrderIsPendingAndNotCharged() {\n        var saved = new java.util.ArrayList<Order>();\n        var charged = new java.util.ArrayList<Money>();\n        var service = new PlaceOrderService(\n            saved::add,                              // SaveOrderPort fake\n            (id, amt) -> charged.add(amt),           // ChargePaymentPort fake\n            () -> new OrderId(\"O-1\"));               // id generator stub\n\n        Order result = service.place(new PlaceOrderCommand(\n            List.of(new LineItem(\"item\", Money.of(20_000)))));\n\n        org.junit.jupiter.api.Assertions.assertEquals(\n            OrderStatus.PENDING_APPROVAL, result.status());\n        org.junit.jupiter.api.Assertions.assertTrue(charged.isEmpty()); // not charged\n        org.junit.jupiter.api.Assertions.assertEquals(1, saved.size());\n    }\n}",
+      "solutionLanguage": "java",
+      "explanation": "The refactor separates four concerns the fat service had tangled together. First, the business rule ('orders over 10000 require approval') moves into Order.place(), so the invariant is enforced wherever an order is created and can never be bypassed by a future caller — fixing the consistency bug a second adapter would have caused. Second, the two driven dependencies become outbound ports (SaveOrderPort, ChargePaymentPort) owned by the core; the JPA repository and payment client now implement these in adapters, inverting the dependency so infrastructure points at the core rather than the reverse. Third, the use case becomes an inbound port (PlaceOrderUseCase) so the controller depends on an interface, not a concrete service. Fourth, the transaction boundary sits on the application service method, the correct unit of work. The payoff is visible in the test: because PlaceOrderService depends only on interfaces, the test wires a lambda SaveOrderPort, a lambda ChargePaymentPort, and a stub id generator — no @SpringBootTest, no Testcontainers — and asserts both the status rule and that a pending order is not charged, in microseconds. The Java functional-interface trick (saved::add as SaveOrderPort) shows how cheaply outbound ports can be faked. Note the persistence adapter's mapper keeps the JPA entity entirely out of the domain, so no Hibernate proxy or LazyInitializationException can ever reach business logic.",
+      "relatedTopic": "domain-driven-design"
+    },
+    {
+      "id": "ch-archunit-guard",
+      "title": "Enforce the Dependency Rule with ArchUnit",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "prompt": "Conventions erode. Write ArchUnit tests that fail the build if (1) any class in the domain package imports Spring, JPA/jakarta.persistence, or the adapter packages; (2) outbound ports (application.port.out) are imported by the domain; (3) adapters only access the core through ports, never reaching into application service implementations directly. Assume package layout com.shop.<feature>.domain, com.shop.<feature>.application, com.shop.<feature>.adapter.in, com.shop.<feature>.adapter.out.",
+      "hints": [
+        "ArchUnit's noClasses().that().resideInAPackage(..).should().dependOnClassesThat().resideInAnyPackage(..) expresses 'X must not depend on Y'.",
+        "Use '..domain..' style packages (the .. matches any sub-packages) so the rules survive refactors.",
+        "Run the rules over a JavaClasses import scoped to your base package, ideally as a JUnit 5 test so it runs in CI.",
+        "For the layered check, ArchUnit's layeredArchitecture() DSL is more readable than many individual rules.",
+        "Forbid the domain from depending on org.springframework.. and jakarta.persistence.. explicitly — these are the leaks that hurt most."
+      ],
+      "solutionCode": "import com.tngtech.archunit.core.domain.JavaClasses;\nimport com.tngtech.archunit.core.importer.ClassFileImporter;\nimport com.tngtech.archunit.lang.ArchRule;\nimport org.junit.jupiter.api.BeforeAll;\nimport org.junit.jupiter.api.Test;\n\nimport static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;\nimport static com.tngtech.archunit.library.Architectures.layeredArchitecture;\n\nclass HexagonalArchitectureTest {\n\n    private static JavaClasses classes;\n\n    @BeforeAll\n    static void importClasses() {\n        // Exclude test classes so test fakes don't trip the rules.\n        classes = new ClassFileImporter()\n            .importPackages(\"com.shop\");\n    }\n\n    @Test\n    void domainMustNotDependOnFrameworks() {\n        ArchRule rule = noClasses()\n            .that().resideInAPackage(\"..domain..\")\n            .should().dependOnClassesThat()\n            .resideInAnyPackage(\n                \"org.springframework..\",\n                \"jakarta.persistence..\",\n                \"javax.persistence..\",\n                \"com.fasterxml.jackson..\");\n        rule.check(classes);\n    }\n\n    @Test\n    void domainMustNotDependOnApplicationOrAdapters() {\n        ArchRule rule = noClasses()\n            .that().resideInAPackage(\"..domain..\")\n            .should().dependOnClassesThat()\n            .resideInAnyPackage(\"..application..\", \"..adapter..\");\n        rule.check(classes);\n    }\n\n    @Test\n    void adaptersMustReachCoreOnlyThroughPorts() {\n        // Adapters may use ports + domain, but must not import application\n        // service IMPLEMENTATIONS directly (those live in application.service).\n        ArchRule rule = noClasses()\n            .that().resideInAPackage(\"..adapter..\")\n            .should().dependOnClassesThat()\n            .resideInAPackage(\"..application.service..\");\n        rule.check(classes);\n    }\n\n    @Test\n    void enforceLayering() {\n        ArchRule rule = layeredArchitecture().consideringOnlyDependenciesInLayers()\n            .layer(\"Domain\").definedBy(\"..domain..\")\n            .layer(\"Application\").definedBy(\"..application..\")\n            .layer(\"AdapterIn\").definedBy(\"..adapter.in..\")\n            .layer(\"AdapterOut\").definedBy(\"..adapter.out..\")\n            // Domain is depended on by everyone, depends on no one.\n            .whereLayer(\"Domain\").mayOnlyBeAccessedByLayers(\n                \"Application\", \"AdapterIn\", \"AdapterOut\")\n            // Application is reached by adapters via inbound ports.\n            .whereLayer(\"Application\").mayOnlyBeAccessedByLayers(\n                \"AdapterIn\", \"AdapterOut\")\n            // Adapters are leaves: nobody depends on them.\n            .whereLayer(\"AdapterIn\").mayNotBeAccessedByAnyLayer()\n            .whereLayer(\"AdapterOut\").mayNotBeAccessedByAnyLayer();\n        rule.check(classes);\n    }\n}",
+      "solutionLanguage": "java",
+      "explanation": "These four rules turn the dependency rule from a code-review hope into a build gate. domainMustNotDependOnFrameworks forbids the single most damaging leak — Spring, JPA, or Jackson annotations creeping onto domain classes — by failing if any '..domain..' class references those packages. domainMustNotDependOnApplicationOrAdapters keeps the innermost ring pure: the domain must not even know the application or adapter packages exist, guaranteeing it can be lifted into another project untouched. adaptersMustReachCoreOnlyThroughPorts stops adapters from binding to concrete application services (in '..application.service..'); they should depend on the inbound/outbound port interfaces instead, which preserves substitutability. enforceLayering uses ArchUnit's layered DSL to express the whole topology at once: domain is accessed by all but accesses none, application is accessed only by adapters, and adapters are leaves nobody depends on. The '..package..' wildcard form means the rules survive feature-folder refactors. Running this as a JUnit 5 test wires it straight into CI, so the first time someone autowires a JPA entity into a domain method, the build goes red with a precise violation message naming the offending class and dependency. This is the mechanical enforcement that keeps hexagonal architecture from decaying over years of churn.",
+      "relatedTopic": "clean-architecture"
+    }
+  ],
+  "references": [
+    {"label": "Alistair Cockburn — Hexagonal Architecture (original article)", "url": "https://alistair.cockburn.us/hexagonal-architecture/"},
+    {"label": "Robert C. Martin — The Clean Architecture", "url": "https://blog.cleancoder.com/uncle-bob/2012/08/13/the-clean-architecture.html"},
+    {"label": "Tom Hombergs — Get Your Hands Dirty on Clean Architecture", "url": "https://reflectoring.io/spring-hexagonal/"},
+    {"label": "ArchUnit — Enforcing architecture rules in tests", "url": "https://www.archunit.org/userguide/html/000_Index.html"},
+    {"label": "Spring Modulith reference documentation", "url": "https://docs.spring.io/spring-modulith/reference/"},
+    {"label": "Chris Richardson — Transactional Outbox pattern", "url": "https://microservices.io/patterns/data/transactional-outbox.html"}
+  ]
+}

@@ -1,0 +1,564 @@
+{
+  "id": "javascript",
+  "title": "JavaScript",
+  "category": "Frontend",
+  "subcategory": "Language",
+  "difficulty": "senior",
+  "tags": ["javascript", "event-loop", "closures", "async", "prototypes", "performance"],
+  "description": "A staff-level deep dive into JavaScript's runtime model, async semantics, closures, prototypes, and the subtle footguns that separate senior engineers from the rest.",
+  "estReadMinutes": 28,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "JavaScript is a single-threaded, dynamically typed language built around a concurrency model that surprises almost everyone the first time they hit a race in a UI or a stalled Node.js event loop. To use it at a senior level you must hold three mental models simultaneously: the synchronous call stack, the asynchronous task queues (microtasks vs macrotasks), and the lexical scope chain that closures capture. Get those three right and most 'weird JavaScript' behavior stops being weird."
+        },
+        {
+          "type": "paragraph",
+          "text": "This topic is opinionated and production-focused. We will not just define closures; we will show how a misused closure becomes a memory leak that grows your Node heap until the orchestrator OOM-kills the pod. We will not just say 'await is sugar over promises'; we will trace exactly why a setTimeout(fn, 0) runs after a Promise.resolve().then(fn) even though both look like 'do this soon'."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Throughout, 'the platform' means whatever hosts the JS engine: the browser (HTML event loop) or Node.js (libuv event loop). The language spec defines microtask ordering; the host defines macrotask sources like timers and I/O."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "JavaScript runs the front end of nearly every product on the internet and, via Node.js, a huge share of backends and tooling. Because it is single-threaded, one badly written synchronous loop or one leaked closure does not slow down a request; it freezes the entire UI tab or stalls every concurrent request the Node process is serving. The blast radius of a JS mistake is the whole runtime, not one thread."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Correctness: equality coercion, this binding, and hoisting cause bugs that pass code review because the code 'looks fine'.",
+            "Performance: understanding the event loop is the difference between a 16ms frame budget met and a janky 200ms scroll.",
+            "Reliability: memory leaks from retained closures and detached DOM nodes are the most common cause of long-lived SPA and Node crashes.",
+            "Concurrency: async/await makes concurrency look sequential, which hides ordering and error-propagation bugs unless you understand the underlying promise machinery."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "In interviews, JavaScript questions are rarely about syntax. They are probes for whether you understand the runtime. 'What logs first?' is a question about the event loop, not about console.log."
+        }
+      ]
+    },
+    {
+      "id": "event-loop",
+      "heading": "The Event Loop: Microtasks vs Macrotasks",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "JavaScript executes on a single call stack. When the stack empties, the runtime consults task queues. There are two priority tiers. Macrotasks (a.k.a. 'tasks') include timers (setTimeout, setInterval), I/O callbacks, and UI events. Microtasks include Promise reactions (.then/.catch/.finally callbacks), queueMicrotask, and MutationObserver callbacks."
+        },
+        {
+          "type": "heading",
+          "text": "The golden rule of ordering"
+        },
+        {
+          "type": "paragraph",
+          "text": "After each macrotask completes, the engine drains the ENTIRE microtask queue before rendering or picking up the next macrotask. Microtasks scheduled while draining are also run in the same pass. This is why a chain of promises always finishes before the next setTimeout fires, and why an infinite microtask loop can starve the event loop and freeze the page."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "console.log('1: sync start');\n\nsetTimeout(() => console.log('2: macrotask (timer)'), 0);\n\nPromise.resolve()\n  .then(() => console.log('3: microtask A'))\n  .then(() => console.log('4: microtask B'));\n\nqueueMicrotask(() => console.log('5: microtask C'));\n\nconsole.log('6: sync end');\n\n// Output:\n// 1: sync start\n// 6: sync end\n// 3: microtask A   <- all microtasks drain before the timer\n// 5: microtask C\n// 4: microtask B\n// 2: macrotask (timer)"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "An infinite or unbounded microtask chain (e.g. a recursive queueMicrotask, or a promise that resolves itself in a loop) will starve macrotasks forever: timers never fire, I/O never completes, the UI never paints. This is a real DoS-the-tab footgun."
+        },
+        {
+          "type": "table",
+          "headers": ["Source", "Queue", "Drained when"],
+          "rows": [
+            ["setTimeout / setInterval", "Macrotask", "One per event-loop tick"],
+            ["Promise .then / .catch / .finally", "Microtask", "Entire queue per tick"],
+            ["queueMicrotask", "Microtask", "Entire queue per tick"],
+            ["await continuation", "Microtask", "Entire queue per tick"],
+            ["DOM events / MessageChannel", "Macrotask", "One per event-loop tick"],
+            ["Node: process.nextTick", "Before microtasks", "Drained before promise jobs"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "closures-scope",
+      "heading": "Closures, Scope, and Hoisting",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A closure is a function bundled with a reference to its surrounding lexical environment. The function does not copy variables; it keeps a live reference to the bindings. This is the source of both JavaScript's most elegant patterns (private state, memoization, currying) and its most classic bug (the var loop closure)."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "function createCounter() {\n  let count = 0;                 // private binding, kept alive by the closure\n  return {\n    increment: () => ++count,\n    value: () => count,\n  };\n}\n\nconst c = createCounter();\nc.increment();\nc.increment();\nconsole.log(c.value()); // 2  — `count` is not accessible except through the closure"
+        },
+        {
+          "type": "heading",
+          "text": "Hoisting and the temporal dead zone"
+        },
+        {
+          "type": "paragraph",
+          "text": "var declarations are hoisted to the top of their function scope and initialized to undefined. function declarations are hoisted with their full body. let and const are hoisted too, but NOT initialized — accessing them before the declaration line throws a ReferenceError. That window is the Temporal Dead Zone (TDZ)."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "console.log(hoistedFn());   // 'works' — function declaration fully hoisted\nconsole.log(varX);          // undefined — declaration hoisted, assignment not\n// console.log(letY);       // ReferenceError: Cannot access 'letY' before initialization (TDZ)\n\nvar varX = 1;\nlet letY = 2;\nfunction hoistedFn() { return 'works'; }"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Rule of thumb: default to const, use let only when you must reassign, and never use var in new code. let/const are block-scoped, which makes the classic loop-closure bug disappear (see the tricky questions)."
+        }
+      ]
+    },
+    {
+      "id": "this-binding",
+      "heading": "this Binding and Prototypes",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The value of `this` is determined by HOW a function is called, not where it is defined — with one exception: arrow functions. Arrow functions have no own `this`; they lexically capture `this` from the enclosing scope. There are four call-site rules for regular functions, resolved in this precedence order."
+        },
+        {
+          "type": "list",
+          "items": [
+            "new binding: `new Fn()` — `this` is the freshly created object.",
+            "Explicit binding: `fn.call(obj)`, `fn.apply(obj)`, `fn.bind(obj)` — `this` is `obj`.",
+            "Implicit binding: `obj.fn()` — `this` is `obj` (the object left of the dot).",
+            "Default binding: bare `fn()` — `this` is undefined in strict mode, globalThis otherwise."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "const user = {\n  name: 'Ada',\n  greetLater() {\n    // Arrow captures `this` from greetLater's scope -> user\n    setTimeout(() => console.log(`Hi, ${this.name}`), 0); // 'Hi, Ada'\n  },\n  greetBroken() {\n    // Regular function: called by the timer with default binding\n    setTimeout(function () { console.log(`Hi, ${this.name}`); }, 0); // 'Hi, undefined'\n  },\n};\nuser.greetLater();\nuser.greetBroken();"
+        },
+        {
+          "type": "heading",
+          "text": "Prototypal inheritance"
+        },
+        {
+          "type": "paragraph",
+          "text": "Every object has an internal [[Prototype]] link (exposed as __proto__, set via Object.create or class extends). Property lookups walk this prototype chain until found or until null. `class` syntax is sugar over this same mechanism — methods live on Constructor.prototype, shared by all instances rather than copied per instance."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "function Animal(name) { this.name = name; }\nAnimal.prototype.speak = function () { return `${this.name} makes a sound`; };\n\nfunction Dog(name) { Animal.call(this, name); }      // borrow constructor\nDog.prototype = Object.create(Animal.prototype);      // link the chain\nDog.prototype.constructor = Dog;\nDog.prototype.speak = function () { return `${this.name} barks`; };\n\nconst d = new Dog('Rex');\nconsole.log(d.speak());                 // 'Rex barks' (own prototype)\nconsole.log(d instanceof Animal);       // true (chain walked)"
+        }
+      ]
+    },
+    {
+      "id": "promises-async",
+      "heading": "Promises, async/await, and Generators",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A Promise is a state machine: pending -> fulfilled or pending -> rejected, settled exactly once. `async/await` is syntactic sugar: an async function returns a promise, and each `await` suspends the function, scheduling the continuation as a microtask when the awaited value settles. Generators (`function*` + yield) are the lower-level primitive that made coroutine-style async possible before async/await was standardized."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Concurrency control: run independent work in parallel, not sequentially.\n\n// SLOW: sequential — total time = sum of both\nasync function sequential() {\n  const a = await fetchUser();   // waits\n  const b = await fetchOrders(); // then waits again\n  return { a, b };\n}\n\n// FAST: concurrent — total time = max of both\nasync function concurrent() {\n  const [a, b] = await Promise.all([fetchUser(), fetchOrders()]);\n  return { a, b };\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Promise.all rejects as soon as ANY input rejects (fail-fast) and discards the other results. Use Promise.allSettled when you need every outcome, success or failure, e.g. fanning out to N independent services where partial success is acceptable."
+        },
+        {
+          "type": "heading",
+          "text": "await yields a microtask"
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "async function demo() {\n  console.log('A');\n  await null;            // suspends here; continuation queued as a microtask\n  console.log('C');     // runs after the current sync stack unwinds\n}\nconsole.log('start');\ndemo();\nconsole.log('B');\n// Output: start, A, B, C"
+        },
+        {
+          "type": "paragraph",
+          "text": "Generators give you pull-based iteration and cooperative suspension. They are still the right tool for streaming/lazy sequences and for libraries like Redux-Saga that need to intercept effects between yields."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "function* idGenerator() {\n  let id = 1;\n  while (true) yield id++;     // lazy, infinite, no memory growth\n}\nconst ids = idGenerator();\nconsole.log(ids.next().value); // 1\nconsole.log(ids.next().value); // 2"
+        }
+      ]
+    },
+    {
+      "id": "debounce-throttle-copy",
+      "heading": "Debounce, Throttle, and Copying",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Debounce and throttle are rate-limiters built on closures and timers. Debounce collapses a burst of calls into one trailing call after the burst goes quiet (good for search-as-you-type, resize). Throttle guarantees at most one call per interval (good for scroll, mousemove, analytics)."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "function throttle(fn, intervalMs) {\n  let last = 0;\n  let timer = null;\n  return function (...args) {\n    const now = Date.now();\n    const remaining = intervalMs - (now - last);\n    if (remaining <= 0) {            // enough time passed: fire leading edge\n      clearTimeout(timer); timer = null;\n      last = now;\n      fn.apply(this, args);\n    } else if (!timer) {             // schedule trailing edge\n      timer = setTimeout(() => { last = Date.now(); timer = null; fn.apply(this, args); }, remaining);\n    }\n  };\n}"
+        },
+        {
+          "type": "heading",
+          "text": "Deep vs shallow copy"
+        },
+        {
+          "type": "paragraph",
+          "text": "Spread (`{...obj}`) and Object.assign produce SHALLOW copies: top-level keys are copied, but nested objects/arrays are still shared by reference. Mutating a nested value mutates both copies — a classic source of 'why did my Redux state change' bugs. For a true deep copy, use structuredClone (built-in, handles cycles, Maps, Sets, Dates, typed arrays) rather than the lossy JSON.parse(JSON.stringify(...)) trick."
+        },
+        {
+          "type": "table",
+          "headers": ["Technique", "Depth", "Handles cycles", "Loses", "Notes"],
+          "rows": [
+            ["{...obj} / Object.assign", "Shallow", "n/a", "Nothing (shallow)", "Nested refs shared"],
+            ["JSON.parse(JSON.stringify)", "Deep", "No (throws)", "Functions, undefined, Dates->string, Map/Set", "Avoid in prod"],
+            ["structuredClone(obj)", "Deep", "Yes", "Functions, DOM nodes", "Preferred built-in"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: The Memory Leak That Grew Overnight",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Incident: a Node.js service exposing an in-memory cache started getting OOM-killed by Kubernetes every ~6 hours under steady traffic. RSS climbed linearly. Heap snapshots showed millions of retained closures referencing large response buffers that should have been garbage collected."
+        },
+        {
+          "type": "paragraph",
+          "text": "Root cause: an event listener was registered per request on a long-lived EventEmitter but never removed. Each listener was a closure capturing the request's response object. The emitter held the listeners; the listeners held the responses; nothing could be collected."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// BEFORE — leak: a new closure added on every request, never removed.\nfunction handleRequest(req, res, bus) {\n  const big = buildLargePayload(req); // captured by the closure below\n  bus.on('flush', () => res.write(big)); // listener accumulates forever\n}\n\n// AFTER — bounded: register, then guarantee removal.\nfunction handleRequest(req, res, bus) {\n  const big = buildLargePayload(req);\n  const onFlush = () => res.write(big);\n  bus.on('flush', onFlush);\n  res.on('close', () => bus.off('flush', onFlush)); // detach -> closure & payload collectable\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The bug only appeared in production because traffic was high and the process was long-lived. Local tests with a few requests never retained enough to notice. Always reason about the LIFETIME of objects holding your closures, not just correctness on a single request."
+        },
+        {
+          "type": "paragraph",
+          "text": "Diagnostic workflow: capture two heap snapshots minutes apart with `node --inspect` or `heapdump`, diff them in Chrome DevTools, and sort by 'objects allocated between snapshots'. The retained closures and their (closure) context entries point straight at the offending function."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Sequential awaits where Promise.all would do — turning a 50ms call into 500ms by awaiting in a loop instead of fanning out.",
+            "Forgetting to return/await inside an async function, so errors become unhandled rejections that crash Node (or are silently swallowed).",
+            "Using == instead of ===, hitting coercion: 0 == '' is true, [] == false is true, null == undefined is true but null == 0 is false.",
+            "Mutating shared state from a shallow copy and being surprised when the 'original' changed too.",
+            "Registering timers/listeners/intervals without clearing them, leaking memory and firing on unmounted components.",
+            "Assuming this in a callback refers to the surrounding object — it does not unless you use an arrow function or bind.",
+            "Blocking the event loop with a synchronous CPU loop (e.g. JSON.parse of a 50MB payload), stalling every concurrent request."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Anti-pattern: await inside a for loop -> N round-trips back to back\nasync function loadAll(ids) {\n  const out = [];\n  for (const id of ids) out.push(await fetchItem(id)); // serialized!\n  return out;\n}\n\n// Fix: bounded concurrency (see the promise-pool challenge) or Promise.all for small N\nasync function loadAllFast(ids) {\n  return Promise.all(ids.map(fetchItem));\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Promise.all on an unbounded list (e.g. 10,000 ids) is its own incident: you can exhaust sockets/file handles and get ECONNRESET storms. For large N, limit concurrency with a pool."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Default to const; reach for let only when reassigning; never use var in new code.",
+            "Always use === and !==; reach for == only for the deliberate, documented null/undefined check (x == null).",
+            "Use Promise.all for independent work, Promise.allSettled when partial failure is acceptable, and a concurrency pool for large fan-outs.",
+            "Prefer structuredClone over JSON round-tripping for deep copies; prefer immutable updates over mutation in shared state.",
+            "Treat every setTimeout, setInterval, addEventListener, and emitter.on as something you must eventually clear/remove.",
+            "Use arrow functions to preserve this in callbacks; never rely on the call-site to give you the right this.",
+            "Never block the event loop: offload CPU-heavy work to worker_threads (Node) or Web Workers (browser).",
+            "Always handle promise rejections; set process.on('unhandledRejection') as a safety net, not a strategy."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "A simple heuristic that catches most async bugs in review: 'For each await, ask — does this NEED to wait for the previous one? If not, it belongs in a Promise.all.'"
+        }
+      ]
+    },
+    {
+      "id": "note-tooling",
+      "heading": "Note: Engines, JIT, and Why Micro-benchmarks Lie",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Modern engines (V8, SpiderMonkey, JavaScriptCore) JIT-compile hot functions and aggressively optimize based on observed types. A function that stays monomorphic (always called with the same object shape) is fast; one that goes polymorphic/megamorphic deoptimizes. This is why micro-benchmarks often mislead: the JIT may optimize away dead code, or your benchmark may never warm up. Measure in context with realistic data, and trust profiler flame graphs over hand-written timers."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Keep object shapes stable: initialize all properties in the constructor in the same order, avoid deleting properties, and avoid mixing types in a single property. Hidden classes (shapes) are the basis of V8's property-access speed."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "event-loop-flow",
+      "title": "Event Loop: Macrotask vs Microtask Draining",
+      "type": "mermaid",
+      "content": "flowchart TD\n  A[Call stack empties] --> B[Pick one macrotask]\n  B --> C[Run macrotask to completion]\n  C --> D{Microtask queue empty?}\n  D -- No --> E[Run next microtask]\n  E --> D\n  D -- Yes --> F[Render if needed]\n  F --> A"
+    },
+    {
+      "id": "promise-states",
+      "title": "Promise State Machine",
+      "type": "mermaid",
+      "content": "stateDiagram-v2\n  [*] --> Pending\n  Pending --> Fulfilled: resolve value\n  Pending --> Rejected: reject reason\n  Fulfilled --> [*]\n  Rejected --> [*]"
+    },
+    {
+      "id": "prototype-chain",
+      "title": "Prototype Chain Lookup",
+      "type": "ascii",
+      "content": "  d = new Dog('Rex')\n  +-----------------+      __proto__      +------------------+\n  | d instance      | -----------------> | Dog.prototype    |\n  | name: 'Rex'     |                     | speak: barks     |\n  +-----------------+                     +------------------+\n                                                  |\n                                                  | __proto__\n                                                  v\n                                          +------------------+\n                                          | Animal.prototype |\n                                          | speak: sound     |\n                                          +------------------+\n                                                  |\n                                                  | __proto__\n                                                  v\n                                          +------------------+\n                                          | Object.prototype |\n                                          +------------------+\n                                                  |\n                                                  v\n                                                null"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-var-let-const",
+      "question": "What are the differences between var, let, and const in terms of scope, hoisting, and reassignment?",
+      "answer": "var is function-scoped and hoisted with an undefined initialization, so it can be read before its declaration line (yielding undefined). let and const are block-scoped and hoisted into a Temporal Dead Zone — reading them before the declaration throws a ReferenceError. var and let allow reassignment; const forbids reassignment of the binding (but the referenced object can still be mutated). Senior takeaway: default to const, use let when reassigning, avoid var entirely.",
+      "difficulty": "junior",
+      "category": "scope",
+      "tricky": false,
+      "tags": ["scope", "hoisting", "var-let-const"],
+      "followUps": ["What is the Temporal Dead Zone?", "Does const make an object immutable?"]
+    },
+    {
+      "id": "q-closure-def",
+      "question": "What is a closure and name a real-world use for one?",
+      "answer": "A closure is a function together with a live reference to the lexical environment in which it was defined, so it can access those variables even after the outer function has returned. Real-world uses: private state (module pattern, counters), memoization caches, partial application/currying, and event handlers that need to remember context. The key nuance is 'live reference' — the closure sees the current value of the captured binding, not a snapshot.",
+      "difficulty": "junior",
+      "category": "closures",
+      "tricky": false,
+      "tags": ["closures", "scope"],
+      "followUps": ["How can closures cause memory leaks?", "How would you implement a private counter?"]
+    },
+    {
+      "id": "q-this-rules",
+      "question": "Explain how the value of this is determined for a regular function call.",
+      "answer": "this is set by the call site, resolved in precedence order: (1) new binding — this is the newly constructed object; (2) explicit binding via call/apply/bind; (3) implicit binding — this is the object left of the dot in obj.fn(); (4) default binding — undefined in strict mode, globalThis otherwise. Arrow functions are the exception: they have no own this and lexically capture it from the enclosing scope, which is why they are ideal for callbacks.",
+      "difficulty": "mid",
+      "category": "this-binding",
+      "tricky": false,
+      "tags": ["this", "binding"],
+      "followUps": ["Why does an arrow function ignore call/apply?", "What does this resolve to in a standalone function in strict mode?"]
+    },
+    {
+      "id": "q-microtask-macrotask",
+      "question": "What is the difference between a microtask and a macrotask, and how does the event loop schedule them?",
+      "answer": "Macrotasks (timers, I/O, UI events) are processed one per event-loop tick. Microtasks (promise reactions, queueMicrotask, MutationObserver) are drained completely after each macrotask and before the next macrotask or render. Microtasks scheduled during draining run in the same pass. Consequence: a promise chain always completes before a setTimeout(_, 0) that was scheduled earlier, and an unbounded microtask loop can starve macrotasks and freeze the runtime.",
+      "difficulty": "mid",
+      "category": "event-loop",
+      "tricky": false,
+      "tags": ["event-loop", "microtask", "macrotask"],
+      "followUps": ["Where does process.nextTick fit in Node?", "Can microtasks starve the event loop?"]
+    },
+    {
+      "id": "q-promise-all-vs-settled",
+      "question": "When would you use Promise.all vs Promise.allSettled vs Promise.race?",
+      "answer": "Promise.all resolves when all inputs fulfill and rejects (fail-fast) as soon as any rejects, discarding the rest — use it for independent work where any failure should abort. Promise.allSettled always resolves with an array of {status, value/reason}, so use it when partial success is acceptable (fan-out to N services). Promise.race settles as soon as the first input settles (fulfilled OR rejected) — useful for timeouts. Promise.any resolves on the first fulfillment, ignoring rejections until all fail.",
+      "difficulty": "mid",
+      "category": "promises",
+      "tricky": false,
+      "tags": ["promises", "async", "concurrency"],
+      "followUps": ["How do you implement a timeout with Promise.race?", "What does Promise.all do with a non-promise in the array?"]
+    },
+    {
+      "id": "q-deep-shallow",
+      "question": "What is the difference between a deep and a shallow copy, and how do you make each?",
+      "answer": "A shallow copy duplicates only the top-level properties; nested objects remain shared by reference (spread, Object.assign). A deep copy recursively duplicates everything so the result shares nothing with the original. Make a deep copy with structuredClone, which handles cycles, Maps, Sets, Dates, and typed arrays. Avoid JSON.parse(JSON.stringify(x)) in production: it throws on cycles and silently drops functions, undefined, and converts Dates to strings.",
+      "difficulty": "mid",
+      "category": "objects",
+      "tricky": false,
+      "tags": ["copy", "objects", "immutability"],
+      "followUps": ["Why is JSON round-tripping lossy?", "How does structuredClone handle a circular reference?"]
+    },
+    {
+      "id": "q-debounce-throttle",
+      "question": "What is the difference between debounce and throttle, and when do you use each?",
+      "answer": "Debounce waits until activity stops, then fires once after a quiet period — ideal for search-as-you-type, window resize, or saving a draft. Throttle guarantees at most one call per interval regardless of how many events fire — ideal for scroll handlers, mousemove, and rate-limited analytics. Both are built with closures holding a timer; the difference is debounce resets its timer on every call while throttle ignores calls until the interval elapses.",
+      "difficulty": "mid",
+      "category": "patterns",
+      "tricky": false,
+      "tags": ["debounce", "throttle", "performance"],
+      "followUps": ["How do you add leading and trailing edge options?", "How do you cancel a pending debounced call?"]
+    },
+    {
+      "id": "q-memory-leaks",
+      "question": "What are the most common causes of memory leaks in JavaScript, and how do you diagnose them?",
+      "answer": "Common causes: forgotten timers/intervals, event listeners never removed (especially on long-lived emitters or the global window), closures capturing large objects that outlive their usefulness, detached DOM nodes still referenced by JS, and unbounded caches/Maps. WeakMap/WeakSet help by allowing GC of keys. Diagnose by taking two heap snapshots over time in Chrome DevTools (or node --inspect), diffing them, and sorting by objects allocated between snapshots to find what is retained and the retainer path.",
+      "difficulty": "senior",
+      "category": "memory",
+      "tricky": false,
+      "tags": ["memory", "leaks", "gc"],
+      "followUps": ["How does a WeakMap avoid leaks?", "What is a detached DOM node?"]
+    },
+    {
+      "id": "q-generators-async",
+      "question": "How do generators relate to async/await, and where are generators still the better tool?",
+      "answer": "Generators (function*) provide cooperative suspension via yield, producing values lazily and pull-based. async/await was historically built on the same suspension mechanism (you could implement await by driving a generator that yields promises). Today async/await is the default for asynchronous control flow, but generators remain superior for lazy/infinite sequences without memory growth, custom iteration protocols, and effect-interception libraries like Redux-Saga that need to inspect/mock each yielded effect for testability.",
+      "difficulty": "senior",
+      "category": "generators",
+      "tricky": false,
+      "tags": ["generators", "async", "iterators"],
+      "followUps": ["How would you implement a lazy infinite sequence?", "Why are sagas easier to test than thunks?"]
+    },
+    {
+      "id": "q-event-loop-blocking",
+      "question": "What does it mean to 'block the event loop' in Node.js, and how do you avoid it?",
+      "answer": "Because Node is single-threaded for JS execution, a long synchronous operation (large JSON.parse, a tight CPU loop, synchronous crypto, sync fs calls) prevents the event loop from processing any other callbacks — every concurrent request stalls until it finishes. Avoid it by offloading CPU-bound work to worker_threads or a separate service, chunking large work across ticks, streaming large payloads instead of parsing them whole, and preferring async fs/crypto APIs. Monitor with event-loop-lag metrics; rising lag is the leading indicator.",
+      "difficulty": "senior",
+      "category": "event-loop",
+      "tricky": false,
+      "tags": ["event-loop", "performance", "node"],
+      "followUps": ["How do worker_threads communicate?", "Why is event loop lag a good SLO metric?"]
+    },
+    {
+      "id": "q-tricky-loop-closure",
+      "question": "TRICKY: What does this log, and why? for (var i = 0; i < 3; i++) { setTimeout(() => console.log(i), 0); }",
+      "answer": "It logs 3, 3, 3. With var there is a single function-scoped binding i shared by all three closures. The loop completes synchronously (i becomes 3) before any timer callback runs, so every callback reads the final value 3. Fixes: use let, which creates a fresh block-scoped binding per iteration (logs 0, 1, 2); or capture the value via an IIFE or by passing i as a setTimeout argument. This is the canonical demonstration that closures capture bindings, not values.",
+      "difficulty": "mid",
+      "category": "closures",
+      "tricky": true,
+      "tags": ["closures", "var-let-const", "loops"],
+      "followUps": ["Why does let fix it?", "Rewrite the fix using an IIFE."]
+    },
+    {
+      "id": "q-tricky-ordering",
+      "question": "TRICKY: Predict the order: console.log(1); setTimeout(()=>console.log(2),0); Promise.resolve().then(()=>console.log(3)); console.log(4);",
+      "answer": "Output is 1, 4, 3, 2. Synchronous code runs first: 1 then 4. The promise .then is a microtask; the setTimeout is a macrotask. After the synchronous stack unwinds, the entire microtask queue drains before the next macrotask, so 3 (microtask) prints before 2 (timer). The trap is assuming setTimeout(_, 0) means 'immediately' — it is always after all pending microtasks.",
+      "difficulty": "mid",
+      "category": "event-loop",
+      "tricky": true,
+      "tags": ["event-loop", "promises", "ordering"],
+      "followUps": ["Where would an await fit in this ordering?", "How does process.nextTick change the order in Node?"]
+    },
+    {
+      "id": "q-tricky-coercion",
+      "question": "TRICKY: Explain why [] == ![] is true, and why 0 == '' is true but 0 == null is false.",
+      "answer": "![] is false because [] is truthy, so it becomes []  == false. == coerces booleans to numbers: false -> 0, giving [] == 0. Objects coerce via ToPrimitive: [] becomes '' then Number('') is 0, so 0 == 0 is true. 0 == '' is true for the same reason: '' coerces to 0. But 0 == null is false because the spec has a special rule — null only loosely equals null and undefined, and is NOT coerced to a number when compared to other types. This is why senior engineers use === everywhere and only use x == null deliberately to test 'null or undefined'.",
+      "difficulty": "senior",
+      "category": "coercion",
+      "tricky": true,
+      "tags": ["coercion", "equality", "gotchas"],
+      "followUps": ["What does the abstract equality algorithm do step by step?", "Why is x == null a useful idiom?"]
+    },
+    {
+      "id": "q-tricky-this-method-extract",
+      "question": "TRICKY: const log = obj.method; log(); throws or logs undefined for this. Why, and how do bind/arrow fix it?",
+      "answer": "Extracting obj.method into a bare variable severs the implicit binding. Calling log() uses default binding, so this is undefined in strict mode (throwing on property access) or globalThis otherwise. This is the classic 'lost this' bug when passing methods as callbacks (e.g. setTimeout(obj.method)). Fixes: obj.method.bind(obj) to permanently bind, wrap in an arrow () => obj.method() to preserve the call site, or define the method as a class field arrow function. The subtlety: bind creates a NEW function, so you cannot later removeEventListener the original reference.",
+      "difficulty": "senior",
+      "category": "this-binding",
+      "tricky": true,
+      "tags": ["this", "binding", "gotchas"],
+      "followUps": ["Why can't you removeEventListener a bound function by the original reference?", "What is a class field arrow method's tradeoff?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-debounce",
+      "title": "Implement debounce with cancel and immediate option",
+      "difficulty": "mid",
+      "category": "patterns",
+      "prompt": "Implement debounce(fn, wait, { immediate }) that returns a debounced function. Trailing edge by default: fn runs once after calls stop for `wait` ms, with the latest arguments and correct `this`. If immediate is true, fire on the leading edge instead and suppress until quiet. Expose a .cancel() method to drop any pending invocation.",
+      "hints": [
+        "Use a closure variable to hold the timer id so successive calls can clear and reschedule it.",
+        "Capture this and args from the most recent call by using a regular function (not arrow) and fn.apply.",
+        "For immediate mode, fire when there is no active timer, then set one to gate further calls.",
+        "cancel() should clearTimeout and reset the timer reference to null."
+      ],
+      "solutionCode": "function debounce(fn, wait, { immediate = false } = {}) {\n  let timer = null;\n\n  function debounced(...args) {\n    const callNow = immediate && timer === null;\n\n    clearTimeout(timer);\n    timer = setTimeout(() => {\n      timer = null;\n      if (!immediate) fn.apply(this, args); // trailing edge\n    }, wait);\n\n    if (callNow) fn.apply(this, args);      // leading edge\n  }\n\n  debounced.cancel = () => {\n    clearTimeout(timer);\n    timer = null;\n  };\n\n  return debounced;\n}\n\n// Usage\nconst onSearch = debounce((q) => console.log('search', q), 300);\nonSearch('a'); onSearch('ab'); onSearch('abc'); // -> logs once: 'search abc'",
+      "solutionLanguage": "javascript",
+      "explanation": "The timer variable lives in the closure shared by every invocation, so each call can clear the previously scheduled callback and reschedule. Using a regular function (not an arrow) for `debounced` lets us forward the caller's `this` via fn.apply, which matters when the debounced function is used as a method or DOM handler. For trailing mode, the callback fires fn after `wait` ms of quiet with the last args. For immediate mode, callNow is true only when no timer is active, so the very first call in a burst fires synchronously and subsequent ones are suppressed until the burst ends and the timer clears. cancel() drops any pending call and resets state. Edge cases handled: rapid bursts collapse to one call, `this` is preserved, and there is no leak because the timer is always cleared or allowed to fire.",
+      "relatedTopic": "javascript"
+    },
+    {
+      "id": "ch-promise-pool",
+      "title": "Implement a concurrency-limited promise pool",
+      "difficulty": "senior",
+      "category": "async",
+      "prompt": "Implement asyncPool(limit, items, iteratorFn) that runs iteratorFn(item) over all items but with at most `limit` promises in flight at any time. Resolve with an array of results in the SAME order as items. It must not buffer all promises up front (that would defeat the limit) and must propagate the first rejection.",
+      "hints": [
+        "Keep a set of in-flight promises; when one settles, remove it and start the next item.",
+        "Preserve order by writing each result into results[index], not by push order.",
+        "Use Promise.race over the in-flight set to wait for ANY slot to free up.",
+        "Await the remaining in-flight promises after the loop ends."
+      ],
+      "solutionCode": "async function asyncPool(limit, items, iteratorFn) {\n  const results = new Array(items.length);\n  const executing = new Set();\n\n  for (let i = 0; i < items.length; i++) {\n    const idx = i;\n    const p = Promise.resolve(iteratorFn(items[idx], idx))\n      .then((res) => { results[idx] = res; });\n\n    // Track the promise; remove itself from the in-flight set when settled.\n    const tracked = p.then(() => executing.delete(tracked));\n    executing.add(tracked);\n\n    // Once we hit the limit, wait for the fastest in-flight task to finish.\n    if (executing.size >= limit) {\n      await Promise.race(executing); // rejects fast-fail if any task rejects\n    }\n  }\n\n  await Promise.all(executing); // drain the tail; propagates any late rejection\n  return results;\n}\n\n// Usage: fetch 1000 ids, at most 5 concurrent requests\n// const data = await asyncPool(5, ids, (id) => fetch(`/api/${id}`).then(r => r.json()));",
+      "solutionLanguage": "javascript",
+      "explanation": "The core idea is a bounded set of in-flight promises. We iterate items, start a task for each, and store its result by index so output order matches input order regardless of completion order. The `tracked` promise removes itself from the `executing` set on settle, keeping the set as an accurate count of live work. When the set reaches `limit`, we `await Promise.race(executing)` to block until ANY one task frees a slot before scheduling the next — this is what enforces the concurrency cap without buffering every promise eagerly. Because Promise.race rejects as soon as any racer rejects, and the final Promise.all also rejects on any failure, the first error fast-fails the whole pool (swap in allSettled if you want partial success). This pattern prevents socket/file-handle exhaustion and ECONNRESET storms that a naive Promise.all over thousands of items would cause, while still maximizing throughput up to the limit.",
+      "relatedTopic": "javascript"
+    },
+    {
+      "id": "ch-deep-clone",
+      "title": "Implement a deep clone that handles cycles",
+      "difficulty": "senior",
+      "category": "objects",
+      "prompt": "Implement deepClone(value) that recursively clones plain objects and arrays, preserves Date and RegExp, handles Map and Set, and does NOT infinite-loop on circular references. Functions may be copied by reference. Do not use structuredClone.",
+      "hints": [
+        "Use a WeakMap from original -> clone to detect and reuse already-cloned references (handles cycles and shared subgraphs).",
+        "Handle primitives and functions by returning them directly.",
+        "Special-case Date, RegExp, Map, and Set before the generic object branch.",
+        "Recreate the clone container BEFORE recursing into children, then register it in the WeakMap."
+      ],
+      "solutionCode": "function deepClone(value, seen = new WeakMap()) {\n  // Primitives and functions: return as-is.\n  if (value === null || typeof value !== 'object') return value;\n\n  // Cycle / shared-reference guard.\n  if (seen.has(value)) return seen.get(value);\n\n  if (value instanceof Date) return new Date(value.getTime());\n  if (value instanceof RegExp) return new RegExp(value.source, value.flags);\n\n  if (value instanceof Map) {\n    const out = new Map();\n    seen.set(value, out);\n    for (const [k, v] of value) out.set(deepClone(k, seen), deepClone(v, seen));\n    return out;\n  }\n  if (value instanceof Set) {\n    const out = new Set();\n    seen.set(value, out);\n    for (const v of value) out.add(deepClone(v, seen));\n    return out;\n  }\n\n  const out = Array.isArray(value) ? [] : {};\n  seen.set(value, out); // register BEFORE recursing so cycles resolve\n  for (const key of Reflect.ownKeys(value)) {\n    out[key] = deepClone(value[key], seen);\n  }\n  return out;\n}\n\n// Cycle test\nconst a = { name: 'a' };\na.self = a;\nconst clone = deepClone(a);\nconsole.log(clone.self === clone);   // true — cycle preserved, no stack overflow\nconsole.log(clone !== a);            // true — actually a copy",
+      "solutionLanguage": "javascript",
+      "explanation": "The WeakMap `seen` maps each original reference to its clone. Before recursing into an object's children, we register the freshly created (still empty) container in `seen`. That ordering is what makes cycles work: when recursion reaches a back-reference to an ancestor, `seen.has(value)` is true and we return the existing clone instead of recursing forever. The WeakMap also correctly preserves shared subgraphs (two properties pointing at the same object stay shared in the clone) and avoids redundant work. We special-case Date and RegExp because a generic property copy would not reconstruct them, and Map/Set because their entries live behind an iterator rather than enumerable keys. Using Reflect.ownKeys copies symbol keys and non-enumerable string keys too. Functions and primitives are returned directly. The main thing NOT handled (intentionally, matching structuredClone's own limitations) is cloning class instances back to their exact prototype — the generic branch produces a plain object; preserving the prototype would require Object.create(Object.getPrototypeOf(value)).",
+      "relatedTopic": "javascript"
+    }
+  ],
+  "references": [
+    {"label": "MDN: Event loop", "url": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Execution_model"},
+    {"label": "MDN: Closures", "url": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Closures"},
+    {"label": "MDN: Inheritance and the prototype chain", "url": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Inheritance_and_the_prototype_chain"},
+    {"label": "MDN: structuredClone", "url": "https://developer.mozilla.org/en-US/docs/Web/API/structuredClone"},
+    {"label": "Node.js: The event loop, timers, and process.nextTick", "url": "https://nodejs.org/en/learn/asynchronous-work/event-loop-timers-and-nexttick"},
+    {"label": "Jake Archibald: Tasks, microtasks, queues and schedules", "url": "https://jakearchibald.com/2015/tasks-microtasks-queues-and-schedules/"}
+  ]
+}

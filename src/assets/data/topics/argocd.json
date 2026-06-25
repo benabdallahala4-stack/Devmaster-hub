@@ -1,0 +1,574 @@
+{
+  "id": "argocd",
+  "title": "ArgoCD & GitOps",
+  "category": "DevOps",
+  "subcategory": "GitOps",
+  "difficulty": "mid",
+  "tags": ["argocd", "gitops", "kubernetes", "continuous-delivery", "declarative", "reconciliation"],
+  "description": "Master GitOps with ArgoCD: declarative continuous delivery where Git is the single source of truth and a controller continuously reconciles your cluster toward the desired state.",
+  "estReadMinutes": 28,
+  "sections": [
+    {
+      "id": "introduction",
+      "heading": "Introduction to GitOps and ArgoCD",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "GitOps is an operational model where the desired state of your infrastructure and applications lives in Git, and an automated agent continuously reconciles the running system to match that state. ArgoCD is a Kubernetes-native, CNCF-graduated controller that implements GitOps: it watches Git repositories, compares the declared manifests against what is actually running in the cluster, and converges the two."
+        },
+        {
+          "type": "paragraph",
+          "text": "The mental shift is from push to pull. In a traditional CI/CD pipeline, a CI job runs kubectl apply or helm upgrade against the cluster from outside, holding cluster credentials. In GitOps, the cluster pulls its own desired state. ArgoCD runs inside the cluster, reads from Git, and applies changes itself. Nothing outside the cluster needs production kubectl access."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Declarative: everything (Deployments, Services, ConfigMaps, even ArgoCD's own config) is described as data, not imperative commands.",
+            "Versioned and immutable: Git is the source of truth, so every change is a commit with an author, timestamp, and review history.",
+            "Pulled automatically: an in-cluster agent reconciles the live state toward the declared state, no external push.",
+            "Continuously reconciled: drift is detected and (optionally) corrected automatically."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "ArgoCD reached CNCF Graduated status in 2022 and is one of the two dominant GitOps controllers alongside Flux. The two share the GitOps Toolkit principles defined by the OpenGitOps working group."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why GitOps Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The value of GitOps is not novelty, it is operational discipline that scales. When Git is the only way to change production, you inherit Git's entire ecosystem of governance for free: pull request review, branch protection, signed commits, CODEOWNERS, and a complete audit log."
+        },
+        {
+          "type": "table",
+          "headers": ["Concern", "Imperative push (kubectl/CI)", "GitOps pull (ArgoCD)"],
+          "rows": [
+            ["Audit trail", "Scattered across CI logs and shell history", "Every change is a reviewed Git commit"],
+            ["Rollback", "Re-run an old pipeline or manual kubectl", "git revert the bad commit"],
+            ["Drift", "Invisible until something breaks", "Detected continuously, optionally auto-healed"],
+            ["Prod credentials", "CI holds cluster admin secrets", "No external system needs cluster access"],
+            ["Disaster recovery", "Hope the pipeline is reproducible", "Re-point ArgoCD at Git and resync"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The credential argument is the one senior engineers emphasize most. With push-based CD, your CI system is a privileged actor: anyone who compromises a CI runner or a pipeline secret can reach production. With GitOps, the blast radius shrinks dramatically because the only write path to the cluster is a commit that passed review, and the agent applying it lives inside the trust boundary."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Reproducibility is the killer feature for DR. If a cluster is lost, you bootstrap a new one, install ArgoCD, point it at the same Git repo, and the entire platform reconstructs itself declaratively."
+        }
+      ]
+    },
+    {
+      "id": "core-application-crd",
+      "heading": "Core Concept: The Application CRD",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The fundamental unit in ArgoCD is the Application custom resource. It is a declarative pointer that says: take manifests from this Git source and reconcile them into this destination cluster and namespace, using this sync policy. Because the Application is itself a Kubernetes resource, you can manage ArgoCD applications with ArgoCD (this is the app-of-apps pattern)."
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "code": "apiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: payments-api\n  namespace: argocd\n  finalizers:\n    - resources-finalizer.argocd.argoproj.io\nspec:\n  project: production\n  source:\n    repoURL: https://github.com/acme/k8s-manifests.git\n    targetRevision: main\n    path: apps/payments-api/overlays/prod\n  destination:\n    server: https://kubernetes.default.svc\n    namespace: payments\n  syncPolicy:\n    automated:\n      prune: true       # delete resources removed from Git\n      selfHeal: true    # revert manual cluster changes\n    syncOptions:\n      - CreateNamespace=true\n      - ApplyOutOfSyncOnly=true"
+        },
+        {
+          "type": "list",
+          "items": [
+            "source.targetRevision can be a branch, tag, or commit SHA. Pinning to a tag or SHA gives immutable, reproducible deploys.",
+            "destination can target the local cluster (kubernetes.default.svc) or a remote registered cluster for multi-cluster fan-out.",
+            "The resources-finalizer ensures that deleting the Application cascades to delete the managed resources, not orphan them.",
+            "project scopes which repos, clusters, and namespaces this app is allowed to touch, enforced by AppProject RBAC."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "ArgoCD supports plain YAML, Kustomize, Helm, and Jsonnet sources natively. With Helm, ArgoCD renders the chart with helm template and applies the output, it does NOT use Tiller or helm release state, so helm list on the cluster will show nothing."
+        }
+      ]
+    },
+    {
+      "id": "core-reconciliation",
+      "heading": "Core Concept: Sync, Self-Heal, and Drift Detection",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "ArgoCD runs a reconciliation loop. On an interval (default every 3 minutes) and on webhook events, it renders the desired manifests from Git, fetches the live state from the cluster, and computes a diff. The result is a sync status: Synced, OutOfSync, or Unknown, plus a health status aggregated from the resources."
+        },
+        {
+          "type": "heading",
+          "text": "Sync status vs health status"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Sync status answers: does the live cluster match Git? An OutOfSync app has a difference between desired and actual manifests.",
+            "Health status answers: are the resources working? A Deployment that is Synced can still be Degraded if its pods are crash-looping.",
+            "These are orthogonal. You can be Synced + Degraded (Git is correct but the app is broken) or OutOfSync + Healthy (someone changed something live, app still runs)."
+          ]
+        },
+        {
+          "type": "heading",
+          "text": "Self-heal and prune"
+        },
+        {
+          "type": "paragraph",
+          "text": "With automated sync, ArgoCD applies changes from Git automatically. selfHeal: true makes ArgoCD also revert out-of-band changes, if someone runs kubectl scale on a managed Deployment, ArgoCD detects the drift and re-applies the Git-declared replica count. prune: true makes ArgoCD delete resources that were removed from Git. Without prune, deleting a manifest leaves the resource orphaned in the cluster."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "# Inspect what ArgoCD thinks is different\nargocd app diff payments-api\n\n# Manually trigger a sync (when not using automated)\nargocd app sync payments-api\n\n# Sync only specific resources\nargocd app sync payments-api --resource apps:Deployment:payments-api\n\n# See the live vs desired manifest for one resource\nargocd app manifests payments-api --source live"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "selfHeal does NOT poll instantly. The detection interval and a built-in debounce mean a manual change can persist for up to a few minutes before being reverted. Do not rely on selfHeal as a real-time security control."
+        }
+      ]
+    },
+    {
+      "id": "core-sync-waves-hooks",
+      "heading": "Core Concept: Sync Waves and Resource Hooks",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A single sync often needs ordering: run a database migration before the new app pods start, create a CRD before the custom resources that use it, or run a smoke test after everything is up. ArgoCD provides sync waves and resource hooks for this orchestration."
+        },
+        {
+          "type": "heading",
+          "text": "Sync waves"
+        },
+        {
+          "type": "paragraph",
+          "text": "Annotate resources with argocd.argoproj.io/sync-wave: \"<integer>\". ArgoCD applies resources in ascending wave order, waiting for each wave to become healthy before starting the next. Resources without the annotation default to wave 0. Negative waves run first, which is useful for prerequisites like Namespaces and CRDs."
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "code": "# Wave -1: install the CRD first\napiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: queues.messaging.acme.io\n  annotations:\n    argocd.argoproj.io/sync-wave: \"-1\"\n---\n# Wave 0 (default): the application that creates Queue resources\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: worker\n  annotations:\n    argocd.argoproj.io/sync-wave: \"0\""
+        },
+        {
+          "type": "heading",
+          "text": "Resource hooks"
+        },
+        {
+          "type": "paragraph",
+          "text": "Hooks are resources (usually Jobs) that run at a specific phase of the sync. PreSync runs before the main manifests, Sync runs alongside them, PostSync runs after everything is healthy, and SyncFail runs if the sync fails. Combined with hook-delete-policy, you control cleanup."
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "code": "apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: db-migrate\n  annotations:\n    argocd.argoproj.io/hook: PreSync\n    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation\nspec:\n  backoffLimit: 2\n  template:\n    spec:\n      restartPolicy: Never\n      containers:\n        - name: migrate\n          image: registry.acme.io/payments-api:v2.4.1\n          command: [\"./manage\", \"db\", \"migrate\", \"--no-input\"]"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Sync waves and hooks compose: PreSync hooks run before wave 0, and you can also assign sync-wave annotations to hooks to order multiple hooks within the same phase."
+        }
+      ]
+    },
+    {
+      "id": "core-app-of-apps",
+      "heading": "Core Concept: App-of-Apps and ApplicationSets",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Managing dozens of Applications by hand does not scale. The app-of-apps pattern uses a single root Application whose Git path contains other Application manifests. ArgoCD reconciles the root, which creates the children, which create the workloads. This gives you one bootstrap entry point for an entire cluster."
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "code": "apiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: root\n  namespace: argocd\nspec:\n  project: default\n  source:\n    repoURL: https://github.com/acme/platform.git\n    targetRevision: main\n    path: clusters/prod/apps   # this directory holds Application YAMLs\n  destination:\n    server: https://kubernetes.default.svc\n    namespace: argocd\n  syncPolicy:\n    automated:\n      prune: true\n      selfHeal: true"
+        },
+        {
+          "type": "paragraph",
+          "text": "For dynamic, templated fan-out, ApplicationSet is the more powerful successor. It uses generators (list, git directory, cluster, pull request, matrix) to template many Applications from one definition, for example one app per cluster or one preview environment per open pull request."
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "code": "apiVersion: argoproj.io/v1alpha1\nkind: ApplicationSet\nmetadata:\n  name: tenant-apps\n  namespace: argocd\nspec:\n  generators:\n    - git:\n        repoURL: https://github.com/acme/tenants.git\n        revision: main\n        directories:\n          - path: tenants/*\n  template:\n    metadata:\n      name: '{{path.basename}}'\n    spec:\n      project: default\n      source:\n        repoURL: https://github.com/acme/tenants.git\n        targetRevision: main\n        path: '{{path}}'\n      destination:\n        server: https://kubernetes.default.svc\n        namespace: '{{path.basename}}'\n      syncPolicy:\n        automated: { prune: true, selfHeal: true }"
+        }
+      ]
+    },
+    {
+      "id": "core-rollback",
+      "heading": "Core Concept: Rollback by Git Revert",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Because Git is the source of truth, the canonical rollback is git revert. You revert the offending commit, push, and ArgoCD reconciles the cluster back to the previous good state. The rollback itself becomes an auditable commit, no special tooling, no out-of-band kubectl."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "# Production is broken after deploying v2.4.1. Find the commit:\ngit log --oneline apps/payments-api/overlays/prod\n# a1b2c3d bump payments-api to v2.4.1   <- bad\n# 9f8e7d6 bump payments-api to v2.4.0\n\n# Revert it (creates a NEW commit that undoes the change)\ngit revert a1b2c3d\ngit push origin main\n# ArgoCD detects OutOfSync within seconds (webhook) and syncs back to v2.4.0"
+        },
+        {
+          "type": "paragraph",
+          "text": "ArgoCD also keeps a deployment history (revisionHistoryLimit) and offers argocd app rollback to a previous synced revision. This is faster in an emergency but it creates an OutOfSync state versus Git, your live cluster now disagrees with main. Treat argocd app rollback as a break-glass action and follow it with a real git revert to restore the invariant that Git equals live."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "If automated selfHeal is on and you use argocd app rollback, ArgoCD will immediately re-sync back to the broken Git state. Always fix Git, not just the cluster."
+        }
+      ]
+    },
+    {
+      "id": "example-production-incident",
+      "heading": "Production Example: A Helm Values Drift Incident",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Scenario: a fintech platform runs ArgoCD across three clusters. During a Black Friday load spike, an on-call engineer manually scaled the checkout Deployment from 6 to 24 replicas with kubectl to absorb traffic. The app had automated sync with selfHeal: true. Within four minutes ArgoCD detected the drift, saw Git still declared 6 replicas, and scaled it back down, dropping capacity mid-spike and causing elevated p99 latency and a partial outage."
+        },
+        {
+          "type": "paragraph",
+          "text": "Root cause: the operational change was made in the cluster, not in Git, violating the GitOps contract. selfHeal correctly reverted what it saw as unauthorized drift. The fix had two parts, immediate and structural."
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "code": "# Immediate fix: change replicas in Git, where it actually takes effect\n# apps/checkout/overlays/prod/scale-patch.yaml\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: checkout\nspec:\n  replicas: 24   # committed, reviewed, and now authoritative\n---\n# Structural fix: let HPA own replicas so ArgoCD does not fight it\napiVersion: autoscaling/v2\nkind: HorizontalPodAutoscaler\nmetadata:\n  name: checkout\nspec:\n  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: checkout }\n  minReplicas: 6\n  maxReplicas: 40\n  metrics:\n    - type: Resource\n      resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }"
+        },
+        {
+          "type": "paragraph",
+          "text": "Because HPA and ArgoCD both want to set spec.replicas, you must stop ArgoCD from reconciling that field, otherwise they ping-pong forever. ArgoCD supports ignoreDifferences for exactly this. After the change, HPA owns replica count and ArgoCD ignores it."
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "code": "spec:\n  syncPolicy:\n    automated:\n      selfHeal: true\n      prune: true\n  ignoreDifferences:\n    - group: apps\n      kind: Deployment\n      name: checkout\n      jsonPointers:\n        - /spec/replicas   # HPA owns this, do not self-heal it"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The lesson: with selfHeal enabled, any field ArgoCD manages becomes immutable except through Git. Either move the operational lever into Git, or explicitly exclude the field from reconciliation. There is no third option."
+        }
+      ]
+    },
+    {
+      "id": "mistakes-incidents",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "heading",
+          "text": "Storing plaintext secrets in Git"
+        },
+        {
+          "type": "paragraph",
+          "text": "The single most common GitOps mistake is committing raw Kubernetes Secret manifests, which are only base64-encoded, not encrypted. Anyone with repo read access can decode them. The fix is Sealed Secrets (encrypt with a cluster-held key) or External Secrets Operator (store only a reference, fetch the value from Vault/AWS Secrets Manager at runtime)."
+        },
+        {
+          "type": "heading",
+          "text": "Enabling prune blindly on first sync"
+        },
+        {
+          "type": "paragraph",
+          "text": "Turning on prune: true while your Git repo is incomplete will delete every live resource not represented in Git, including things you forgot to migrate. Always start with prune disabled, confirm the diff is empty, then enable it."
+        },
+        {
+          "type": "heading",
+          "text": "selfHeal fighting controllers"
+        },
+        {
+          "type": "paragraph",
+          "text": "As shown in the incident above, HPA, VPA, cert-manager, and admission webhooks mutate live resources. If ArgoCD manages the same fields, you get a reconciliation war. Use ignoreDifferences for fields owned by other controllers."
+        },
+        {
+          "type": "heading",
+          "text": "Non-deterministic manifests"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Helm charts with randomly generated values or timestamps cause permanent OutOfSync because each render differs.",
+            "Resources missing the app.kubernetes.io/instance label can confuse ArgoCD ownership tracking and trigger spurious diffs.",
+            "Mutating webhooks that inject sidecars (Istio, Linkerd) make live state differ from Git; handle with ignoreDifferences or RespectIgnoreDifferences."
+          ]
+        },
+        {
+          "type": "heading",
+          "text": "Auto-sync to a moving branch"
+        },
+        {
+          "type": "paragraph",
+          "text": "Pointing targetRevision: main with automated sync means any merge deploys instantly, including a bad one merged at 2am. Mitigate with sync windows, manual sync for prod, or pinning environments to immutable tags promoted by a separate commit."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Real incident pattern: a developer force-pushed to main to fix a typo, rewriting history. ArgoCD synced the rewritten commit, an intermediate state with a missing ConfigMap briefly went live, and pods crash-looped. Protect deployment branches and forbid force-push."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Separate config repo from app source repo. The CI pipeline builds an image, then commits a new image tag to the config repo. ArgoCD watches only the config repo. This decouples build from deploy and keeps the deploy history clean.",
+            "Pin production to immutable revisions (tags or SHAs), not floating branches. Promote between environments by committing the tag change, which is reviewable.",
+            "Never store plaintext secrets. Use Sealed Secrets or External Secrets Operator so the Git repo never contains decryptable secret material.",
+            "Use AppProjects for tenancy. Restrict which repos, destinations, and namespaces each team's apps can target, and gate it with RBAC.",
+            "Enable prune and selfHeal only after the repo fully represents the cluster and you have verified an empty diff.",
+            "Use ignoreDifferences for fields owned by other controllers (HPA replicas, cert-manager-injected CA bundles, webhook-injected sidecars).",
+            "Configure Git webhooks so ArgoCD reconciles within seconds instead of waiting for the polling interval.",
+            "Set revisionHistoryLimit and meaningful sync windows; gate prod syncs behind manual approval or change windows.",
+            "Use app-of-apps or ApplicationSets for bootstrap so the entire platform is reproducible from one root resource."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The golden invariant to protect: live cluster state equals what is in Git. Every practice above exists to keep that equation true. When it is true, your audit log, rollback story, and DR plan are all just Git."
+        }
+      ]
+    },
+    {
+      "id": "secret-management-note",
+      "heading": "Note: Secret Management in GitOps",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Secret management is the hardest part of GitOps because Git is meant to be readable and secrets are meant not to be. Two patterns dominate, and they make different trade-offs."
+        },
+        {
+          "type": "table",
+          "headers": ["Approach", "What lives in Git", "Decryption / source of truth", "Trade-off"],
+          "rows": [
+            ["Sealed Secrets", "Encrypted SealedSecret CR", "Controller's private key in-cluster", "Secret value still versioned in Git; key rotation is manual"],
+            ["External Secrets Operator", "ExternalSecret reference only", "Vault / AWS / GCP Secrets Manager", "Real secret never in Git; adds an external dependency"],
+            ["SOPS + age/KMS", "SOPS-encrypted YAML", "KMS or age key", "Great for files; needs a SOPS-aware plugin in ArgoCD"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "With Sealed Secrets, you kubeseal a Secret into a SealedSecret that only the in-cluster controller can decrypt. The encrypted blob is safe to commit. With External Secrets Operator, Git holds only a pointer (which key in Vault), and the operator materializes the real Secret at runtime, so secret values never touch Git at all."
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "code": "# External Secrets Operator: Git stores a reference, not the value\napiVersion: external-secrets.io/v1beta1\nkind: ExternalSecret\nmetadata:\n  name: payments-db\nspec:\n  refreshInterval: 1h\n  secretStoreRef:\n    name: vault-backend\n    kind: ClusterSecretStore\n  target:\n    name: payments-db-credentials   # the K8s Secret that gets created\n  data:\n    - secretKey: password\n      remoteRef:\n        key: secret/data/payments/db\n        property: password"
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "gitops-flow",
+      "title": "GitOps Pull-Based Reconciliation: Git to ArgoCD to Kubernetes",
+      "type": "ascii",
+      "content": "  +-----------+        +------------------+         +--------------------+\n  |  Developer|        |   Git Repository |         |   Kubernetes       |\n  |           | commit |  (source of      |         |   Cluster          |\n  |  laptop   +------->+   truth)         |         |                    |\n  +-----------+   PR   |  manifests/      |         |  +--------------+  |\n                       +--------+---------+         |  |  ArgoCD      |  |\n                                |                   |  |  controller  |  |\n                                |   1. watch/poll   |  |              |  |\n                                |<------------------+--+  reconcile   |  |\n                                |   + webhook        |  |  loop        |  |\n                                |                   |  +------+-------+  |\n                                | 2. render desired |         |          |\n                                |    manifests      | 3. apply / prune   |\n                                |                   |         v          |\n                                |                   |  +--------------+  |\n                                |                   |  | Deployments  |  |\n                                |                   |  | Services     |  |\n                                |                   |  | ConfigMaps   |  |\n                                |                   |  +--------------+  |\n                                |   4. diff live vs |         |          |\n                                |      desired      |         |          |\n                                +<------------------+---------+          |\n                                   drift detected   |  self-heal/prune   |\n                                                    +--------------------+\n   Flow: commit -> ArgoCD pulls -> diff -> sync -> live matches Git"
+    },
+    {
+      "id": "sync-state-machine",
+      "title": "ArgoCD Sync and Health State Machine",
+      "type": "mermaid",
+      "content": "flowchart TD\n    A[Reconcile loop triggered] --> B[Render desired from Git]\n    B --> C[Fetch live cluster state]\n    C --> D{Diff desired vs live}\n    D -->|No difference| E[Status Synced]\n    D -->|Difference found| F[Status OutOfSync]\n    F --> G{Automated sync enabled}\n    G -->|No| H[Wait for manual sync]\n    G -->|Yes| I[Apply PreSync hooks]\n    I --> J[Apply sync waves in order]\n    J --> K[Apply PostSync hooks]\n    K --> L{Resources healthy}\n    L -->|Yes| E\n    L -->|No| M[Status Degraded]\n    E --> N{selfHeal and drift detected}\n    N -->|Yes| F\n    N -->|No| E"
+    },
+    {
+      "id": "app-of-apps",
+      "title": "App-of-Apps Bootstrap Hierarchy",
+      "type": "mermaid",
+      "content": "graph TD\n    Root[Root Application] --> Mon[monitoring Application]\n    Root --> Ing[ingress Application]\n    Root --> Pay[payments Application]\n    Mon --> Prom[Prometheus workloads]\n    Mon --> Graf[Grafana workloads]\n    Ing --> Nginx[ingress-nginx workloads]\n    Pay --> API[payments-api Deployment]\n    Pay --> DB[db migration Job]"
+    },
+    {
+      "id": "secret-flow",
+      "title": "External Secrets vs Sealed Secrets Data Flow",
+      "type": "ascii",
+      "content": " SEALED SECRETS                          EXTERNAL SECRETS OPERATOR\n +----------------+                      +----------------+\n |  Git repo      |                      |  Git repo      |\n |  SealedSecret  | (encrypted blob)     |  ExternalSecret| (reference only)\n +-------+--------+                      +-------+--------+\n         | ArgoCD applies                       | ArgoCD applies\n         v                                      v\n +----------------+                      +----------------+      +-----------+\n | SealedSecret   |                      | ExternalSecret |----->|  Vault /  |\n | controller     |                      | operator       | pull |  AWS SM   |\n | (in-cluster    |                      |                |<-----|  GCP SM   |\n |  private key)  |                      +-------+--------+ value+-----------+\n +-------+--------+                              |\n         | decrypts                              | materializes\n         v                                       v\n +----------------+                      +----------------+\n | K8s Secret     |                      | K8s Secret     |\n +----------------+                      +----------------+\n  value WAS in Git (encrypted)            value NEVER in Git"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-what-is-gitops",
+      "question": "What is GitOps, and how does it differ from a traditional CI/CD push model?",
+      "answer": "GitOps is an operational model where the desired state of the system is declared in Git and an automated agent continuously reconciles the live system to match it. The key difference is the direction of control: traditional CI/CD pushes changes into the cluster from outside (a CI job runs kubectl apply with cluster credentials), while GitOps pulls, an agent running inside the cluster reads from Git and applies changes itself. This makes Git the single source of truth, gives you Git's audit and review machinery for every change, and means no external system needs production cluster credentials.",
+      "difficulty": "junior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["gitops", "fundamentals", "cicd"],
+      "followUps": ["What are the four OpenGitOps principles?", "Why is pull-based considered more secure?"]
+    },
+    {
+      "id": "q-application-crd",
+      "question": "What does the ArgoCD Application custom resource represent, and what are its essential fields?",
+      "answer": "The Application CR is a declarative binding between a Git source and a cluster destination. Its essential fields are source (repoURL, targetRevision, and path identifying where the manifests live), destination (the cluster server and namespace), project (the AppProject that scopes its RBAC and allowed repos/destinations), and syncPolicy (whether sync is automated, and whether prune and selfHeal are enabled). Because the Application is itself a Kubernetes resource, you can manage Applications declaratively with other Applications, which is the basis of the app-of-apps pattern.",
+      "difficulty": "junior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["argocd", "application-crd", "kubernetes"],
+      "followUps": ["What is an AppProject and why use one?", "How do you target a remote cluster?"]
+    },
+    {
+      "id": "q-sync-vs-health",
+      "question": "Explain the difference between an application's sync status and its health status.",
+      "answer": "Sync status and health status are orthogonal. Sync status answers whether the live cluster matches Git: Synced means they match, OutOfSync means there is a manifest-level difference. Health status answers whether the resources are actually working, aggregated from resource-specific health checks: a Deployment is Healthy when its pods are ready, Degraded when they are crash-looping. The combinations matter operationally. Synced + Degraded means Git is correct but the app is broken (likely a bad image or config in Git). OutOfSync + Healthy means something was changed live and the app still runs but no longer matches Git.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["argocd", "sync", "health"],
+      "followUps": ["How would you debug a Synced but Degraded app?", "What triggers a transition to OutOfSync?"]
+    },
+    {
+      "id": "q-rollback",
+      "question": "How do you roll back a bad deployment in ArgoCD, and why is git revert preferred over argocd app rollback?",
+      "answer": "The canonical rollback is git revert: you revert the offending commit, push, and ArgoCD reconciles the cluster back to the previous good state. This is preferred because it keeps the GitOps invariant intact, the live cluster still equals Git, and the rollback is itself an auditable, reviewed commit. argocd app rollback re-applies a previous synced revision directly to the cluster, which is faster in an emergency but leaves the cluster OutOfSync versus Git. Worse, if selfHeal is enabled, ArgoCD will immediately re-sync back to the broken Git state. So argocd app rollback is a break-glass action that must be followed by a real git revert.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["argocd", "rollback", "git"],
+      "followUps": ["What does revisionHistoryLimit control?", "How do sync windows help prevent bad auto-deploys?"]
+    },
+    {
+      "id": "q-sync-waves",
+      "question": "What are sync waves and resource hooks, and when would you use each?",
+      "answer": "Sync waves order resources within a single sync. You annotate resources with argocd.argoproj.io/sync-wave set to an integer; ArgoCD applies them in ascending order, waiting for each wave to become healthy before the next. Use negative waves for prerequisites like Namespaces and CRDs that must exist before dependent resources. Resource hooks run lifecycle Jobs at specific phases: PreSync (before main manifests, e.g. database migrations), Sync (alongside), PostSync (after everything is healthy, e.g. smoke tests), and SyncFail (on failure, e.g. cleanup or alerting). They compose: PreSync hooks run before wave 0, and hooks can also carry sync-wave annotations to order multiple hooks.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["argocd", "sync-waves", "hooks"],
+      "followUps": ["How do you clean up hook Jobs after they run?", "Why might a PreSync migration Job block your whole sync?"]
+    },
+    {
+      "id": "q-app-of-apps",
+      "question": "Describe the app-of-apps pattern and when you would reach for ApplicationSets instead.",
+      "answer": "App-of-apps uses a single root Application whose Git path contains other Application manifests. ArgoCD reconciles the root, which creates the child Applications, which create the workloads. This gives a single bootstrap entry point so an entire cluster reconstructs from one resource. You reach for ApplicationSets when you need templated, dynamic fan-out rather than a static list, for example one Application per registered cluster, one per directory in a repo, or one ephemeral preview environment per open pull request. ApplicationSets use generators (list, git, cluster, pullRequest, matrix, merge) to template many Applications from a single definition, which app-of-apps cannot do dynamically.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["argocd", "app-of-apps", "applicationset"],
+      "followUps": ["How does the PR generator enable preview environments?", "What is a matrix generator used for?"]
+    },
+    {
+      "id": "q-multicluster",
+      "question": "How does ArgoCD manage deployments across multiple clusters, and what are the architectural options?",
+      "answer": "ArgoCD registers external clusters as secrets containing their API endpoint and credentials; an Application's destination.server then points at a remote cluster instead of kubernetes.default.svc. Two architectures exist. A single hub ArgoCD instance manages all clusters remotely, which centralizes control and audit but makes the hub a critical dependency and concentrates credentials. Alternatively, each cluster runs its own ArgoCD reconciling against the same Git, which removes the central dependency and keeps each cluster's credentials local at the cost of more instances to operate. ApplicationSets with a cluster generator pair naturally with the hub model to template one Application per registered cluster.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["argocd", "multi-cluster", "architecture"],
+      "followUps": ["What are the failure-domain implications of a single hub?", "How do you scope which clusters a team can deploy to?"]
+    },
+    {
+      "id": "q-tricky-selfheal-hpa",
+      "question": "You enable selfHeal, and now your Deployment keeps flapping between replica counts. What is happening and how do you fix it?",
+      "answer": "This is a reconciliation war between ArgoCD and the HorizontalPodAutoscaler. Git declares spec.replicas (say 3), HPA scales it to 8 under load, ArgoCD detects drift on spec.replicas and self-heals it back to 3, HPA scales it up again, and the cycle repeats. Two controllers both claim ownership of the same field. The fix is to tell ArgoCD to stop reconciling that field using ignoreDifferences with a jsonPointer of /spec/replicas for that Deployment. The cleanest practice is to omit replicas from the Git manifest entirely when an HPA owns it. The general rule: any field managed by another controller (HPA replicas, cert-manager CA injection, webhook-injected sidecars) must be excluded from ArgoCD reconciliation.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": ["argocd", "selfheal", "hpa", "drift"],
+      "followUps": ["What about VPA and webhook-injected sidecars?", "How does RespectIgnoreDifferences interact with server-side apply?"]
+    },
+    {
+      "id": "q-tricky-secrets",
+      "question": "A teammate base64-encodes secrets into Secret manifests and commits them, arguing they are encoded so it is fine. Why is this wrong, and what should you do instead?",
+      "answer": "base64 is encoding, not encryption, it is trivially reversible with base64 -d, so anyone with repo read access (or anyone who later forks or clones the repo) has the plaintext, forever, in Git history. The correct approaches are Sealed Secrets or External Secrets Operator. With Sealed Secrets you kubeseal the Secret into a SealedSecret that only the in-cluster controller's private key can decrypt; the encrypted blob is safe to commit, though the (encrypted) value still lives in Git history. With External Secrets Operator, Git holds only a reference to a key in Vault or a cloud secret manager, and the operator materializes the real Secret at runtime, so the secret value never touches Git at all. For team workflows that want file-level encryption, SOPS with KMS or age is a third option. Critically, once a plaintext secret has been pushed, rotating it is mandatory because it is permanently in history.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": ["argocd", "secrets", "security", "sealed-secrets"],
+      "followUps": ["How does kubeseal scope encryption to a namespace?", "What is the operational cost of External Secrets Operator?"]
+    },
+    {
+      "id": "q-tricky-drift-window",
+      "question": "With selfHeal enabled, how quickly is a manual kubectl change reverted, and why is it a mistake to treat selfHeal as a security control?",
+      "answer": "selfHeal is not instant. ArgoCD detects drift on its reconciliation interval (default 3 minutes) plus an internal debounce, and webhook events only fire on Git changes, not on cluster-side changes. So a manual kubectl edit can persist for up to several minutes before ArgoCD notices and reverts it. That window is plenty of time for an attacker or a careless operator to do damage, exfiltrate data, escalate privileges, or trigger a deploy, before the revert happens. selfHeal is a drift-correction mechanism for operational consistency, not a real-time admission control. Actual prevention belongs to Kubernetes RBAC, admission controllers (OPA Gatekeeper or Kyverno), and removing human kubectl write access to production entirely. selfHeal cleans up after the fact; it does not stop the change from happening.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": ["argocd", "selfheal", "security", "race-condition"],
+      "followUps": ["How do you make drift correction faster?", "What admission controllers complement GitOps?"]
+    },
+    {
+      "id": "q-tricky-helm-state",
+      "question": "Your team uses Helm via ArgoCD, but helm list on the cluster shows nothing and helm rollback does not work. Why?",
+      "answer": "ArgoCD does not use Helm's release lifecycle. When you point an Application at a Helm chart, ArgoCD runs the equivalent of helm template to render the chart into plain manifests, then applies those manifests itself. It never creates a Helm release secret, never talks to Tiller (which no longer exists in Helm 3), and never records release state. That is why helm list shows nothing and helm rollback has no release to act on, there is no Helm-managed state on the cluster. Rollback is done the GitOps way: revert the commit that changed the chart version or values, and ArgoCD re-renders and applies the previous state. This is a frequent surprise for teams migrating from helm upgrade pipelines.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": ["argocd", "helm", "templating"],
+      "followUps": ["How does ArgoCD handle Helm hooks?", "What breaks if your chart uses randAlphaNum in a template?"]
+    },
+    {
+      "id": "q-prune-danger",
+      "question": "What does prune do, and what is the risk of enabling it on a freshly onboarded application?",
+      "answer": "prune makes ArgoCD delete cluster resources that are no longer present in Git, keeping live state a strict mirror of the repo. The risk on a fresh onboarding is that if your Git repo does not yet fully represent everything running in the cluster, enabling prune will delete every live resource that is missing from Git, including things created out-of-band or not yet migrated. The safe sequence is: onboard with automated sync but prune disabled, confirm the app reports a clean (empty) diff so you know Git fully describes reality, and only then enable prune. ArgoCD also offers PruneLast and the Prune=false resource annotation to protect specific resources from deletion.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["argocd", "prune", "safety"],
+      "followUps": ["What is the PruneLast sync option for?", "How do you protect a single resource from pruning?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-application-with-migration",
+      "title": "Author an ArgoCD Application with an Ordered DB Migration",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "prompt": "Write an ArgoCD Application manifest for a service called orders-api. It must deploy from the repo https://github.com/acme/k8s.git, path apps/orders-api/prod, branch main, into namespace orders on the local cluster. Enable automated sync with prune and selfHeal, and auto-create the namespace. Then, in the same source path, ensure a database migration runs as a PreSync hook BEFORE the application pods are updated, and that the migration Job is recreated cleanly on every sync. Show both the Application and the migration Job manifest.",
+      "hints": [
+        "The Application source has three coordinates: repoURL, targetRevision, and path.",
+        "Automated sync lives under spec.syncPolicy.automated with prune and selfHeal booleans.",
+        "CreateNamespace=true is a syncOption, not part of automated.",
+        "A PreSync hook is a Job annotated with argocd.argoproj.io/hook: PreSync.",
+        "To recreate the Job cleanly each sync, use hook-delete-policy: BeforeHookCreation."
+      ],
+      "solutionCode": "# application.yaml\napiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: orders-api\n  namespace: argocd\n  finalizers:\n    - resources-finalizer.argocd.argoproj.io\nspec:\n  project: default\n  source:\n    repoURL: https://github.com/acme/k8s.git\n    targetRevision: main\n    path: apps/orders-api/prod\n  destination:\n    server: https://kubernetes.default.svc\n    namespace: orders\n  syncPolicy:\n    automated:\n      prune: true\n      selfHeal: true\n    syncOptions:\n      - CreateNamespace=true\n---\n# apps/orders-api/prod/db-migrate-job.yaml  (lives in the synced path)\napiVersion: batch/v1\nkind: Job\nmetadata:\n  name: orders-db-migrate\n  annotations:\n    argocd.argoproj.io/hook: PreSync\n    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation\nspec:\n  backoffLimit: 2\n  template:\n    spec:\n      restartPolicy: Never\n      containers:\n        - name: migrate\n          image: registry.acme.io/orders-api:v3.1.0\n          command: [\"./manage\", \"migrate\", \"--no-input\"]\n          envFrom:\n            - secretRef:\n                name: orders-db-credentials",
+      "solutionLanguage": "yaml",
+      "explanation": "The Application declares the source coordinates (repo, branch, path) and the destination (local cluster, orders namespace). spec.syncPolicy.automated with prune and selfHeal makes ArgoCD apply Git changes, delete removed resources, and revert manual drift automatically. CreateNamespace=true is a syncOption (it changes how sync executes) rather than part of automated, so it must sit under syncOptions. The finalizer ensures deleting the Application cascades to its managed resources instead of orphaning them. The migration runs correctly by living in the synced path and carrying the argocd.argoproj.io/hook: PreSync annotation: ArgoCD runs PreSync hooks to completion before applying the main manifests, so the schema migration always lands before the new pods start, avoiding the classic race where new code expects a column that does not exist yet. hook-delete-policy: BeforeHookCreation deletes the previous Job right before creating the new one, so each sync gets a fresh Job (Jobs are otherwise immutable and would fail to re-apply). backoffLimit and restartPolicy: Never make a failed migration fail the sync rather than retry forever, which is what you want, a failed migration should block the rollout, not silently loop.",
+      "relatedTopic": "argocd"
+    },
+    {
+      "id": "ch-applicationset-per-env",
+      "title": "Generate Per-Environment Applications with an ApplicationSet",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "prompt": "Your repo https://github.com/acme/web.git has overlays at envs/dev, envs/staging, and envs/prod, each a Kustomize overlay for the same web service. Write a single ApplicationSet that creates one ArgoCD Application per environment using a list generator. Dev and staging should auto-sync (prune + selfHeal), but prod must NOT auto-sync, it requires a manual sync. Each Application should deploy into a namespace named web-<env>. Make the prod difference data-driven from the generator, not hardcoded into the template logic awkwardly.",
+      "hints": [
+        "A list generator yields a set of key/value elements you can interpolate with {{key}}.",
+        "Put per-env data (env name, target cluster, and a syncpolicy flag) into each list element.",
+        "ApplicationSet templates support a goTemplate mode for conditionals; enable spec.goTemplate: true.",
+        "When automated should be absent for prod, omit the automated block entirely rather than setting it to false.",
+        "Namespace can be templated as web-{{.env}} in goTemplate mode."
+      ],
+      "solutionCode": "apiVersion: argoproj.io/v1alpha1\nkind: ApplicationSet\nmetadata:\n  name: web\n  namespace: argocd\nspec:\n  goTemplate: true\n  goTemplateOptions: [\"missingkey=error\"]\n  generators:\n    - list:\n        elements:\n          - env: dev\n            autoSync: \"true\"\n          - env: staging\n            autoSync: \"true\"\n          - env: prod\n            autoSync: \"false\"\n  template:\n    metadata:\n      name: 'web-{{.env}}'\n    spec:\n      project: default\n      source:\n        repoURL: https://github.com/acme/web.git\n        targetRevision: main\n        path: 'envs/{{.env}}'\n      destination:\n        server: https://kubernetes.default.svc\n        namespace: 'web-{{.env}}'\n      syncPolicy:\n        syncOptions:\n          - CreateNamespace=true\n  templatePatch: |\n    {{- if eq .autoSync \"true\" }}\n    spec:\n      syncPolicy:\n        automated:\n          prune: true\n          selfHeal: true\n    {{- end }}",
+      "solutionLanguage": "yaml",
+      "explanation": "A single ApplicationSet with a list generator yields three elements, one per environment, each carrying an autoSync flag as data. With spec.goTemplate: true the template uses Go templating ({{.env}}) so names, paths, and namespaces interpolate cleanly to web-dev, envs/dev, web-dev and so on. The interesting part is making prod manual without forking the template: setting automated to false is wrong, because the mere presence of the automated key with prune/selfHeal sub-fields still configures automation semantics and reads confusingly. The correct approach is to OMIT the automated block entirely for prod. This is done with templatePatch, an ApplicationSet feature that lets you conditionally merge a fragment into the generated Application: the {{- if eq .autoSync \"true\" }} guard only injects the automated block for dev and staging, so prod's Application has no automated policy and therefore requires a manual argocd app sync web-prod. goTemplateOptions missingkey=error makes a typo in a template key fail loudly at generation time instead of rendering an empty string and silently producing a broken Application. The result is a DRY, data-driven definition where promoting the prod sync policy later is a one-line data change, not a structural rewrite, and where prod retains a human gate, the standard pattern for protecting production in GitOps.",
+      "relatedTopic": "argocd"
+    }
+  ],
+  "references": [
+    {"label": "ArgoCD Official Documentation", "url": "https://argo-cd.readthedocs.io/en/stable/"},
+    {"label": "OpenGitOps Principles", "url": "https://opengitops.dev/"},
+    {"label": "ApplicationSet Controller", "url": "https://argo-cd.readthedocs.io/en/stable/user-guide/application-set/"},
+    {"label": "Sealed Secrets (Bitnami)", "url": "https://github.com/bitnami-labs/sealed-secrets"},
+    {"label": "External Secrets Operator", "url": "https://external-secrets.io/"},
+    {"label": "Argo Project (CNCF Graduated)", "url": "https://www.cncf.io/projects/argo/"}
+  ]
+}

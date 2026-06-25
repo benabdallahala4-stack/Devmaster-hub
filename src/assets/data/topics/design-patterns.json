@@ -1,0 +1,375 @@
+{
+  "id": "design-patterns",
+  "title": "Design Patterns (GoF)",
+  "category": "Architecture",
+  "subcategory": "Patterns",
+  "difficulty": "senior",
+  "tags": ["design-patterns", "gof", "oop", "java", "architecture", "creational", "structural", "behavioral"],
+  "description": "A staff-level tour of the 15 most interview-relevant Gang of Four patterns, with the problem each solves, when to reach for it, when to avoid it, and idiomatic Java.",
+  "estReadMinutes": 32,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {"type": "paragraph", "text": "Design Patterns are named, reusable solutions to recurring design problems in object-oriented software. The 1994 book Design Patterns: Elements of Reusable Object-Oriented Software by Gamma, Helm, Johnson, and Vlissides (the Gang of Four, or GoF) catalogued 23 of them. They are not libraries you import; they are shapes you recognize and a shared vocabulary that lets a team say Strategy or Adapter and instantly agree on a structure."},
+        {"type": "paragraph", "text": "The GoF organized patterns into three families by intent. Creational patterns abstract how objects are instantiated. Structural patterns compose objects and classes into larger structures. Behavioral patterns assign responsibilities and define how objects communicate."},
+        {"type": "table", "headers": ["Family", "Concern", "Patterns covered here"], "rows": [
+          ["Creational", "Object construction and instantiation", "Singleton, Factory Method, Abstract Factory, Builder, Prototype"],
+          ["Structural", "Composition of objects into larger structures", "Adapter, Decorator, Facade, Proxy, Composite"],
+          ["Behavioral", "Communication and responsibility between objects", "Strategy, Observer, Command, Chain of Responsibility, Template Method"]
+        ]},
+        {"type": "callout", "variant": "info", "text": "Patterns are a vocabulary, not a checklist. The senior skill is knowing the forces a pattern resolves, not memorizing its class diagram. Reaching for a pattern that does not fit creates accidental complexity."}
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why Patterns Matter",
+      "kind": "why",
+      "blocks": [
+        {"type": "paragraph", "text": "Patterns matter for three concrete, career-relevant reasons. First, communication: in a design review, saying this is a Decorator chain compresses paragraphs of explanation into one word. Second, they encode hard-won tradeoffs around the open/closed principle, dependency inversion, and testability that you would otherwise rediscover painfully in production. Third, frameworks you use daily are built from them, so recognizing the pattern lets you predict the API."},
+        {"type": "list", "items": [
+          "Spring's BeanFactory is an Abstract Factory; its FactoryBean is a Factory Method.",
+          "java.io streams (BufferedInputStream wrapping FileInputStream) are textbook Decorators.",
+          "java.util.Comparator passed to Collections.sort is the Strategy pattern.",
+          "javax.servlet.Filter chains and Spring Security filter chains are Chain of Responsibility.",
+          "java.lang.Runnable and every undo/redo stack are Command objects.",
+          "Hibernate lazy-loading entities and Spring @Transactional proxies are dynamic Proxies."
+        ]},
+        {"type": "callout", "variant": "warning", "text": "The anti-goal is pattern-itis: forcing a GoF pattern onto a three-line problem. A static method is sometimes better than a Factory; a lambda is sometimes a better Strategy than a class hierarchy. Patterns earn their keep when the axis of change they protect actually changes."}
+      ]
+    },
+    {
+      "id": "creational-patterns",
+      "heading": "Creational Patterns",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Creational patterns decouple a client from the concrete classes it instantiates. The goal is that code depends on interfaces and lets a construction mechanism decide the concrete type, so adding a new product does not force edits across the codebase."},
+        {"type": "heading", "text": "Singleton"},
+        {"type": "paragraph", "text": "Problem: exactly one instance of a class must exist and be globally reachable (a connection pool, a metrics registry). Solution: make the constructor private and expose a single shared instance. When to use: genuinely stateless or process-wide infrastructure that is expensive to create. When NOT to use: as a convenient global variable for application state. Singletons hide dependencies, make tests order-dependent, and become a concurrency bottleneck."},
+        {"type": "code", "language": "java", "code": "// Best Java idiom: an enum singleton. Thread-safe, serialization-safe,\n// and reflection-proof out of the box (Effective Java, Item 3).\npublic enum MetricsRegistry {\n    INSTANCE;\n\n    private final Map<String, Long> counters = new ConcurrentHashMap<>();\n\n    public void increment(String name) {\n        counters.merge(name, 1L, Long::sum);\n    }\n\n    public long get(String name) {\n        return counters.getOrDefault(name, 0L);\n    }\n}\n// Usage: MetricsRegistry.INSTANCE.increment(\"http.requests\");"},
+        {"type": "heading", "text": "Factory Method"},
+        {"type": "paragraph", "text": "Problem: a class must create objects but cannot know the concrete type in advance; subclasses should decide. Solution: define a creation method that subclasses override. When to use: a framework defines a workflow but lets extensions choose the product (think JDBC drivers). When NOT to use: when a simple constructor or a static factory suffices; do not introduce a class hierarchy for one product."},
+        {"type": "code", "language": "java", "code": "abstract class Dialog {\n    abstract Button createButton();          // the factory method\n\n    public void render() {\n        Button b = createButton();\n        b.onClick(this::close);\n        b.paint();\n    }\n    void close() { /* ... */ }\n}\n\nclass WindowsDialog extends Dialog {\n    Button createButton() { return new WindowsButton(); }\n}\nclass WebDialog extends Dialog {\n    Button createButton() { return new HtmlButton(); }\n}"},
+        {"type": "heading", "text": "Abstract Factory"},
+        {"type": "paragraph", "text": "Problem: you must create families of related objects that must be used together (a Windows button plus a Windows checkbox), without coupling to concrete classes. Solution: an interface with one factory method per product, implemented once per family. When to use: cross-platform UI kits, swapping a whole stack of cloud SDK clients. When NOT to use: when products are not actually related, or when a new product type would force editing every factory."},
+        {"type": "code", "language": "java", "code": "interface GuiFactory {\n    Button createButton();\n    Checkbox createCheckbox();\n}\n\nclass MacFactory implements GuiFactory {\n    public Button createButton() { return new MacButton(); }\n    public Checkbox createCheckbox() { return new MacCheckbox(); }\n}\n\nclass App {\n    private final Button button;\n    private final Checkbox checkbox;\n    App(GuiFactory factory) {            // client depends only on the abstraction\n        this.button = factory.createButton();\n        this.checkbox = factory.createCheckbox();\n    }\n}"},
+        {"type": "heading", "text": "Builder"},
+        {"type": "paragraph", "text": "Problem: an object has many optional parameters and a telescoping-constructor explosion. Solution: a fluent builder that assembles the object step by step and validates in build(). When to use: immutable value objects with 4+ fields, several optional. When NOT to use: 2-3 fields, where a constructor is clearer; do not add a builder reflexively."},
+        {"type": "code", "language": "java", "code": "public final class HttpRequest {\n    private final String url;\n    private final String method;\n    private final Map<String, String> headers;\n    private final Duration timeout;\n\n    private HttpRequest(Builder b) {\n        this.url = b.url; this.method = b.method;\n        this.headers = Map.copyOf(b.headers); this.timeout = b.timeout;\n    }\n\n    public static class Builder {\n        private final String url;                 // required\n        private String method = \"GET\";\n        private Map<String, String> headers = new HashMap<>();\n        private Duration timeout = Duration.ofSeconds(30);\n\n        public Builder(String url) { this.url = Objects.requireNonNull(url); }\n        public Builder method(String m) { this.method = m; return this; }\n        public Builder header(String k, String v) { headers.put(k, v); return this; }\n        public Builder timeout(Duration t) { this.timeout = t; return this; }\n        public HttpRequest build() { return new HttpRequest(this); }\n    }\n}\n// new HttpRequest.Builder(\"https://api\").method(\"POST\").timeout(ofSeconds(5)).build();"},
+        {"type": "heading", "text": "Prototype"},
+        {"type": "paragraph", "text": "Problem: creating an object from scratch is expensive (heavy initialization, deep config) and you need many near-identical copies. Solution: clone an existing configured instance and tweak it. When to use: object graphs that are costly to build but cheap to copy, or when concrete types are not known at compile time. When NOT to use: with deep mutable graphs where shallow clone causes aliasing bugs; cloning in Java is famously error-prone, so prefer a copy constructor."},
+        {"type": "code", "language": "java", "code": "// Prefer a copy constructor over Cloneable to control deep vs shallow copy.\npublic final class GameUnit {\n    private final String type;\n    private final List<String> abilities;\n    private int hp;\n\n    public GameUnit(String type, List<String> abilities, int hp) {\n        this.type = type; this.abilities = new ArrayList<>(abilities); this.hp = hp;\n    }\n    // copy constructor = explicit prototype\n    public GameUnit(GameUnit src) {\n        this(src.type, src.abilities, src.hp);   // deep-copies the list\n    }\n    public GameUnit withHp(int newHp) {\n        GameUnit copy = new GameUnit(this); copy.hp = newHp; return copy;\n    }\n}"},
+        {"type": "callout", "variant": "success", "text": "Rule of thumb: reach for Builder when construction is complex, Factory Method/Abstract Factory when the concrete type must be chosen elsewhere, and Prototype when copying beats constructing."}
+      ]
+    },
+    {
+      "id": "structural-patterns",
+      "heading": "Structural Patterns",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Structural patterns compose objects to form larger structures while keeping those structures flexible and efficient. They are mostly about wrapping: an object that holds a reference to another and adds, adapts, restricts, or simplifies access to it."},
+        {"type": "heading", "text": "Adapter"},
+        {"type": "paragraph", "text": "Problem: a client expects interface A but you only have a class that exposes incompatible interface B (a legacy API, a third-party SDK). Solution: a wrapper that implements A and translates calls to B. When to use: integrating code you cannot change. When NOT to use: when you own both sides and can simply align the interfaces; do not adapter-wrap to avoid a rename."},
+        {"type": "code", "language": "java", "code": "// Target our code expects:\ninterface PaymentGateway { void charge(String customer, long cents); }\n\n// Adaptee a third-party SDK we cannot modify:\nclass StripeSdk { void createCharge(int amountDollars, String src) { /* ... */ } }\n\nclass StripeAdapter implements PaymentGateway {\n    private final StripeSdk stripe;\n    StripeAdapter(StripeSdk stripe) { this.stripe = stripe; }\n    public void charge(String customer, long cents) {\n        stripe.createCharge((int)(cents / 100), customer); // translate the call\n    }\n}"},
+        {"type": "heading", "text": "Decorator"},
+        {"type": "paragraph", "text": "Problem: you need to add responsibilities to individual objects dynamically without subclass explosion. Solution: wrap the object in a decorator that implements the same interface and delegates, adding behavior before or after. When to use: layered, composable behavior (compression then encryption then buffering). When NOT to use: when behavior is fixed and a simple subclass is clearer; deep decorator stacks are hard to debug."},
+        {"type": "code", "language": "java", "code": "interface DataSource { void write(String data); String read(); }\n\nabstract class DataSourceDecorator implements DataSource {\n    protected final DataSource wrappee;\n    DataSourceDecorator(DataSource w) { this.wrappee = w; }\n}\n\nclass EncryptionDecorator extends DataSourceDecorator {\n    EncryptionDecorator(DataSource w) { super(w); }\n    public void write(String data) { wrappee.write(encrypt(data)); }\n    public String read() { return decrypt(wrappee.read()); }\n    private String encrypt(String s) { /* ... */ return s; }\n    private String decrypt(String s) { /* ... */ return s; }\n}\n// DataSource ds = new EncryptionDecorator(new CompressionDecorator(new FileSource(\"a.txt\")));"},
+        {"type": "heading", "text": "Facade"},
+        {"type": "paragraph", "text": "Problem: a subsystem is complex with many interdependent classes, and clients need only a simple common path. Solution: a single class offering a high-level method that orchestrates the subsystem. When to use: taming a sprawling library or legacy module behind one entry point. When NOT to use: as the only entry point if it grows into a god object; a Facade should simplify, not monopolize."},
+        {"type": "code", "language": "java", "code": "class VideoConverterFacade {\n    public File convert(String filename, String targetFormat) {\n        VideoFile file = new VideoFile(filename);\n        Codec source = CodecFactory.extract(file);\n        Codec dest = targetFormat.equals(\"mp4\") ? new Mp4Codec() : new OggCodec();\n        BitrateReader buffer = BitrateReader.read(file, source);\n        BitrateReader result = BitrateReader.convert(buffer, dest);\n        return new AudioMixer().fix(result);   // hides 5 subsystem classes\n    }\n}"},
+        {"type": "heading", "text": "Proxy"},
+        {"type": "paragraph", "text": "Problem: you need to control access to an object: lazy creation, caching, access control, remoting, or logging, without changing the real object. Solution: a stand-in implementing the same interface that adds control logic around the real subject. When to use: lazy loading (Hibernate), virtual proxies, protection proxies, AOP cross-cutting concerns. When NOT to use: when the indirection adds latency or hides behavior the caller must reason about."},
+        {"type": "code", "language": "java", "code": "interface Image { void display(); }\n\nclass RealImage implements Image {       // expensive to load\n    private final String file;\n    RealImage(String file) { this.file = file; loadFromDisk(); }\n    private void loadFromDisk() { /* heavy IO */ }\n    public void display() { /* render */ }\n}\n\nclass LazyImageProxy implements Image {  // virtual proxy: defers loading\n    private final String file;\n    private RealImage real;\n    LazyImageProxy(String file) { this.file = file; }\n    public void display() {\n        if (real == null) real = new RealImage(file); // load on first use\n        real.display();\n    }\n}"},
+        {"type": "heading", "text": "Composite"},
+        {"type": "paragraph", "text": "Problem: you need to treat individual objects and compositions of objects uniformly (a file and a folder of files). Solution: a common component interface where leaves and containers share the same operations, and containers delegate to children. When to use: tree structures, UI widget trees, org charts. When NOT to use: when leaves and containers genuinely differ; forcing a uniform interface can leak meaningless operations (add() on a leaf)."},
+        {"type": "code", "language": "java", "code": "interface FsNode { long size(); }\n\nclass FileNode implements FsNode {\n    private final long bytes;\n    FileNode(long bytes) { this.bytes = bytes; }\n    public long size() { return bytes; }\n}\n\nclass DirNode implements FsNode {\n    private final List<FsNode> children = new ArrayList<>();\n    public DirNode add(FsNode n) { children.add(n); return this; }\n    public long size() {                       // recurse uniformly\n        return children.stream().mapToLong(FsNode::size).sum();\n    }\n}"},
+        {"type": "callout", "variant": "info", "text": "Adapter, Decorator, and Proxy all wrap and all implement the same interface as their target. The difference is intent: Adapter changes the interface, Decorator adds behavior, Proxy controls access. Same shape, different purpose."}
+      ]
+    },
+    {
+      "id": "behavioral-patterns",
+      "heading": "Behavioral Patterns",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Behavioral patterns are about algorithms and the assignment of responsibilities between objects. They describe not just objects but the patterns of communication between them, pushing logic out of rigid conditionals and into pluggable collaborators."},
+        {"type": "heading", "text": "Strategy"},
+        {"type": "paragraph", "text": "Problem: you have a family of interchangeable algorithms and want to pick one at runtime without a sprawling switch. Solution: define an interface for the algorithm and inject a concrete strategy. When to use: payment methods, compression algorithms, routing rules, anything selected by config or context. When NOT to use: when there is exactly one algorithm and no foreseeable second; a strategy of one is over-engineering."},
+        {"type": "code", "language": "java", "code": "interface ShippingStrategy { long cost(Order order); }\n\nclass FlatRate implements ShippingStrategy {\n    public long cost(Order o) { return 599; }\n}\nclass WeightBased implements ShippingStrategy {\n    public long cost(Order o) { return o.weightKg() * 150; }\n}\n\nclass Checkout {\n    private final ShippingStrategy shipping;        // injected\n    Checkout(ShippingStrategy shipping) { this.shipping = shipping; }\n    long total(Order o) { return o.subtotal() + shipping.cost(o); }\n}\n// In modern Java a strategy is often just a lambda: ShippingStrategy s = o -> 599;"},
+        {"type": "heading", "text": "Observer"},
+        {"type": "paragraph", "text": "Problem: when one object changes state, an open-ended set of dependents must be notified, without the subject knowing their concrete types. Solution: subjects keep a list of observers and broadcast events. When to use: event systems, UI bindings, pub/sub within a process. When NOT to use: across process boundaries (use a message broker) or when notification ordering and re-entrancy create subtle bugs; avoid hand-rolled observers if a reactive library fits."},
+        {"type": "code", "language": "java", "code": "interface OrderObserver { void onPlaced(Order order); }\n\nclass OrderService {\n    private final List<OrderObserver> observers = new CopyOnWriteArrayList<>();\n    public void subscribe(OrderObserver o) { observers.add(o); }\n    public void place(Order order) {\n        save(order);\n        for (OrderObserver o : observers) o.onPlaced(order); // broadcast\n    }\n    private void save(Order o) { /* ... */ }\n}\n// service.subscribe(order -> emailService.sendConfirmation(order));\n// service.subscribe(order -> inventory.reserve(order));"},
+        {"type": "heading", "text": "Command"},
+        {"type": "paragraph", "text": "Problem: you want to parameterize, queue, log, or undo operations, decoupling the invoker from the receiver. Solution: encapsulate a request as an object with an execute() (and optionally undo()) method. When to use: undo/redo, task queues, transactional retries, macro recording. When NOT to use: for a single direct method call where a lambda is enough; do not wrap trivial calls in command classes."},
+        {"type": "code", "language": "java", "code": "interface Command { void execute(); void undo(); }\n\nclass InsertTextCommand implements Command {\n    private final Document doc; private final String text; private final int pos;\n    InsertTextCommand(Document doc, String text, int pos) {\n        this.doc = doc; this.text = text; this.pos = pos;\n    }\n    public void execute() { doc.insert(pos, text); }\n    public void undo() { doc.delete(pos, text.length()); }\n}\n\nclass Editor {\n    private final Deque<Command> history = new ArrayDeque<>();\n    public void run(Command c) { c.execute(); history.push(c); }\n    public void undo() { if (!history.isEmpty()) history.pop().undo(); }\n}"},
+        {"type": "heading", "text": "Chain of Responsibility"},
+        {"type": "paragraph", "text": "Problem: a request should be handled by one of several handlers, and you do not want the sender coupled to which one. Solution: chain handlers; each either handles the request or passes it to the next. When to use: middleware, servlet filters, validation pipelines, escalation logic. When NOT to use: when exactly one handler always applies (just call it) or when a request silently falling off the end of the chain is a correctness hazard."},
+        {"type": "code", "language": "java", "code": "abstract class Handler {\n    private Handler next;\n    public Handler setNext(Handler next) { this.next = next; return next; }\n    public final void handle(Request req) {\n        if (canHandle(req)) process(req);\n        else if (next != null) next.handle(req);\n        else throw new IllegalStateException(\"Unhandled: \" + req);\n    }\n    protected abstract boolean canHandle(Request req);\n    protected abstract void process(Request req);\n}\n\nclass AuthHandler extends Handler {\n    protected boolean canHandle(Request r) { return !r.isAuthenticated(); }\n    protected void process(Request r) { r.reject(401); }\n}"},
+        {"type": "heading", "text": "Template Method"},
+        {"type": "paragraph", "text": "Problem: several algorithms share the same skeleton but differ in specific steps. Solution: a base class defines the invariant skeleton in a final method and leaves the variable steps as abstract hooks. When to use: frameworks defining a workflow with extension points (parse, validate, transform, save). When NOT to use: when inheritance is too rigid; composition via Strategy is often more flexible and avoids fragile base classes."},
+        {"type": "code", "language": "java", "code": "abstract class DataImporter {\n    public final void run(Path file) {       // the template method, final\n        var raw = read(file);\n        var records = parse(raw);\n        validate(records);\n        persist(records);\n    }\n    protected String read(Path f) { /* shared default */ return \"\"; }\n    protected abstract List<Record> parse(String raw);   // hook\n    protected abstract void validate(List<Record> recs); // hook\n    protected abstract void persist(List<Record> recs);  // hook\n}"},
+        {"type": "callout", "variant": "warning", "text": "Strategy and Template Method solve the same problem (varying part of an algorithm) but via composition vs inheritance. Prefer Strategy: it composes at runtime, is unit-testable in isolation, and avoids the fragile-base-class trap that Template Method invites."}
+      ]
+    },
+    {
+      "id": "notification-system",
+      "heading": "Real Production Example: A Notification System",
+      "kind": "example",
+      "blocks": [
+        {"type": "paragraph", "text": "The flagship system-design question for patterns is: design a notification system that can send to email, SMS, push, and Slack, where business events trigger one or more channels. The clean answer combines two behavioral patterns. Strategy models each delivery channel as an interchangeable algorithm. Observer lets domain events fan out to whichever channels subscribed, without the domain knowing them."},
+        {"type": "paragraph", "text": "Scenario: at an e-commerce company, an order-confirmation incident occurred because the notification logic was a 400-line switch on channel type with the SMS provider call inline. When the SMS vendor had an outage, an unhandled exception in the switch aborted the whole loop, so customers also stopped receiving email confirmations. The fix was to isolate each channel behind a Strategy and decouple dispatch with an Observer, so one failing channel no longer poisons the others."},
+        {"type": "code", "language": "java", "code": "// Strategy: one interchangeable algorithm per channel.\ninterface NotificationChannel {\n    void send(Notification n);\n    boolean supports(Channel type);\n}\n\nclass EmailChannel implements NotificationChannel {\n    public boolean supports(Channel t) { return t == Channel.EMAIL; }\n    public void send(Notification n) { /* SES call */ }\n}\nclass SmsChannel implements NotificationChannel {\n    public boolean supports(Channel t) { return t == Channel.SMS; }\n    public void send(Notification n) { /* Twilio call */ }\n}"},
+        {"type": "code", "language": "java", "code": "// Observer: the dispatcher subscribes to domain events and fans out,\n// isolating per-channel failures so one outage cannot poison the rest.\nclass NotificationDispatcher implements OrderObserver {\n    private final List<NotificationChannel> channels;\n    private final UserPreferences prefs;\n\n    NotificationDispatcher(List<NotificationChannel> channels, UserPreferences prefs) {\n        this.channels = channels; this.prefs = prefs;\n    }\n    public void onPlaced(Order order) {\n        Notification n = Notification.confirmation(order);\n        for (Channel type : prefs.channelsFor(order.userId())) {\n            channels.stream().filter(c -> c.supports(type)).findFirst()\n                .ifPresent(c -> safeSend(c, n));   // each channel isolated\n        }\n    }\n    private void safeSend(NotificationChannel c, Notification n) {\n        try { c.send(n); }\n        catch (Exception e) { log.error(\"channel failed, continuing\", e); }\n    }\n}"},
+        {"type": "callout", "variant": "success", "text": "Adding WhatsApp later means writing one new Strategy class and registering it. Zero edits to the dispatcher, the order service, or any existing channel. That is the open/closed principle paying off in a real codebase."}
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {"type": "heading", "text": "Singleton as global mutable state"},
+        {"type": "paragraph", "text": "The most common incident is a Singleton holding mutable application state. It works in dev and explodes under concurrency or in tests. Because two tests share the instance, test B fails depending on whether test A ran first, producing flaky, order-dependent suites. The hidden global dependency also makes the class impossible to mock, so its collaborators cannot be unit-tested in isolation."},
+        {"type": "heading", "text": "Broken double-checked locking"},
+        {"type": "paragraph", "text": "A classic lazy-Singleton incident: under the Java Memory Model, without volatile a thread can observe a partially constructed object because the write publishing the reference can be reordered before the constructor finishes. The result is intermittent NullPointerExceptions or half-initialized state that only appears on multi-core production hosts under load."},
+        {"type": "code", "language": "java", "code": "// BROKEN: no volatile -> partially constructed object can leak.\nclass Config {\n    private static Config instance;            // missing volatile\n    static Config get() {\n        if (instance == null) {\n            synchronized (Config.class) {\n                if (instance == null) instance = new Config(); // reorder hazard\n            }\n        }\n        return instance;\n    }\n}\n// CORRECT options: mark the field volatile, or use the initialization-on-demand\n// holder idiom, which is lazy and thread-safe with no synchronization:\nclass ConfigOk {\n    private ConfigOk() {}\n    private static class Holder { static final ConfigOk I = new ConfigOk(); }\n    static ConfigOk get() { return Holder.I; }\n}"},
+        {"type": "heading", "text": "Observer memory leaks (lapsed listener)"},
+        {"type": "paragraph", "text": "Observers that never unsubscribe are a frequent source of slow memory leaks. The subject holds a strong reference to every observer; if a short-lived view subscribes but is never removed, it (and everything it references) can never be garbage collected. In a long-running server this manifests as steadily climbing heap and eventual OutOfMemoryError. Always provide and call an unsubscribe, or hold weak references."},
+        {"type": "heading", "text": "Other recurring footguns"},
+        {"type": "list", "items": [
+          "Decorator stacks so deep that a stack trace is unreadable and order-dependent bugs hide in the wrapping sequence.",
+          "Chain of Responsibility where no handler matches and the request silently vanishes instead of erroring.",
+          "Abstract Factory abused so that adding one new product type forces editing every concrete factory, breaking open/closed.",
+          "Template Method causing a fragile base class: a base-class change silently breaks dozens of subclasses.",
+          "Pattern-itis: a FactoryFactoryBuilderStrategy for what should be a one-line constructor call."
+        ]},
+        {"type": "callout", "variant": "danger", "text": "If a Singleton holds mutable state, treat it as a code smell until proven otherwise. The cure is dependency injection: create one instance at the composition root and pass it in. You keep one instance without the global, the untestability, or the hidden coupling."}
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {"type": "list", "items": [
+          "Program to interfaces, not implementations; nearly every GoF pattern is an application of this principle plus dependency inversion.",
+          "Favor composition over inheritance: prefer Strategy and Decorator over deep class hierarchies and Template Method when both fit.",
+          "Let the framework provide the pattern. Use Spring/Guice DI instead of hand-rolled Singletons; use java.util.function lambdas instead of one-method Strategy/Command classes.",
+          "Introduce a pattern when the axis of change it protects actually changes. Do not pre-build extension points for variation that may never arrive (YAGNI).",
+          "Make value objects immutable and build them with Builder; immutability removes whole categories of concurrency bugs.",
+          "Always pair Observer subscribe with an unsubscribe, and prefer CopyOnWriteArrayList or a concurrent structure to avoid ConcurrentModificationException during notification.",
+          "Name classes after their pattern role (StripeAdapter, ShippingStrategy, OrderObserver) so readers grasp the structure instantly.",
+          "Use enum or the holder idiom for Singletons; never naive double-checked locking without volatile."
+        ]},
+        {"type": "callout", "variant": "info", "text": "The senior signal in an interview is not listing patterns; it is articulating the tradeoff you are buying. Always answer when NOT to use it and what the simpler alternative would be."}
+      ]
+    },
+    {
+      "id": "choosing-a-pattern",
+      "heading": "Choosing the Right Pattern",
+      "kind": "note",
+      "blocks": [
+        {"type": "paragraph", "text": "Patterns are answers to forces. Identify the axis of change first, then pick the pattern that isolates it. The table below maps a recurring symptom to the pattern that usually resolves it."},
+        {"type": "table", "headers": ["Symptom in the code", "Likely pattern"], "rows": [
+          ["A big switch selecting between algorithms", "Strategy"],
+          ["Telescoping constructors with many optional params", "Builder"],
+          ["Third-party interface does not match yours", "Adapter"],
+          ["Need to add behavior to some instances at runtime", "Decorator"],
+          ["One change must notify many dependents", "Observer"],
+          ["Need undo/redo, queueing, or logging of actions", "Command"],
+          ["A request handled by one of several stages", "Chain of Responsibility"],
+          ["Same algorithm skeleton, different steps", "Template Method or Strategy"],
+          ["Hide a complex subsystem behind one call", "Facade"],
+          ["Control access, lazy-load, or cache an object", "Proxy"],
+          ["Treat a tree of objects and leaves uniformly", "Composite"]
+        ]}
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "gof-taxonomy",
+      "title": "GoF Pattern Taxonomy",
+      "type": "mermaid",
+      "content": "flowchart TD\n    GoF[GoF Patterns] --> C[Creational]\n    GoF --> S[Structural]\n    GoF --> B[Behavioral]\n    C --> C1[Singleton]\n    C --> C2[Factory Method]\n    C --> C3[Abstract Factory]\n    C --> C4[Builder]\n    C --> C5[Prototype]\n    S --> S1[Adapter]\n    S --> S2[Decorator]\n    S --> S3[Facade]\n    S --> S4[Proxy]\n    S --> S5[Composite]\n    B --> B1[Strategy]\n    B --> B2[Observer]\n    B --> B3[Command]\n    B --> B4[Chain of Responsibility]\n    B --> B5[Template Method]"
+    },
+    {
+      "id": "notification-sequence",
+      "title": "Notification System: Strategy plus Observer Flow",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n    participant Client\n    participant OrderService\n    participant Dispatcher\n    participant EmailChannel\n    participant SmsChannel\n    Client->>OrderService: place order\n    OrderService->>OrderService: save order\n    OrderService->>Dispatcher: onPlaced event\n    Dispatcher->>Dispatcher: lookup user channel prefs\n    Dispatcher->>EmailChannel: send notification\n    Dispatcher->>SmsChannel: send notification\n    Note over Dispatcher,SmsChannel: each send isolated in try catch"
+    },
+    {
+      "id": "decorator-stack",
+      "title": "Decorator Wrapping Stack",
+      "type": "ascii",
+      "content": "+-----------------------------------------------+\n|  EncryptionDecorator                          |\n|  +-----------------------------------------+  |\n|  |  CompressionDecorator                   |  |\n|  |  +-----------------------------------+  |  |\n|  |  |  BufferedDecorator                |  |  |\n|  |  |  +-----------------------------+  |  |  |\n|  |  |  |  FileDataSource  (concrete) |  |  |  |\n|  |  |  +-----------------------------+  |  |  |\n|  |  +-----------------------------------+  |  |\n|  +-----------------------------------------+  |\n+-----------------------------------------------+\n  write() flows outer -> inner ; read() inner -> outer"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-strategy-vs-template",
+      "question": "What is the difference between the Strategy and Template Method patterns, and which would you prefer?",
+      "answer": "Both vary part of an algorithm while keeping the rest fixed. Template Method uses inheritance: a base class defines the skeleton in a final method and subclasses override hook methods. Strategy uses composition: the varying algorithm is an injected object implementing an interface. I prefer Strategy in most cases because it composes at runtime, can be swapped without a new subclass, is unit-testable in isolation, and avoids the fragile-base-class problem where a base change silently breaks subclasses. Template Method is fine for a framework workflow with truly fixed extension points, but composition is the more flexible default.",
+      "difficulty": "senior",
+      "category": "behavioral",
+      "tricky": false,
+      "tags": ["strategy", "template-method", "composition"],
+      "followUps": ["How does a Java lambda relate to Strategy?", "When does inheritance still win?"]
+    },
+    {
+      "id": "q-adapter-vs-decorator",
+      "question": "Adapter, Decorator, and Proxy all wrap an object that implements the same interface. How do you tell them apart?",
+      "answer": "By intent, not shape. Adapter changes the interface: the wrapper exposes the interface the client expects and translates to a different one the adaptee provides. Decorator keeps the interface identical and adds behavior before or after delegating, and is designed to stack. Proxy also keeps the interface identical but controls access to the real subject, for lazy loading, caching, security, or remoting, without adding domain behavior. So: Adapter converts, Decorator enhances, Proxy guards.",
+      "difficulty": "mid",
+      "category": "structural",
+      "tricky": false,
+      "tags": ["adapter", "decorator", "proxy"],
+      "followUps": ["Give a JDK example of each.", "Can a Proxy also be a Decorator?"]
+    },
+    {
+      "id": "q-design-notification",
+      "question": "Design a notification system that sends order updates over email, SMS, push, and Slack, with per-user channel preferences. Which patterns and why?",
+      "answer": "Model each channel as a Strategy: a NotificationChannel interface with send() and supports(), one implementation per channel. This lets me add a channel by writing one class with zero edits elsewhere (open/closed). Decouple dispatch with Observer: domain events like OrderPlaced fan out to a dispatcher that the order service does not know concretely. The dispatcher reads the user's channel preferences and routes to the matching strategies, wrapping each send in a try/catch so one channel outage cannot poison the others. For scale and resilience I would push each send onto a message queue so delivery is async and retryable, and add a Template Method or shared base for common steps like rendering and rate limiting.",
+      "difficulty": "senior",
+      "category": "behavioral",
+      "tricky": false,
+      "tags": ["strategy", "observer", "system-design", "notifications"],
+      "followUps": ["How do you add retries and dead-lettering?", "How do you guarantee idempotency so a user is not notified twice?"]
+    },
+    {
+      "id": "q-singleton-antipattern",
+      "question": "Why is the Singleton pattern often called an anti-pattern?",
+      "answer": "Because it usually smuggles in global mutable state. It hides dependencies: a class secretly reaching for a Singleton does not declare it in its constructor, so you cannot tell what it depends on or substitute a fake. That makes unit testing painful and creates order-dependent, flaky tests since the instance is shared across the suite. It introduces tight coupling to a concrete type, violating dependency inversion, and can become a concurrency bottleneck. The better pattern is dependency injection: create exactly one instance at the composition root and pass it in. You keep one instance without the global reach, the testing pain, or the hidden coupling.",
+      "difficulty": "senior",
+      "category": "creational",
+      "tricky": true,
+      "tags": ["singleton", "global-state", "testing", "di"],
+      "followUps": ["When is a Singleton legitimately fine?", "How does DI give you one instance without a Singleton?"]
+    },
+    {
+      "id": "q-double-checked-locking",
+      "question": "Explain double-checked locking for a lazy Singleton and the subtle bug if the field is not volatile.",
+      "answer": "Double-checked locking checks the instance outside the lock to avoid synchronizing on every call, then re-checks inside a synchronized block before constructing. The subtle bug: without volatile, under the Java Memory Model the write that publishes the reference can be reordered before the object's constructor finishes. Another thread can then see a non-null but partially constructed object, leading to intermittent NPEs or half-initialized state that only appears under concurrency on multi-core machines. The fix is to mark the field volatile, which establishes a happens-before edge so the construction is fully visible before the reference is published. Cleaner still is the initialization-on-demand holder idiom, which is lazy and thread-safe with no synchronization, or an enum singleton.",
+      "difficulty": "senior",
+      "category": "creational",
+      "tricky": true,
+      "tags": ["singleton", "concurrency", "volatile", "jmm"],
+      "followUps": ["Why does the holder idiom work without volatile?", "Why is enum the recommended singleton?"]
+    },
+    {
+      "id": "q-observer-leak",
+      "question": "What is the lapsed-listener problem in the Observer pattern and how do you prevent it?",
+      "answer": "The subject holds strong references to its observers. If an observer subscribes but never unsubscribes, the subject keeps it alive forever, so the observer and everything it transitively references can never be garbage collected. In a long-running server this is a slow memory leak that ends in OutOfMemoryError. Prevent it by always pairing subscribe with an explicit unsubscribe tied to the observer's lifecycle, or by holding observers through WeakReferences so they can be collected when no one else references them. Auto-cleanup of dead weak references on each notification keeps the list tidy.",
+      "difficulty": "senior",
+      "category": "behavioral",
+      "tricky": true,
+      "tags": ["observer", "memory-leak", "weak-references"],
+      "followUps": ["What are the downsides of weak references here?", "How do reactive libraries handle disposal?"]
+    },
+    {
+      "id": "q-factory-vs-abstract-factory",
+      "question": "What is the difference between Factory Method and Abstract Factory?",
+      "answer": "Factory Method is a single method, usually overridden by subclasses, that creates one product and lets subclasses decide its concrete type. Abstract Factory is an object with several factory methods that together create a family of related products meant to be used together, like a matching Button and Checkbox for one platform. Put simply, Factory Method makes one product via inheritance; Abstract Factory makes a family of related products via composition, and is often implemented using several Factory Methods internally.",
+      "difficulty": "mid",
+      "category": "creational",
+      "tricky": false,
+      "tags": ["factory-method", "abstract-factory"],
+      "followUps": ["What breaks open/closed in Abstract Factory?", "Where does Spring use these?"]
+    },
+    {
+      "id": "q-builder-when",
+      "question": "When would you choose the Builder pattern over a constructor or static factory?",
+      "answer": "When an object has many parameters, several of them optional, and you want it immutable. Constructors become a telescoping mess of overloads, and a long list of same-typed parameters is easy to transpose silently. A Builder gives readable, named, fluent construction, supports optional fields with defaults, can validate invariants in build(), and yields an immutable object. For two or three required fields, though, a plain constructor or a static factory is clearer; do not add a Builder reflexively.",
+      "difficulty": "mid",
+      "category": "creational",
+      "tricky": false,
+      "tags": ["builder", "immutability"],
+      "followUps": ["How does Lombok @Builder change the tradeoff?", "How do you make a Builder enforce required fields at compile time?"]
+    },
+    {
+      "id": "q-chain-pitfall",
+      "question": "What is a correctness hazard with the Chain of Responsibility pattern?",
+      "answer": "A request can fall off the end of the chain when no handler matches, and the naive implementation simply returns, so the request is silently dropped. In a validation or middleware pipeline that means an unprocessed request is treated as success. Guard against it by either making the last handler a catch-all default, or by throwing when the chain ends with no handler, so unhandled requests fail loudly instead of vanishing. A second hazard is ordering: handlers are order-sensitive, and a misordered chain can let a request bypass a check it should have hit.",
+      "difficulty": "senior",
+      "category": "behavioral",
+      "tricky": true,
+      "tags": ["chain-of-responsibility", "middleware", "correctness"],
+      "followUps": ["How do servlet filter chains avoid silent drops?", "How would you make ordering explicit and testable?"]
+    },
+    {
+      "id": "q-proxy-jdk",
+      "question": "How does Spring use the Proxy pattern, and what is the well-known self-invocation gotcha?",
+      "answer": "Spring AOP wraps a bean in a dynamic proxy (JDK interface proxy or CGLIB subclass) to weave cross-cutting concerns like @Transactional, @Cacheable, and @Async. The proxy intercepts external calls and runs the advice before delegating to the real bean. The gotcha is self-invocation: when a method calls another @Transactional method on the same instance via this.other(), the call does not go through the proxy, so the advice never runs and the second transaction or cache behavior is silently skipped. Fixes are to inject a reference to the proxied bean, restructure so the call crosses a bean boundary, or use AspectJ load-time weaving which does not rely on a proxy.",
+      "difficulty": "senior",
+      "category": "structural",
+      "tricky": true,
+      "tags": ["proxy", "spring", "aop", "transactions"],
+      "followUps": ["JDK dynamic proxy vs CGLIB, when is each used?", "Why does @Transactional on a private method do nothing?"]
+    },
+    {
+      "id": "q-composite-leaf",
+      "question": "In the Composite pattern, should leaf nodes expose child-management operations like add and remove?",
+      "answer": "This is the transparency-versus-safety tradeoff. The transparent design puts add/remove on the common component interface so clients treat leaves and composites uniformly, but then add on a leaf is meaningless and must throw or no-op, which is unsafe. The safe design puts child operations only on the composite, so leaves cannot expose nonsensical methods, but clients must type-check or cast to manipulate children, losing uniformity. GoF lean toward transparency for client simplicity; I usually keep child operations on the composite for type safety and accept the cast, because a runtime exception from add on a leaf is a worse surprise than an explicit cast.",
+      "difficulty": "senior",
+      "category": "structural",
+      "tricky": true,
+      "tags": ["composite", "interface-design", "type-safety"],
+      "followUps": ["How does the JVM widget tree handle this?", "Does the visitor pattern help traverse a composite?"]
+    },
+    {
+      "id": "q-decorator-vs-inheritance",
+      "question": "Why prefer Decorator over subclassing to add behavior?",
+      "answer": "Subclassing to combine N optional behaviors leads to a combinatorial explosion of classes, like BufferedCompressedEncryptedStream, and the combination is fixed at compile time. Decorator lets you compose those behaviors at runtime in any order by wrapping, so three behaviors are three small classes that combine freely instead of eight subclasses. It also keeps each behavior single-responsibility and open for extension without modifying existing code. The cost is many small objects and a wrapping order that can be confusing, so deep stacks should be documented.",
+      "difficulty": "mid",
+      "category": "structural",
+      "tricky": false,
+      "tags": ["decorator", "inheritance", "composition"],
+      "followUps": ["Where does java.io use this?", "How does wrapping order affect correctness?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-strategy-discount",
+      "title": "Refactor a Discount Switch into Strategy",
+      "difficulty": "mid",
+      "category": "behavioral",
+      "prompt": "A checkout class computes discounts with a growing switch on a String code: NONE, PERCENT_10, BLACK_FRIDAY, LOYALTY. Every new promotion means editing the switch, risking regressions. Refactor it to the Strategy pattern so a new discount is a new class with no edits to existing code. Provide a DiscountStrategy interface, at least two implementations, and a Checkout that takes a strategy. Bonus: support selecting a strategy by name via a registry.",
+      "hints": [
+        "Define DiscountStrategy with a single method long applyTo(long subtotalCents).",
+        "Make each promotion its own class implementing the interface; in modern Java a simple one can be a lambda.",
+        "Inject the strategy into Checkout via the constructor so it depends only on the interface.",
+        "For name-based selection, hold a Map<String, DiscountStrategy> as a registry instead of a switch."
+      ],
+      "solutionCode": "import java.util.*;\n\ninterface DiscountStrategy {\n    long applyTo(long subtotalCents);   // returns amount AFTER discount\n}\n\nclass NoDiscount implements DiscountStrategy {\n    public long applyTo(long s) { return s; }\n}\n\nclass PercentDiscount implements DiscountStrategy {\n    private final int percent;\n    PercentDiscount(int percent) { this.percent = percent; }\n    public long applyTo(long s) { return s - (s * percent / 100); }\n}\n\nclass Checkout {\n    private final DiscountStrategy discount;\n    Checkout(DiscountStrategy discount) {\n        this.discount = Objects.requireNonNull(discount);\n    }\n    long total(long subtotalCents) { return discount.applyTo(subtotalCents); }\n}\n\n// Registry replaces the switch: adding a promotion = one put(), no edits elsewhere.\nclass DiscountRegistry {\n    private final Map<String, DiscountStrategy> strategies = new HashMap<>();\n    DiscountRegistry() {\n        strategies.put(\"NONE\", new NoDiscount());\n        strategies.put(\"PERCENT_10\", new PercentDiscount(10));\n        strategies.put(\"BLACK_FRIDAY\", new PercentDiscount(40));\n        strategies.put(\"LOYALTY\", s -> s - 500);   // lambda strategy\n    }\n    DiscountStrategy forCode(String code) {\n        return strategies.getOrDefault(code, new NoDiscount());\n    }\n}\n\nclass Demo {\n    public static void main(String[] args) {\n        var registry = new DiscountRegistry();\n        var checkout = new Checkout(registry.forCode(\"BLACK_FRIDAY\"));\n        System.out.println(checkout.total(10000)); // 6000 cents\n    }\n}",
+      "solutionLanguage": "java",
+      "explanation": "The switch is replaced by polymorphism. DiscountStrategy is the abstraction; each promotion is a concrete strategy, so adding BLACK_FRIDAY_2 means writing one class or one lambda and registering it, with zero edits to Checkout or any existing strategy. That is the open/closed principle: open for extension, closed for modification. Checkout depends only on the interface, so it is trivially unit-tested by passing a stub strategy, and the registry centralizes the name-to-strategy mapping that used to be a brittle switch. The LOYALTY entry shows that a single-method strategy is naturally a lambda in modern Java, which removes ceremony while keeping the pattern. The unknown-code path defaults to NoDiscount rather than throwing, which is a deliberate safety choice for a pricing path; if a missing code should be an error instead, replace getOrDefault with an explicit throw so misconfiguration fails loudly.",
+      "relatedTopic": "design-patterns"
+    },
+    {
+      "id": "ch-observer-eventbus",
+      "title": "Build a Leak-Safe Observer Event Bus",
+      "difficulty": "senior",
+      "category": "behavioral",
+      "prompt": "Implement a typed event bus using the Observer pattern. It must let subscribers register a listener for an event type, publish events to all matching listeners, and crucially support unsubscription so listeners can be garbage-collected, avoiding the lapsed-listener leak. It must also be safe to publish while listeners subscribe or unsubscribe concurrently, and a throwing listener must not stop other listeners from receiving the event.",
+      "hints": [
+        "Key listeners by event Class so publish only notifies matching subscribers.",
+        "Use CopyOnWriteArrayList per event type so iteration during publish is safe under concurrent subscribe/unsubscribe.",
+        "Return a Subscription handle with a close() method so callers can unsubscribe deterministically.",
+        "Wrap each listener invocation in try/catch so one failure does not abort the broadcast."
+      ],
+      "solutionCode": "import java.util.*;\nimport java.util.concurrent.*;\nimport java.util.function.Consumer;\n\npublic class EventBus {\n    // CopyOnWriteArrayList: safe to iterate while others mutate it.\n    private final Map<Class<?>, List<Consumer<?>>> listeners = new ConcurrentHashMap<>();\n\n    public interface Subscription extends AutoCloseable {\n        void close();   // narrow checked exception away\n    }\n\n    public <T> Subscription subscribe(Class<T> type, Consumer<T> listener) {\n        listeners.computeIfAbsent(type, k -> new CopyOnWriteArrayList<>()).add(listener);\n        // returning a handle is what prevents the lapsed-listener leak\n        return () -> {\n            List<Consumer<?>> l = listeners.get(type);\n            if (l != null) l.remove(listener);\n        };\n    }\n\n    @SuppressWarnings(\"unchecked\")\n    public <T> void publish(T event) {\n        List<Consumer<?>> l = listeners.get(event.getClass());\n        if (l == null) return;\n        for (Consumer<?> raw : l) {\n            try {\n                ((Consumer<T>) raw).accept(event);   // isolate each listener\n            } catch (RuntimeException e) {\n                System.err.println(\"listener failed, continuing: \" + e.getMessage());\n            }\n        }\n    }\n\n    public static void main(String[] args) {\n        EventBus bus = new EventBus();\n        Subscription sub = bus.subscribe(String.class, s -> System.out.println(\"got: \" + s));\n        bus.subscribe(String.class, s -> { throw new RuntimeException(\"boom\"); });\n        bus.publish(\"order-42\");   // first listener still fires despite the boom\n        sub.close();               // deterministic unsubscribe -> no leak\n        bus.publish(\"order-43\");   // first listener no longer receives it\n    }\n}",
+      "solutionLanguage": "java",
+      "explanation": "This is the Observer pattern hardened for production. Listeners are keyed by event Class so publish targets only relevant subscribers, giving a typed bus. The three hard problems are addressed deliberately. Concurrency: each type maps to a CopyOnWriteArrayList, so the publish loop iterates a stable snapshot even while other threads subscribe or unsubscribe, eliminating ConcurrentModificationException without locking the publish path. Failure isolation: each accept is wrapped in try/catch, so one throwing listener is logged and skipped rather than aborting the broadcast, the exact bug that took down the notification system earlier in this topic. The memory leak: subscribe returns a Subscription handle whose close() removes the listener, so callers tied to a lifecycle (a request, a UI view) can unsubscribe deterministically and become eligible for garbage collection, defeating the lapsed-listener leak. The unchecked cast is safe because subscribe enforces that the listener type matches the key at registration time. For an even stronger guarantee against leaks you could store WeakReferences and purge dead ones on publish, at the cost of nondeterministic delivery if a listener is collected early.",
+      "relatedTopic": "design-patterns"
+    }
+  ],
+  "references": [
+    {"label": "Design Patterns: Elements of Reusable Object-Oriented Software (GoF)", "url": "https://en.wikipedia.org/wiki/Design_Patterns"},
+    {"label": "Refactoring Guru: Design Patterns Catalog", "url": "https://refactoring.guru/design-patterns"},
+    {"label": "Effective Java, 3rd Edition (Bloch) - Items 1-3 on creation", "url": "https://www.oreilly.com/library/view/effective-java-3rd/9780134686097/"},
+    {"label": "Java Memory Model and double-checked locking", "url": "https://www.cs.umd.edu/~pugh/java/memoryModel/DoubleCheckedLocking.html"},
+    {"label": "Spring Framework: AOP Proxying", "url": "https://docs.spring.io/spring-framework/reference/core/aop/proxying.html"}
+  ]
+}

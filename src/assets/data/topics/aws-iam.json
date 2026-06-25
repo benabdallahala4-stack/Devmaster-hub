@@ -1,0 +1,395 @@
+{
+  "id": "aws-iam",
+  "title": "AWS IAM",
+  "category": "Cloud",
+  "subcategory": "Security",
+  "difficulty": "senior",
+  "tags": ["aws", "iam", "security", "least-privilege", "sts", "policies"],
+  "description": "Master AWS Identity and Access Management — from users, roles, and policy evaluation logic to STS assume-role, permission boundaries, SCPs, and IRSA for production-grade, least-privilege security.",
+  "estReadMinutes": 28,
+  "sections": [
+    {
+      "id": "introduction",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {"type": "paragraph", "text": "AWS Identity and Access Management (IAM) is the control plane that decides, for every single AWS API call, whether the caller is allowed to perform an action on a resource. It is the foundation of the AWS shared-responsibility model: AWS secures the infrastructure, but you are responsible for who can do what inside your account. Misconfigured IAM is the single most common root cause of cloud data breaches."},
+        {"type": "paragraph", "text": "IAM is a global service (not region-scoped) and is eventually consistent — propagation of policy changes can take a few seconds. It is also free: you pay for the resources you protect, not for the access controls themselves. The mental model that matters most is that IAM is fundamentally a distributed authorization engine that evaluates JSON policy documents against a request context."},
+        {"type": "list", "items": [
+          "Principals: who is making the request (an IAM user, a role session, an AWS service, or a federated identity).",
+          "Actions: what they want to do (e.g. s3:GetObject, dynamodb:PutItem).",
+          "Resources: the ARN being acted on (e.g. arn:aws:s3:::my-bucket/prefix/*).",
+          "Conditions: the runtime context (source IP, MFA present, time, tags, requesting service)."
+        ]},
+        {"type": "callout", "variant": "info", "text": "IAM authenticates (proves identity) AND authorizes (decides permissions). Resource policies, SCPs, and identity policies are all evaluated together for a single decision."}
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why IAM Matters",
+      "kind": "why",
+      "blocks": [
+        {"type": "paragraph", "text": "Almost every serious AWS security incident traces back to IAM: leaked long-lived access keys committed to GitHub, an over-permissive wildcard policy on a Lambda that let an attacker pivot, or a trust policy that allowed an external account to assume a powerful role. Getting IAM right is the difference between a contained blast radius and a full account compromise."},
+        {"type": "list", "items": [
+          "Blast radius control: least-privilege ensures a compromised workload can only touch what it strictly needs.",
+          "Auditability: every Allow/Deny is logged in CloudTrail and analyzable with IAM Access Analyzer.",
+          "Credential hygiene: roles and STS short-lived credentials eliminate long-lived secrets that leak.",
+          "Compliance: SOC 2, PCI-DSS, and HIPAA all require demonstrable, scoped access control.",
+          "Cost of failure: a single over-permissioned key can lead to crypto-mining bills, data exfiltration, and ransomware."
+        ]},
+        {"type": "callout", "variant": "danger", "text": "An access key with AdministratorAccess pushed to a public repo is typically exploited by bots within minutes. Treat any leaked long-lived key as a full account breach until proven otherwise."}
+      ]
+    },
+    {
+      "id": "identities-users-groups-roles",
+      "heading": "Core Concept: Identities — Users, Groups, and Roles",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "IAM has three identity primitives. Understanding when to use each is a frequent interview discriminator between a junior and senior engineer."},
+        {"type": "heading", "text": "Users"},
+        {"type": "paragraph", "text": "An IAM user is a permanent identity for a human or (legacy) application. It has long-lived credentials: a console password and/or access keys (an access key ID + secret access key). Access keys do not expire, which makes them a liability. In a mature org, human users authenticate via IAM Identity Center (SSO) or federation, and you have close to zero standalone IAM users."},
+        {"type": "heading", "text": "Groups"},
+        {"type": "paragraph", "text": "A group is just a container for users that you attach policies to. Groups cannot be a principal in a policy and cannot be nested. They exist only to simplify policy management for humans — e.g. an Admins group, a ReadOnly group."},
+        {"type": "heading", "text": "Roles"},
+        {"type": "paragraph", "text": "A role is an identity with permissions but no long-lived credentials. Instead, a trusted principal assumes the role and receives temporary STS credentials. Roles are how you grant permissions to EC2 instances, Lambda functions, ECS tasks, EKS pods (via IRSA), other AWS accounts, and federated SSO users. Roles are the right answer almost any time you would reach for an access key."},
+        {"type": "table", "headers": ["Dimension", "IAM User", "IAM Role"], "rows": [
+          ["Credentials", "Long-lived (password / access keys)", "Temporary STS tokens (minutes to hours)"],
+          ["Who uses it", "A specific human or app", "Anyone the trust policy permits"],
+          ["Rotation", "Manual, often forgotten", "Automatic on every assume"],
+          ["Best for", "Break-glass / legacy only", "Workloads, cross-account, federation"],
+          ["Leak impact", "High — valid until manually revoked", "Low — expires quickly"]
+        ]},
+        {"type": "callout", "variant": "success", "text": "Rule of thumb: if you are about to create an access key, stop and ask whether a role can do the job. On EC2/ECS/Lambda/EKS it almost always can."}
+      ]
+    },
+    {
+      "id": "policies-identity-vs-resource",
+      "heading": "Core Concept: Policies — Identity-based vs Resource-based",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "A policy is a JSON document with Statements. Each statement has an Effect (Allow/Deny), Action, Resource, and optional Condition. There are two fundamental attachment models."},
+        {"type": "list", "items": [
+          "Identity-based policies are attached to a principal (user/group/role) and answer: what can THIS identity do?",
+          "Resource-based policies are attached to a resource (S3 bucket, SQS queue, KMS key, Lambda) and answer: who can do what to THIS resource? They include a Principal field."
+        ]},
+        {"type": "paragraph", "text": "The key behavioral difference: for access WITHIN the same account, an Allow from EITHER the identity policy OR the resource policy is sufficient (they are unioned). For CROSS-account access, you generally need an Allow on BOTH sides — the resource policy in the target account AND an identity policy in the calling account permitting the action. Resource-based policies are also the only way to grant access without the caller assuming a role (e.g. another account reads your S3 bucket directly)."},
+        {"type": "code", "language": "json", "code": "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [\n    {\n      \"Sid\": \"AllowAppReadFromImagesPrefix\",\n      \"Effect\": \"Allow\",\n      \"Action\": [\"s3:GetObject\"],\n      \"Resource\": \"arn:aws:s3:::acme-prod-assets/images/*\",\n      \"Condition\": {\n        \"StringEquals\": { \"s3:ExistingObjectTag/scan\": \"clean\" }\n      }\n    }\n  ]\n}"},
+        {"type": "callout", "variant": "info", "text": "Managed policies (AWS-managed or customer-managed) are reusable and versioned. Inline policies are embedded in a single identity and disappear when it is deleted — avoid them except for tightly-coupled one-offs."}
+      ]
+    },
+    {
+      "id": "policy-evaluation-logic",
+      "heading": "Core Concept: Policy Evaluation Logic",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "This is the single most-tested IAM topic in interviews. The evaluation engine resolves every request through a deterministic decision flow, combining all applicable policy types: SCPs, permission boundaries, identity policies, resource policies, and session policies."},
+        {"type": "heading", "text": "The Decision Order"},
+        {"type": "list", "items": [
+          "1. Default deny: every request is implicitly denied unless explicitly allowed.",
+          "2. Explicit Deny: if ANY policy in scope has a matching Deny, the request is denied. Period. No Allow can override it.",
+          "3. SCPs (Organizations): if an SCP does not allow the action, it is denied — SCPs are a permission ceiling, they never grant.",
+          "4. Resource policies, permission boundaries, session policies, and identity policies are evaluated for an explicit Allow.",
+          "5. If at least one explicit Allow exists and nothing denies, the request is allowed; otherwise default deny applies."
+        ]},
+        {"type": "callout", "variant": "warning", "text": "Explicit Deny ALWAYS wins. This is the cornerstone of IAM. A Deny in an SCP, a permission boundary, a resource policy, or an identity policy overrides every Allow everywhere."},
+        {"type": "paragraph", "text": "For an action to ultimately succeed, it must survive every gate: not denied anywhere, allowed by the identity (or resource) policy, within the permission boundary, within the SCP ceiling, and within any session policy. Each of these is an intersection (AND), while explicit Deny is a short-circuit."},
+        {"type": "table", "headers": ["Policy type", "Can Allow?", "Can Deny?", "Acts as"], "rows": [
+          ["Identity policy", "Yes", "Yes", "Grant of permissions"],
+          ["Resource policy", "Yes", "Yes", "Grant on the resource"],
+          ["Permission boundary", "No (only caps)", "Effectively yes", "Max permissions for the identity"],
+          ["SCP", "No (only caps)", "Effectively yes", "Max permissions for the account"],
+          ["Session policy", "No (only caps)", "Yes", "Cap on an assumed-role session"]
+        ]}
+      ]
+    },
+    {
+      "id": "sts-assume-role-trust",
+      "heading": "Core Concept: STS, AssumeRole, and Trust Policies",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Security Token Service (STS) issues the temporary credentials behind every role assumption. A role has TWO policies that work together: the trust policy (a resource-based policy on the role saying WHO can assume it) and the permission policy (identity-based, saying WHAT the role can do once assumed)."},
+        {"type": "heading", "text": "Trust Policy"},
+        {"type": "paragraph", "text": "The trust policy is evaluated when someone calls sts:AssumeRole. The Principal identifies who is allowed in: an AWS account, a specific role/user ARN, an AWS service principal (e.g. lambda.amazonaws.com), or a federated provider. Getting the trust policy wrong is how you both lock yourself out AND accidentally let the whole internet in."},
+        {"type": "code", "language": "json", "code": "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [\n    {\n      \"Effect\": \"Allow\",\n      \"Principal\": { \"AWS\": \"arn:aws:iam::111122223333:role/ci-deployer\" },\n      \"Action\": \"sts:AssumeRole\",\n      \"Condition\": {\n        \"StringEquals\": { \"sts:ExternalId\": \"acme-tenant-7f3a\" },\n        \"Bool\": { \"aws:MultiFactorAuthPresent\": \"true\" }\n      }\n    }\n  ]\n}"},
+        {"type": "paragraph", "text": "The ExternalId condition is the canonical defense against the confused-deputy problem: when a third-party SaaS assumes a role in your account, the ExternalId proves the request was intended for your tenant and cannot be replayed against another customer's role."},
+        {"type": "code", "language": "bash", "code": "# Assume a role and export the temporary credentials\nCREDS=$(aws sts assume-role \\\n  --role-arn arn:aws:iam::444455556666:role/app-runtime \\\n  --role-session-name reporting-job \\\n  --external-id acme-tenant-7f3a \\\n  --duration-seconds 3600)\n\nexport AWS_ACCESS_KEY_ID=$(echo \"$CREDS\" | jq -r .Credentials.AccessKeyId)\nexport AWS_SECRET_ACCESS_KEY=$(echo \"$CREDS\" | jq -r .Credentials.SecretAccessKey)\nexport AWS_SESSION_TOKEN=$(echo \"$CREDS\" | jq -r .Credentials.SessionToken)"},
+        {"type": "callout", "variant": "info", "text": "Session credentials always include a session token. If you ever see AWS_SESSION_TOKEN set, you are using temporary (role) credentials, not a long-lived access key."}
+      ]
+    },
+    {
+      "id": "boundaries-scps-irsa",
+      "heading": "Core Concept: Permission Boundaries, SCPs, and IRSA",
+      "kind": "concept",
+      "blocks": [
+        {"type": "heading", "text": "Permission Boundaries"},
+        {"type": "paragraph", "text": "A permission boundary is an advanced feature that sets the MAXIMUM permissions an identity-based policy can grant to a user or role. It never grants anything by itself — effective permissions are the intersection of the identity policy AND the boundary. The classic use case is delegated administration: you let developers create their own roles, but attach a boundary so they can never escalate beyond a safe set, and crucially cannot create roles without the boundary."},
+        {"type": "heading", "text": "Service Control Policies (SCPs)"},
+        {"type": "paragraph", "text": "SCPs live in AWS Organizations and apply to entire accounts or OUs. They are a ceiling for everyone in the account — including the root user. An SCP that denies ec2:* in a particular region enforces a guardrail no account admin can override. SCPs never grant permissions; they only constrain what identity policies are permitted to allow."},
+        {"type": "heading", "text": "IRSA — IAM Roles for Service Accounts"},
+        {"type": "paragraph", "text": "On EKS, IRSA lets a Kubernetes pod assume an IAM role scoped to its service account, instead of inheriting the node's instance-profile permissions. The EKS OIDC provider is registered as a federated trust principal; the pod's projected service-account token is exchanged via sts:AssumeRoleWithWebIdentity for role credentials. This gives per-pod least privilege — a logging sidecar no longer shares the database role of the app container."},
+        {"type": "code", "language": "json", "code": "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [{\n    \"Effect\": \"Allow\",\n    \"Principal\": {\n      \"Federated\": \"arn:aws:iam::111122223333:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/EXAMPLED539\"\n    },\n    \"Action\": \"sts:AssumeRoleWithWebIdentity\",\n    \"Condition\": {\n      \"StringEquals\": {\n        \"oidc.eks.us-east-1.amazonaws.com/id/EXAMPLED539:sub\": \"system:serviceaccount:payments:checkout-sa\",\n        \"oidc.eks.us-east-1.amazonaws.com/id/EXAMPLED539:aud\": \"sts.amazonaws.com\"\n      }\n    }\n  }]\n}"},
+        {"type": "callout", "variant": "warning", "text": "A common IRSA footgun: scoping the trust only on aud but not sub. Without the sub condition, ANY service account in the cluster can assume the role. Always pin the exact system:serviceaccount:<namespace>:<name>."}
+      ]
+    },
+    {
+      "id": "production-example-incident",
+      "heading": "Production Example: The Cross-Account S3 Replication Incident",
+      "kind": "example",
+      "blocks": [
+        {"type": "paragraph", "text": "Scenario: A fintech runs a data-platform account (account D, 444455556666) that needs to read raw event files from a producer account's bucket (account P, 111122223333) and write aggregates into its own DynamoDB. The on-call engineer kept getting AccessDenied even though the data role had s3:GetObject in its identity policy."},
+        {"type": "paragraph", "text": "Root cause: cross-account S3 access requires an Allow on BOTH sides. The producer bucket policy in account P had no statement granting account D, so the union check failed. Worse, an earlier attempt fixed it by adding a wildcard Principal '*' to the bucket policy — which silently made the bucket world-readable for two days before Access Analyzer flagged it as public."},
+        {"type": "heading", "text": "The correct bucket policy in the producer account (P)"},
+        {"type": "code", "language": "json", "code": "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [{\n    \"Sid\": \"AllowDataPlatformReadOnlyRawPrefix\",\n    \"Effect\": \"Allow\",\n    \"Principal\": { \"AWS\": \"arn:aws:iam::444455556666:role/data-ingest\" },\n    \"Action\": [\"s3:GetObject\", \"s3:ListBucket\"],\n    \"Resource\": [\n      \"arn:aws:s3:::producer-raw-events\",\n      \"arn:aws:s3:::producer-raw-events/raw/*\"\n    ],\n    \"Condition\": { \"StringEquals\": { \"aws:PrincipalOrgID\": \"o-acme123456\" } }\n  }]\n}"},
+        {"type": "paragraph", "text": "The aws:PrincipalOrgID condition is the senior-level touch: instead of trusting a hard-coded account ID that could be replaced, it restricts access to principals inside the company's AWS Organization, defending against a confused-deputy or a future account-ID typo that points at a foreign account."},
+        {"type": "callout", "variant": "danger", "text": "Never use Principal '*' on a resource policy unless you genuinely intend public access AND scope it tightly with conditions. It is the most common cause of public S3 data exposure."}
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {"type": "list", "items": [
+          "Wildcard everything: Action '*' on Resource '*' is the policy equivalent of chmod 777. A Lambda with this can delete your whole account if compromised.",
+          "Long-lived access keys in code/CI: keys leak to git history, logs, and Docker images. Use OIDC federation for CI (GitHub Actions -> AssumeRoleWithWebIdentity) instead.",
+          "Forgetting cross-account needs both sides: identity Allow alone is not enough; the resource policy must also grant the external principal.",
+          "Assuming Allow can override Deny: it never can. Engineers waste hours adding broader Allows when an explicit Deny in an SCP or boundary is the real blocker.",
+          "Trust policy too broad: Principal set to a whole account (root) when only one role needed access, widening the assume surface.",
+          "No ExternalId for third-party roles: opens the confused-deputy hole.",
+          "iam:PassRole left unbounded: lets a user attach ANY role to a service, a classic privilege-escalation path. Always scope PassRole to specific role ARNs.",
+          "Treating IAM as instantly consistent: it is eventually consistent; a brand-new role may briefly fail to assume."
+        ]},
+        {"type": "heading", "text": "The PassRole escalation"},
+        {"type": "paragraph", "text": "A user with iam:PassRole on '*' plus lambda:CreateFunction can create a Lambda, pass it an admin role, and invoke it — escalating from limited permissions to full admin. The fix is to scope PassRole to only the specific roles a service legitimately needs."},
+        {"type": "code", "language": "json", "code": "{\n  \"Effect\": \"Allow\",\n  \"Action\": \"iam:PassRole\",\n  \"Resource\": \"arn:aws:iam::444455556666:role/app-runtime-only\",\n  \"Condition\": {\n    \"StringEquals\": { \"iam:PassedToService\": \"lambda.amazonaws.com\" }\n  }\n}"},
+        {"type": "callout", "variant": "danger", "text": "iam:PassRole + a compute-creation permission is one of the most exploited privilege-escalation chains in AWS. Audit it relentlessly."}
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {"type": "list", "items": [
+          "Default to roles and short-lived STS credentials; eliminate long-lived access keys wherever possible.",
+          "Grant least privilege: start from zero, add specific actions/resources, and tighten with conditions (source IP, MFA, tags, PrincipalOrgID).",
+          "Use permission boundaries to safely delegate role creation to teams without enabling escalation.",
+          "Use SCPs in Organizations as account-wide guardrails (deny risky regions, deny disabling CloudTrail, enforce encryption).",
+          "Run IAM Access Analyzer continuously to find external/public access and to generate least-privilege policies from CloudTrail activity.",
+          "Scope iam:PassRole narrowly and audit it; treat it as a privilege-escalation primitive.",
+          "Always set an ExternalId for third-party cross-account roles to prevent the confused deputy.",
+          "Require MFA for sensitive actions via aws:MultiFactorAuthPresent conditions; protect and rarely use root.",
+          "Tag resources and use ABAC (attribute-based access control) with condition keys like aws:ResourceTag to scale permissions without policy sprawl.",
+          "Federate human access through IAM Identity Center / SSO; aim for near-zero standalone IAM users."
+        ]},
+        {"type": "callout", "variant": "success", "text": "A mature IAM posture has: no long-lived keys, every role boundary-capped where delegated, SCP guardrails on every account, and Access Analyzer wired into CI to block policies that grant external access."}
+      ]
+    },
+    {
+      "id": "condition-keys-note",
+      "heading": "Note: Condition Keys Worth Knowing",
+      "kind": "note",
+      "blocks": [
+        {"type": "paragraph", "text": "Condition keys are where senior engineers add precision. They let a single broad Allow become a tightly-scoped grant."},
+        {"type": "table", "headers": ["Condition key", "Use"], "rows": [
+          ["aws:MultiFactorAuthPresent", "Require MFA for the action"],
+          ["aws:SourceIp", "Restrict to a corporate CIDR / VPN range"],
+          ["aws:PrincipalOrgID", "Limit cross-account access to your Organization"],
+          ["aws:SourceArn / aws:SourceAccount", "Prevent confused-deputy on service-to-service calls"],
+          ["aws:RequestTag / aws:ResourceTag", "ABAC — match identity tags to resource tags"],
+          ["s3:prefix", "Constrain ListBucket to a single key prefix"],
+          ["aws:SecureTransport", "Force HTTPS-only access"]
+        ]},
+        {"type": "callout", "variant": "info", "text": "Conditions only constrain — they make an Allow narrower or a Deny conditional. They never grant on their own."}
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "policy-evaluation-flow",
+      "title": "IAM Policy Evaluation Decision Flow",
+      "type": "mermaid",
+      "content": "flowchart TD\n  A[API request arrives] --> B{Explicit Deny anywhere}\n  B -- Yes --> X[DENY]\n  B -- No --> C{Allowed by SCP ceiling}\n  C -- No --> X\n  C -- Yes --> D{Within permission boundary}\n  D -- No --> X\n  D -- Yes --> E{Within session policy}\n  E -- No --> X\n  E -- Yes --> F{Explicit Allow in identity or resource policy}\n  F -- No --> X\n  F -- Yes --> G[ALLOW]"
+    },
+    {
+      "id": "assume-role-sequence",
+      "title": "Cross-Account AssumeRole with STS",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n  participant App as App in Account D\n  participant STS as AWS STS\n  participant Role as Target Role in Account P\n  participant S3 as S3 Bucket in Account P\n  App->>STS: AssumeRole with ExternalId\n  STS->>Role: Evaluate trust policy\n  Role-->>STS: Principal and ExternalId match\n  STS-->>App: Temporary credentials\n  App->>S3: GetObject with session token\n  S3-->>App: Object bytes if resource policy allows"
+    },
+    {
+      "id": "policy-layers-ascii",
+      "title": "IAM Permission Layers (Intersection of Constraints)",
+      "type": "ascii",
+      "content": "+------------------------------------------------------+\n|  SCP ceiling (Organizations - whole account)         |\n|  +------------------------------------------------+  |\n|  |  Permission boundary (max for this identity)   |  |\n|  |  +------------------------------------------+  |  |\n|  |  |  Identity policy (what is granted)       |  |  |\n|  |  |  +------------------------------------+  |  |  |\n|  |  |  | Session policy (cap on assume)     |  |  |  |\n|  |  |  |   ===> EFFECTIVE PERMISSIONS       |  |  |  |\n|  |  |  +------------------------------------+  |  |  |\n|  |  +------------------------------------------+  |  |\n|  +------------------------------------------------+  |\n+------------------------------------------------------+\n   Any explicit DENY at any layer overrides everything."
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-role-vs-user",
+      "question": "What is the difference between an IAM user and an IAM role, and when would you choose each?",
+      "answer": "An IAM user is a permanent identity with long-lived credentials (password, access keys) tied to a specific human or app. A role has no long-lived credentials; a trusted principal assumes it and receives temporary STS tokens. Use roles for anything programmatic — EC2/ECS/Lambda/EKS workloads, cross-account access, and federated humans — because credentials are short-lived and auto-rotated. Reserve users for break-glass or legacy cases where federation truly is not possible. In a mature org you have close to zero standalone users and humans log in via IAM Identity Center / SSO.",
+      "difficulty": "junior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["iam", "roles", "users"],
+      "followUps": ["How does a role get its credentials?", "Why are access keys discouraged?"]
+    },
+    {
+      "id": "q-identity-vs-resource-policy",
+      "question": "Explain the difference between identity-based and resource-based policies.",
+      "answer": "Identity-based policies attach to a principal (user/group/role) and define what that identity can do; they have no Principal field. Resource-based policies attach to a resource (S3 bucket, SQS queue, KMS key, Lambda) and define who can do what to that resource; they DO have a Principal field. Within one account, an Allow from either side is enough (union). For cross-account, you typically need an Allow on both: the resource policy in the target account and an identity policy in the caller's account.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["policies", "resource-based", "identity-based"],
+      "followUps": ["Which services support resource-based policies?", "Why does cross-account need both sides?"]
+    },
+    {
+      "id": "q-policy-evaluation",
+      "question": "Walk me through how IAM resolves whether a request is allowed or denied.",
+      "answer": "Start from default deny — everything is denied unless explicitly allowed. Then: (1) if any policy in scope has a matching explicit Deny, deny immediately and stop. (2) The request must be permitted by the SCP ceiling and within any permission boundary and session policy (all intersections). (3) There must be at least one explicit Allow in an identity or resource policy. If all gates pass with no Deny, allow; otherwise default deny. The mental model: Deny is a short-circuit; everything else is an AND of constraints plus a required Allow.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["policy-evaluation", "deny", "allow"],
+      "followUps": ["Can an SCP grant a permission?", "What if identity policy allows but boundary does not?"]
+    },
+    {
+      "id": "q-explicit-deny-wins",
+      "question": "An identity policy explicitly Allows s3:DeleteObject, but the user still gets AccessDenied. Give two distinct reasons.",
+      "answer": "(1) An explicit Deny somewhere in scope — in an SCP, a permission boundary, the resource (bucket) policy, or another attached identity policy — overrides the Allow, because explicit Deny always wins. (2) A constraint layer fails the intersection: the SCP ceiling does not permit s3:DeleteObject, or the permission boundary does not include it, so even though the identity policy allows it, the effective permission excludes it. Other possibilities: a Condition on the Allow isn't met, or eventual consistency on a just-edited policy.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["explicit-deny", "policy-evaluation", "gotcha"],
+      "followUps": ["How would you debug which layer is denying?", "Does IAM Policy Simulator account for SCPs?"]
+    },
+    {
+      "id": "q-trust-vs-permission-policy",
+      "question": "A role has two policies — what are they and what does each control?",
+      "answer": "Every role has a trust policy and a permission (identity) policy. The trust policy is a resource-based policy on the role that controls WHO can assume it (its Principal — an account, a specific role/user ARN, a service principal, or a federated provider) and under what conditions. The permission policy controls WHAT the role can do once assumed. Both must be satisfied: the trust policy gates the sts:AssumeRole call; the permission policy governs subsequent API calls.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["roles", "trust-policy", "sts"],
+      "followUps": ["What happens if the trust policy is missing?", "Can a role assume itself?"]
+    },
+    {
+      "id": "q-confused-deputy",
+      "question": "What is the confused-deputy problem in AWS, and how do you prevent it?",
+      "answer": "A confused deputy is when a trusted service or third party is tricked into using its legitimate permissions on behalf of an attacker. In AWS this commonly happens with cross-account roles assumed by third-party SaaS: without protection, the SaaS could be induced to assume YOUR role while acting for another customer. The fix is an ExternalId in the trust policy condition (a shared secret unique to your tenant), and for service-to-service calls, aws:SourceArn / aws:SourceAccount conditions so the role can only be used on behalf of your specific resource/account.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["confused-deputy", "trust-policy", "external-id", "gotcha"],
+      "followUps": ["Why is ExternalId better than just the account ID?", "How does aws:SourceArn help CloudWatch/SNS?"]
+    },
+    {
+      "id": "q-permission-boundary",
+      "question": "What is a permission boundary and why would you use one?",
+      "answer": "A permission boundary is a managed policy that sets the MAXIMUM permissions an identity-based policy can grant to a user or role — effective permissions are the intersection of the identity policy and the boundary. It never grants anything itself. The main use case is delegated administration: you let developers create roles for their apps, but a boundary ensures they can never escalate beyond a safe set, and you require (via condition) that any role they create must carry the boundary, closing the escalation loop.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["permission-boundary", "delegation", "least-privilege"],
+      "followUps": ["How is a boundary different from an SCP?", "How do you force created roles to keep the boundary?"]
+    },
+    {
+      "id": "q-scp-grant",
+      "question": "Can a Service Control Policy grant a permission? A developer says adding an SCP fixed their AccessDenied.",
+      "answer": "No — SCPs can never grant permissions; they only set a ceiling. If adding an SCP appeared to fix an AccessDenied, what actually happened is the previous SCP (or default behavior) was denying the action, and the new SCP widened the ceiling so the existing identity-policy Allow could finally take effect. The grant still comes from the identity/resource policy; the SCP merely stopped blocking it. SCPs apply to the whole account including root.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["scp", "organizations", "gotcha"],
+      "followUps": ["Does an SCP affect the management account?", "What is FullAWSAccess and why does it exist?"]
+    },
+    {
+      "id": "q-wildcard-danger",
+      "question": "Why is a policy with Action '*' on Resource '*' dangerous even on a non-prod workload?",
+      "answer": "It is effectively admin. If that workload is compromised — an SSRF reading instance metadata, an exploited dependency, a leaked key — the attacker inherits full account control: they can read all data, create backdoor users, disable CloudTrail, and run up huge bills. 'Non-prod' is irrelevant if the non-prod account is in the same Organization or can pivot via trust relationships. Least privilege limits the blast radius regardless of environment.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["wildcard", "least-privilege", "blast-radius"],
+      "followUps": ["How would you generate a least-privilege policy from real usage?", "What does Access Analyzer flag here?"]
+    },
+    {
+      "id": "q-passrole-escalation",
+      "question": "How can iam:PassRole lead to privilege escalation?",
+      "answer": "PassRole lets an identity hand a role to a service. If a user has iam:PassRole on '*' plus a compute-creation permission like lambda:CreateFunction (or ec2:RunInstances, ecs:RunTask), they can create a resource, attach a far more powerful role (e.g. an admin role) to it, and then invoke it — escalating from limited permissions to whatever the passed role can do. Mitigate by scoping PassRole to specific role ARNs and adding the iam:PassedToService condition so a role can only be passed to its intended service.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["passrole", "privilege-escalation", "gotcha"],
+      "followUps": ["What other actions pair with PassRole for escalation?", "How do you audit PassRole usage org-wide?"]
+    },
+    {
+      "id": "q-irsa",
+      "question": "What is IRSA and what problem does it solve on EKS?",
+      "answer": "IAM Roles for Service Accounts lets a Kubernetes pod assume an IAM role scoped to its service account instead of inheriting the EC2 node's instance-profile permissions. Without IRSA, every pod on a node shares the node role, so a low-trust sidecar has the same AWS access as your payments app. With IRSA, the EKS OIDC provider is a federated trust principal; the pod's projected service-account token is exchanged via sts:AssumeRoleWithWebIdentity for role credentials, giving per-pod least privilege. You must pin the trust policy on both the sub (service account) and aud claims.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["irsa", "eks", "oidc", "federation"],
+      "followUps": ["What is the alternative EKS Pod Identity?", "Why must you condition on sub, not just aud?"]
+    },
+    {
+      "id": "q-access-keys-vs-roles",
+      "question": "Your CI pipeline needs to deploy to AWS. Why prefer OIDC federation over storing access keys?",
+      "answer": "Stored access keys are long-lived static secrets: they leak into logs, git history, and images, and remain valid until someone manually rotates them — which rarely happens. With OIDC federation (e.g. GitHub Actions presenting a signed OIDC token to sts:AssumeRoleWithWebIdentity), no secret is stored at all; CI receives short-lived credentials per run, scoped by a trust policy that can pin the exact repo and branch via condition keys. This removes the most common leak vector and tightens who can deploy.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["oidc", "ci-cd", "access-keys", "federation"],
+      "followUps": ["How do you pin the GitHub repo/branch in the trust policy?", "What is the token audience for GitHub OIDC?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-least-privilege-policy",
+      "title": "Write a Least-Privilege Policy: Read One S3 Prefix, Write One DynamoDB Table",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "prompt": "An application role needs to (1) read objects from a single prefix — reports/ — of the bucket acme-prod-reports, including listing only that prefix, and (2) write items into exactly one DynamoDB table, orders-prod, in us-east-1, account 444455556666. It must NOT be able to delete S3 objects, touch other prefixes, or perform table-management actions on DynamoDB. Write a least-privilege identity policy. Enforce HTTPS-only.",
+      "hints": [
+        "S3 ListBucket acts on the bucket ARN, while GetObject acts on the object ARN (bucket/key). They are different resources.",
+        "Constrain ListBucket to the prefix using the s3:prefix condition key, not just the resource ARN.",
+        "Writing items is dynamodb:PutItem/UpdateItem/BatchWriteItem — NOT dynamodb:* and NOT CreateTable/DeleteTable.",
+        "Add a global condition aws:SecureTransport = true to force TLS.",
+        "Use exact ARNs; avoid wildcards on the account/region/table name."
+      ],
+      "solutionCode": "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [\n    {\n      \"Sid\": \"ListOnlyReportsPrefix\",\n      \"Effect\": \"Allow\",\n      \"Action\": \"s3:ListBucket\",\n      \"Resource\": \"arn:aws:s3:::acme-prod-reports\",\n      \"Condition\": {\n        \"StringLike\": { \"s3:prefix\": \"reports/*\" },\n        \"Bool\": { \"aws:SecureTransport\": \"true\" }\n      }\n    },\n    {\n      \"Sid\": \"ReadReportsObjects\",\n      \"Effect\": \"Allow\",\n      \"Action\": \"s3:GetObject\",\n      \"Resource\": \"arn:aws:s3:::acme-prod-reports/reports/*\",\n      \"Condition\": {\n        \"Bool\": { \"aws:SecureTransport\": \"true\" }\n      }\n    },\n    {\n      \"Sid\": \"WriteOrdersTableOnly\",\n      \"Effect\": \"Allow\",\n      \"Action\": [\n        \"dynamodb:PutItem\",\n        \"dynamodb:UpdateItem\",\n        \"dynamodb:BatchWriteItem\"\n      ],\n      \"Resource\": \"arn:aws:dynamodb:us-east-1:444455556666:table/orders-prod\",\n      \"Condition\": {\n        \"Bool\": { \"aws:SecureTransport\": \"true\" }\n      }\n    }\n  ]\n}",
+      "solutionLanguage": "json",
+      "explanation": "The policy is split into three statements because each acts on a different resource type and ARN shape. ListBucket is a bucket-level action: its Resource is the bucket ARN (no key), and we constrain it to the reports/ prefix with the s3:prefix condition so the app cannot enumerate other folders — putting the prefix only in the Resource ARN would not restrict ListBucket because ListBucket does not operate on object ARNs. GetObject is an object-level action, so its Resource is bucket/reports/* — note we deliberately omit s3:PutObject and s3:DeleteObject to keep it read-only. For DynamoDB we enumerate only the write actions (PutItem, UpdateItem, BatchWriteItem) on the exact table ARN, excluding scans, reads, and any table-management actions like CreateTable or DeleteTable; using dynamodb:* here would be the classic over-grant. The aws:SecureTransport condition on every statement forces TLS, denying any plaintext HTTP request. Because there is no wildcard on account, region, or table, and no broad Action '*', the blast radius if this role is compromised is limited to reading one prefix and appending to one table. A senior refinement would be to also scope DynamoDB writes by dynamodb:LeadingKeys if the app should only touch its own partition keys.",
+      "relatedTopic": "aws-iam"
+    },
+    {
+      "id": "ch-secure-trust-policy",
+      "title": "Harden a Cross-Account Trust Policy Against the Confused Deputy",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "prompt": "A third-party analytics vendor (their account 999988887777, their role audit-runner) must assume a read-only role in your account 444455556666. Write the role's trust policy so that ONLY that specific vendor role can assume it, the request must carry the ExternalId 'acme-9f12-tenant', and it must be denied unless the call comes over a session that originated from the vendor (use ExternalId as the confused-deputy guard). Also require that the assumed session lasts no more than 1 hour by noting the max session duration setting.",
+      "hints": [
+        "Principal should be the exact vendor role ARN, not the whole vendor account root.",
+        "The action is sts:AssumeRole.",
+        "Add a StringEquals condition on sts:ExternalId.",
+        "Max session duration is a property of the role (MaxSessionDuration), not the trust policy itself — call it out.",
+        "Consider denying assumption without the ExternalId rather than just not allowing it, for clarity."
+      ],
+      "solutionCode": "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [\n    {\n      \"Sid\": \"AllowVendorAuditRoleWithExternalId\",\n      \"Effect\": \"Allow\",\n      \"Principal\": {\n        \"AWS\": \"arn:aws:iam::999988887777:role/audit-runner\"\n      },\n      \"Action\": \"sts:AssumeRole\",\n      \"Condition\": {\n        \"StringEquals\": {\n          \"sts:ExternalId\": \"acme-9f12-tenant\"\n        }\n      }\n    },\n    {\n      \"Sid\": \"DenyAssumeWithoutExternalId\",\n      \"Effect\": \"Deny\",\n      \"Principal\": { \"AWS\": \"*\" },\n      \"Action\": \"sts:AssumeRole\",\n      \"Condition\": {\n        \"Null\": { \"sts:ExternalId\": \"true\" }\n      }\n    }\n  ]\n}\n\n/* Set on the ROLE itself, not the trust policy: */\n/* aws iam update-role --role-name vendor-audit \\      */\n/*   --max-session-duration 3600                       */",
+      "solutionLanguage": "json",
+      "explanation": "The Allow statement names the exact vendor role ARN as the Principal rather than arn:aws:iam::999988887777:root — scoping to root would let ANY identity in the vendor account assume your role, widening trust unnecessarily. The StringEquals on sts:ExternalId is the confused-deputy defense: the vendor must supply the agreed secret on every AssumeRole call, so even if an attacker controlled the vendor's deputy, they could not target your role without knowing your unique ExternalId. The second statement is an explicit Deny that fires when sts:ExternalId is absent (the Null condition is true when the key is missing); because explicit Deny always wins, this guarantees no assume can ever succeed without an ExternalId, even if a future broad Allow is added by mistake — a belt-and-suspenders pattern senior engineers use to make the guard fail-safe. Finally, the maximum session length is NOT a trust-policy field; it is the role's MaxSessionDuration attribute, set via update-role or in IaC (here 3600 seconds = 1 hour). This combination — exact principal, mandatory ExternalId, fail-safe Deny, and bounded session — produces a hardened cross-account boundary that resists both confused-deputy abuse and accidental policy widening.",
+      "relatedTopic": "aws-iam"
+    }
+  ],
+  "references": [
+    {"label": "AWS IAM User Guide", "url": "https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html"},
+    {"label": "Policy Evaluation Logic", "url": "https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic.html"},
+    {"label": "IAM Security Best Practices", "url": "https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html"},
+    {"label": "The Confused Deputy Problem", "url": "https://docs.aws.amazon.com/IAM/latest/UserGuide/confused-deputy.html"},
+    {"label": "Permissions Boundaries", "url": "https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_boundaries.html"},
+    {"label": "IAM Roles for Service Accounts (IRSA)", "url": "https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html"}
+  ]
+}

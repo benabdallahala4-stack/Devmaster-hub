@@ -1,0 +1,596 @@
+{
+  "id": "helm",
+  "title": "Helm",
+  "category": "DevOps",
+  "subcategory": "K8s Packaging",
+  "difficulty": "mid",
+  "tags": ["helm", "kubernetes", "packaging", "templating", "gitops", "charts"],
+  "description": "Master Helm as a production-grade Kubernetes package manager: templated charts, value overrides, releases and rollbacks, dependencies, hooks, and the subtle Go-templating gotchas that bite teams in real incidents.",
+  "estReadMinutes": 28,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "What Helm Actually Is",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Helm is the de facto package manager for Kubernetes. It packages a set of related Kubernetes manifests (Deployments, Services, ConfigMaps, Ingresses, and more) into a versioned, parameterized unit called a chart. Instead of copy-pasting near-identical YAML across dev, staging, and prod, you template the manifests once and feed in environment-specific values."
+        },
+        {
+          "type": "paragraph",
+          "text": "Mechanically, Helm is a client-side templating engine plus a release-tracking system. The `helm` CLI renders Go templates against a merged values tree, validates the output against the cluster's API schema, and applies the resulting manifests. It then stores a record of what it applied (the release) as a Secret in the target namespace, so it can diff, upgrade, and roll back deterministically."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Chart: a directory of templates + a Chart.yaml + a default values.yaml.",
+            "Release: a named, versioned installation of a chart into a namespace.",
+            "Revision: an immutable snapshot of a release's rendered manifests after each install/upgrade.",
+            "Repository: an indexed HTTP(S) or OCI store from which charts are pulled."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Helm 3 is fully client-side. The old Tiller server-side component (Helm 2) is gone, which removed a large RBAC and security footgun. If you read docs mentioning Tiller, they are obsolete."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why Helm Matters in Production",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "At scale you do not deploy one app to one cluster. You deploy dozens of microservices across multiple environments and regions, each with different replica counts, resource limits, feature flags, and ingress hostnames. Without parameterization you accumulate thousands of lines of duplicated YAML that drift apart silently until a prod-only field is missing and a deploy fails at 2 AM."
+        },
+        {
+          "type": "list",
+          "items": [
+            "DRY manifests: one template, many environments via value overrides.",
+            "Atomic releases: an upgrade either fully succeeds or can be rolled back to a known-good revision.",
+            "Auditability: every revision is stored, so you can answer 'what exactly was running last Tuesday?'",
+            "Distribution: vendors ship charts (Postgres, Redis, ingress-nginx, cert-manager) you can pin and consume as dependencies.",
+            "GitOps fit: tools like ArgoCD and Flux render Helm charts as part of a declarative pipeline."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The real value is the release lifecycle, not the templating. Anyone can string YAML together; Helm's superpower is tracking revisions so `helm rollback` is a single, safe command instead of a frantic git revert plus manual re-apply."
+        }
+      ]
+    },
+    {
+      "id": "chart-anatomy",
+      "heading": "Chart Anatomy and the File Layout",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A chart is a directory with a strict, conventional structure. Helm cares about specific filenames; everything in templates/ is rendered, everything else has a defined role."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "myapp/\n  Chart.yaml          # name, version, appVersion, dependencies\n  values.yaml         # default values\n  values.schema.json  # optional JSON Schema to validate values\n  charts/             # vendored/subchart dependencies\n  crds/               # CRDs installed before templates, never templated\n  templates/\n    _helpers.tpl      # named template definitions (no manifest output)\n    deployment.yaml\n    service.yaml\n    ingress.yaml\n    hpa.yaml\n    NOTES.txt         # post-install message, templated\n    tests/            # `helm test` pods"
+        },
+        {
+          "type": "table",
+          "headers": ["Field", "Meaning", "Gotcha"],
+          "rows": [
+            ["version", "The chart's own SemVer version", "Must bump on every chart change for repo consumers to pick it up"],
+            ["appVersion", "The version of the app shipped", "Informational only; does NOT affect chart resolution"],
+            ["type", "application or library", "Library charts cannot be installed, only imported"],
+            ["dependencies", "Subcharts pulled into charts/", "Run `helm dependency update` to populate Chart.lock and charts/"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Files in crds/ are applied raw and are NOT processed by the template engine. Helm also never upgrades or deletes CRDs it installed from crds/ — managing CRD lifecycle is a known sharp edge."
+        }
+      ]
+    },
+    {
+      "id": "templating",
+      "heading": "Go Templating, Values, and _helpers.tpl",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Helm templates are Go text/template plus the Sprig function library plus a handful of Helm-specific functions. Templates receive a top-level context with .Values (the merged values tree), .Release (name, namespace, revision), .Chart (metadata), and .Capabilities (cluster API versions)."
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "code": "# templates/deployment.yaml (fragment)\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: {{ include \"myapp.fullname\" . }}\n  labels:\n    {{- include \"myapp.labels\" . | nindent 4 }}\nspec:\n  replicas: {{ .Values.replicaCount }}\n  template:\n    spec:\n      containers:\n        - name: {{ .Chart.Name }}\n          image: \"{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}\"\n          resources:\n            {{- toYaml .Values.resources | nindent 12 }}"
+        },
+        {
+          "type": "paragraph",
+          "text": "_helpers.tpl holds reusable named templates. Defining naming and label logic once avoids drift and keeps every manifest consistent. Use `include` (not `template`) so the output can be piped into functions like `nindent`."
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "code": "{{/* templates/_helpers.tpl */}}\n{{- define \"myapp.fullname\" -}}\n{{- printf \"%s-%s\" .Release.Name .Chart.Name | trunc 63 | trimSuffix \"-\" -}}\n{{- end -}}\n\n{{- define \"myapp.labels\" -}}\nhelm.sh/chart: {{ printf \"%s-%s\" .Chart.Name .Chart.Version | replace \"+\" \"_\" }}\napp.kubernetes.io/name: {{ .Chart.Name }}\napp.kubernetes.io/instance: {{ .Release.Name }}\napp.kubernetes.io/managed-by: {{ .Release.Service }}\n{{- end -}}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "`include` returns a string you can pipe; `template` is an action that writes directly and cannot be piped. This is why every helper that produces indented YAML is consumed via `include ... | nindent N`."
+        },
+        {
+          "type": "heading",
+          "text": "Value Merging and Override Precedence"
+        },
+        {
+          "type": "paragraph",
+          "text": "Values merge in a well-defined order. Later sources win. Understanding this precedence is essential when debugging 'why did prod get the dev replica count?'."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Lowest: the chart's own values.yaml.",
+            "Then a parent chart's values for its subcharts (subchart values can be overridden under the subchart's key).",
+            "Then each -f / --values file, in the order given on the command line.",
+            "Highest: --set / --set-string / --set-json flags."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "releases-revisions",
+      "heading": "Releases, Revisions, Upgrade and Rollback",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Every `helm install` or `helm upgrade` creates a new revision and stores it as a Secret of type helm.sh/release.v1 in the release namespace. Helm uses a three-way strategic merge between the old manifest, the new manifest, and the live cluster state to compute the patch — this is how it avoids stomping fields set by controllers or admission webhooks."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "# Install with environment overrides\nhelm install api ./myapp -n prod \\\n  -f values.yaml -f values-prod.yaml \\\n  --set image.tag=1.8.3\n\n# Inspect history\nhelm history api -n prod\n# REVISION  STATUS      CHART        APP VERSION  DESCRIPTION\n# 1         superseded  myapp-0.4.0  1.8.1        Install complete\n# 2         deployed    myapp-0.4.0  1.8.3        Upgrade complete\n\n# Upgrade, rolling back automatically if it fails or times out\nhelm upgrade api ./myapp -n prod -f values-prod.yaml \\\n  --atomic --timeout 5m\n\n# Roll back to a known-good revision\nhelm rollback api 1 -n prod"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "--atomic implies --wait. If the upgrade does not become Ready within --timeout, Helm rolls back to the previous revision. Without --atomic a failed upgrade leaves a partially applied, broken release that you must fix manually."
+        },
+        {
+          "type": "paragraph",
+          "text": "A rollback is itself a new revision (it does not delete history). `helm rollback api 1` while on revision 5 produces revision 6 whose manifests equal revision 1. This keeps the history append-only and auditable."
+        },
+        {
+          "type": "table",
+          "headers": ["Flag", "Effect", "When to use"],
+          "rows": [
+            ["--wait", "Block until resources are Ready", "Gating deploys in CI"],
+            ["--atomic", "--wait + auto-rollback on failure", "Production upgrades"],
+            ["--install", "Install if release does not exist", "Idempotent CI (helm upgrade --install)"],
+            ["--reuse-values", "Keep previously set values, merge new", "Careful: drops values.yaml changes"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dependencies-hooks",
+      "heading": "Dependencies, Hooks, and Library Charts",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "heading",
+          "text": "Chart Dependencies"
+        },
+        {
+          "type": "paragraph",
+          "text": "A chart can declare other charts as dependencies in Chart.yaml. `helm dependency update` resolves them into charts/ and writes Chart.lock for reproducibility. The condition and alias fields let you toggle and rename subcharts."
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "code": "# Chart.yaml\ndependencies:\n  - name: postgresql\n    version: \"15.5.x\"\n    repository: \"https://charts.bitnami.com/bitnami\"\n    condition: postgresql.enabled\n  - name: redis\n    version: \"19.x\"\n    repository: \"oci://registry-1.docker.io/bitnamicharts\"\n    alias: cache"
+        },
+        {
+          "type": "heading",
+          "text": "Lifecycle Hooks"
+        },
+        {
+          "type": "paragraph",
+          "text": "Hooks are ordinary manifests annotated with helm.sh/hook. Helm applies them at defined points in the release lifecycle — commonly a Job that runs database migrations before the app rolls out."
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "code": "apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: {{ include \"myapp.fullname\" . }}-migrate\n  annotations:\n    helm.sh/hook: pre-upgrade,pre-install\n    helm.sh/hook-weight: \"-5\"\n    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded\nspec:\n  backoffLimit: 2\n  template:\n    spec:\n      restartPolicy: Never\n      containers:\n        - name: migrate\n          image: \"{{ .Values.image.repository }}:{{ .Values.image.tag }}\"\n          command: [\"/app/migrate\", \"up\"]"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Hook resources are NOT tracked in the release's normal lifecycle. If you forget helm.sh/hook-delete-policy, old hook Jobs pile up and a re-run can collide on the Job name. Always set a delete policy."
+        },
+        {
+          "type": "heading",
+          "text": "Library Charts"
+        },
+        {
+          "type": "paragraph",
+          "text": "A library chart (type: library) ships only reusable named templates — no installable manifests. Application charts import it to share common helpers (standard labels, a generic deployment template) across an org's many services, eliminating copy-paste of _helpers.tpl."
+        }
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: A Templated Service With an Outage Postmortem",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Scenario: a payments API ships as a chart with Deployment, Service, Ingress, and HPA. During a routine upgrade the team bumped the image tag via --set image.tag=v2 and the new pods entered CrashLoopBackOff, but traffic kept flowing to old pods — so nobody noticed until the HPA scaled up and the new (broken) pods took share."
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "code": "# templates/hpa.yaml\n{{- if .Values.autoscaling.enabled }}\napiVersion: autoscaling/v2\nkind: HorizontalPodAutoscaler\nmetadata:\n  name: {{ include \"myapp.fullname\" . }}\nspec:\n  scaleTargetRef:\n    apiVersion: apps/v1\n    kind: Deployment\n    name: {{ include \"myapp.fullname\" . }}\n  minReplicas: {{ .Values.autoscaling.minReplicas }}\n  maxReplicas: {{ .Values.autoscaling.maxReplicas }}\n  metrics:\n    - type: Resource\n      resource:\n        name: cpu\n        target:\n          type: Utilization\n          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}\n{{- end }}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Root cause: the Deployment template hard-coded replicas: {{ .Values.replicaCount }}. With the HPA also managing replicas, every `helm upgrade` reset the replica count to the chart default, briefly fighting the HPA. Worse, the upgrade was run without --atomic, so the broken revision stuck around. The fix had two parts."
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "code": "# templates/deployment.yaml — omit replicas when HPA owns scaling\nspec:\n  {{- if not .Values.autoscaling.enabled }}\n  replicas: {{ .Values.replicaCount }}\n  {{- end }}\n  strategy:\n    type: RollingUpdate\n    rollingUpdate:\n      maxUnavailable: 0\n      maxSurge: 25%\n  template:\n    spec:\n      containers:\n        - name: {{ .Chart.Name }}\n          readinessProbe:\n            httpGet: { path: /healthz, port: http }\n            initialDelaySeconds: 5\n            periodSeconds: 10"
+        },
+        {
+          "type": "paragraph",
+          "text": "Because maxUnavailable: 0 plus a real readinessProbe means the rollout never retires a healthy old pod until a new one is Ready, the CrashLooping v2 pods could never pass readiness, the rollout stalled, and `--atomic --timeout 5m` rolled the whole thing back automatically. The combination of (1) not templating replicas when HPA is on and (2) atomic upgrades with proper probes turned a silent partial outage into a safe no-op."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Lesson: probes are not optional polish. Helm's --wait/--atomic only know a release succeeded if pods report Ready, which requires a readinessProbe that genuinely fails when the app is broken."
+        }
+      ]
+    },
+    {
+      "id": "templating-gotchas",
+      "heading": "Templating Gotchas: Whitespace, Quoting, and Nil",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Most real Helm bugs are not Kubernetes bugs — they are text-rendering bugs. The template engine produces a string, and YAML is whitespace-sensitive, so a stray space or missing dash silently corrupts the manifest."
+        },
+        {
+          "type": "heading",
+          "text": "Whitespace Chomping"
+        },
+        {
+          "type": "list",
+          "items": [
+            "{{- trims all whitespace (including the preceding newline) to the LEFT of the action.",
+            "-}} trims all whitespace to the RIGHT, which can eat the newline of the next line — usually a mistake in YAML.",
+            "Use nindent N instead of indent N when the content starts on its own line: nindent prepends a newline then indents, avoiding double-blank-line and merged-line bugs."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "code": "# WRONG: -}} eats the newline, merging keys onto one line\nlabels:\n  {{- toYaml .Values.labels | indent 2 -}}\n  app: payments        # gets glued to previous output\n\n# RIGHT: nindent controls the leading newline + indentation\nlabels:\n  {{- toYaml .Values.labels | nindent 2 }}\n  app: payments"
+        },
+        {
+          "type": "heading",
+          "text": "Quoting and Type Coercion"
+        },
+        {
+          "type": "paragraph",
+          "text": "YAML interprets unquoted scalars. A version tag of 1.20 becomes the float 1.2, the string 'true' becomes a boolean, and a Norway-problem value like 'no' becomes false. Always quote string values that could be misread, and use --set-string to force string semantics on the CLI."
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "code": "# image tag 1.20 would render as the number 1.2 without quotes\nimage: \"{{ .Values.image.repository }}:{{ .Values.image.tag }}\"\n\n# Force a value to render with quotes\nport: {{ .Values.port | quote }}    # -> port: \"8080\"\n# Quote on the CLI to avoid bool/number coercion\n# helm upgrade ... --set-string image.tag=1.20"
+        },
+        {
+          "type": "heading",
+          "text": "Nil and Missing Values"
+        },
+        {
+          "type": "paragraph",
+          "text": "Referencing a missing nested key does not error by default — it renders the empty string, producing key: with no value (a nil), which can be valid YAML but wrong semantics. Guard with default and required."
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "code": "# Empty string if unset -> silently wrong\nhost: {{ .Values.ingress.host }}\n\n# Provide a fallback\nhost: {{ .Values.ingress.host | default \"localhost\" }}\n\n# Fail fast at render time if a critical value is missing\nhost: {{ required \"ingress.host is required for prod\" .Values.ingress.host }}\n\n# Safely walk a possibly-missing path\ntls: {{ (.Values.ingress).tls | default false }}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Deep-dotting a nil parent (.Values.ingress.host when ingress itself is unset) throws 'nil pointer evaluating interface {}.host'. Wrap intermediate access in parentheses or use dig to traverse safely."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Using helm install in CI instead of helm upgrade --install — the second run fails with 'cannot re-use a name that is still in use'. Always use upgrade --install for idempotency.",
+            "Relying on --reuse-values across upgrades: it keeps old --set overrides but silently ignores changes you made to values.yaml, so a 'fixed' value never takes effect.",
+            "Storing secrets in plaintext values.yaml committed to git. Use sealed-secrets, SOPS, or external-secrets; Helm has no native secret encryption.",
+            "Forgetting helm.sh/hook-delete-policy, leaving orphaned migration Jobs that block the next deploy on a name collision.",
+            "Putting the image tag in appVersion and expecting chart consumers to redeploy — appVersion is informational and does not change chart resolution.",
+            "Templating replicas while an HPA also manages them, causing every upgrade to fight the autoscaler.",
+            "Hitting the release Secret size limit (1 MB etcd object) by storing huge rendered manifests or too many revisions; prune history with --history-max."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Incident pattern: a team set --history-max 0 (unlimited) and a chatty CI pipeline created hundreds of revisions. The release Secret grew, and helm list became slow cluster-wide because Helm lists and decodes every release Secret. Cap history (e.g. --history-max 10)."
+        },
+        {
+          "type": "paragraph",
+          "text": "Another classic: a `helm upgrade` that changed an immutable field (a Service's clusterIP or a Deployment's selector labels). Kubernetes rejects the patch, the release goes to FAILED state, and subsequent upgrades refuse to proceed because the prior one did not complete. The fix is to recognize immutable fields up front and, when unavoidable, delete-and-recreate the resource or the release."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Run `helm template` and `helm lint` in CI to catch render errors before they reach a cluster; pipe output through `kubeconform` or `kubectl apply --dry-run=server` for schema validation.",
+            "Use `helm upgrade --install --atomic --timeout 5m` for every deploy so failures auto-roll-back to the last good revision.",
+            "Define standard labels and naming once in _helpers.tpl (or a shared library chart) and include them everywhere.",
+            "Add a values.schema.json to fail fast on malformed or missing values instead of producing broken manifests.",
+            "Pin dependency versions and commit Chart.lock for reproducible builds.",
+            "Quote all string values that could be coerced (tags, ports, booleans) and prefer --set-string on the CLI.",
+            "Cap revision history with --history-max to keep release Secrets small.",
+            "Keep secrets out of values.yaml; integrate SOPS/sealed-secrets/external-secrets.",
+            "Use `helm diff upgrade` (helm-diff plugin) to preview changes before applying in prod."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "A mature Helm pipeline treats charts like code: versioned, linted, schema-validated, dry-run-rendered, and reviewed via diff before the live cluster ever sees them."
+        }
+      ]
+    },
+    {
+      "id": "helm-vs-kustomize",
+      "heading": "Helm vs Kustomize",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The two tools solve overlapping problems differently. Helm templates and packages; Kustomize patches base YAML overlays without templating. They are not mutually exclusive — many teams use Helm to render third-party charts and Kustomize to patch the output."
+        },
+        {
+          "type": "table",
+          "headers": ["Dimension", "Helm", "Kustomize"],
+          "rows": [
+            ["Mechanism", "Go templating over values", "Strategic-merge / JSON patches over base YAML"],
+            ["Release tracking", "Yes (revisions, rollback)", "No (kubectl applies plain manifests)"],
+            ["Packaging/distribution", "Yes (repos, OCI, dependencies)", "No native packaging"],
+            ["Learning curve", "Templating + lifecycle", "Lower; pure YAML"],
+            ["Readability of output", "Indirection via templates", "Direct, diff-friendly overlays"],
+            ["Built into kubectl", "No (separate binary)", "Yes (kubectl -k / apply -k)"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Rule of thumb: choose Helm when you need packaging, dependencies, and rollback (especially for distributing software). Choose Kustomize for env-specific overlays of manifests you own and want to keep template-free. Combining them (helm template | kustomize) is common in GitOps."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "render-pipeline",
+      "title": "Helm Render and Release Pipeline",
+      "type": "mermaid",
+      "content": "flowchart TD\n  A[Chart templates plus values.yaml] --> B[Merge values overrides]\n  B --> C[Go template engine renders manifests]\n  C --> D[Validate against cluster API schema]\n  D --> E[Three-way merge with live state]\n  E --> F[Apply to Kubernetes]\n  F --> G[Store revision as Secret]\n  G --> H{Wait for Ready}\n  H -->|Healthy| I[Release deployed]\n  H -->|Timeout and atomic| J[Rollback to prior revision]"
+    },
+    {
+      "id": "upgrade-sequence",
+      "title": "Upgrade With Migration Hook",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n  participant U as User CLI\n  participant H as Helm\n  participant K as Kube API\n  U->>H: helm upgrade --atomic\n  H->>K: Apply pre-upgrade hook Job\n  K-->>H: Migration Job succeeded\n  H->>K: Apply Deployment Service Ingress HPA\n  K-->>H: Rollout status\n  alt Pods Ready before timeout\n    H->>K: Mark revision deployed\n    H-->>U: Upgrade complete\n  else Timeout\n    H->>K: Roll back to prior revision\n    H-->>U: Upgrade failed rolled back\n  end"
+    },
+    {
+      "id": "value-precedence",
+      "title": "Value Override Precedence (lowest to highest)",
+      "type": "ascii",
+      "content": "+-------------------------------------------+\n|  --set / --set-string / --set-json (CLI)  |  <- highest, wins\n+-------------------------------------------+\n|  -f values-prod.yaml (last -f wins)       |\n+-------------------------------------------+\n|  -f values.yaml (earlier -f)              |\n+-------------------------------------------+\n|  parent chart values for subcharts        |\n+-------------------------------------------+\n|  chart's own values.yaml                  |  <- lowest, base\n+-------------------------------------------+\n         merged top-down  =>  .Values"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-release-vs-chart",
+      "question": "What is the difference between a chart, a release, and a revision in Helm?",
+      "answer": "A chart is the package: a directory of templates, a Chart.yaml, and default values — it is the reusable blueprint. A release is a named installation of that chart into a specific namespace; the same chart can be installed many times under different release names. A revision is an immutable snapshot of a release's rendered manifests created on every install or upgrade; Helm stores each revision as a Secret so it can show history and roll back to any prior point.",
+      "difficulty": "junior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["concepts", "releases"],
+      "followUps": ["Where is the revision data physically stored?", "Does a rollback delete later revisions?"]
+    },
+    {
+      "id": "q-include-vs-template",
+      "question": "Why do Helm charts use `include` instead of the built-in `template` action?",
+      "answer": "`template` is a Go template action that writes its output directly to the rendered stream and returns nothing, so you cannot pipe it into functions. `include` is a Helm-provided function that returns the rendered text as a string, which means you can pipe it into `nindent`, `indent`, `quote`, etc. Because almost every shared helper produces YAML that must be indented to fit its insertion point, charts use `include \"name\" . | nindent N` rather than `template`.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["templating", "helpers"],
+      "followUps": ["What does nindent do that indent does not?", "How would you pass extra context to an included template?"]
+    },
+    {
+      "id": "q-atomic",
+      "question": "What does `helm upgrade --atomic` do, and what does it require from your manifests to be useful?",
+      "answer": "--atomic implies --wait: Helm blocks until all resources report Ready within --timeout, and if they do not, it automatically rolls back to the previous revision, leaving the cluster in the last known-good state. For it to actually detect failure, your pods need a genuine readinessProbe that fails when the app is broken; otherwise Helm thinks the rollout succeeded and --atomic provides no protection.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["lifecycle", "rollback"],
+      "followUps": ["What is a sensible --timeout for a large StatefulSet?", "How does --wait know a Deployment is Ready?"]
+    },
+    {
+      "id": "q-upgrade-install",
+      "question": "Why is `helm upgrade --install` preferred over `helm install` in CI/CD?",
+      "answer": "It is idempotent. `helm install` fails on the second run because the release name already exists ('cannot re-use a name that is still in use'). `helm upgrade --install` installs the release if it does not exist and upgrades it if it does, so the same pipeline command works on first deploy and every redeploy without branching logic.",
+      "difficulty": "junior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["cicd", "lifecycle"],
+      "followUps": ["What happens if a previous upgrade is stuck in FAILED state?", "How do you make a CI deploy gate on readiness?"]
+    },
+    {
+      "id": "q-dependencies",
+      "question": "How do chart dependencies work, and what do `helm dependency update` and Chart.lock provide?",
+      "answer": "Dependencies are declared in Chart.yaml with a name, version constraint, and repository. `helm dependency update` resolves those constraints, downloads the matching subcharts into charts/, and writes Chart.lock with the exact resolved versions and a digest. Chart.lock makes builds reproducible: subsequent `helm dependency build` installs precisely the locked versions rather than re-resolving constraints, which could otherwise pull a newer patch and change behavior.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["dependencies", "charts"],
+      "followUps": ["What does the condition field do for a dependency?", "How do you override a subchart's values from the parent?"]
+    },
+    {
+      "id": "q-library-chart",
+      "question": "What is a library chart and when would you use one?",
+      "answer": "A library chart has type: library and ships only named templates (helpers) — it has no installable manifests and cannot be deployed on its own. Application charts add it as a dependency and import its templates. You use one to share common logic — standard labels, a generic deployment skeleton, naming conventions — across an organization's many service charts, so you fix or improve the shared helper once instead of editing dozens of copies of _helpers.tpl.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["library-charts", "reuse"],
+      "followUps": ["How does an application chart import templates from a library chart?", "Can a library chart have its own values?"]
+    },
+    {
+      "id": "q-hooks",
+      "question": "How do Helm hooks work and what is the risk of omitting a hook-delete-policy?",
+      "answer": "Hooks are normal Kubernetes manifests annotated with helm.sh/hook (e.g. pre-install, pre-upgrade, post-delete) and ordered by helm.sh/hook-weight. Helm applies them at the corresponding lifecycle point — a common use is a pre-upgrade Job that runs DB migrations before the new app rolls out. Hook resources are not part of the release's normal tracked set, so if you omit helm.sh/hook-delete-policy, old hook objects are never cleaned up; a re-run then collides on the resource name (e.g. an existing immutable Job) and the upgrade fails. Setting before-hook-creation,hook-succeeded avoids this.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["hooks", "lifecycle"],
+      "followUps": ["What hook would you use for a backup before a destructive upgrade?", "How is hook ordering controlled across many hooks?"]
+    },
+    {
+      "id": "q-helm-vs-kustomize",
+      "question": "When would you choose Helm over Kustomize, and can you use both?",
+      "answer": "Choose Helm when you need packaging, distribution, dependency management, and release lifecycle (revisions and rollback) — especially when shipping software others install, or when consuming third-party charts. Choose Kustomize for template-free, env-specific overlays of manifests you own and want to keep readable and diff-friendly. They compose: a common pattern is `helm template` to render a chart, then Kustomize overlays to patch the output, or letting ArgoCD render Helm and apply Kustomize patches on top.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["comparison", "kustomize"],
+      "followUps": ["Does Kustomize give you rollback?", "How does ArgoCD treat a Helm chart vs raw rendering?"]
+    },
+    {
+      "id": "q-reuse-values",
+      "question": "Tricky: A teammate edits values.yaml to fix a wrong memory limit, then deploys with `helm upgrade --reuse-values`. The limit does not change. Why?",
+      "answer": "--reuse-values does NOT re-read the chart's values.yaml. It takes the values that were computed in the LAST release (the merged result of prior -f files and --set flags) and merges only the new --set flags from this command on top. So edits made to values.yaml on disk are completely ignored — the old computed memory limit is reused. The fix is to pass the values explicitly with -f values.yaml (and use --reset-then-reuse-values in newer Helm if you specifically want to reset to chart defaults then re-apply your overrides). This is a frequent 'my change isn't taking effect' incident.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": ["values", "footgun", "upgrade"],
+      "followUps": ["What is the difference between --reuse-values and --reset-then-reuse-values?", "How do you audit the exact values used in a given revision?"]
+    },
+    {
+      "id": "q-norway",
+      "question": "Tricky: Your config has `region: no` and `featureEnabled: yes` in values.yaml. At runtime your app sees a boolean false and the string 'true'. What happened and how do you fix it?",
+      "answer": "This is the YAML Norway problem combined with implicit boolean coercion (YAML 1.1 semantics that Helm/Go-yaml follow). Unquoted `no` parses as the boolean false (Norway's ISO code), and `yes` parses as boolean true. When the value is later injected where a string is expected, you get the stringified boolean. The fix is to quote string scalars: `region: \"no\"` and `featureEnabled: \"yes\"`, and in templates use `| quote` or pass values via --set-string to force string semantics. Adding a values.schema.json that declares these fields as strings catches it at lint time.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": ["yaml", "quoting", "footgun"],
+      "followUps": ["Why does --set-string help here?", "Name another value that gets silently coerced (e.g. version 1.20)."]
+    },
+    {
+      "id": "q-nil-pointer",
+      "question": "Tricky: `helm template` fails with 'nil pointer evaluating interface {}.host' on the line `{{ .Values.ingress.host }}`, but only in dev. Why and how do you make it safe?",
+      "answer": "In dev, the entire `ingress` key is unset (or null) in the values tree. Accessing `.host` on a nil parent — not just a missing leaf — throws a nil-pointer error, whereas a missing leaf under an existing map would just render empty. Helm only errors when you dot INTO a nil. To make it safe, wrap intermediate access in parentheses so the lookup short-circuits, or use the `dig` function: `{{ (.Values.ingress).host | default \"localhost\" }}` or `{{ dig \"ingress\" \"host\" \"localhost\" .Values }}`. For required prod values, use `required` to fail with a clear message instead of a cryptic nil-pointer.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": ["templating", "nil", "footgun"],
+      "followUps": ["What is the difference between a missing leaf and a nil parent in Helm?", "How does the dig function differ from chained dotting?"]
+    },
+    {
+      "id": "q-immutable-field",
+      "question": "Tricky: An upgrade put the release in FAILED state and now every subsequent `helm upgrade` refuses to proceed. What likely happened and how do you recover?",
+      "answer": "The upgrade probably tried to change an immutable field — for example a Deployment's spec.selector labels, a Service's clusterIP, or a StatefulSet's volumeClaimTemplates. Kubernetes rejects the patch, so the release's last revision is marked FAILED and never reached a deployed state; Helm then blocks the next upgrade because a release in a pending/failed state cannot be cleanly upgraded. Recovery options: roll back to the last good revision (`helm rollback`), or if the rollback also hits the immutable field, delete the offending resource (or uninstall and reinstall the release) so the new spec can be created fresh. The real fix is to avoid mutating immutable fields — treat them as create-only in your chart design.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": ["immutable", "incident", "recovery"],
+      "followUps": ["Name three immutable fields you must not template-change.", "How does `helm rollback` behave if the target revision also conflicts?"]
+    },
+    {
+      "id": "q-secret-storage",
+      "question": "How and where does Helm 3 store release state, and what scaling concern does that create?",
+      "answer": "Helm 3 stores each revision as a Kubernetes Secret of type helm.sh/release.v1 in the release's namespace; the payload is the gzip+base64-encoded rendered manifests and metadata. Because every install/upgrade/rollback creates a new Secret, and `helm list` decodes them, a release with hundreds of revisions or very large manifests can approach etcd's ~1 MB object size limit and slow down Helm operations cluster-wide. Mitigate by capping history with --history-max and keeping charts lean.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["internals", "storage", "scaling"],
+      "followUps": ["What changed from Helm 2's storage model?", "How would you migrate release storage to a different backend?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-prod-chart",
+      "title": "Build a Production-Grade Deployment Template",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "prompt": "Write templates/deployment.yaml for an application chart that: (1) uses a shared fullname/labels helper; (2) sets replicas only when autoscaling is disabled; (3) renders resources, env, and probes from values; (4) safely quotes the image tag and falls back to .Chart.AppVersion; (5) uses nindent correctly so the YAML is valid. Also show the matching values.yaml defaults.",
+      "hints": [
+        "Use include \"myapp.fullname\" . for the name and include \"myapp.labels\" . | nindent N for labels.",
+        "Guard replicas with {{- if not .Values.autoscaling.enabled }}.",
+        "Pipe complex sub-objects through toYaml | nindent to keep indentation correct.",
+        "Default the image tag: .Values.image.tag | default .Chart.AppVersion, and quote the whole image string."
+      ],
+      "solutionCode": "# values.yaml\nreplicaCount: 2\nimage:\n  repository: registry.example.com/payments\n  tag: \"\"            # falls back to .Chart.AppVersion\n  pullPolicy: IfNotPresent\nautoscaling:\n  enabled: false\nresources:\n  requests: { cpu: 100m, memory: 128Mi }\n  limits:   { cpu: 500m, memory: 256Mi }\nenv:\n  - name: LOG_LEVEL\n    value: \"info\"\n---\n# templates/deployment.yaml\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: {{ include \"myapp.fullname\" . }}\n  labels:\n    {{- include \"myapp.labels\" . | nindent 4 }}\nspec:\n  {{- if not .Values.autoscaling.enabled }}\n  replicas: {{ .Values.replicaCount }}\n  {{- end }}\n  strategy:\n    type: RollingUpdate\n    rollingUpdate:\n      maxUnavailable: 0\n      maxSurge: 25%\n  selector:\n    matchLabels:\n      app.kubernetes.io/name: {{ .Chart.Name }}\n      app.kubernetes.io/instance: {{ .Release.Name }}\n  template:\n    metadata:\n      labels:\n        {{- include \"myapp.labels\" . | nindent 8 }}\n    spec:\n      containers:\n        - name: {{ .Chart.Name }}\n          image: \"{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}\"\n          imagePullPolicy: {{ .Values.image.pullPolicy }}\n          ports:\n            - name: http\n              containerPort: 8080\n          {{- with .Values.env }}\n          env:\n            {{- toYaml . | nindent 12 }}\n          {{- end }}\n          resources:\n            {{- toYaml .Values.resources | nindent 12 }}\n          readinessProbe:\n            httpGet: { path: /healthz, port: http }\n            initialDelaySeconds: 5\n            periodSeconds: 10\n          livenessProbe:\n            httpGet: { path: /livez, port: http }\n            initialDelaySeconds: 15\n            periodSeconds: 20",
+      "solutionLanguage": "yaml",
+      "explanation": "The template demonstrates every production concern. Naming and labels come from shared helpers via include + nindent, so they stay consistent across all manifests and you avoid the indent/whitespace bugs that plague hand-written YAML. replicas is wrapped in {{- if not .Values.autoscaling.enabled }} so that when an HPA owns scaling, Helm does not reset replicas on every upgrade and fight the autoscaler. The image string quotes the full repository:tag and uses default .Chart.AppVersion so an empty tag in values.yaml gracefully falls back to the app version rather than rendering a dangling colon. env is guarded with {{- with .Values.env }} so the env: key is omitted entirely when the list is empty (rendering env: with no items is invalid). resources, env, and probes are injected with toYaml | nindent so arbitrary nested structures keep correct indentation regardless of depth. maxUnavailable: 0 plus real readiness/liveness probes makes --wait/--atomic upgrades meaningful: a broken new revision can never pass readiness, so the rollout stalls and atomic mode rolls it back automatically.",
+      "relatedTopic": "helm"
+    },
+    {
+      "id": "ch-helper-safe-values",
+      "title": "Write a Robust _helpers.tpl Image Helper",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "prompt": "Write a named template `myapp.image` in _helpers.tpl that builds a fully-qualified image reference. It must: support an optional registry prefix, fall back the tag to .Chart.AppVersion, use a digest if provided (preferring digest over tag), and never produce a nil-pointer error when image fields are partially unset. Show how a manifest calls it.",
+      "hints": [
+        "Templates receive a single argument; pass the root context with a dict so you can reach both .Values and .Chart.",
+        "Use (.Values.image) parenthesized access or default to avoid nil parents.",
+        "Prefer digest: build repo@sha256:... when .digest is set, otherwise repo:tag.",
+        "Call it with include \"myapp.image\" . | quote in the manifest."
+      ],
+      "solutionCode": "{{/* templates/_helpers.tpl */}}\n{{- define \"myapp.image\" -}}\n{{- $img := .Values.image | default dict -}}\n{{- $registry := $img.registry | default \"\" -}}\n{{- $repo := required \"image.repository is required\" $img.repository -}}\n{{- $tag := $img.tag | default .Chart.AppVersion -}}\n{{- $digest := $img.digest | default \"\" -}}\n{{- $base := $repo -}}\n{{- if $registry -}}\n  {{- $base = printf \"%s/%s\" $registry $repo -}}\n{{- end -}}\n{{- if $digest -}}\n  {{- printf \"%s@%s\" $base $digest -}}\n{{- else -}}\n  {{- printf \"%s:%s\" $base $tag -}}\n{{- end -}}\n{{- end -}}\n\n{{/* templates/deployment.yaml usage */}}\n# containers:\n#   - name: {{ .Chart.Name }}\n#     image: {{ include \"myapp.image\" . | quote }}\n#\n# values.yaml examples:\n# image: { repository: payments }                      -> payments:<appVersion>\n# image: { registry: ghcr.io/acme, repository: pay, tag: \"1.20\" } -> ghcr.io/acme/pay:1.20\n# image: { repository: pay, digest: sha256:abc... }    -> pay@sha256:abc... (tag ignored)",
+      "solutionLanguage": "yaml",
+      "explanation": "The helper is hardened against the three classic templating footguns. First, .Values.image | default dict guarantees $img is always a map, so accessing $img.repository never triggers 'nil pointer evaluating interface {}.repository' when the image block is omitted in some environment. Second, required on the repository fails fast with a clear, actionable message at render time rather than emitting a malformed image:tag. Third, the digest-versus-tag precedence is explicit: when a digest is supplied we build repo@sha256:... and ignore the tag entirely, which is the correct immutable-by-digest deployment pattern; otherwise we fall back the tag to .Chart.AppVersion so an unset tag still yields a valid reference. The whole template is wrapped with {{- ... -}} chomping so it produces a single clean string with no stray whitespace or newlines, and the caller pipes it through quote so YAML never coerces a tag like 1.20 into the float 1.2. Passing the root context (.) gives the helper access to both .Values and .Chart, avoiding the common mistake of passing only a sub-value and then being unable to reach .Chart.AppVersion.",
+      "relatedTopic": "helm"
+    }
+  ],
+  "references": [
+    {"label": "Helm Official Documentation", "url": "https://helm.sh/docs/"},
+    {"label": "Chart Template Guide", "url": "https://helm.sh/docs/chart_template_guide/"},
+    {"label": "Helm Best Practices", "url": "https://helm.sh/docs/chart_best_practices/"},
+    {"label": "Sprig Template Functions", "url": "https://masterminds.github.io/sprig/"},
+    {"label": "Kustomize vs Helm (Kubernetes docs)", "url": "https://kubernetes.io/docs/tasks/manage-kubernetes-objects/kustomization/"}
+  ]
+}
