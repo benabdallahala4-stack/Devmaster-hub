@@ -333,7 +333,7 @@
     {
       "id": "q-lowest-set-bit",
       "question": "Explain why x & (-x) isolates the lowest set bit.",
-      "answer": "In two's complement, -x == ~x + 1. Inverting x flips every bit; adding one carries up through the trailing zeros of ~x (which were the trailing ones of... actually the trailing zeros above the lowest set bit of x). The net effect is that -x has the same lowest set bit as x, zeros below it, and the complement of x's bits above it. ANDing x with -x therefore keeps only the single lowest set bit and zeros everything else. For example x = 0b10110 gives -x = 0b...01010, and x & -x = 0b00010. This is the foundation of Fenwick (binary indexed) trees, which use i & -i to walk index ranges.",
+      "answer": "In two's complement, -x == ~x + 1. Inverting x flips every bit; adding one then carries through all the trailing 1-bits of ~x (which correspond to the trailing zeros of x), flipping them back to 0 and setting the single bit just above them — that bit is the lowest set bit of x. So -x agrees with x at exactly the lowest set bit and differs at every higher bit, which is why x & -x isolates it. For example x = 0b10110 gives -x = 0b...01010, and x & -x = 0b00010. This is the foundation of Fenwick (binary indexed) trees, which use i & -i to walk index ranges.",
       "difficulty": "mid",
       "category": "Computer Science",
       "tricky": false,
