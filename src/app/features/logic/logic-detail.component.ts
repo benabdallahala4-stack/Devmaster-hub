@@ -36,7 +36,7 @@ import { ContentBlocksComponent } from '../../shared/components/content-blocks.c
           <div class="ld__label"><app-icon name="brain" [size]="15" /> Your solution</div>
           <textarea class="ld__textarea" rows="7" placeholder="Work the problem here — your answer auto-saves."
             [value]="solutionText()" (input)="onSolutionInput($event)"></textarea>
-          <span class="ld__saved">Saved locally</span>
+          @if (solutionText().length > 0) { <span class="ld__saved">Saved locally</span> }
         </section>
 
         @if (p.hints.length) {
@@ -76,7 +76,9 @@ import { ContentBlocksComponent } from '../../shared/components/content-blocks.c
             <p class="ld__score-hint">Tick each criterion your own solution satisfied.</p>
             <ul class="ld__rubric">
               @for (c of p.rubric; track c.id) {
-                <li class="ld__crit" [class.is-on]="checked().has(c.id)" (click)="toggle(c.id)">
+                <li class="ld__crit" role="checkbox" tabindex="0"
+                    [attr.aria-checked]="checked().has(c.id)" [class.is-on]="checked().has(c.id)"
+                    (click)="toggle(c.id)" (keydown.enter)="toggle(c.id)" (keydown.space)="onCritKey($event, c.id)">
                   <span class="ld__crit-box"><app-icon name="check" [size]="13" /></span>
                   <span class="ld__crit-text">{{ c.text }}</span>
                   <span class="ld__crit-pts">{{ c.points }} pt</span>
@@ -196,6 +198,11 @@ export class LogicDetailComponent implements OnInit {
       next.has(cid) ? next.delete(cid) : next.add(cid);
       return next;
     });
+  }
+
+  onCritKey(e: Event, cid: string): void {
+    e.preventDefault();   // stop the space key from scrolling the page
+    this.toggle(cid);
   }
 
   saveScore(): void {
