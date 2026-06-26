@@ -1,0 +1,639 @@
+{
+  "id": "coding-patterns",
+  "title": "Coding Patterns",
+  "category": "Interview Prep",
+  "subcategory": "Patterns",
+  "difficulty": "mid",
+  "tags": ["patterns", "algorithms", "two-pointers", "sliding-window", "dynamic-programming", "interview"],
+  "description": "The canonical problem-solving patterns that cover the majority of coding interview questions — two pointers, sliding window, fast & slow pointers, BFS/DFS, backtracking, dynamic programming, binary search, heap/top-K, prefix sums, and merge intervals — each with a recognition cue, a reusable template, and a worked representative problem.",
+  "estReadMinutes": 34,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Most coding interview problems are not unique — they are instances of a dozen or so recurring patterns. The difference between grinding 500 problems and being prepared is learning to recognize the pattern behind a problem in the first 60 seconds, then instantiating a template you already know. This topic catalogs those patterns: for each, the cue that triggers it, a reusable template, and a representative problem with correct, idiomatic code and complexity."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Two pointers — sorted arrays, pair/triplet sums, in-place partitioning.",
+            "Sliding window — contiguous subarray/substring optimum under a constraint.",
+            "Fast & slow pointers — cycle detection, middle of a list, cycle start.",
+            "BFS / DFS — tree and graph traversal, shortest path in unweighted graphs.",
+            "Backtracking — enumerate combinations, permutations, subsets, constraint search.",
+            "Dynamic programming — overlapping subproblems with optimal substructure.",
+            "Binary search — sorted data, or a monotonic predicate over an answer space.",
+            "Heap / top-K — k largest/smallest, streaming order statistics, merge k lists.",
+            "Prefix sums — many range-sum / subarray-sum queries.",
+            "Merge intervals — overlapping ranges, scheduling, calendars."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Pattern recognition is the skill being tested as much as coding. Verbalize the cue in the interview: 'the array is sorted and we want a pair summing to a target, so I'll use two pointers' shows the interviewer your reasoning, which is half the evaluation."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why Patterns Matter",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Interview time is brutally short — typically 35–45 minutes to read, clarify, design, code, and test. You do not have time to invent an algorithm from first principles. A pattern gives you a head start: a known structure that you adapt, freeing your remaining time for the problem-specific twist, edge cases, and clean code. Patterns also generalize: the two-pointer idea that solves 'pair with target sum' also solves 'container with most water' and 'remove duplicates in place'."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Speed: instantiating a template is far faster than deriving an approach live.",
+            "Correctness: templates encode the invariants (loop bounds, pointer movement) that are easy to get wrong under pressure.",
+            "Communication: naming the pattern signals competence and structures your explanation.",
+            "Transfer: ~10 patterns cover a large share of LeetCode-style questions, so study compounds."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Patterns are a starting point, not a substitute for understanding. Memorizing a template without knowing why the invariant holds means you cannot adapt it when the problem deviates by one detail — which interviewers deliberately do."
+        }
+      ]
+    },
+    {
+      "id": "two-pointers",
+      "heading": "Pattern: Two Pointers",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Two pointers walk two indices through a structure, usually converging from both ends (sorted array) or as a slow/fast pair (in-place filtering). Recognize it when the input is sorted and you want a pair or triplet meeting a condition, or when you must partition/dedupe an array in O(1) extra space. The sorted-pair version replaces an O(n^2) brute force with O(n) by exploiting order: if the sum is too small, only moving the left pointer up can increase it; if too large, only moving right down can decrease it."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Template: pair with target sum in a SORTED array. O(n) time, O(1) space.\nfunction pairSum(sortedNums, target) {\n  let lo = 0, hi = sortedNums.length - 1;\n  while (lo < hi) {\n    const sum = sortedNums[lo] + sortedNums[hi];\n    if (sum === target) return [lo, hi];\n    if (sum < target) lo++;   // need a bigger sum\n    else hi--;                // need a smaller sum\n  }\n  return [-1, -1];\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Representative problem — 3Sum: find all unique triplets summing to zero. Sort, then fix one element and two-pointer the rest, skipping duplicates to keep triplets unique. Sorting is O(n log n); the fixed element times the inner two-pointer scan is O(n^2), which dominates."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "function threeSum(nums) {\n  nums.sort((a, b) => a - b);\n  const res = [];\n  for (let i = 0; i < nums.length - 2; i++) {\n    if (i > 0 && nums[i] === nums[i - 1]) continue;     // skip dup anchor\n    let lo = i + 1, hi = nums.length - 1;\n    while (lo < hi) {\n      const sum = nums[i] + nums[lo] + nums[hi];\n      if (sum === 0) {\n        res.push([nums[i], nums[lo], nums[hi]]);\n        while (lo < hi && nums[lo] === nums[lo + 1]) lo++; // skip dups\n        while (lo < hi && nums[hi] === nums[hi - 1]) hi--;\n        lo++; hi--;\n      } else if (sum < 0) lo++;\n      else hi--;\n    }\n  }\n  return res; // O(n^2) time, O(1) extra (excluding output)\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "If the array is NOT sorted and you only need a single pair, a hash set is O(n) and avoids the O(n log n) sort. Two pointers wins when the array is already sorted or when you need the in-place / no-extra-space property."
+        }
+      ]
+    },
+    {
+      "id": "sliding-window",
+      "heading": "Pattern: Sliding Window",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Sliding window maintains a contiguous range [left, right] and slides it across the input, expanding right to include new elements and contracting left when a constraint is violated. Recognize it when the problem asks for the longest/shortest/optimal contiguous subarray or substring satisfying a condition (sum, distinct chars, at most k of something). It turns an O(n^2) or O(n^3) brute force over all subarrays into O(n) because each index enters and leaves the window at most once."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Template: longest substring with NO repeating characters. O(n) time.\nfunction longestUniqueSubstring(s) {\n  const lastSeen = new Map(); // char -> last index\n  let left = 0, best = 0;\n  for (let right = 0; right < s.length; right++) {\n    const c = s[right];\n    // If c is in the window, jump left past its previous occurrence.\n    if (lastSeen.has(c) && lastSeen.get(c) >= left) {\n      left = lastSeen.get(c) + 1;\n    }\n    lastSeen.set(c, right);\n    best = Math.max(best, right - left + 1);\n  }\n  return best;\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "There are two window flavors. A variable-size window grows and shrinks to find an optimum (above). A fixed-size window of width k slides one step at a time — add the entering element, remove the leaving one — for problems like 'maximum sum of any k consecutive elements'."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Fixed-size window: max sum of any k consecutive elements. O(n).\nfunction maxSumK(nums, k) {\n  let windowSum = 0, best = -Infinity;\n  for (let right = 0; right < nums.length; right++) {\n    windowSum += nums[right];\n    if (right >= k - 1) {\n      best = Math.max(best, windowSum);\n      windowSum -= nums[right - k + 1]; // drop the leftmost\n    }\n  }\n  return best;\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The classic bug is mishandling the shrink condition. For 'at most k distinct', you shrink with a while-loop until the window is valid again; for 'exactly k', a common trick is atMost(k) - atMost(k-1). Get the invariant explicit before coding."
+        }
+      ]
+    },
+    {
+      "id": "fast-slow-pointers",
+      "heading": "Pattern: Fast & Slow Pointers",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Floyd's tortoise-and-hare uses two pointers moving at different speeds (slow +1, fast +2) through a linked list or implicit functional graph. Recognize it for cycle detection, finding the cycle's start, finding the middle node, or detecting a 'happy number' loop. If a cycle exists the fast pointer eventually laps the slow one and they meet; if not, fast reaches the end. It uses O(1) space, unlike a hash-set approach."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Detect a cycle in a linked list. O(n) time, O(1) space.\nfunction hasCycle(head) {\n  let slow = head, fast = head;\n  while (fast && fast.next) {\n    slow = slow.next;        // +1\n    fast = fast.next.next;   // +2\n    if (slow === fast) return true; // they met inside the loop\n  }\n  return false;              // fast hit the end -> no cycle\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Finding the cycle's start node uses Floyd's two-phase trick. After the meeting point, reset one pointer to the head and advance both one step at a time; they meet exactly at the cycle entrance. This works because of a clean distance argument: the distance from head to the cycle start equals the distance from the meeting point to the cycle start (mod cycle length)."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Find the node where the cycle begins, or null. O(n) time, O(1) space.\nfunction cycleStart(head) {\n  let slow = head, fast = head;\n  while (fast && fast.next) {\n    slow = slow.next;\n    fast = fast.next.next;\n    if (slow === fast) {            // phase 1: meeting point found\n      let p = head;\n      while (p !== slow) {          // phase 2: walk both at +1\n        p = p.next;\n        slow = slow.next;\n      }\n      return p;                     // entrance of the cycle\n    }\n  }\n  return null;\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The same technique finds the middle of a list in one pass: when fast reaches the end, slow is at the middle. This is handy for splitting a list (e.g. merge sort on a linked list) without first computing its length."
+        }
+      ]
+    },
+    {
+      "id": "bfs-dfs",
+      "heading": "Pattern: BFS and DFS on Trees & Graphs",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Breadth-first search explores level by level using a queue; depth-first search explores as deep as possible first, using recursion or an explicit stack. Use BFS when you need the shortest path in an unweighted graph or level-order processing of a tree. Use DFS for exhaustive traversal, connected components, topological sort, cycle detection in directed graphs, and any 'explore all paths' problem. Both are O(V + E) on a graph; on a tree they are O(n)."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// BFS level-order traversal of a binary tree -> array of levels. O(n).\nfunction levelOrder(root) {\n  if (!root) return [];\n  const levels = [];\n  let queue = [root];\n  while (queue.length) {\n    const level = [], next = [];\n    for (const node of queue) {\n      level.push(node.val);\n      if (node.left) next.push(node.left);\n      if (node.right) next.push(node.right);\n    }\n    levels.push(level);\n    queue = next;            // advance to the next level\n  }\n  return levels;\n}"
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// DFS on a graph: count connected components. O(V + E).\nfunction countComponents(n, edges) {\n  const adj = Array.from({ length: n }, () => []);\n  for (const [a, b] of edges) { adj[a].push(b); adj[b].push(a); }\n  const seen = new Array(n).fill(false);\n  let count = 0;\n  const dfs = (u) => {\n    seen[u] = true;\n    for (const v of adj[u]) if (!seen[v]) dfs(v);\n  };\n  for (let i = 0; i < n; i++) {\n    if (!seen[i]) { count++; dfs(i); }  // new component\n  }\n  return count;\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "On a GRAPH you must track visited nodes or you loop forever; on a TREE there are no cycles so you do not. For shortest path in an UNWEIGHTED graph, BFS gives the answer; the moment edges have weights you need Dijkstra (a heap), not plain BFS."
+        }
+      ]
+    },
+    {
+      "id": "backtracking",
+      "heading": "Pattern: Backtracking",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Backtracking incrementally builds a candidate solution and abandons ('backtracks' from) any partial candidate that cannot lead to a valid complete solution. Recognize it when you must enumerate all combinations, permutations, subsets, or solve a constraint puzzle (N-Queens, Sudoku, word search). The template is: choose, explore (recurse), un-choose. The recursion tree's size bounds the complexity — subsets are O(2^n), permutations O(n!)."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Template: all subsets (the power set). O(2^n) subsets, O(n) each to copy.\nfunction subsets(nums) {\n  const res = [];\n  const backtrack = (start, path) => {\n    res.push([...path]);                 // every node is a valid subset\n    for (let i = start; i < nums.length; i++) {\n      path.push(nums[i]);                // choose\n      backtrack(i + 1, path);            // explore (i+1 avoids reuse/dupes)\n      path.pop();                        // un-choose (backtrack)\n    }\n  };\n  backtrack(0, []);\n  return res;\n}"
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Permutations. O(n!) leaves. 'used' marks elements already in the path.\nfunction permute(nums) {\n  const res = [], used = new Array(nums.length).fill(false);\n  const backtrack = (path) => {\n    if (path.length === nums.length) { res.push([...path]); return; }\n    for (let i = 0; i < nums.length; i++) {\n      if (used[i]) continue;\n      used[i] = true; path.push(nums[i]);   // choose\n      backtrack(path);                        // explore\n      path.pop(); used[i] = false;            // un-choose\n    }\n  };\n  backtrack([]);\n  return res;\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The pruning is what makes backtracking better than brute force: by abandoning a partial candidate as soon as it violates a constraint (e.g. two queens attacking), you cut whole subtrees of the search space instead of generating every full candidate and filtering."
+        }
+      ]
+    },
+    {
+      "id": "dynamic-programming",
+      "heading": "Pattern: Dynamic Programming",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Dynamic programming applies when a problem has overlapping subproblems (the same subproblem is solved many times) and optimal substructure (the optimum is built from optima of subproblems). Recognize it from 'count the ways', 'min/max cost', or 'is it possible' over choices, especially when naive recursion recomputes the same arguments. Two equivalent implementations exist: top-down (recursion + memoization) and bottom-up (fill a table iteratively)."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Top-down (memoized) coin change: fewest coins to make 'amount'. \n// O(amount * coins) time and space.\nfunction coinChangeTopDown(coins, amount) {\n  const memo = new Map();\n  const dp = (rem) => {\n    if (rem === 0) return 0;\n    if (rem < 0) return Infinity;            // invalid path\n    if (memo.has(rem)) return memo.get(rem);\n    let best = Infinity;\n    for (const c of coins) best = Math.min(best, 1 + dp(rem - c));\n    memo.set(rem, best);\n    return best;\n  };\n  const ans = dp(amount);\n  return ans === Infinity ? -1 : ans;\n}"
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Bottom-up coin change: same recurrence, iterative table.\n// dp[a] = fewest coins to make amount a. O(amount * coins).\nfunction coinChangeBottomUp(coins, amount) {\n  const dp = new Array(amount + 1).fill(Infinity);\n  dp[0] = 0;                                  // base case: 0 coins for 0\n  for (let a = 1; a <= amount; a++) {\n    for (const c of coins) {\n      if (c <= a && dp[a - c] + 1 < dp[a]) {\n        dp[a] = dp[a - c] + 1;\n      }\n    }\n  }\n  return dp[amount] === Infinity ? -1 : dp[amount];\n}"
+        },
+        {
+          "type": "table",
+          "headers": ["Aspect", "Top-down (memo)", "Bottom-up (table)"],
+          "rows": [
+            ["Order", "Lazy — only reachable subproblems", "Eager — every subproblem, in dependency order"],
+            ["Code shape", "Natural recursion, easy to write from recurrence", "Loops; need correct fill order"],
+            ["Overhead", "Recursion stack + hashmap lookups", "No recursion; often O(1)-space tricks possible"],
+            ["When to prefer", "Sparse state space, easier to derive", "Dense state space, want to optimize space"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The hard part of DP is defining the state and recurrence, not the loop. Always write 'dp[i] = ...' in words first ('fewest coins to make amount i'), then the transition, then base cases. The code is mechanical once those three are correct."
+        }
+      ]
+    },
+    {
+      "id": "binary-search",
+      "heading": "Pattern: Binary Search & Variants",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Binary search halves a search space each step, giving O(log n). The obvious use is finding a value in a sorted array, but the powerful generalization is 'binary search on the answer': whenever a predicate is monotonic over a range (false, false, ..., false, true, true), you can binary-search for the boundary. This solves problems like 'minimum capacity to ship in D days' that contain no sorted array at all."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Classic: index of target in a sorted array, or -1. O(log n).\nfunction binarySearch(nums, target) {\n  let lo = 0, hi = nums.length - 1;\n  while (lo <= hi) {\n    const mid = lo + ((hi - lo) >> 1);   // avoids overflow in other langs\n    if (nums[mid] === target) return mid;\n    if (nums[mid] < target) lo = mid + 1;\n    else hi = mid - 1;\n  }\n  return -1;\n}"
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Lower bound: first index with nums[i] >= target (the 'leftmost' variant).\n// Returns nums.length if no such element. O(log n).\nfunction lowerBound(nums, target) {\n  let lo = 0, hi = nums.length;          // half-open [lo, hi)\n  while (lo < hi) {\n    const mid = lo + ((hi - lo) >> 1);\n    if (nums[mid] < target) lo = mid + 1; // mid too small, discard left half\n    else hi = mid;                        // mid is a candidate, keep it\n  }\n  return lo;\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Binary search on the answer — find the minimum ship capacity to deliver all packages within D days. Capacity is monotonic: if capacity C works, any larger capacity also works, so the set of feasible capacities is a suffix and we binary-search its left boundary. The search range is [max(weights), sum(weights)]."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "function shipWithinDays(weights, days) {\n  const feasible = (cap) => {\n    let need = 1, cur = 0;\n    for (const w of weights) {\n      if (cur + w > cap) { need++; cur = 0; } // start a new day\n      cur += w;\n    }\n    return need <= days;\n  };\n  let lo = Math.max(...weights);           // must fit the heaviest item\n  let hi = weights.reduce((a, b) => a + b, 0); // all in one day\n  while (lo < hi) {\n    const mid = lo + ((hi - lo) >> 1);\n    if (feasible(mid)) hi = mid;            // try smaller\n    else lo = mid + 1;                       // need bigger\n  }\n  return lo; // O(n log(sum)) time\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Binary search is famously bug-prone: off-by-one in bounds, wrong mid update, and infinite loops when lo/hi do not converge. Pick ONE convention (here: inclusive [lo,hi] for exact match, half-open [lo,hi) for boundary searches) and use it consistently. The boundary version must move hi = mid (not mid-1) to keep the candidate."
+        }
+      ]
+    },
+    {
+      "id": "heap-topk",
+      "heading": "Pattern: Heap / Top-K",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A heap (priority queue) gives O(log n) insert and O(1) peek of the min or max. Recognize the top-K pattern when asked for the k largest/smallest/most-frequent elements, the kth element, or to merge k sorted sequences. The key insight for 'k largest': maintain a MIN-heap of size k; each new element is pushed and, if the heap exceeds k, the smallest is popped — so the heap always holds the k largest seen, in O(n log k) instead of O(n log n) for a full sort."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Minimal binary min-heap (enough for top-K). All ops O(log n).\nclass MinHeap {\n  constructor() { this.a = []; }\n  size() { return this.a.length; }\n  peek() { return this.a[0]; }\n  push(x) {\n    const a = this.a; a.push(x);\n    let i = a.length - 1;\n    while (i > 0) {\n      const p = (i - 1) >> 1;\n      if (a[p] <= a[i]) break;\n      [a[p], a[i]] = [a[i], a[p]]; i = p;   // sift up\n    }\n  }\n  pop() {\n    const a = this.a, top = a[0], last = a.pop();\n    if (a.length) {\n      a[0] = last; let i = 0;\n      while (true) {\n        const l = 2 * i + 1, r = 2 * i + 2; let s = i;\n        if (l < a.length && a[l] < a[s]) s = l;\n        if (r < a.length && a[r] < a[s]) s = r;\n        if (s === i) break;\n        [a[s], a[i]] = [a[i], a[s]]; i = s;  // sift down\n      }\n    }\n    return top;\n  }\n}\n\n// kth largest element. O(n log k) time, O(k) space.\nfunction kthLargest(nums, k) {\n  const h = new MinHeap();\n  for (const x of nums) {\n    h.push(x);\n    if (h.size() > k) h.pop();   // evict smallest, keep k largest\n  }\n  return h.peek();               // smallest of the k largest = kth largest\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Counter-intuitively, to keep the k LARGEST you use a MIN-heap (so you can cheaply evict the smallest of your current top-k), and to keep the k SMALLEST you use a MAX-heap. Quickselect can find the kth element in O(n) average but O(n^2) worst case; the heap is O(n log k) guaranteed and trivially handles streaming input."
+        }
+      ]
+    },
+    {
+      "id": "prefix-sums",
+      "heading": "Pattern: Prefix Sums",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A prefix-sum array P where P[i] is the sum of the first i elements lets you answer any range-sum query sum(l..r) in O(1) as P[r+1] - P[l], after O(n) preprocessing. Recognize it when there are many range-sum queries, or when combined with a hash map to count subarrays with a target sum. The hash-map variant is the real interview workhorse."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Build prefix sums, then answer range queries in O(1).\nfunction prefix(nums) {\n  const P = new Array(nums.length + 1).fill(0);\n  for (let i = 0; i < nums.length; i++) P[i + 1] = P[i] + nums[i];\n  return P; // sum of nums[l..r] inclusive = P[r + 1] - P[l]\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Representative problem — count subarrays summing to k. As you sweep, keep a running prefix sum and a map of how many times each prefix sum has occurred. A subarray ending at the current index sums to k exactly when (runningSum - k) was a previously seen prefix sum, because that earlier prefix marks where the qualifying subarray starts. This is O(n) time and handles negatives, which a sliding window cannot."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Number of contiguous subarrays summing to k. O(n) time, O(n) space.\nfunction subarraySum(nums, k) {\n  const seen = new Map([[0, 1]]); // prefix sum 0 occurs once (empty prefix)\n  let running = 0, count = 0;\n  for (const x of nums) {\n    running += x;\n    // a start point exists where prefix == running - k\n    count += seen.get(running - k) ?? 0;\n    seen.set(running, (seen.get(running) ?? 0) + 1);\n  }\n  return count;\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Seed the map with {0: 1} so subarrays starting at index 0 are counted (a prefix equal to k means running - k == 0, which must already be present). Forgetting this seed is the single most common bug in this pattern."
+        }
+      ]
+    },
+    {
+      "id": "merge-intervals-example",
+      "heading": "Pattern: Merge Intervals (Worked Example)",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Interval problems involve ranges [start, end] that may overlap — merging calendars, booking rooms, inserting a new meeting. The universal first move is to sort by start. Then a single pass merges any interval whose start is <= the current merged interval's end. Recognize the pattern from words like 'overlapping', 'merge', 'schedule', or 'meeting rooms'."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Merge all overlapping intervals. O(n log n) for the sort, O(n) pass.\nfunction mergeIntervals(intervals) {\n  if (intervals.length === 0) return [];\n  intervals.sort((a, b) => a[0] - b[0]);   // by start\n  const merged = [intervals[0].slice()];\n  for (let i = 1; i < intervals.length; i++) {\n    const last = merged[merged.length - 1];\n    const [s, e] = intervals[i];\n    if (s <= last[1]) {\n      last[1] = Math.max(last[1], e);       // overlap -> extend end\n    } else {\n      merged.push([s, e]);                  // disjoint -> new interval\n    }\n  }\n  return merged;\n}\n// merge([[1,3],[2,6],[8,10],[15,18]]) -> [[1,6],[8,10],[15,18]]"
+        },
+        {
+          "type": "paragraph",
+          "text": "The related 'minimum meeting rooms' problem uses a different but adjacent idea: a min-heap of end times (a sweep line). Sort by start; for each meeting, if the earliest-ending room (heap top) is free by its start, reuse it (pop), otherwise allocate a new room (push the end time). The heap size's maximum is the answer — the peak number of concurrent meetings."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Sort-by-start then single-pass merge is one of the highest-yield templates: it appears as merge intervals, insert interval, interval intersection, and (with a heap on end times) meeting rooms. Learn it once, reuse it across a whole problem family."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Forcing a pattern that does not fit: sliding window fails on subarray-sum problems with negative numbers (the window invariant breaks) — use prefix sums + hashmap instead.",
+            "Two pointers on an UNSORTED array for pair-sum: the convergence argument relies on order; without sorting it is simply wrong.",
+            "BFS/DFS on a graph without a visited set: infinite loops on any cycle. (Trees are the exception — no cycles.)",
+            "Binary search off-by-one: mixing inclusive and half-open conventions, updating hi = mid - 1 in a boundary search and losing the answer, or an infinite loop when mid never advances.",
+            "Top-K with the wrong heap: using a max-heap to keep the k largest (you cannot cheaply evict the smallest). Use a min-heap of size k.",
+            "Prefix-sum map not seeded with {0:1}: undercounts subarrays that start at index 0.",
+            "DP without defining the state in words first: the recurrence ends up subtly wrong and the off-by-one in the table fill is unfindable.",
+            "Backtracking that forgets to un-choose (pop / reset used): state leaks across branches and corrupts later results."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The most expensive interview mistake is choosing the pattern silently and being wrong. State your chosen pattern and WHY out loud before coding — the interviewer can redirect you in 10 seconds, saving you from coding a doomed approach for 20 minutes."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Clarify before coding: input size, sorted or not, negatives allowed, duplicates, return value, in-place vs extra space — each answer steers the pattern choice.",
+            "Map the cue to the pattern explicitly: 'sorted + pair' -> two pointers; 'contiguous + optimum' -> sliding window; 'k largest' -> heap; 'count ways / min cost' -> DP; 'overlapping ranges' -> sort + merge.",
+            "State and code the loop invariant; most bugs are invariant violations (window validity, search bounds, visited set).",
+            "Always reason about complexity out loud, both time and space, before and after coding.",
+            "Test on edge cases: empty input, single element, all-equal, the boundary value, and the maximum size for complexity.",
+            "Prefer the simplest pattern that meets the constraints; do not reach for DP when greedy or two pointers suffices.",
+            "Write the DP state in words ('dp[i] = ...') before the recurrence; write the base case last and check it explicitly."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Cue in the problem", "Pattern", "Typical complexity"],
+          "rows": [
+            ["Sorted array, find a pair/triplet", "Two pointers", "O(n) / O(n^2)"],
+            ["Longest/shortest contiguous subarray", "Sliding window", "O(n)"],
+            ["Cycle / middle of a linked list", "Fast & slow pointers", "O(n), O(1) space"],
+            ["Shortest path in unweighted graph", "BFS", "O(V + E)"],
+            ["All subsets / permutations / N-Queens", "Backtracking", "O(2^n) / O(n!)"],
+            ["Count ways / min-max over choices", "Dynamic programming", "states * transitions"],
+            ["Sorted data or monotonic predicate", "Binary search", "O(log n)"],
+            ["k largest / smallest / merge k lists", "Heap / top-K", "O(n log k)"],
+            ["Many range-sum / subarray-sum queries", "Prefix sums", "O(n) build, O(1) query"],
+            ["Overlapping ranges / scheduling", "Merge intervals", "O(n log n)"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "note-combos",
+      "heading": "Note: Patterns Combine",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Hard problems usually compose two or three patterns. 'Sliding window maximum' is a window plus a monotonic deque. 'Meeting rooms II' is sort-by-start plus a heap on end times. 'Word ladder' is BFS over an implicitly-defined graph. 'Trapping rain water' yields to two pointers or to prefix max/min arrays. When a single pattern stalls, ask which second structure removes the bottleneck — a heap to get the next extreme cheaply, a hash map to look up complements in O(1), a monotonic stack/deque to maintain an ordered window. Recognizing the primary pattern gets you most of the way; spotting the secondary structure closes the gap."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A reliable escalation ladder when stuck: brute force first (state the O(n^2)/O(2^n) baseline), then ask whether sorting unlocks two pointers or intervals, whether a hash map removes a lookup loop, whether a heap gives the next extreme cheaply, or whether overlapping subproblems mean DP. Verbalizing this ladder is itself a strong signal."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "two-pointer-convergence",
+      "title": "Two Pointers Converging in a Sorted Array",
+      "type": "ascii",
+      "content": "target = 9\nindex:   0   1   2   3   4\nvalue: [ 1   2   4   7   8 ]\n         ^lo             ^hi   sum=1+8=9  -> found!\n\n  sum < target  => move lo right (increase sum)\n  sum > target  => move hi left  (decrease sum)\n  O(n): each pointer moves inward, never crosses back"
+    },
+    {
+      "id": "sliding-window-flow",
+      "title": "Sliding Window: Expand Right, Contract Left on Violation",
+      "type": "mermaid",
+      "content": "flowchart TD\n    A[right = 0, left = 0] --> B[Include s at right]\n    B --> C{Window still valid?}\n    C -- yes --> D[Update best with right-left+1]\n    C -- no --> E[Advance left until valid]\n    E --> D\n    D --> F{right at end?}\n    F -- no --> G[right++]\n    G --> B\n    F -- yes --> H[Return best]"
+    },
+    {
+      "id": "floyd-cycle",
+      "title": "Floyd's Fast & Slow Pointers (Cycle Detection)",
+      "type": "ascii",
+      "content": "list with a cycle:\n  1 -> 2 -> 3 -> 4\n            ^         |\n            +----6 <- 5\n\n slow moves +1, fast moves +2 each step.\n If a cycle exists, fast laps slow and they MEET inside the loop.\n Phase 2: reset one ptr to head, advance both +1 -> meet at cycle START."
+    },
+    {
+      "id": "dp-memo-vs-tab",
+      "title": "DP: Top-Down Memoization vs Bottom-Up Tabulation",
+      "type": "mermaid",
+      "content": "flowchart LR\n    subgraph TopDown[Top-down memo]\n      A[dp amount] --> B[dp amount - coin]\n      B --> C[... cache hits stop recomputation]\n    end\n    subgraph BottomUp[Bottom-up table]\n      D[dp 0 base] --> E[dp 1] --> F[dp 2] --> G[dp amount]\n    end"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-cp-recognize",
+      "question": "How do you recognize which pattern a problem needs in the first minute?",
+      "answer": "Map surface cues to patterns. 'Sorted array, find a pair/triplet meeting a sum' signals two pointers. 'Longest/shortest contiguous subarray or substring under a constraint' signals sliding window. 'Cycle or middle of a linked list in O(1) space' signals fast & slow pointers. 'Shortest path in an unweighted graph / level order' signals BFS; 'explore all paths / components / topological order' signals DFS. 'Enumerate all subsets/permutations or a constraint puzzle' signals backtracking. 'Count the ways / min or max cost over a sequence of choices' with overlapping subproblems signals DP. 'Sorted data, or a monotonic yes/no predicate over an answer range' signals binary search. 'k largest/smallest/most frequent, or merge k lists' signals a heap. 'Many range-sum queries or count subarrays summing to k' signals prefix sums. 'Overlapping ranges / scheduling' signals sort-by-start then merge. The discipline is to verbalize the cue and the chosen pattern before coding so the interviewer can confirm or redirect.",
+      "difficulty": "mid",
+      "category": "Interview Prep",
+      "tricky": false,
+      "tags": ["recognition", "cues"],
+      "followUps": ["What clarifying questions change the pattern choice?", "Which problems combine two patterns?"]
+    },
+    {
+      "id": "q-cp-two-pointer-why",
+      "question": "Why does the two-pointer technique require a sorted array for pair-sum, and what is its complexity?",
+      "answer": "The convergence argument depends on order. With lo at the smallest candidate and hi at the largest, if their sum is too small the only way to increase it is to move lo rightward (to a larger value); if too large, the only way to decrease it is to move hi leftward. This monotonic relationship — guaranteed only by sortedness — lets you discard one candidate per step without missing any pair, so each pointer moves inward at most n times for O(n) total. On an unsorted array that reasoning collapses (moving a pointer no longer reliably increases or decreases the sum), so you must either sort first (making it O(n log n)) or switch to a hash-set approach (O(n) time, O(n) space).",
+      "difficulty": "mid",
+      "category": "Interview Prep",
+      "tricky": false,
+      "tags": ["two-pointers", "complexity"],
+      "followUps": ["When is a hash set better than two pointers?", "How does 3Sum extend the technique?"]
+    },
+    {
+      "id": "q-cp-window-variants",
+      "question": "What is the difference between a fixed-size and a variable-size sliding window, and why is each O(n)?",
+      "answer": "A fixed-size window of width k slides one step at a time: you add the entering element and subtract the leaving one, keeping a running aggregate (sum, count) — used for 'max sum of k consecutive elements'. A variable-size window grows by advancing right and shrinks by advancing left whenever a constraint is violated, used to find the longest/shortest subarray satisfying a condition. Both are O(n) because each index is added to the window exactly once and removed at most once; even though the inner shrink is a loop, across the whole run left advances at most n times total, so the amortized work per element is O(1). The amortized argument is the key insight — the nested while-loop does not make it O(n^2).",
+      "difficulty": "mid",
+      "category": "Interview Prep",
+      "tricky": false,
+      "tags": ["sliding-window", "amortized"],
+      "followUps": ["How do you handle 'exactly k distinct'?", "Why can't a window handle negative numbers for subarray sum?"]
+    },
+    {
+      "id": "q-cp-floyd-start",
+      "question": "After fast and slow pointers meet inside a cycle, how do you find the cycle's start node?",
+      "answer": "Reset one pointer to the head and keep the other at the meeting point, then advance both one step at a time; they meet exactly at the cycle's entrance. The proof: let the distance from head to the cycle start be a, and from the start to the meeting point be b, with cycle length c. When they meet, slow has travelled a + b and fast has travelled a + b + k*c for some integer k (fast did extra full loops), and since fast moved twice as far, 2(a + b) = a + b + k*c, giving a + b = k*c, hence a = k*c - b. That means walking a steps from the head lands at the same node as walking a steps from the meeting point (which is k*c - b steps forward = the start). So advancing both pointers at speed 1 makes them collide precisely at the cycle start. It runs in O(n) time and O(1) space.",
+      "difficulty": "senior",
+      "category": "Interview Prep",
+      "tricky": false,
+      "tags": ["fast-slow-pointers", "floyd", "proof"],
+      "followUps": ["How do you find the middle of a list with the same idea?", "Why is O(1) space the advantage over a hash set?"]
+    },
+    {
+      "id": "q-cp-bfs-vs-dfs",
+      "question": "When do you choose BFS over DFS, and vice versa?",
+      "answer": "Choose BFS when you need the shortest path in an unweighted graph or level-by-level processing of a tree, because BFS visits nodes in increasing distance from the source, so the first time it reaches a target it has found a shortest path. Choose DFS for exhaustive exploration: enumerating all paths, finding connected components, topological sorting, and cycle detection in directed graphs, where exploring deep first and backtracking is natural and DFS uses less memory on wide-but-shallow-path graphs. Both are O(V + E). Practical caveats: BFS uses a queue and can consume a lot of memory on very wide graphs; DFS uses the call stack and can overflow on very deep graphs (use an explicit stack then). And BFS only gives shortest paths when edges are unweighted — with weights you need Dijkstra (a heap).",
+      "difficulty": "mid",
+      "category": "Interview Prep",
+      "tricky": false,
+      "tags": ["bfs", "dfs", "graphs"],
+      "followUps": ["Why does BFS fail for weighted shortest paths?", "When would you use an explicit stack for DFS?"]
+    },
+    {
+      "id": "q-cp-backtracking-template",
+      "question": "What is the backtracking template, and what makes it more efficient than brute force?",
+      "answer": "The template is choose / explore / un-choose: pick an option, recurse to extend the partial solution, then undo the choice before trying the next option, so each recursion branch starts from a clean state. Backtracking beats brute force through pruning — it abandons a partial candidate the instant it cannot possibly lead to a valid solution (two queens attacking, a partial sum already exceeding the target), cutting off the entire subtree of completions below that point rather than generating every full candidate and filtering at the end. Without pruning, subsets are O(2^n) and permutations O(n!); pruning does not change those worst-case bounds but dramatically reduces the practical work on constrained problems. The common bug is forgetting the un-choose step (pop the path element, reset the used flag), which leaks state across branches and corrupts results.",
+      "difficulty": "mid",
+      "category": "Interview Prep",
+      "tricky": false,
+      "tags": ["backtracking", "pruning"],
+      "followUps": ["How do you avoid duplicate results with repeated elements?", "What state must be undone on backtrack?"]
+    },
+    {
+      "id": "q-cp-dp-two-styles",
+      "question": "What are the two implementations of dynamic programming and how do you choose between them?",
+      "answer": "Top-down is recursion plus memoization: you write the recurrence directly and cache results keyed by the subproblem arguments, so each distinct subproblem is computed once. Bottom-up is tabulation: you fill an array iteratively in dependency order from the base cases up to the answer. They compute the same values. Top-down is easier to derive from the recurrence and only touches reachable (sparse) subproblems, but pays recursion-stack and hashmap overhead and can stack-overflow on deep recursion. Bottom-up has no recursion overhead, makes the dependency order explicit, and often enables space optimizations (e.g. keeping only the last row/column to drop from O(n*m) to O(m) space). Choose top-down when the recurrence is natural and the state space is sparse; choose bottom-up when the state space is dense or you want to optimize space.",
+      "difficulty": "mid",
+      "category": "Interview Prep",
+      "tricky": false,
+      "tags": ["dynamic-programming", "memoization", "tabulation"],
+      "followUps": ["When can you reduce DP space to O(1) rows?", "Which is more prone to stack overflow?"]
+    },
+    {
+      "id": "q-cp-tricky-topk-heap",
+      "question": "Tricky: to find the k LARGEST elements you keep a heap of size k. Should it be a min-heap or a max-heap, and why is the intuitive choice wrong?",
+      "answer": "It should be a MIN-heap, which surprises people who reason 'largest -> max-heap'. The point of the size-k heap is to cheaply evict whichever element is the weakest candidate so far. The weakest of the current k largest is the smallest of them, and a min-heap exposes exactly that at its root in O(1) and pops it in O(log k). So for each incoming element you push it and, if the heap now exceeds k, pop the root (the current smallest), guaranteeing the heap always holds the k largest seen, in O(n log k). A max-heap would put the largest at the root, so to drop the smallest you would have to scan or rebuild — defeating the purpose. Symmetrically, to keep the k SMALLEST you use a MAX-heap so you can evict the current largest. The kth largest is then the root of the size-k min-heap (the smallest of the k largest).",
+      "difficulty": "senior",
+      "category": "Interview Prep",
+      "tricky": true,
+      "tags": ["heap", "top-k", "gotcha"],
+      "followUps": ["How does quickselect compare in complexity?", "Why does the heap handle streaming input naturally?"]
+    },
+    {
+      "id": "q-cp-tricky-window-negatives",
+      "question": "Tricky: 'find the number of subarrays summing to k' looks like a sliding-window problem. Why does the window approach fail, and what works?",
+      "answer": "Sliding window relies on a monotonic relationship: extending the window must move the aggregate in a predictable direction so you know whether to grow or shrink. That holds when all numbers are non-negative (adding an element only increases the sum, so once you exceed k you can shrink from the left). With negative numbers the invariant breaks — adding an element can decrease the sum, so 'sum exceeded k' no longer means you should shrink, and you can miss valid subarrays or double-count. The correct tool is prefix sums with a hash map: maintain a running prefix sum and a map of how many times each prefix value has occurred; a subarray ending at the current index sums to k exactly when (running - k) was a previously seen prefix sum. Seed the map with {0: 1} so subarrays starting at index 0 count. This is O(n) and handles negatives, zero, and any integers.",
+      "difficulty": "senior",
+      "category": "Interview Prep",
+      "tricky": true,
+      "tags": ["sliding-window", "prefix-sums", "gotcha"],
+      "followUps": ["Why must the prefix map be seeded with {0:1}?", "When IS a sliding window valid for subarray sums?"]
+    },
+    {
+      "id": "q-cp-tricky-binary-answer",
+      "question": "Tricky: a problem has no sorted array, yet the intended solution is binary search. How is that possible?",
+      "answer": "Through 'binary search on the answer'. Binary search does not fundamentally need a sorted array — it needs a monotonic predicate over an ordered search space: a function feasible(x) that is false for all x below some threshold and true for all x at or above it (or vice versa). Whenever the answer is a number in a known range and 'does answer x work?' is monotonic, you binary-search the range for the boundary where feasible flips, calling feasible at each midpoint. Example: 'minimum ship capacity to deliver all packages in D days' — larger capacity is always at least as feasible as smaller, so feasibility is monotonic in capacity; the range is [max(weights), sum(weights)] and you binary-search for the smallest feasible capacity. This turns an O(answer-range) scan into O(log(range)) feasibility checks. The skill is spotting the hidden monotonic predicate.",
+      "difficulty": "senior",
+      "category": "Interview Prep",
+      "tricky": true,
+      "tags": ["binary-search", "monotonic", "gotcha"],
+      "followUps": ["How do you identify the monotonic predicate?", "What is the search range for 'min capacity to ship in D days'?"]
+    },
+    {
+      "id": "q-cp-prefix-seed",
+      "question": "In the 'count subarrays summing to k' prefix-sum solution, why must the hash map be initialized with {0: 1}?",
+      "answer": "Because a subarray that starts at index 0 has no earlier prefix to subtract. A subarray nums[0..r] sums to k when the running prefix sum at r equals k, i.e. running - k == 0. For the algorithm to count that case it must find the value 0 already present in the map of seen prefix sums — and 0 is the prefix sum of the empty prefix that sits before index 0, which has occurred exactly once. Seeding {0: 1} encodes that empty prefix. Without it, every subarray that begins at index 0 and sums to k is silently missed, which is the single most common bug in this pattern. The general rule: the map represents 'how many start points produce a qualifying subarray ending here', and the empty start point is a legitimate one that must be pre-registered.",
+      "difficulty": "mid",
+      "category": "Interview Prep",
+      "tricky": false,
+      "tags": ["prefix-sums", "edge-case"],
+      "followUps": ["What does the map's value (the count) represent?", "How does this extend to 'subarrays divisible by k'?"]
+    },
+    {
+      "id": "q-cp-intervals",
+      "question": "What is the universal first step for interval problems, and how does the merge pass work?",
+      "answer": "Sort the intervals by start. Almost every interval problem — merge intervals, insert interval, interval intersection, meeting rooms — becomes tractable once intervals are in start order, because then any overlap with already-processed intervals can only involve the most recent one. For merging: after sorting, walk the list keeping the last merged interval; for each next interval [s, e], if s <= last.end the two overlap, so extend last.end to max(last.end, e); otherwise they are disjoint, so push [s, e] as a new merged interval. That is O(n log n) for the sort plus an O(n) single pass. The related 'minimum meeting rooms' variant sorts by start and uses a min-heap of end times: reuse the earliest-freeing room if it is free by the next start, else allocate a new room; the peak heap size is the answer.",
+      "difficulty": "mid",
+      "category": "Interview Prep",
+      "tricky": false,
+      "tags": ["intervals", "sorting", "heap"],
+      "followUps": ["Why does sorting by start suffice rather than by end?", "How does meeting-rooms use a heap on end times?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-cp-longest-unique",
+      "title": "Longest Substring Without Repeating Characters (Sliding Window)",
+      "difficulty": "mid",
+      "category": "Interview Prep",
+      "prompt": "Given a string s, return the length of the longest substring that contains no repeating characters. Example: 'abcabcbb' -> 3 ('abc'); 'bbbbb' -> 1 ('b'); 'pwwkew' -> 3 ('wke'). Aim for O(n) time. Identify the pattern, then implement it.",
+      "hints": [
+        "This is a variable-size sliding window: expand right, and when you hit a repeat, contract left past the previous occurrence.",
+        "Track the last index you saw each character so you can jump left in O(1) instead of shrinking one step at a time.",
+        "Only move left forward, never backward, so guard with lastSeen[c] >= left before jumping."
+      ],
+      "solutionCode": "function lengthOfLongestSubstring(s) {\n  const lastSeen = new Map(); // char -> most recent index\n  let left = 0;               // left edge of the current window\n  let best = 0;\n\n  for (let right = 0; right < s.length; right++) {\n    const c = s[right];\n    // If c is already inside the window, jump left to just past it.\n    // The >= left guard prevents moving left backwards on stale entries.\n    if (lastSeen.has(c) && lastSeen.get(c) >= left) {\n      left = lastSeen.get(c) + 1;\n    }\n    lastSeen.set(c, right);\n    best = Math.max(best, right - left + 1); // current window length\n  }\n  return best;\n}\n\n// Quick checks:\n// lengthOfLongestSubstring('abcabcbb') === 3\n// lengthOfLongestSubstring('bbbbb')    === 1\n// lengthOfLongestSubstring('pwwkew')   === 3\n// lengthOfLongestSubstring('')         === 0\n// lengthOfLongestSubstring('au')       === 2  (stale 'a' not re-counted)",
+      "solutionLanguage": "javascript",
+      "explanation": "This is the canonical variable-size sliding-window problem. The window [left, right] always holds a substring with all-unique characters. We expand by advancing right each iteration. When the new character c was seen before AND its last position is inside the current window (lastSeen.get(c) >= left), it would create a duplicate, so we jump left to one past that previous occurrence, instantly restoring uniqueness without scanning. The >= left guard is essential: a character seen long ago but already outside the window (e.g. the 'a' in 'au' after left has moved) must NOT drag left backward — without the guard 'abba' would compute the wrong length. We record the latest index of c and update best with the window width right - left + 1. Complexity: O(n) time because right advances n times and left only ever moves forward (each index is entered and left at most once); O(min(n, alphabet)) space for the map. Edge cases handled: empty string returns 0, and a single repeated character returns 1. A common wrong answer uses a Set and shrinks left one char at a time inside a while-loop — still O(n) amortized but the index-jump version is cleaner and avoids the off-by-one in the shrink loop.",
+      "relatedTopic": "sliding-window"
+    },
+    {
+      "id": "ch-cp-subsets-backtracking",
+      "title": "Generate All Subsets (Backtracking)",
+      "difficulty": "mid",
+      "category": "Interview Prep",
+      "prompt": "Given an array of DISTINCT integers nums, return all possible subsets (the power set), in any order, with no duplicate subsets. Example: [1,2,3] -> [[],[1],[2],[3],[1,2],[1,3],[2,3],[1,2,3]] (8 subsets). Use backtracking and state the time complexity.",
+      "hints": [
+        "Every node of the recursion tree is itself a valid subset — record the current path at the top of each call.",
+        "Pass a 'start' index so each element is only considered once and you never revisit earlier elements (this avoids duplicate subsets).",
+        "Remember the choose / explore / un-choose discipline: push, recurse, then pop."
+      ],
+      "solutionCode": "function subsets(nums) {\n  const res = [];\n\n  const backtrack = (start, path) => {\n    res.push([...path]);            // every prefix path is a valid subset\n    for (let i = start; i < nums.length; i++) {\n      path.push(nums[i]);           // choose nums[i]\n      backtrack(i + 1, path);       // explore with elements AFTER i only\n      path.pop();                   // un-choose (restore state for sibling)\n    }\n  };\n\n  backtrack(0, []);\n  return res;\n}\n\n// subsets([1,2,3]) ->\n// [], [1], [1,2], [1,2,3], [1,3], [2], [2,3], [3]   (all 8, order varies)\n// subsets([])  -> [[]]\n// subsets([7]) -> [[], [7]]",
+      "solutionLanguage": "javascript",
+      "explanation": "The power set is the textbook backtracking enumeration. The key idea is that EVERY node in the recursion tree corresponds to a valid subset, so we push a copy of the current path at the start of each call (not only at leaves). We must copy with [...path] because path is mutated in place as recursion proceeds; pushing the reference would store a value that later gets emptied. The 'start' index is what guarantees uniqueness and avoids permutations of the same subset: by only considering elements at indices >= start, the recursion builds subsets in increasing index order, so [1,2] is generated but [2,1] never is. The choose/explore/un-choose pattern is explicit: push nums[i], recurse with i+1 (so nums[i] is not reused and earlier elements are excluded), then pop to restore the path for the next sibling branch. Complexity: there are exactly 2^n subsets and copying each costs up to O(n), so total time is O(n * 2^n); space is O(n) for the recursion depth and path, excluding the O(n * 2^n) output. Edge cases: subsets([]) correctly yields [[]] (the empty set is a subset), and a single element yields [[], [x]]. This input is stated as distinct integers; if duplicates were allowed you would sort and skip i > start with nums[i] === nums[i-1] to avoid duplicate subsets.",
+      "relatedTopic": "backtracking"
+    },
+    {
+      "id": "ch-cp-detect-cycle",
+      "title": "Detect a Cycle in a Linked List (Fast & Slow Pointers)",
+      "difficulty": "mid",
+      "category": "Interview Prep",
+      "prompt": "Given the head of a singly linked list, determine whether the list contains a cycle, using O(1) extra space. A node structure is { val, next }. Return true if any node can be reached again by following next pointers, false otherwise.",
+      "hints": [
+        "Use two pointers at different speeds: slow advances one node, fast advances two.",
+        "If there is a cycle, the fast pointer eventually laps the slow one and they become equal; if not, fast reaches the end (null).",
+        "Guard the fast-pointer advance with both fast and fast.next being non-null to avoid a null dereference."
+      ],
+      "solutionCode": "function hasCycle(head) {\n  let slow = head;\n  let fast = head;\n\n  // fast moves twice as fast; if it can take two steps, the list continues.\n  while (fast !== null && fast.next !== null) {\n    slow = slow.next;        // +1\n    fast = fast.next.next;   // +2\n    if (slow === fast) {     // pointers collided inside the loop\n      return true;\n    }\n  }\n  return false;              // fast reached the end -> acyclic\n}\n\n// Construction helpers for a quick mental check:\n//   a -> b -> c -> d -> b (cycle back to b)  => hasCycle = true\n//   a -> b -> c -> null                      => hasCycle = false\n//   null (empty list)                        => false\n//   single node, no self-loop                => false",
+      "solutionLanguage": "javascript",
+      "explanation": "This is Floyd's tortoise-and-hare cycle detection. Two pointers start at the head; slow advances one node per step and fast advances two. If the list is acyclic, fast (the faster pointer) reaches the end first and the loop terminates returning false — the while condition checks both fast and fast.next so that fast.next.next never dereferences null (fast can be the last node or one past it). If a cycle exists, fast cannot escape the loop, and because it gains one node of ground on slow every step, the gap between them shrinks by one each iteration until it reaches zero — i.e. they land on the same node — so we return true. They are guaranteed to meet: once both pointers are inside the cycle of length c, fast closes the cyclic distance to slow by 1 per step, so within at most c steps slow === fast. Complexity: O(n) time (slow visits at most n nodes before fast laps it or exits) and O(1) space, which is the whole advantage over the alternative of storing visited nodes in a hash set (O(n) space). Edge cases handled by the loop guard: an empty list (head null) and a single node without a self-loop both return false immediately. To additionally find where the cycle starts, after the meeting reset one pointer to head and advance both by one until they meet again at the entrance.",
+      "relatedTopic": "fast-slow-pointers"
+    }
+  ],
+  "references": [
+    {"label": "Cracking the Coding Interview (Gayle Laakmann McDowell)", "url": "https://www.crackingthecodinginterview.com/"},
+    {"label": "NeetCode — Coding Interview Patterns / Roadmap", "url": "https://neetcode.io/roadmap"},
+    {"label": "Sedgewick & Wayne — Algorithms (4th ed.)", "url": "https://algs4.cs.princeton.edu/home/"},
+    {"label": "CLRS — Introduction to Algorithms (MIT Press)", "url": "https://mitpress.mit.edu/9780262046305/introduction-to-algorithms/"},
+    {"label": "Floyd's Cycle Detection (tortoise and hare)", "url": "https://en.wikipedia.org/wiki/Cycle_detection#Floyd's_tortoise_and_hare"},
+    {"label": "VisuAlgo — algorithm visualizations", "url": "https://visualgo.net/en"}
+  ]
+}

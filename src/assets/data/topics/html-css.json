@@ -1,0 +1,547 @@
+{
+  "id": "html-css",
+  "title": "HTML & CSS",
+  "category": "Frontend",
+  "subcategory": "Fundamentals",
+  "difficulty": "mid",
+  "tags": ["html", "css", "flexbox", "grid", "specificity", "responsive"],
+  "description": "The fundamentals every frontend engineer is expected to truly understand: semantic HTML, the box model, flexbox and grid, the cascade and specificity, positioning and stacking contexts, and modern CSS.",
+  "estReadMinutes": 29,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "HTML provides the structure and meaning of a document; CSS describes how that structure is presented. Although they look simple, they encode a surprising amount of behavior: an inheritance and cascade algorithm, two full layout systems (flexbox and grid), a box model that determines how every element is sized, and rules for stacking, positioning, and containment. Mid-level interviews probe these because layout bugs and accessibility gaps almost always come from a shaky grasp of the underlying model rather than from not knowing a property name."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Semantic HTML: choose elements for meaning (nav, main, button, article), not appearance, so the document is accessible and machine-readable.",
+            "Box model: every element is a box with content, padding, border, and margin; box-sizing decides whether width includes padding and border.",
+            "Layout: flexbox lays out items along one axis; grid lays out in two dimensions; both replace the float and table hacks of the past.",
+            "Cascade and specificity: when multiple rules target an element, the browser resolves the winner by origin, specificity, and source order."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A reliable signal of CSS seniority is whether someone reasons about the model (formatting contexts, the cascade, the box model) or just tries properties until the layout looks right. The model is what makes bugs predictable instead of mysterious."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Every web product is ultimately HTML and CSS in the browser, and getting them right has outsized consequences. Semantic markup is the foundation of accessibility and SEO - a div pretending to be a button is invisible to keyboard and screen-reader users and is a legal liability in many jurisdictions. CSS correctness determines whether a layout holds up across screen sizes, content lengths, and locales. And because CSS is global and cascading by design, undisciplined styles create fragility where a change in one place breaks an unrelated component."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Accessibility: semantic elements give assistive technology the roles, states, and keyboard behavior users depend on - for free.",
+            "Maintainability: understanding the cascade lets you write low-specificity, predictable styles instead of an arms race of !important.",
+            "Responsiveness: a real grasp of flexbox, grid, and modern units produces layouts that adapt to content and viewport instead of breaking.",
+            "Performance and correctness: knowing what creates a stacking context or a new formatting context explains z-index that 'does not work' and margins that mysteriously collapse."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Reaching for !important or ever-deeper selectors to win specificity battles is a sign the cascade is fighting you. The fix is almost always lower, flatter specificity and better source ordering, not more force."
+        }
+      ]
+    },
+    {
+      "id": "semantic-html",
+      "heading": "Semantic HTML and Accessibility",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Semantic HTML means using the element whose meaning matches the content's role. A button is <button>, navigation is <nav>, the main content is <main>, a self-contained piece is <article>. Semantic elements come with built-in roles, keyboard behavior, and focus management that browsers and assistive technology understand. Re-creating those behaviors on a generic <div> requires ARIA roles, tabindex, and key handlers - and is almost always done incompletely."
+        },
+        {
+          "type": "heading",
+          "text": "Bad: a div pretending to be a button"
+        },
+        {
+          "type": "code",
+          "language": "html",
+          "code": "<!-- Not focusable, not keyboard-activatable, no role announced. -->\n<div class=\"btn\" onclick=\"submit()\">Submit</div>\n\n<!-- Patching it requires reimplementing everything a button gives free: -->\n<div class=\"btn\" role=\"button\" tabindex=\"0\"\n     onclick=\"submit()\"\n     onkeydown=\"if(event.key==='Enter'||event.key===' ')submit()\">\n  Submit\n</div>"
+        },
+        {
+          "type": "heading",
+          "text": "Good: use the real element"
+        },
+        {
+          "type": "code",
+          "language": "html",
+          "code": "<button type=\"button\" onclick=\"submit()\">Submit</button>\n\n<!-- Real document structure aids screen readers and SEO. -->\n<header><nav aria-label=\"Primary\">...</nav></header>\n<main>\n  <article>\n    <h1>Title</h1>\n    <p>Body...</p>\n  </article>\n</main>\n<footer>...</footer>"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The first rule of ARIA is: do not use ARIA if a native element with the needed semantics exists. Native <button>, <a href>, <input>, <label>, and the landmark elements give you focusability, keyboard support, and correct roles automatically - ARIA only adds semantics, never behavior."
+        }
+      ]
+    },
+    {
+      "id": "box-model",
+      "heading": "The Box Model and box-sizing",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Every element generates a rectangular box composed of four layers from inside out: the content box, padding, border, and margin. The crucial question is what the width and height properties refer to. With the default box-sizing: content-box, width sets only the content box, so padding and border are added on top - a 300px element with 20px padding and a 1px border actually occupies 342px. With box-sizing: border-box, width includes content, padding, and border, so the element stays 300px wide regardless of padding. Almost every codebase sets border-box globally for sane sizing."
+        },
+        {
+          "type": "code",
+          "language": "css",
+          "code": "/* The near-universal reset: make width predictable everywhere. */\n*, *::before, *::after {\n  box-sizing: border-box;\n}\n\n.card {\n  width: 300px;     /* total rendered width stays 300px with border-box */\n  padding: 20px;    /* eats into the content area instead of growing the box */\n  border: 1px solid #ccc;\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Margins behave differently from padding: they are outside the border, are transparent, and can collapse. Adjacent vertical margins between block siblings, and a parent and its first/last child, collapse to the larger of the two rather than adding. This catches people off guard when a child's margin-top appears to leak out of its parent."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Margin collapsing only happens in the block (vertical) direction and only between block-level boxes in normal flow. Flex and grid items do NOT collapse margins, and adding padding, a border, or overflow other than visible to the parent stops the parent-child collapse. This is why a flex container often 'fixes' surprising margin behavior."
+        }
+      ]
+    },
+    {
+      "id": "flexbox",
+      "heading": "Flexbox: One-Dimensional Layout",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Flexbox lays out items along a single axis - a row or a column - and distributes space between them. The container's flex-direction sets the main axis; justify-content aligns items along the main axis; align-items aligns them along the cross axis. On the items, the flex shorthand (flex-grow flex-shrink flex-basis) controls how they grow and shrink to fill or fit the container. It is the right tool for toolbars, nav bars, card rows, and any 'line of things' that should align and distribute space."
+        },
+        {
+          "type": "code",
+          "language": "css",
+          "code": ".toolbar {\n  display: flex;\n  align-items: center;            /* vertical centering on the cross axis */\n  justify-content: space-between; /* push first/last to the edges */\n  gap: 12px;                      /* spacing between items, no margin hacks */\n}\n\n.toolbar .spacer { flex: 1; }     /* grows to absorb leftover space */\n\n.search {\n  flex: 1 1 200px;  /* grow:1 shrink:1 basis:200px -> flexible but min ~200px */\n}\n\n.logo {\n  flex: 0 0 auto;   /* never grow or shrink: stays its natural size */\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "A frequent gotcha: flex-basis combined with flex-shrink can make items shrink below their content size, and min-width defaults to auto on flex items, which is what prevents a long unbreakable string from shrinking a flex item to zero. Setting min-width: 0 on a flex item is the classic fix for 'my text refuses to truncate inside a flex container.'"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Use the gap property for spacing between flex (and grid) items instead of margins on children. gap does not add space before the first or after the last item, so it avoids the off-by-one margin hacks that flex layouts used to require."
+        }
+      ]
+    },
+    {
+      "id": "grid",
+      "heading": "CSS Grid: Two-Dimensional Layout",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Grid lays out content in two dimensions at once - rows and columns - making it the right tool for page layouts and any structure where you care about alignment across both axes. You define tracks with grid-template-columns/rows, size them with the flexible fr unit and functions like minmax() and repeat(), and place items by line number or named area. Unlike flexbox, which sizes around content along one axis, grid lets you define the structure first and place content into it."
+        },
+        {
+          "type": "code",
+          "language": "css",
+          "code": "/* Responsive card grid: as many columns as fit, each at least 240px,\n   sharing leftover space equally. No media queries needed. */\n.gallery {\n  display: grid;\n  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));\n  gap: 16px;\n}\n\n/* Classic app shell with named areas. */\n.app {\n  display: grid;\n  grid-template-columns: 240px 1fr;\n  grid-template-rows: auto 1fr auto;\n  grid-template-areas:\n    'sidebar header'\n    'sidebar main'\n    'sidebar footer';\n  min-height: 100vh;\n}\n.app > .sidebar { grid-area: sidebar; }\n.app > .header  { grid-area: header; }\n.app > .main    { grid-area: main; }\n.app > .footer  { grid-area: footer; }"
+        },
+        {
+          "type": "paragraph",
+          "text": "auto-fill vs auto-fit is a common interview distinction: with auto-fill, empty tracks are kept when there are too few items (items stay their minmax size and leave gaps); with auto-fit, empty tracks collapse and the remaining items stretch to fill the row. For a gallery that should stretch a single card to full width, use auto-fit; to keep a fixed grid rhythm, use auto-fill."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Rule of thumb: reach for flexbox when you are laying out content along one axis and want it to size around its content; reach for grid when you want to define a two-dimensional structure and place content into it. They compose - a grid cell can itself be a flex container."
+        }
+      ]
+    },
+    {
+      "id": "cascade-specificity",
+      "heading": "The Cascade, Specificity, and Inheritance",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "When several declarations target the same property on an element, the browser resolves the winner with the cascade algorithm. The main steps in order: importance and origin (a user-agent rule loses to an author rule; an !important author rule beats a normal author rule), then specificity, then source order (later wins). Specificity is counted as three buckets - ID selectors, then class/attribute/pseudo-class selectors, then type/pseudo-element selectors - compared left to right. The universal selector and combinators add nothing."
+        },
+        {
+          "type": "table",
+          "headers": ["Selector", "ID", "Class/attr/pseudo-class", "Type/pseudo-element", "Wins over"],
+          "rows": [
+            ["*", "0", "0", "0", "nothing"],
+            ["li", "0", "0", "1", "*"],
+            [".active", "0", "1", "0", "li"],
+            ["nav .active", "0", "1", "1", ".active"],
+            ["#hero .cta", "1", "1", "0", "any class-only selector"],
+            ["inline style", "—", "—", "—", "any selector (beaten only by !important)"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Inheritance is separate from the cascade: some properties (color, font-family, line-height) inherit from parent to child by default, while box properties (margin, padding, border, width) do not. You can opt in with the inherit keyword or reset with initial/unset/revert. Modern CSS adds tools that sidestep specificity wars entirely: cascade layers (@layer) let you order whole groups of rules regardless of selector specificity, and :where() contributes zero specificity so you can write low-specificity defaults."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "An !important arms race is the classic failure mode: one team adds !important to win, the next adds it to override that, and soon the cascade is unusable. Prefer flat, single-class selectors and let source order or @layer decide. Reserve !important for utility overrides or third-party CSS you cannot edit."
+        }
+      ]
+    },
+    {
+      "id": "positioning-stacking",
+      "heading": "Positioning and Stacking Contexts",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The position property controls how an element is placed and what its top/right/bottom/left offsets reference. static (default) follows normal flow; relative offsets the element from its normal position while leaving its space reserved; absolute removes it from flow and positions it relative to the nearest positioned ancestor; fixed positions relative to the viewport; sticky toggles between relative and fixed based on scroll. z-index controls stacking order - but only within the same stacking context, which is the part that trips people up."
+        },
+        {
+          "type": "code",
+          "language": "css",
+          "code": "/* A common 'z-index does not work' bug. */\n.modal { position: fixed; z-index: 1000; }\n\n/* This ancestor accidentally creates a NEW stacking context, so the\n   modal inside it can never rise above a sibling of the ancestor,\n   no matter how high its z-index. */\n.card {\n  transform: translateZ(0);   /* creates a stacking context! */\n  /* opacity < 1, filter, will-change, position+z-index, isolation:isolate\n     and several other properties also create one. */\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "A stacking context is a self-contained z-axis layer. z-index values only compete with siblings inside the same context; a child can never escape its parent's context. Many innocuous-looking properties create one: opacity below 1, transform, filter, will-change, isolation: isolate, position with a z-index, and others. This is why a modal with z-index 9999 can still render behind a header - the modal is trapped inside an ancestor whose own context sits below the header's. The fix is to portal the modal to the document body (a sibling of the contexts), or to control where contexts are created."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "When z-index 'does nothing', the cause is almost always either that the element is not positioned (z-index has no effect on static elements outside flex/grid), or that it is trapped in an ancestor's stacking context. Debug by walking up the ancestors looking for transform, opacity, filter, or a positioned+z-index parent."
+        }
+      ]
+    },
+    {
+      "id": "responsive-modern",
+      "heading": "Responsive Design and Modern CSS",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Responsive design adapts a layout to the viewport and the content. The traditional tool is media queries reacting to viewport width, but modern CSS adds far better primitives: relative units (rem, em, ch, %), viewport units (vw, vh, dvh for mobile address-bar-aware sizing), intrinsic sizing functions (min(), max(), clamp()), container queries that react to a parent's size rather than the viewport, and logical properties that adapt to writing direction."
+        },
+        {
+          "type": "code",
+          "language": "css",
+          "code": ":root {\n  /* Custom properties: a single source of truth, themeable at runtime. */\n  --space: 1rem;\n  --brand: #4f46e5;\n}\n\n.title {\n  /* Fluid type: scales between 1.5rem and 3rem with the viewport,\n     no breakpoint jumps. */\n  font-size: clamp(1.5rem, 4vw + 1rem, 3rem);\n  color: var(--brand);\n}\n\n/* Logical properties adapt to LTR/RTL automatically. */\n.note {\n  margin-inline-start: var(--space);  /* left in LTR, right in RTL */\n  padding-block: var(--space);        /* top and bottom */\n}\n\n/* Container queries: style based on the component's own width,\n   so the same card adapts inside a sidebar or a wide main column. */\n.card-wrapper { container-type: inline-size; }\n@container (min-width: 400px) {\n  .card { display: grid; grid-template-columns: 120px 1fr; }\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Container queries are a genuine shift: a component can now respond to the space it is actually given instead of guessing from the global viewport, which makes truly reusable components possible. Custom properties (CSS variables) participate in the cascade and inherit, so they enable runtime theming, dark mode, and computed values in a way preprocessor variables never could."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Prefer intrinsic and content-driven sizing (min/max/clamp, auto-fit grids, container queries) over a ladder of fixed breakpoints. Layouts that respond to content and available space break far less often across the long tail of real devices and content lengths."
+        }
+      ]
+    },
+    {
+      "id": "layout-bug-example",
+      "heading": "Example: Debugging a Centering and Overflow Bug",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Scenario: a product card row used flexbox, but on narrow screens long product titles pushed the cards wider than the viewport, causing horizontal scroll, and a 'truncate to one line' rule did nothing. Two classic flex gotchas were in play: the min-width:auto default and a missing overflow setup."
+        },
+        {
+          "type": "heading",
+          "text": "Before: items overflow and refuse to truncate"
+        },
+        {
+          "type": "code",
+          "language": "css",
+          "code": ".row { display: flex; gap: 16px; }\n.card { flex: 1; }\n.card .title {\n  white-space: nowrap;\n  overflow: hidden;\n  text-overflow: ellipsis;   /* yet it still overflows the row! */\n}"
+        },
+        {
+          "type": "heading",
+          "text": "After: allow flex items to shrink below content size"
+        },
+        {
+          "type": "code",
+          "language": "css",
+          "code": ".row { display: flex; gap: 16px; }\n.card {\n  flex: 1;\n  min-width: 0;     /* THE FIX: override the default min-width:auto so the\n                       card may shrink narrower than its longest word */\n}\n.card .title {\n  white-space: nowrap;\n  overflow: hidden;\n  text-overflow: ellipsis;   /* now actually truncates */\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Root cause: a flex item's min-width defaults to auto, so it will not shrink below the size of its content (including an unbreakable long title). That kept each card at least as wide as its longest title, overflowing the row and disabling truncation - you cannot ellipsis content that the box refuses to clip. Setting min-width: 0 lets the card shrink, the overflow:hidden now takes effect, and the ellipsis appears. The same min-width:0 trick fixes the related 'a flex child stretches its parent past 100%' problem."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "min-width: 0 (and its block-axis sibling min-height: 0) on flex and grid items is one of the highest-leverage fixes in CSS. Remember it whenever content refuses to truncate or a child blows out its container's width."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Layout Bugs",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Using divs instead of semantic elements and buttons, breaking keyboard access and screen-reader navigation, then bolting on incomplete ARIA.",
+            "Forgetting box-sizing: border-box, so adding padding unexpectedly grows elements past their declared width and breaks grid/flex math.",
+            "Fighting specificity with !important and ever-longer selectors instead of flattening to single-class selectors and using source order or @layer.",
+            "Assuming z-index is global: setting a huge z-index that still loses because the element is trapped in an ancestor's stacking context.",
+            "Surprise margin collapsing: a child's margin-top escaping its parent because there is no padding, border, or new formatting context between them.",
+            "Flex items that will not truncate or that overflow their container because min-width defaults to auto (the min-width:0 fix).",
+            "A ladder of fixed-pixel breakpoints instead of intrinsic sizing (clamp, auto-fit, container queries), which breaks on the next unexpected screen size."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Accessibility incident pattern: a 'button' built from a styled <div> with an onclick. It worked with a mouse but was unreachable by keyboard and silent to screen readers, failing a WCAG audit before launch. The one-line fix - use a <button> - would have given focusability, Enter/Space activation, and the correct role for free."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Reach for the native semantic element first (button, a, label, nav, main); only add ARIA to fill genuine gaps, never to recreate behavior native elements already provide.",
+            "Set box-sizing: border-box globally so width is predictable and layout math is intuitive.",
+            "Keep selectors flat and low-specificity (prefer a single class); use @layer and source order to control overrides instead of !important.",
+            "Use flexbox for one-dimensional alignment and grid for two-dimensional structure; combine them freely.",
+            "Use the gap property for spacing between flex/grid items rather than child margins.",
+            "Default to intrinsic and fluid sizing - clamp(), minmax(), auto-fit, container queries - over hard-coded breakpoints.",
+            "Centralize design tokens in CSS custom properties on :root for theming and dark mode.",
+            "Remember min-width: 0 on flex/grid items when content must truncate or must not overflow."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Problem", "Tool", "Note"],
+          "rows": [
+            ["One row/column of items", "flexbox", "Sizes around content"],
+            ["Two-dimensional layout", "grid", "Define structure, place content"],
+            ["Spacing between items", "gap", "No leading/trailing space"],
+            ["Fluid typography/sizing", "clamp()", "No breakpoint jumps"],
+            ["Component-aware responsiveness", "container queries", "Reacts to parent, not viewport"],
+            ["Runtime theming", "custom properties", "Inherit and cascade"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "note-formatting-contexts",
+      "heading": "Formatting Contexts in One Paragraph",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Many CSS surprises come down to formatting contexts. Block and inline formatting contexts (BFC/IFC) govern normal flow; establishing a new block formatting context (with overflow other than visible, display: flow-root, a flex/grid container, or floats) contains floats, stops margin collapsing across its boundary, and prevents the element from overlapping adjacent floats. Flex and grid create their own formatting contexts where their children are flex/grid items rather than block boxes - which is why margins do not collapse inside them and why min-width:auto behaves specially. Recognizing 'this element establishes a new context' explains a large share of otherwise baffling layout behavior."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "display: flow-root is the modern, side-effect-free way to create a block formatting context - useful to contain floats or stop parent-child margin collapse without the overflow:hidden hack that can clip content."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "box-model-diagram",
+      "title": "The Box Model: Content, Padding, Border, Margin",
+      "type": "ascii",
+      "content": "+-----------------------------------------------+\n|                 margin (transparent)          |\n|   +---------------------------------------+   |\n|   |             border                    |   |\n|   |   +-------------------------------+   |   |\n|   |   |          padding              |   |   |\n|   |   |   +-----------------------+   |   |   |\n|   |   |   |       content         |   |   |   |\n|   |   |   |   width x height      |   |   |   |\n|   |   |   +-----------------------+   |   |   |\n|   |   +-------------------------------+   |   |\n|   +---------------------------------------+   |\n+-----------------------------------------------+\nbox-sizing: content-box -> width = content only\nbox-sizing: border-box  -> width = content + padding + border"
+    },
+    {
+      "id": "cascade-flow",
+      "title": "How the Browser Picks the Winning Declaration",
+      "type": "mermaid",
+      "content": "flowchart TD\n    A[Multiple declarations target the property] --> B{Importance and origin}\n    B -->|author !important beats normal| C[Pick by importance/origin]\n    B -->|tie| D{Specificity: ID > class > type}\n    D -->|higher wins| E[Pick by specificity]\n    D -->|tie| F[Source order: last declaration wins]"
+    },
+    {
+      "id": "flex-vs-grid",
+      "title": "Flexbox (1D) vs Grid (2D)",
+      "type": "ascii",
+      "content": "FLEXBOX - one axis, content-sized\n[ logo ][ search ............ ][ btn ]\n  main axis ------------------------->\n\nGRID - two axes, structured tracks\n+----------+--------------------+\n| sidebar  |  header            |\n|          +--------------------+\n|          |  main              |\n|          +--------------------+\n|          |  footer            |\n+----------+--------------------+"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-box-sizing",
+      "question": "What is the difference between content-box and border-box, and why do most projects set border-box globally?",
+      "answer": "With box-sizing: content-box (the default), the width and height properties size only the content box; padding and border are added outside it, so an element declared width: 300px with 20px padding and a 1px border actually renders at 342px wide. With box-sizing: border-box, width and height include the content, padding, and border, so the element stays exactly 300px wide and adding padding shrinks the inner content area instead of growing the box. Projects set border-box globally because it makes width predictable and layout math intuitive - you can give an element a width and add padding without it overflowing its grid cell or flex track. The standard reset applies it with the universal selector to all elements and pseudo-elements.",
+      "difficulty": "junior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["box-model", "box-sizing"],
+      "followUps": ["Does margin count toward border-box width?", "Why apply it to ::before and ::after too?"]
+    },
+    {
+      "id": "q-specificity",
+      "question": "How is CSS specificity calculated and how does it interact with source order and !important?",
+      "answer": "Specificity is a three-part count compared left to right: the number of ID selectors, then the number of class, attribute, and pseudo-class selectors, then the number of type and pseudo-element selectors. The universal selector and combinators contribute nothing. When two declarations conflict, the browser first resolves by importance and origin (an author !important declaration beats normal author declarations, which beat user-agent styles), then by specificity (higher wins), and only if specificity ties does source order decide, with the later declaration winning. Inline styles act like a very high specificity, beaten only by !important. The practical takeaway is to keep selectors flat and low-specificity and let source order or cascade layers control overrides, rather than escalating specificity or reaching for !important.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["cascade", "specificity"],
+      "followUps": ["Where do inline styles and !important sit?", "How does @layer change the picture?"]
+    },
+    {
+      "id": "q-flex-vs-grid",
+      "question": "When should you use flexbox versus CSS grid?",
+      "answer": "Use flexbox when you are laying out content along a single axis - a row or a column - and you want items to size around their content and distribute leftover space, such as a toolbar, nav bar, or a row of buttons. Use grid when you need to control two dimensions at once and define a structure into which content is placed, such as a page shell with sidebar/header/main/footer or a responsive card gallery aligned across both rows and columns. The simplest distinction: flexbox is content-first and one-dimensional, grid is layout-first and two-dimensional. They are not mutually exclusive - a common pattern is a grid for the overall page and flexbox inside individual cells, since a grid item can itself be a flex container.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["flexbox", "grid", "layout"],
+      "followUps": ["Can a grid item be a flex container?", "How would you build a holy-grail layout in grid?"]
+    },
+    {
+      "id": "q-semantic-html",
+      "question": "Why does semantic HTML matter, and what do you lose by using a div with a click handler instead of a button?",
+      "answer": "Semantic HTML gives elements the correct role, default keyboard behavior, and focus management that browsers and assistive technologies rely on. A native <button> is automatically focusable, activates on Enter and Space, exposes the 'button' role to screen readers, and participates in forms. A <div> with an onclick has none of this: it is not in the tab order, cannot be activated by keyboard, and is announced as a generic group or nothing at all. To make the div behave you must add role=\"button\", tabindex=\"0\", and keydown handlers for Enter and Space - and people routinely implement this incompletely. Beyond accessibility, semantic landmark elements (nav, main, article, header, footer) help screen-reader users navigate and improve SEO. The guiding rule is to use the native element with the right semantics first and only reach for ARIA to fill genuine gaps.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["semantic-html", "accessibility"],
+      "followUps": ["What is the first rule of ARIA?", "Which landmark elements help screen-reader navigation?"]
+    },
+    {
+      "id": "q-positioning",
+      "question": "Explain the values of the CSS position property.",
+      "answer": "static is the default: the element follows normal flow and ignores top/right/bottom/left. relative keeps the element in flow (its original space is reserved) but lets you offset it visually from that position, and it becomes a positioning context for absolutely positioned descendants. absolute removes the element from normal flow entirely and positions it relative to its nearest positioned ancestor (or the initial containing block if none), so it no longer affects sibling layout. fixed is like absolute but positioned relative to the viewport, so it stays put during scroll (unless inside a transformed ancestor, which becomes its containing block). sticky behaves as relative until the element crosses a scroll threshold defined by its offsets, then behaves as fixed within its scroll container - ideal for sticky headers. Choosing the right value depends on whether the element should keep its space, scroll with the page, or stick.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["positioning", "layout"],
+      "followUps": ["What makes sticky stop sticking?", "Why can a transformed ancestor break position: fixed?"]
+    },
+    {
+      "id": "q-container-queries",
+      "question": "What do container queries solve that media queries cannot?",
+      "answer": "Media queries respond to the global viewport (or other device characteristics), so a component's layout depends on the whole window rather than on the space the component is actually given. That breaks reusability: the same card needs different breakpoints depending on whether it sits in a narrow sidebar or a wide main column, but a media query cannot tell the difference. Container queries let an element respond to the size of a designated ancestor container (declared with container-type), so the card can switch from a stacked to a side-by-side layout based on its own available width, no matter where it is placed. This makes genuinely reusable, context-independent components possible and removes a whole class of breakpoint hacks where component layout was coupled to page layout.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["responsive", "container-queries", "modern-css"],
+      "followUps": ["How do you declare a query container?", "Can container queries replace media queries entirely?"]
+    },
+    {
+      "id": "q-custom-properties",
+      "question": "How do CSS custom properties differ from preprocessor (Sass) variables?",
+      "answer": "Sass variables are resolved at compile time and then disappear: the generated CSS contains only their substituted values, so they cannot change at runtime and do not participate in the cascade. CSS custom properties (--name) are real runtime entities that live in the cascade and inherit like other properties: they can be redefined per selector, overridden by more specific rules, read with var(), changed live with JavaScript, and recomputed when the DOM or media state changes. That makes them the foundation for runtime theming and dark mode (flip the values on :root or a theme class and everything updated re-cascades), for scoping (a component sets its own --gap that children inherit), and for computed values inside calc(). Sass variables remain useful for build-time constants and logic, but only custom properties give you live, cascading, themeable values in the browser.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["custom-properties", "modern-css", "theming"],
+      "followUps": ["How would you implement dark mode with custom properties?", "Can custom properties be animated?"]
+    },
+    {
+      "id": "q-margin-collapse",
+      "question": "What is margin collapsing and when does it happen?",
+      "answer": "Margin collapsing is when two adjacent vertical margins combine into a single margin equal to the larger of the two, rather than summing. It happens only in the block (vertical) direction and only between block-level boxes in normal flow, in three cases: between adjacent siblings (the bottom margin of one and the top margin of the next collapse), between a parent and its first or last child (the child's margin can appear to leak outside the parent), and between an empty block's own top and bottom margins. It does not happen horizontally, does not happen for flex or grid items, and is prevented by anything that separates the margins: padding or a border on the parent, a new block formatting context (overflow other than visible, display: flow-root), or absolute positioning. Understanding it explains the classic surprise of a child's margin-top pushing the whole parent down.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["box-model", "margin-collapsing"],
+      "followUps": ["How does display: flow-root stop it cleanly?", "Why do flex items not collapse margins?"]
+    },
+    {
+      "id": "q-tricky-zindex",
+      "question": "Tricky: A modal has z-index: 9999 but still renders behind a header with z-index: 10. Both are position: fixed. Why, and how do you fix it?",
+      "answer": "z-index only orders elements within the same stacking context; it cannot lift an element above something in a different, higher context. The modal is almost certainly nested inside an ancestor that creates its own stacking context - commonly via transform, opacity below 1, filter, will-change, or position with a z-index - and that ancestor's context sits below the header's in the stacking order. Once that happens, no z-index on the modal (even 9999) can raise it above the header, because the entire ancestor context is painted as one unit beneath the header. The fixes are: render the modal as a direct child of <body> (a React portal is the usual mechanism) so it lives in the root stacking context as a sibling of the header rather than trapped inside another context; or remove the property on the ancestor that created the unwanted context; or use isolation: isolate deliberately to control where contexts form. Debugging means walking up the modal's ancestors looking for the property that created the trapping context.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["stacking-context", "z-index", "positioning", "gotcha"],
+      "followUps": ["Which properties create a stacking context?", "Why do React portals solve this so reliably?"]
+    },
+    {
+      "id": "q-tricky-percent-height",
+      "question": "Tricky: You set height: 100% on a child but it collapses to zero. Why, and what are the correct fixes?",
+      "answer": "A percentage height resolves against the parent's height, but only if the parent has a definite (resolvable) height. By default a block parent's height is auto - determined by its content - so the child's 100% has nothing concrete to resolve against and computes to auto, which with no content is zero. This chains all the way up: if you want height: 100% to work, every ancestor in the chain needs a definite height (commonly html, body { height: 100% } down to the element). The modern fixes are usually better than the percentage chain: use viewport units (height: 100vh or 100dvh for mobile), make the parent a flex container and let the child flex: 1 to fill, or use a grid with a 1fr row. These intrinsic approaches avoid the brittle requirement that every ancestor declare a height. The gotcha is that the same percentage-height rule does NOT apply to flex/grid children, where the layout algorithm can stretch them by default.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["box-model", "sizing", "gotcha"],
+      "followUps": ["Why does flex: 1 fill height without a percentage?", "What is the difference between vh and dvh?"]
+    },
+    {
+      "id": "q-tricky-important-order",
+      "question": "Tricky: Two rules both use !important and target the same element with the same property. Which wins, and what does that reveal about the cascade?",
+      "answer": "When two declarations are both !important and come from the same origin (author CSS), they are tied on importance, so the cascade falls through to the next criteria: specificity first, then source order. The more specific selector wins; if specificity also ties, the later declaration in source order wins. This reveals two things. First, !important does not create a single magic override - it just promotes a declaration into a higher origin tier, and within that tier normal cascade rules (specificity, then order) still apply, which is exactly how an !important arms race escalates. Second, importance is resolved before specificity, so a low-specificity !important rule beats a high-specificity normal rule - which is why people reach for it and why it is so destructive to maintainability. The disciplined alternative is cascade layers (@layer), which let you order entire groups of rules deterministically without escalating specificity or importance at all.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["cascade", "specificity", "important", "gotcha"],
+      "followUps": ["How does @layer let you avoid !important?", "Where does !important from the user origin rank?"]
+    },
+    {
+      "id": "q-flex-min-width",
+      "question": "Why does text inside a flex item sometimes refuse to truncate with ellipsis, and what is the fix?",
+      "answer": "Flex items have a default min-width of auto, which means an item will not shrink below the intrinsic size of its content - including a long unbreakable string. So even with white-space: nowrap, overflow: hidden, and text-overflow: ellipsis on the inner text, the flex item stays at least as wide as its longest content and never gets narrow enough for the overflow clipping to kick in; the item instead overflows or stretches its container. The fix is to set min-width: 0 on the flex item, overriding the auto default so the item is allowed to shrink, at which point overflow: hidden takes effect and the ellipsis appears. The same min-width: 0 (and min-height: 0 in the block direction) also resolves the related problem of a flex child blowing out its parent past 100% width. It is one of the most useful one-line fixes in flex layouts.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["flexbox", "overflow", "min-width"],
+      "followUps": ["Does grid have the same min-width:auto behavior?", "When would you not want min-width: 0?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-responsive-grid",
+      "title": "Build a Responsive Card Grid Without Media Queries",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "prompt": "Create a card grid that shows as many columns as fit, where each card is at least 240px wide and columns share leftover space equally, with a 16px gap. It must add and remove columns automatically as the viewport resizes, with no media queries. Then explain when you would choose auto-fit over auto-fill.",
+      "hints": [
+        "Use display: grid with grid-template-columns.",
+        "Combine repeat() with auto-fill/auto-fit and minmax() to make tracks responsive.",
+        "minmax(240px, 1fr) means 'at least 240px, otherwise share free space'."
+      ],
+      "solutionCode": ".card-grid {\n  display: grid;\n  /* As many 240px-min columns as fit; each flexes up to share free space. */\n  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));\n  gap: 16px;\n}\n\n.card {\n  /* border-box keeps padding inside the track width */\n  box-sizing: border-box;\n  padding: 16px;\n  border: 1px solid #e5e7eb;\n  border-radius: 8px;\n}\n\n/* Variant: stretch the last items to fill the row instead of leaving gaps. */\n.card-grid--fit {\n  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));\n}",
+      "solutionLanguage": "css",
+      "explanation": "grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)) tells the grid to create as many columns as can fit at a minimum of 240px each, and the 1fr maximum lets each column grow to share leftover space equally - so the grid fluidly adds a column when the viewport widens enough for another 240px track and drops one when it narrows, with zero media queries. The gap handles spacing without margin hacks, and box-sizing: border-box ensures the card's padding and border stay within the computed track width instead of overflowing it. The auto-fill vs auto-fit choice matters when there are fewer items than columns that could fit: auto-fill preserves the empty phantom tracks (items stay at their minmax size and the row shows trailing gaps), keeping a consistent column rhythm; auto-fit collapses those empty tracks to zero, so the existing items stretch to fill the entire row. Use auto-fit when you want a single remaining card to span full width, and auto-fill when you want items to keep their natural size and not stretch.",
+      "relatedTopic": "grid"
+    },
+    {
+      "id": "ch-center-overlay",
+      "title": "Center a Modal and Make Its Backdrop Cover Everything",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "prompt": "Implement a modal that is perfectly centered both horizontally and vertically over a full-viewport backdrop, scrolls internally if its content is taller than the screen, and reliably renders above all page content. Address why a high z-index alone may not be enough.",
+      "hints": [
+        "A fixed-position full-viewport backdrop plus a flex container centers the dialog cleanly.",
+        "Use inset: 0 to pin the backdrop to all four edges of the viewport.",
+        "Render the modal at the document root (e.g. a portal) so it is not trapped in an ancestor's stacking context."
+      ],
+      "solutionCode": "/* Backdrop covers the whole viewport and centers its child. */\n.modal-backdrop {\n  position: fixed;\n  inset: 0;                       /* top/right/bottom/left: 0 */\n  display: flex;\n  align-items: center;            /* vertical centering */\n  justify-content: center;        /* horizontal centering */\n  background: rgba(0, 0, 0, 0.5);\n  z-index: 1000;\n  padding: 16px;                  /* breathing room on small screens */\n}\n\n/* The dialog itself: capped height, internal scroll when content overflows. */\n.modal {\n  box-sizing: border-box;\n  width: min(560px, 100%);        /* responsive max width */\n  max-height: 90vh;\n  overflow-y: auto;               /* scroll inside, not the whole page */\n  background: #fff;\n  border-radius: 12px;\n  padding: 24px;\n}",
+      "solutionLanguage": "css",
+      "explanation": "The backdrop uses position: fixed with inset: 0 to stretch across the entire viewport regardless of scroll, and turning it into a flex container with align-items: center and justify-content: center centers the dialog on both axes - the most robust modern centering technique, immune to the dialog's exact dimensions. width: min(560px, 100%) makes the dialog responsive (capped at 560px on large screens, full width minus padding on small ones), while max-height: 90vh plus overflow-y: auto lets tall content scroll inside the dialog instead of forcing the whole page to scroll. The z-index: 1000 orders it above page content, but that only works within its stacking context - which is why the modal must be rendered at the document root (via a portal in a framework like React) rather than deep inside a component tree. If it were nested under an ancestor with transform, opacity, or filter, that ancestor would create its own stacking context and trap the modal beneath sibling content no matter how high its z-index; portaling to <body> makes the modal a sibling of the page's top-level contexts so its z-index is actually comparable to the header's.",
+      "relatedTopic": "positioning-stacking"
+    }
+  ],
+  "references": [
+    {"label": "MDN - The box model", "url": "https://developer.mozilla.org/en-US/docs/Learn/CSS/Building_blocks/The_box_model"},
+    {"label": "MDN - CSS Flexible Box Layout", "url": "https://developer.mozilla.org/en-US/docs/Web/CSS/CSS_flexible_box_layout"},
+    {"label": "MDN - CSS Grid Layout", "url": "https://developer.mozilla.org/en-US/docs/Web/CSS/CSS_grid_layout"},
+    {"label": "MDN - Specificity", "url": "https://developer.mozilla.org/en-US/docs/Web/CSS/Specificity"},
+    {"label": "MDN - Stacking context", "url": "https://developer.mozilla.org/en-US/docs/Web/CSS/CSS_positioned_layout/Stacking_context"},
+    {"label": "MDN - Container queries", "url": "https://developer.mozilla.org/en-US/docs/Web/CSS/CSS_containment/Container_queries"}
+  ]
+}

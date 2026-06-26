@@ -1,0 +1,492 @@
+{
+  "id": "web-performance",
+  "title": "Web Performance",
+  "category": "Frontend",
+  "subcategory": "Performance",
+  "difficulty": "senior",
+  "tags": ["performance", "core-web-vitals", "code-splitting", "caching", "images", "lighthouse"],
+  "description": "A practical, senior-level playbook for making web apps fast: fixing each Core Web Vital, loading strategy, caching and CDNs, image and bundle optimization, runtime perf, and how to measure it all.",
+  "estReadMinutes": 30,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Web performance is the discipline of delivering and running a page so users see and can use it quickly. It spans three layers: the network (how fast bytes arrive - influenced by bundle size, caching, CDNs, and compression), loading strategy (in what order and priority resources load - code splitting, lazy loading, resource hints), and runtime (how smoothly the page behaves once loaded - long tasks, debouncing, efficient rendering). A senior engineer connects user-facing symptoms to a specific layer and applies a targeted fix, then measures to confirm."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Core Web Vitals (LCP, CLS, INP) are the user-centric scoreboard and a Google ranking factor.",
+            "Loading strategy decides what arrives first: split bundles, lazy-load below-the-fold, preload the critical, defer the rest.",
+            "Caching and CDNs cut the distance and repeat cost of bytes; image and font optimization usually move the needle most.",
+            "Runtime perf keeps the main thread free so interactions feel instant; measurement (lab + field) keeps you honest."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The cardinal rule: measure first, optimize the biggest cost, measure again. Performance intuition is frequently wrong - the bottleneck is often an unoptimized hero image or a render-blocking third-party script, not the code you were about to micro-tune."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Performance is a feature with direct business impact. Multiple large studies link faster pages to higher conversion, lower bounce, and more engagement; Google uses Core Web Vitals as a ranking signal, so speed affects discoverability. It is also an equity issue: a heavy app that runs fine on a developer's laptop and fiber connection can be unusable on a mid-range phone over flaky mobile data, which is the median experience for much of the world. And performance debt compounds - every unoptimized image, unsplit bundle, and long task adds up until the app feels sluggish and no single fix rescues it."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Conversion and revenue: faster LCP and INP measurably improve checkout completion and engagement.",
+            "SEO: Core Web Vitals influence search ranking, so performance affects traffic.",
+            "Reach and equity: optimizing for low-end devices and slow networks expands the usable audience.",
+            "Maintainability of speed: budgets and CI checks prevent regressions from creeping back in after each release."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Optimizing only on a fast machine and fast network hides the worst problems. Always test with CPU throttling (4x-6x slowdown) and a Slow 4G profile, and watch field data from real users (RUM) - the lab and the field often disagree, and the field is what ranks and converts."
+        }
+      ]
+    },
+    {
+      "id": "fix-core-web-vitals",
+      "heading": "Fixing Each Core Web Vital",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Each Core Web Vital has a distinct cause and a distinct set of fixes. LCP (Largest Contentful Paint, target <= 2.5s) is dominated by how quickly the largest visible element renders. CLS (Cumulative Layout Shift, target <= 0.1) is about content moving after it was painted. INP (Interaction to Next Paint, target <= 200ms) is about how fast the page responds to input. Treat them as three separate problems with three playbooks."
+        },
+        {
+          "type": "table",
+          "headers": ["Vital", "Target", "Top fixes"],
+          "rows": [
+            ["LCP", "<= 2.5s", "Preload + prioritize hero image, inline critical CSS, defer JS, fast TTFB/CDN, modern image formats"],
+            ["CLS", "<= 0.1", "Set image width/height or aspect-ratio, reserve ad/embed slots, font-display + size-adjust, avoid inserting content above the fold"],
+            ["INP", "<= 200ms", "Break up long tasks, yield to the event loop, debounce/throttle handlers, move CPU work to workers, reduce hydration cost"]
+          ]
+        },
+        {
+          "type": "code",
+          "language": "html",
+          "code": "<!-- LCP: tell the browser the hero image is critical and load it early. -->\n<link rel=\"preload\" as=\"image\" href=\"/hero.avif\" fetchpriority=\"high\">\n<img src=\"/hero.avif\" width=\"1200\" height=\"600\" fetchpriority=\"high\"\n     alt=\"Product hero\">\n\n<!-- CLS: reserve space so nothing reflows when it loads. -->\n<img src=\"/thumb.jpg\" width=\"320\" height=\"180\" loading=\"lazy\" alt=\"...\">\n<div class=\"ad-slot\" style=\"aspect-ratio: 16/9;\"><!-- ad injected here --></div>\n\n<!-- INP-friendly font loading: swap to avoid blocking, override metrics\n     so the swap does not shift layout. -->\n<style>\n  @font-face {\n    font-family: Inter; src: url(/inter.woff2) format('woff2');\n    font-display: swap; size-adjust: 100%;\n  }\n</style>"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The single highest-leverage LCP fix on most sites is the hero image: serve it in AVIF/WebP, size it for the viewport, preload it with fetchpriority=high, and make sure no lazy-loading or low priority delays it. The LCP element should never be lazy-loaded."
+        }
+      ]
+    },
+    {
+      "id": "loading-strategy",
+      "heading": "Loading Strategy: Splitting, Lazy Loading, and Hints",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The fastest byte is the one you never send, and the second fastest is the one you send only when needed. Code splitting breaks the bundle so users download only the code for the current route or feature; lazy loading defers below-the-fold images and rarely-used components; and resource hints (preload, prefetch, preconnect, dns-prefetch) tell the browser what to fetch early and what to warm up. Used together they shrink the critical path and spread the rest of the work across time."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Route-level code splitting: each route's code is a separate chunk,\n// loaded only when the user navigates there.\nimport { lazy, Suspense } from 'react';\nconst Settings = lazy(() => import('./routes/Settings'));\n\n<Suspense fallback={<Spinner />}>\n  <Settings />\n</Suspense>\n\n// Component-level: defer a heavy chart until it is actually needed.\nbutton.addEventListener('click', async () => {\n  const { renderChart } = await import('./heavyChart.js'); // dynamic import\n  renderChart(data);\n});"
+        },
+        {
+          "type": "code",
+          "language": "html",
+          "code": "<!-- preconnect: open the TCP+TLS connection to a known origin early. -->\n<link rel=\"preconnect\" href=\"https://cdn.example.com\" crossorigin>\n\n<!-- preload: fetch a critical resource for THIS page at high priority. -->\n<link rel=\"preload\" as=\"font\" href=\"/inter.woff2\" type=\"font/woff2\" crossorigin>\n\n<!-- prefetch: fetch a resource likely needed for the NEXT navigation,\n     at low priority, when idle. -->\n<link rel=\"prefetch\" href=\"/next-route.js\">\n\n<!-- native lazy loading for below-the-fold images and iframes -->\n<img src=\"/below.jpg\" loading=\"lazy\" width=\"600\" height=\"400\" alt=\"...\">"
+        },
+        {
+          "type": "paragraph",
+          "text": "The distinctions matter: preload is for resources the current page definitely needs soon (the LCP image, a critical font) and fetches at high priority; prefetch is a low-priority, idle-time fetch for a likely future navigation; preconnect warms up the connection (DNS + TCP + TLS) to a third-party origin so the eventual request is faster. Over-preloading is harmful - it competes for bandwidth with genuinely critical resources - so preload only a small number of truly critical assets."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Lazy-loading the wrong thing hurts: never lazy-load the LCP element or above-the-fold images, and do not lazy-load tiny resources where the loading overhead exceeds the savings. Lazy loading is for below-the-fold and on-demand content."
+        }
+      ]
+    },
+    {
+      "id": "caching-cdn",
+      "heading": "Caching and CDNs",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Caching avoids re-fetching and re-computing; a CDN moves cached bytes physically closer to users. The HTTP cache is controlled by Cache-Control: immutable, content-hashed assets (app.4f3a.js) get a long max-age and immutable so they are cached for a year and never revalidated, while HTML and API responses use short max-age with revalidation (ETag/Last-Modified) so users get fresh content. A CDN caches these at edge locations worldwide, cutting latency (closer = faster TTFB) and offloading origin traffic. Service workers add a programmable client-side cache for offline and instant repeat loads."
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "# Content-hashed static assets: cache forever, never revalidate.\nCache-Control: public, max-age=31536000, immutable\n\n# HTML: always revalidate so deploys are picked up immediately.\nCache-Control: no-cache              # store but revalidate every time\n# (no-cache means 'revalidate', NOT 'do not store'; no-store means 'do not store')\n\n# API responses that can be briefly stale, served from CDN edge:\nCache-Control: public, max-age=60, stale-while-revalidate=300\n# serve cached for 60s; for the next 300s serve stale instantly while\n# revalidating in the background."
+        },
+        {
+          "type": "paragraph",
+          "text": "The cache-busting pattern that makes long max-age safe is content hashing in filenames: when a file changes, its hash changes, so the URL changes, so the old cached entry is irrelevant and the new URL is fetched fresh. This is why you can cache JS/CSS for a year (immutable) while still shipping updates instantly. stale-while-revalidate is a powerful directive: it serves the cached (possibly stale) response immediately for perceived speed, then refreshes in the background so the next request is fresh - hiding revalidation latency from the user."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "A classic outage: HTML cached with a long max-age. Because the HTML references the old hashed asset URLs, users keep loading a stale app for the full cache duration even after a deploy, and cannot be force-updated. HTML should use no-cache (revalidate every time); only content-hashed assets get long, immutable caching."
+        }
+      ]
+    },
+    {
+      "id": "images-bundles",
+      "heading": "Image Optimization and Bundle Size",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Images are usually the largest bytes on a page, and JavaScript is usually the most expensive to process. For images: serve modern formats (AVIF, then WebP, with a fallback), generate responsive sizes and let the browser pick with srcset/sizes, compress appropriately, and set explicit dimensions to prevent CLS. For JavaScript: measure the bundle, split by route, tree-shake dead code, avoid shipping large dependencies (e.g. a full moment.js or lodash when a few functions or a smaller library would do), and prefer modern syntax so polyfills are only sent to browsers that need them."
+        },
+        {
+          "type": "code",
+          "language": "html",
+          "code": "<!-- Responsive, modern-format images: the browser downloads the smallest\n     file that fits the layout and the device's pixel density. -->\n<picture>\n  <source type=\"image/avif\"\n          srcset=\"/hero-480.avif 480w, /hero-960.avif 960w, /hero-1440.avif 1440w\"\n          sizes=\"(max-width: 600px) 100vw, 600px\">\n  <source type=\"image/webp\"\n          srcset=\"/hero-480.webp 480w, /hero-960.webp 960w, /hero-1440.webp 1440w\"\n          sizes=\"(max-width: 600px) 100vw, 600px\">\n  <img src=\"/hero-960.jpg\" width=\"960\" height=\"540\"\n       alt=\"Product hero\" fetchpriority=\"high\">\n</picture>"
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Tree-shaking only works with ES module named imports and side-effect-free\n// packages. This pulls in only debounce, not all of lodash:\nimport debounce from 'lodash-es/debounce';   // good: granular, tree-shakeable\n// import _ from 'lodash';                    // bad: can drag in the whole lib\n\n// Analyze the bundle to find the real weight before optimizing:\n//   npx vite-bundle-visualizer    (Vite/Rollup)\n//   npx webpack-bundle-analyzer    (webpack)\n// Look for: duplicate dependencies, oversized libs, non-split routes,\n// and polyfills shipped to modern browsers."
+        },
+        {
+          "type": "paragraph",
+          "text": "JavaScript cost is not just download - it is parse, compile, and execute on the CPU, which is far slower on low-end phones. A megabyte of JS can cost several seconds of main-thread work on a budget device, blocking interactivity. That is why reducing JS shipped (splitting, tree-shaking, smaller deps, server rendering) often improves INP and TBT more than any other single change. Always measure the bundle with an analyzer rather than guessing what is heavy."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Use width/height or aspect-ratio on every image to reserve space (CLS), loading=\"lazy\" for below-the-fold, fetchpriority=\"high\" for the LCP image, and decoding=\"async\" to keep image decode off the critical path. These attributes are free wins."
+        }
+      ]
+    },
+    {
+      "id": "runtime-perf",
+      "heading": "Runtime Performance: Long Tasks, Debounce, Throttle",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Once loaded, an app's responsiveness depends on keeping the main thread free. Long tasks (over 50ms) block input and rendering, hurting INP. High-frequency events - input, scroll, resize, mousemove - can fire dozens of times per second; running expensive work on each is wasteful and janky. Debounce coalesces a burst of events into one call after activity stops (good for search-as-you-type, which should fire after the user pauses); throttle caps the rate to at most once per interval (good for scroll/resize handlers that should update periodically during continuous activity)."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Debounce: run fn only after `delay` ms of silence. Resets on each call.\nfunction debounce(fn, delay) {\n  let timer;\n  return (...args) => {\n    clearTimeout(timer);\n    timer = setTimeout(() => fn(...args), delay);\n  };\n}\n\n// Throttle: run fn at most once per `interval` ms, on the leading edge.\nfunction throttle(fn, interval) {\n  let last = 0;\n  return (...args) => {\n    const now = Date.now();\n    if (now - last >= interval) {\n      last = now;\n      fn(...args);\n    }\n  };\n}\n\n// Search fires after the user stops typing for 300ms (one request, not one per key).\nsearchInput.addEventListener('input', debounce(e => fetchResults(e.target.value), 300));\n\n// Scroll handler runs at most ~10x/sec instead of on every scroll event.\nwindow.addEventListener('scroll', throttle(updateScrollProgress, 100), { passive: true });"
+        },
+        {
+          "type": "paragraph",
+          "text": "Beyond debounce/throttle, runtime wins come from: marking scroll/touch listeners passive: true so they cannot block scrolling; using requestAnimationFrame for visual updates so they align with frames; breaking long tasks into chunks that yield to the event loop; virtualizing long lists so you render only what is visible; and offloading CPU-bound work (parsing, image processing, crypto) to a Web Worker so the main thread stays responsive for input and paint."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Debounce vs throttle is a frequent interview question and a frequent real-world choice. Mnemonic: debounce waits for quiet (fires once after the storm), throttle rations (fires at a steady max rate during the storm). Search = debounce; scroll/resize progress = throttle."
+        }
+      ]
+    },
+    {
+      "id": "measuring-example",
+      "heading": "Example: A Performance Investigation End-to-End",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Scenario: a marketing landing page scored 'poor' LCP (4.8s) and 'poor' INP in the field. Lab tools (Lighthouse) said LCP was fine on a fast connection, so the team almost dismissed it - the disagreement between lab and field is the lesson. Here is how the investigation unfolded."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Field (RUM/CrUX) showed poor LCP and INP for real users on mobile; lab on fast hardware looked fine. Trust the field.",
+            "Throttled Lighthouse (Slow 4G, 4x CPU) reproduced LCP 4.8s. The LCP element was a 2.3MB JPEG hero, lazy-loaded, served at full desktop size to phones.",
+            "The Performance trace showed a 380ms long task during load: a third-party tag manager parsing and executing synchronously, delaying interactivity (INP).",
+            "Bundle analysis revealed the whole of a date library and a duplicated copy of a UI lib shipped on the landing route that did not use them."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "html",
+          "code": "<!-- LCP fix: stop lazy-loading the hero, serve AVIF responsive sizes,\n     preload at high priority, reserve space. 2.3MB -> ~140KB on mobile. -->\n<link rel=\"preload\" as=\"image\" href=\"/hero-960.avif\" fetchpriority=\"high\">\n<picture>\n  <source type=\"image/avif\" srcset=\"/hero-480.avif 480w, /hero-960.avif 960w\"\n          sizes=\"(max-width:600px) 100vw, 960px\">\n  <img src=\"/hero-960.jpg\" width=\"960\" height=\"540\" fetchpriority=\"high\" alt=\"...\">\n</picture>\n\n<!-- INP fix: load the third-party tag deferred/async so it stops blocking. -->\n<script src=\"https://tags.example.com/tm.js\" async></script>"
+        },
+        {
+          "type": "paragraph",
+          "text": "Fixes applied: converting the hero to responsive AVIF and preloading it (not lazy-loading) cut its bytes from 2.3MB to ~140KB on mobile and moved LCP from 4.8s to 2.1s. Loading the third-party script async removed the 380ms blocking task and improved INP. Route-level code splitting plus removing the duplicated UI library and switching the date library for a few imported functions cut the landing bundle by ~60%. The takeaway: each symptom mapped to a specific layer (image bytes -> LCP, blocking script -> INP, oversized bundle -> TBT/INP), and the field data, not the lab, told the truth about which mattered."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Always reconcile lab and field. Lab tools (Lighthouse) are reproducible and great for diagnosing causes, but they run on synthetic conditions; field data (RUM, CrUX) reflects real users and real devices, and it is what determines ranking and revenue. When they disagree, the field is right - then use the lab to find the cause."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Performance Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Optimizing without measuring: micro-tuning code while a 2MB hero image or a render-blocking third-party script is the real bottleneck.",
+            "Testing only on fast hardware and networks, hiding the experience on the median mid-range phone over slow data.",
+            "Lazy-loading the LCP element or above-the-fold images, which delays the very metric you are trying to improve.",
+            "Caching HTML with a long max-age, so deploys do not reach users for the full cache duration (stale-app incident).",
+            "Shipping huge JavaScript: full utility libraries, duplicated dependencies, unsplit routes, polyfills sent to modern browsers - inflating parse/execute time and INP.",
+            "Running expensive work directly in high-frequency handlers (scroll, input, resize) without debounce/throttle or passive listeners.",
+            "Over-using resource hints: preloading many assets so they compete with the genuinely critical ones, making LCP worse.",
+            "Treating Core Web Vitals as a single number instead of three distinct problems with distinct fixes."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Incident pattern: a team added a synchronous, render-blocking analytics snippet in <head> 'just for a week'. It blocked the parser and added a long task on every load; LCP and INP regressed across the whole site, and conversion dipped measurably before anyone connected the change to the metric drop. Third-party scripts belong async/deferred, with their impact measured."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Measure first with both lab (Lighthouse, WebPageTest) and field (RUM, CrUX) data; optimize the biggest cost; re-measure.",
+            "Treat LCP, CLS, and INP as separate problems: prioritize the hero image for LCP, reserve space for CLS, break up long tasks for INP.",
+            "Ship less JavaScript: split by route, tree-shake, drop oversized dependencies, and prefer server rendering where it helps.",
+            "Serve modern responsive images (AVIF/WebP, srcset/sizes), with explicit dimensions and correct loading/fetchpriority attributes.",
+            "Cache content-hashed assets immutably for a year and HTML with no-cache; put everything behind a CDN; consider stale-while-revalidate for APIs.",
+            "Use resource hints surgically: preconnect to critical origins, preload a few critical assets, prefetch likely next routes - never over-preload.",
+            "Debounce search-style inputs, throttle scroll/resize, mark scroll/touch listeners passive, and offload CPU-bound work to Web Workers.",
+            "Set a performance budget and enforce it in CI (bundle size, Lighthouse score) so regressions are caught before release."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Layer", "Lever", "Primary metric helped"],
+          "rows": [
+            ["Network", "CDN + immutable caching + compression", "TTFB, LCP"],
+            ["Loading", "Code splitting + lazy loading + hints", "LCP, TBT"],
+            ["Assets", "Modern responsive images + smaller bundles", "LCP, INP"],
+            ["Stability", "Reserve space, font-display, aspect-ratio", "CLS"],
+            ["Runtime", "Chunk long tasks, debounce/throttle, workers", "INP"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "note-budgets",
+      "heading": "Performance Budgets and Keeping Speed",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Performance is not a one-time project; without guardrails it regresses with every feature. A performance budget makes speed a checkable constraint: a cap on total JavaScript bytes, image weight, third-party requests, or a minimum Lighthouse/Core Web Vitals score, enforced in CI so a pull request that blows the budget fails the build. Pair this with continuous field monitoring (RUM tracking real LCP/CLS/INP and alerting on regressions) so you catch problems users actually feel. The combination of a lab budget in CI and field monitoring in production is what turns a one-off optimization sprint into durable performance."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A useful starting budget for a typical content/app site: keep initial JavaScript under ~150-200KB compressed on the critical route, total page weight modest, and third-party requests counted and justified. Tighten from a measured baseline rather than guessing."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "perf-layers",
+      "title": "Three Layers of Web Performance",
+      "type": "mermaid",
+      "content": "flowchart TD\n    U[User requests page] --> N[Network layer: CDN, caching, compression, TTFB]\n    N --> L[Loading layer: code splitting, lazy load, resource hints]\n    L --> A[Assets: responsive images, fonts, bundle size]\n    A --> R[Runtime layer: long tasks, debounce/throttle, workers]\n    R --> M{Measure: lab + field}\n    M -->|regression| N\n    M -->|good| Done[Fast, responsive page]"
+    },
+    {
+      "id": "cwv-fix-map",
+      "title": "Core Web Vitals to Fix Mapping",
+      "type": "ascii",
+      "content": "LCP (load speed of largest element)\n   -> preload + prioritize hero image, AVIF/WebP\n   -> inline critical CSS, defer JS, fast TTFB/CDN\n\nCLS (visual stability)\n   -> width/height or aspect-ratio on media\n   -> reserve ad/embed slots, font-display + size-adjust\n\nINP (responsiveness to input)\n   -> break up long tasks, yield to the event loop\n   -> debounce/throttle, move CPU work to workers"
+    },
+    {
+      "id": "hint-decision",
+      "title": "Which Resource Hint?",
+      "type": "mermaid",
+      "content": "flowchart TD\n    Q[What do you need?] --> A{Critical for THIS page now?}\n    A -- yes --> P[preload, high priority]\n    A -- no --> B{Likely for the NEXT navigation?}\n    B -- yes --> PF[prefetch, idle, low priority]\n    B -- no --> C{Just need a third-party connection warm?}\n    C -- yes --> PC[preconnect / dns-prefetch]\n    C -- no --> X[No hint needed]"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-lcp-fix",
+      "question": "What is LCP and what are the most effective ways to improve it?",
+      "answer": "LCP (Largest Contentful Paint) measures the time from navigation start until the largest visible content element - typically a hero image, video poster, or large heading block - is rendered; a good score is 2.5 seconds or less at the 75th percentile of real users. The most effective fixes target whatever delays that element: serve the hero image in a modern format (AVIF/WebP) sized for the viewport with srcset, preload it with fetchpriority=high and never lazy-load it, reduce render-blocking resources by inlining critical CSS and deferring non-critical JavaScript, and improve TTFB with a CDN and caching so bytes start arriving sooner. If the LCP element is text, ensure the font does not block rendering (font-display: swap) and that no large script delays paint. Because the LCP element is usually an image, optimizing and prioritizing that single image is the highest-leverage change on most sites.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["core-web-vitals", "lcp", "images"],
+      "followUps": ["Why should the LCP image never be lazy-loaded?", "How does fetchpriority help LCP?"]
+    },
+    {
+      "id": "q-inp-fix",
+      "question": "What is INP and how do you improve a poor INP score?",
+      "answer": "INP (Interaction to Next Paint) measures the latency from a user interaction - tap, click, or keypress - to the next frame that visually reflects a response, reported as a high percentile across the whole session; a good score is 200ms or less. Poor INP means the main thread is too busy to handle input and repaint promptly. Improvements: break long tasks (anything over 50ms) into smaller chunks and yield to the event loop between them so input handlers can run; reduce the amount of JavaScript that executes (less hydration, smaller bundles, code splitting); debounce or throttle expensive work triggered by high-frequency events; move CPU-bound work (parsing, image processing) to a Web Worker; and avoid forced synchronous layout inside handlers. The goal is to keep every task short so that whenever a user interacts, the browser can quickly run the handler and paint the result. INP replaced FID in 2024 because it captures the full interaction-to-paint latency across the session rather than only the first input's delay.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["core-web-vitals", "inp", "long-tasks"],
+      "followUps": ["How does yielding to the event loop help INP?", "Why did INP replace FID?"]
+    },
+    {
+      "id": "q-debounce-throttle",
+      "question": "What is the difference between debounce and throttle, and when do you use each?",
+      "answer": "Both limit how often a function runs in response to frequent events, but with different timing. Debounce delays execution until a specified quiet period has passed with no further calls - every new call resets the timer - so the function fires once, after the activity stops. Throttle guarantees the function runs at most once per interval during continuous activity, firing at a steady maximum rate regardless of how many events arrive. Use debounce when you only care about the final state after a burst: search-as-you-type (fire the request after the user pauses typing), validating a field after the user stops, or saving a draft after edits settle. Use throttle when you want periodic updates during ongoing activity: a scroll handler updating a progress bar or triggering infinite scroll, a resize handler recomputing layout, or rate-limiting mousemove. The mnemonic: debounce waits for silence and fires once; throttle rations and fires at a fixed cadence.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["runtime", "debounce", "throttle"],
+      "followUps": ["How would you add a trailing call to throttle?", "Why mark scroll listeners passive?"]
+    },
+    {
+      "id": "q-preload-prefetch",
+      "question": "What is the difference between preload, prefetch, and preconnect?",
+      "answer": "These are resource hints with different intents. preload tells the browser to fetch a resource needed for the current page very soon, at high priority - used for the LCP image, a critical font, or a critical script that the parser would otherwise discover late; misusing it (preloading too many things) backfires by competing with truly critical resources. prefetch fetches a resource likely needed for a future navigation at low priority during idle time - used to warm the cache for the next route the user will probably visit, so that navigation feels instant. preconnect (and the lighter dns-prefetch) does not fetch a resource at all; it proactively performs the DNS lookup, TCP handshake, and TLS negotiation to a third-party origin so that when the real request is made, the connection is already established - used for known critical origins like a font CDN or an API. In short: preload for now, prefetch for next, preconnect to warm the connection.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["loading", "resource-hints"],
+      "followUps": ["Why is over-preloading harmful?", "When would you use dns-prefetch over preconnect?"]
+    },
+    {
+      "id": "q-code-splitting",
+      "question": "What is code splitting and how does it improve performance?",
+      "answer": "Code splitting breaks a single large JavaScript bundle into multiple smaller chunks that are loaded on demand rather than all upfront. The most common form is route-based splitting, where each route's code is its own chunk loaded only when the user navigates there, so the initial page downloads, parses, and executes far less JavaScript. Component- or feature-level splitting goes further, deferring heavy widgets (a rich text editor, a charting library) behind a dynamic import() until the user actually triggers them. It improves performance on several axes: smaller initial bundles mean faster download and, more importantly, less parse/compile/execute time on the main thread, which improves interactivity (INP/TBT) - especially on low-end devices where JS execution dominates. The trade-off is more network requests and the need for loading states, but with HTTP/2 multiplexing and prefetching the likely-next chunks, the net effect is a faster initial load and a responsive app.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["loading", "code-splitting", "bundle-size"],
+      "followUps": ["How do you avoid a waterfall of chunk requests?", "When can splitting hurt more than help?"]
+    },
+    {
+      "id": "q-caching-headers",
+      "question": "How should you set caching for static assets versus HTML, and why?",
+      "answer": "Content-hashed static assets (e.g. app.4f3a2b.js, whose filename changes whenever the content changes) should be cached aggressively: Cache-Control: public, max-age=31536000, immutable. Because any change produces a new filename and therefore a new URL, the old cached entry is never wrong, so caching for a year with immutable (which tells the browser not even to revalidate) is safe and maximizes cache hits. HTML, by contrast, should not be cached long because it is the entry point that references those hashed URLs; it should use Cache-Control: no-cache (which means 'store but revalidate every time', not 'do not store') or a very short max-age so that a new deploy is picked up immediately and users get the updated asset references. Getting this backwards - caching HTML for a long time - causes a notorious incident where users keep loading a stale app pointing at old asset URLs for the entire cache duration, with no way to force an update. API responses sit in between and often benefit from short max-age plus stale-while-revalidate.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["caching", "cdn", "http"],
+      "followUps": ["What does stale-while-revalidate do?", "What is the difference between no-cache and no-store?"]
+    },
+    {
+      "id": "q-images",
+      "question": "What are the key techniques for image optimization on the web?",
+      "answer": "Images are usually the heaviest bytes on a page, so optimizing them has outsized impact. The key techniques: serve modern formats (AVIF first, then WebP, with a JPEG/PNG fallback via <picture>), which are dramatically smaller than legacy formats at the same quality; provide multiple resolutions with srcset and sizes so the browser downloads the smallest file that fits the layout and the device's pixel density, instead of sending a desktop-sized image to a phone; compress to an appropriate quality (slightly lossy is usually imperceptible and much smaller); set explicit width and height (or aspect-ratio) so the layout reserves space and the image cannot cause CLS; use loading=\"lazy\" for below-the-fold images and, conversely, fetchpriority=\"high\" plus preload for the LCP image so it is not delayed; and add decoding=\"async\" to keep decode off the critical path. Together these can cut image payload by an order of magnitude while improving both LCP and CLS.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["images", "lcp", "cls"],
+      "followUps": ["How do srcset and sizes work together?", "Why should the LCP image not be lazy-loaded?"]
+    },
+    {
+      "id": "q-lab-vs-field",
+      "question": "What is the difference between lab and field performance data, and why do they sometimes disagree?",
+      "answer": "Lab (synthetic) data comes from tools like Lighthouse or WebPageTest that load the page in a controlled, repeatable environment with simulated network and CPU conditions. It is excellent for diagnosing causes and catching regressions in CI because it is deterministic and gives detailed traces. Field (real-user) data, such as RUM or Google's CrUX dataset, is collected from actual visitors on their real devices and networks, aggregated at percentiles. They disagree because labs use a single synthetic profile that may not match your real audience: a lab on a fast machine and unthrottled network can show a healthy LCP while the field - dominated by mid-range phones on slow mobile data - shows a poor one, or vice versa, and lab tools cannot capture user-specific factors like cache state, interaction patterns, or geographic latency. The practical rule: field data is the source of truth for whether users are having a good experience (and it is what Google ranks on), while lab data is the tool you use to reproduce and diagnose the cause once the field flags a problem.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["measuring", "lighthouse", "rum"],
+      "followUps": ["Which should you trust when they conflict?", "How do you collect field Core Web Vitals?"]
+    },
+    {
+      "id": "q-tricky-bundle-vs-image",
+      "question": "Tricky: Lighthouse flags 'reduce unused JavaScript' as the top opportunity, but your LCP is being set by a hero image. Where should you focus first, and why can the top 'opportunity' mislead?",
+      "answer": "Focus on whatever is actually gating the LCP element first - here, the hero image - not necessarily the item Lighthouse lists as the biggest 'opportunity'. Lighthouse opportunities are estimated potential savings in isolation; they are ranked by estimated milliseconds saved, but those estimates assume the saving translates directly to the metric, which is not always true. If the LCP is set by a 2MB image that is render-independent of the unused JavaScript, trimming JS may improve TBT/INP and the overall score but barely move LCP, because the image download is on the critical path for LCP and the JS is not. The senior approach is to look at the actual LCP attribution in the trace (what element is the LCP, what resource and phase delayed it - TTFB, load delay, load time, or render delay) and fix that specific bottleneck, then address the JavaScript for its own benefit to interactivity. The lesson: optimize the critical path for the specific metric you care about, using attribution data, rather than blindly chasing the top-listed generic opportunity, which can be unrelated to your worst real-user metric.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["measuring", "lcp", "lighthouse", "gotcha"],
+      "followUps": ["What are the four sub-parts of LCP timing?", "Why is a high Lighthouse score not the goal itself?"]
+    },
+    {
+      "id": "q-tricky-preload-everything",
+      "question": "Tricky: A teammate preloads every script, font, and image 'to make the page load faster'. Why does this often make performance worse?",
+      "answer": "Preload does not create bandwidth; it reprioritizes it. The browser has a finite connection budget and the network has finite throughput, so preloading everything means all those resources compete for the same pipe at high priority at once - including the genuinely critical ones like the LCP image and critical CSS. The result is that the truly important resources arrive later than they would have under the browser's own intelligent prioritization, so LCP and first paint can regress. Preload also overrides the browser's normally-correct heuristics, and excessive preloads can delay or starve resources the page needs immediately. The correct use is surgical: preload only a small number of resources that are critical for the current view but that the browser would otherwise discover late (the LCP image referenced in CSS, a critical web font), and let the browser prioritize the rest. The deeper lesson is that performance is about ordering scarce bandwidth correctly, and indiscriminate high-priority hints destroy that ordering.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["loading", "resource-hints", "gotcha"],
+      "followUps": ["What resources are good preload candidates?", "How does the browser prioritize without hints?"]
+    },
+    {
+      "id": "q-tricky-cache-html",
+      "question": "Tricky: After a deploy, some users keep seeing the old app and report white screens with 404s for JS chunks. What likely went wrong with caching?",
+      "answer": "This is the classic stale-HTML caching incident. The HTML was served with a long max-age (or was cached at the CDN edge without proper revalidation), so returning users load an old cached HTML document. That old HTML references the previous build's content-hashed asset URLs (app.OLDHASH.js). After the deploy, the server/CDN may have purged the old chunks, so the old HTML's references now 404 - producing white screens and chunk-load errors - while users who got fresh HTML are fine. The root cause is caching the entry point too aggressively. The fix is to serve HTML with Cache-Control: no-cache (store but always revalidate) or a very short max-age so every visit checks for the latest document, while keeping the content-hashed JS/CSS immutable with a one-year max-age. As a defensive measure, retain previous build artifacts for a grace period so in-flight old HTML can still load its chunks, and add a client-side chunk-load-error handler that forces a reload to fetch fresh HTML. The principle: cache hashed assets forever, never cache the HTML that points at them.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["caching", "cdn", "deploys", "gotcha"],
+      "followUps": ["How do you make deploys safe for in-flight sessions?", "Why does content hashing make immutable caching safe?"]
+    },
+    {
+      "id": "q-tree-shaking",
+      "question": "What is tree shaking and what can prevent it from working?",
+      "answer": "Tree shaking is dead-code elimination at the bundle level: the bundler statically analyzes ES module imports and exports and drops code that is never imported, so the final bundle contains only what is actually used. It depends on ES module syntax (import/export), which is statically analyzable, unlike CommonJS require, which is dynamic. Several things prevent or limit it: importing a whole library namespace or using a CommonJS-only package the bundler cannot analyze; libraries that are not marked side-effect-free (a package without sideEffects: false in package.json, or with module-level code that has observable effects, forces the bundler to keep modules in case those effects matter); re-export barrels that pull in everything; and dynamic property access on a module. The practical guidance is to use granular named imports from ES-module, side-effect-free packages (import debounce from 'lodash-es/debounce' rather than the whole library), mark your own packages sideEffects: false when true, and verify with a bundle analyzer that only the expected code is included.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["bundle-size", "tree-shaking", "build"],
+      "followUps": ["Why does sideEffects matter for tree shaking?", "Why can't CommonJS be tree-shaken as easily?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-debounce-throttle",
+      "title": "Implement debounce and throttle with Correct Semantics",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "prompt": "Implement two higher-order functions: debounce(fn, delay) that runs fn only after `delay` ms have elapsed without any new call, and throttle(fn, interval) that runs fn at most once per `interval` ms while calls keep arriving. Make debounce support a trailing call with the latest arguments, and make throttle fire on the leading edge plus a trailing call if events were dropped. Explain which to use for a search input versus a scroll handler.",
+      "hints": [
+        "debounce: clear and reset a timer on every call; only the final call's timer survives.",
+        "throttle: track the last run time; if the interval has not elapsed, schedule a single trailing call with the latest args.",
+        "Preserve `this` and arguments by using a regular function and applying them."
+      ],
+      "solutionCode": "function debounce(fn, delay) {\n  let timer = null;\n  let lastArgs = null;\n  let lastThis = null;\n  return function (...args) {\n    lastArgs = args;\n    lastThis = this;\n    clearTimeout(timer);              // each call resets the countdown\n    timer = setTimeout(() => {\n      fn.apply(lastThis, lastArgs);   // fire once, after the quiet period\n      timer = null;\n    }, delay);\n  };\n}\n\nfunction throttle(fn, interval) {\n  let last = 0;\n  let trailingTimer = null;\n  let lastArgs = null;\n  let lastThis = null;\n  return function (...args) {\n    const now = Date.now();\n    lastArgs = args;\n    lastThis = this;\n    const remaining = interval - (now - last);\n    if (remaining <= 0) {\n      // Leading edge: enough time has passed, run immediately.\n      if (trailingTimer) { clearTimeout(trailingTimer); trailingTimer = null; }\n      last = now;\n      fn.apply(lastThis, lastArgs);\n    } else if (!trailingTimer) {\n      // Schedule a single trailing call so the last event is not lost.\n      trailingTimer = setTimeout(() => {\n        last = Date.now();\n        trailingTimer = null;\n        fn.apply(lastThis, lastArgs);\n      }, remaining);\n    }\n  };\n}\n\n// Search input: debounce so one request fires after the user stops typing.\nconst onSearch = debounce(q => fetchResults(q), 300);\n// Scroll handler: throttle so progress updates at a steady max rate.\nconst onScroll = throttle(() => updateProgressBar(), 100);",
+      "solutionLanguage": "javascript",
+      "explanation": "debounce keeps a single timer that is cleared and recreated on every call, so only the final call in a burst survives to fire after `delay` ms of silence; it stores the latest arguments and `this` so the trailing invocation uses the most recent values. This is exactly right for a search-as-you-type input: you do not want a request per keystroke, only one after the user pauses. throttle enforces a maximum rate: it records the timestamp of the last actual run and, on each call, computes how much of the interval remains. If the interval has elapsed it runs immediately (leading edge); otherwise it schedules a single trailing timer so the last event in a continuous stream still produces an update rather than being dropped, which matters for a scroll handler that must reflect the final scroll position. Preserving `this` and arguments via apply makes both wrappers transparent drop-in replacements. The choice is semantic: debounce for 'react once after activity settles' (search, autosave, resize-then-recompute), throttle for 'update at a steady cadence during activity' (scroll progress, infinite scroll triggers, mousemove). Both keep expensive work off the critical path and protect INP by preventing a flood of handler executions.",
+      "relatedTopic": "runtime-perf"
+    },
+    {
+      "id": "ch-lazy-image",
+      "title": "Build an Accessible, CLS-Safe Lazy Image Component",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "prompt": "Write a reusable responsive image component (framework-agnostic HTML/JS or React) that: serves AVIF/WebP with a fallback, uses srcset/sizes for responsive sizing, reserves space to avoid CLS, lazy-loads below-the-fold images but eagerly prioritizes an LCP image when a `priority` flag is set, and includes alt text. Explain each performance decision.",
+      "hints": [
+        "Use <picture> with <source type> entries for AVIF and WebP and an <img> fallback.",
+        "Always pass width/height (or aspect-ratio) so the box is reserved before load.",
+        "priority -> loading=\"eager\" + fetchpriority=\"high\"; otherwise loading=\"lazy\" + fetchpriority=\"low\"."
+      ],
+      "solutionCode": "// React component; the same structure works as plain HTML.\nfunction ResponsiveImage({\n  name,        // base path without extension, e.g. '/img/hero'\n  widths,      // e.g. [480, 960, 1440]\n  sizes,       // e.g. '(max-width: 600px) 100vw, 960px'\n  width,       // intrinsic width for aspect ratio (CLS reservation)\n  height,      // intrinsic height\n  alt,         // required for accessibility\n  priority = false, // true for the LCP image\n}) {\n  const srcset = (ext) =>\n    widths.map((w) => `${name}-${w}.${ext} ${w}w`).join(', ');\n\n  return (\n    <picture>\n      <source type=\"image/avif\" srcSet={srcset('avif')} sizes={sizes} />\n      <source type=\"image/webp\" srcSet={srcset('webp')} sizes={sizes} />\n      <img\n        src={`${name}-${widths[widths.length - 1]}.jpg`}\n        srcSet={srcset('jpg')}\n        sizes={sizes}\n        width={width}\n        height={height}          /* reserves space -> no CLS */\n        alt={alt}                /* accessibility */\n        loading={priority ? 'eager' : 'lazy'}\n        fetchpriority={priority ? 'high' : 'low'}\n        decoding=\"async\"          /* keep decode off the critical path */\n      />\n    </picture>\n  );\n}\n\n// Usage:\n// LCP hero -> priority so it loads early, never lazy.\n<ResponsiveImage name=\"/img/hero\" widths={[480, 960, 1440]}\n  sizes=\"(max-width:600px) 100vw, 960px\" width={1440} height={810}\n  alt=\"Product hero\" priority />\n\n// Below-the-fold thumbnail -> lazy, low priority.\n<ResponsiveImage name=\"/img/thumb\" widths={[160, 320]}\n  sizes=\"160px\" width={320} height={180} alt=\"Thumbnail\" />",
+      "solutionLanguage": "tsx",
+      "explanation": "Each decision targets a specific metric. The <picture> element with type-qualified <source> entries lets the browser pick the first format it supports - AVIF (smallest), then WebP, then the JPEG <img> fallback - cutting image bytes substantially, which directly improves LCP and overall page weight. srcset with width descriptors plus sizes lets the browser download the smallest file that satisfies the layout and the device's pixel density, so a phone never downloads a desktop-sized image. The explicit width and height attributes (matching the intrinsic aspect ratio) reserve the correct box before the image loads, so the image cannot push content around when it arrives - eliminating cumulative layout shift (CLS). The priority flag distinguishes the LCP image, which must be eager and fetchpriority=high so it is not delayed by other resources and is never lazy-loaded (lazy-loading the LCP element is a common, self-defeating mistake), from below-the-fold images that get loading=lazy and low priority to defer their bytes until needed. decoding=async keeps image decoding off the main thread's critical path, protecting interactivity. Finally, required alt text keeps the component accessible. The component thus bakes the LCP, CLS, and bandwidth best practices into a single reusable abstraction so teams get them right by default.",
+      "relatedTopic": "images-bundles"
+    }
+  ],
+  "references": [
+    {"label": "web.dev - Learn Performance", "url": "https://web.dev/learn/performance"},
+    {"label": "web.dev - Optimize Largest Contentful Paint", "url": "https://web.dev/articles/optimize-lcp"},
+    {"label": "web.dev - Optimize Interaction to Next Paint", "url": "https://web.dev/articles/optimize-inp"},
+    {"label": "MDN - Lazy loading", "url": "https://developer.mozilla.org/en-US/docs/Web/Performance/Lazy_loading"},
+    {"label": "MDN - HTTP caching", "url": "https://developer.mozilla.org/en-US/docs/Web/HTTP/Caching"},
+    {"label": "web.dev - Preload, prefetch and priorities", "url": "https://web.dev/articles/preload-critical-assets"}
+  ]
+}

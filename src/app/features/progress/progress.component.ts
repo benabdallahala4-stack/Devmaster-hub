@@ -4,6 +4,7 @@ import { ContentService } from '../../core/services/content.service';
 import { ProgressService } from '../../core/services/progress.service';
 import { InterviewService } from '../../core/services/interview.service';
 import { ChallengeService } from '../../core/services/challenge.service';
+import { LogicService } from '../../core/services/logic.service';
 import { TopicMeta } from '../../core/models/content.model';
 import { IconComponent } from '../../shared/components/icon.component';
 import { ProgressRingComponent } from '../../shared/components/progress-ring.component';
@@ -22,6 +23,9 @@ export class ProgressComponent implements OnInit {
   readonly progress = inject(ProgressService);
   readonly interview = inject(InterviewService);
   private readonly challengeSvc = inject(ChallengeService);
+  private readonly logicSvc = inject(LogicService);
+  readonly logicStats = this.progress.logicStats;
+  readonly logicTotal = this.logicSvc.total;
 
   readonly totalTopics = this.content.totalTopics;
   readonly overallRatio = computed(() => {
@@ -46,6 +50,7 @@ export class ProgressComponent implements OnInit {
   ngOnInit(): void {
     this.content.loadCatalog().subscribe();
     this.challengeSvc.load().subscribe();
+    this.logicSvc.load().subscribe();
   }
 
   confirmReset(): void {

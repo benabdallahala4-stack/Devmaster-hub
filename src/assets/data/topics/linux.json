@@ -1,0 +1,470 @@
+{
+  "id": "linux",
+  "title": "Linux & Shell",
+  "category": "DevOps",
+  "subcategory": "OS",
+  "difficulty": "mid",
+  "tags": ["linux", "shell", "bash", "systemd", "permissions", "processes"],
+  "description": "A working engineer's guide to Linux and the shell: the process model and signals, file permissions and ownership, the filesystem hierarchy, pipes and redirection, the essential text/file tools (grep/awk/sed/find/xargs), process and resource inspection, networking utilities, systemd basics, shell-scripting essentials, and the /proc interface.",
+  "estReadMinutes": 30,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Linux fluency is the baseline skill of DevOps and backend engineering: nearly all servers, containers, and CI runners are Linux, and the shell is the universal control surface. The Unix philosophy - small programs that do one thing well, communicating through text streams - is what makes the command line so powerful: you compose simple tools with pipes to solve problems no single program anticipated."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Everything is a file: regular files, directories, devices (/dev/null), sockets, and even process state (/proc) are accessed through the same file API.",
+            "Processes form a tree rooted at PID 1 (init/systemd); each has a parent, an environment, file descriptors, and a set of permissions.",
+            "Streams and pipes: every process has stdin (0), stdout (1), stderr (2); pipes connect one program's stdout to the next program's stdin.",
+            "Text is the lingua franca: line-oriented tools (grep, awk, sed, sort, cut) compose into ad-hoc data pipelines."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The single most useful habit: read the man page (man command) and the --help output. Almost every interview-level Linux question is really 'do you know which small tool composes with which, and what the common flags mean'."
+        }
+      ]
+    },
+    {
+      "id": "why",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "When a service misbehaves in production, the shell is where you triage: is the process alive (ps), what is it waiting on (strace, /proc), is it out of memory or file descriptors (top, /proc/PID/limits), is the port listening (ss), is DNS resolving (dig), is the disk full (df, du), why did systemd restart it (journalctl)? Engineers who can drive these tools resolve incidents in minutes; those who cannot wait for someone who can."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Incident response: diagnosing a hung or killed process, a full disk, an exhausted fd limit, or a crash loop is pure shell-and-/proc work.",
+            "Automation: shell scripts glue together deploys, backups, log rotation, and health checks; getting set -euo pipefail and quoting right prevents disasters.",
+            "Containers: Docker and Kubernetes are thin layers over Linux namespaces, cgroups, and the process model - debugging a pod means debugging a Linux process.",
+            "Performance: understanding the page cache, signals, niceness, and I/O wait lets you reason about why a box is slow without guessing."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The most expensive shell mistakes are unquoted variables and a missing pipefail. `rm -rf $DIR/` where DIR is empty becomes `rm -rf /`; a pipeline whose first command fails can still 'succeed' without pipefail. Always quote and always set strict mode in scripts."
+        }
+      ]
+    },
+    {
+      "id": "process-model-signals",
+      "heading": "The Process Model and Signals",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Every process has a PID, a parent (PPID), an owning user/group, an environment, open file descriptors, and a working directory. Processes form a tree rooted at PID 1. A process created with fork() shares nothing writable with its parent (copy-on-write) and often calls exec() to replace its image. When a process exits, it becomes a zombie until its parent reaps it with wait(); if the parent dies first, the child is re-parented to PID 1, which reaps it."
+        },
+        {
+          "type": "paragraph",
+          "text": "Signals are asynchronous notifications delivered to processes. You send them with kill (despite the name, kill just sends a signal). The two most important are SIGTERM (15), the polite 'please shut down' that a process can catch to clean up, and SIGKILL (9), the unconditional 'die now' that the kernel enforces and a process cannot catch, block, or ignore. SIGINT (2) is what Ctrl+C sends; SIGHUP (1) often means 'reload config'; SIGSTOP/SIGCONT pause and resume."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "kill -TERM 1234     # graceful: ask PID 1234 to terminate (default signal is TERM)\nkill 1234           # same as above (SIGTERM is the default)\nkill -9 1234        # SIGKILL: forceful, uncatchable - use only when TERM fails\nkill -HUP 1234      # often triggers a config reload (e.g. nginx)\npkill -f myservice  # signal by matching the full command line\n\n# Trap a signal in a script to clean up before exiting\ntrap 'echo cleaning up; rm -f \"$tmp\"; exit 1' TERM INT\n\n# Job control\nsleep 100 &         # run in background, prints job + PID\njobs                # list background jobs\nfg %1               # bring job 1 to the foreground"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Reach for SIGTERM first, SIGKILL only as a last resort. SIGKILL gives the process no chance to flush buffers, release locks, or remove temp files - it can leave corrupt state. A well-behaved service catches SIGTERM, drains in-flight work, then exits; this is exactly the contract Kubernetes relies on during pod shutdown."
+        }
+      ]
+    },
+    {
+      "id": "permissions",
+      "heading": "File Permissions and Ownership",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Every file has an owner, a group, and three permission triads - for the owner, the group, and others - each granting read (r=4), write (w=2), and execute (x=1). The familiar octal notation sums these: 755 means rwx for owner, r-x for group and others; 644 means rw- for owner, r-- for the rest. chmod changes permissions, chown changes the owner, and chgrp changes the group."
+        },
+        {
+          "type": "table",
+          "headers": ["Octal", "Symbolic", "Meaning"],
+          "rows": [
+            ["755", "rwxr-xr-x", "Owner full; others read+execute (typical for executables/dirs)"],
+            ["644", "rw-r--r--", "Owner read+write; others read-only (typical for files)"],
+            ["600", "rw-------", "Owner read+write; private (keys, secrets)"],
+            ["700", "rwx------", "Owner only (private scripts/dirs)"],
+            ["775", "rwxrwxr-x", "Owner+group full; others read+execute"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "On directories, the bits mean something subtly different: r lists names, w creates/deletes entries, and x is required to enter the directory (cd into it) or access files within it by path. Special bits extend this: setuid (4xxx) runs an executable with the file owner's privileges (how passwd works), setgid (2xxx) makes new files inherit the directory's group, and the sticky bit (1xxx) on a shared directory like /tmp lets users delete only their own files."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "chmod 600 ~/.ssh/id_rsa          # private key MUST be owner-only or ssh refuses it\nchmod u+x deploy.sh              # add execute for the owner (symbolic form)\nchmod -R 755 /var/www/html      # recursive\nchown alice:www-data app.log    # set owner alice, group www-data\nls -l app.log\n# -rw-r--r-- 1 alice www-data 1024 Jun 25 10:00 app.log\n#  | |  |  |   |     |\n#  | |  |  +-- others (r--)\n#  | |  +----- group   (r--)\n#  | +-------- owner   (rw-)\n#  +---------- type (- file, d dir, l symlink)"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "umask subtracts permissions from the default for newly created files. A umask of 022 yields 644 files and 755 directories. Setting a too-permissive umask (000) makes everything world-writable - a real security hazard. Never chmod 777 to 'fix' a permission problem; find the actual owner/group mismatch."
+        }
+      ]
+    },
+    {
+      "id": "fhs",
+      "heading": "The Filesystem Hierarchy",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Linux organizes everything under a single root /, following the Filesystem Hierarchy Standard. Knowing where things live lets you find configs, logs, and binaries without searching blindly."
+        },
+        {
+          "type": "table",
+          "headers": ["Path", "Contains"],
+          "rows": [
+            ["/bin, /usr/bin", "Essential and user command binaries"],
+            ["/sbin, /usr/sbin", "System administration binaries"],
+            ["/etc", "System-wide configuration files"],
+            ["/var/log", "Log files"],
+            ["/var/lib", "Variable state data (databases, package state)"],
+            ["/tmp", "Temporary files (often cleared on reboot, sticky bit set)"],
+            ["/home", "User home directories"],
+            ["/proc", "Virtual filesystem exposing kernel/process state"],
+            ["/dev", "Device files (/dev/null, /dev/sda)"],
+            ["/opt", "Optional/third-party software"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "/proc and /sys are not on disk - they are virtual filesystems generated by the kernel on read, exposing live process and hardware state as files. Reading /proc/PID/status or /proc/meminfo is how monitoring tools get their data."
+        }
+      ]
+    },
+    {
+      "id": "pipes-tools-example",
+      "heading": "Example: Pipes, Redirection, and the Text Toolkit",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Redirection wires file descriptors: > sends stdout to a file (truncating), >> appends, < feeds stdin from a file, 2> redirects stderr, and 2>&1 merges stderr into stdout. A pipe | connects one command's stdout to the next's stdin, letting you build a data pipeline out of single-purpose tools."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "# Find the top 5 client IPs hitting a web log\ngrep ' 500 ' access.log \\        # only lines with HTTP 500\n  | awk '{print $1}' \\           # first field = client IP\n  | sort \\                       # group identical IPs together\n  | uniq -c \\                    # count consecutive duplicates\n  | sort -rn \\                   # numeric, descending by count\n  | head -5                      # top 5\n\n# Redirection essentials\nmycmd > out.log 2>&1            # stdout AND stderr to out.log\nmycmd 2> err.log               # stderr only to err.log\nmycmd < input.txt              # feed stdin from a file\nmycmd > /dev/null 2>&1          # discard all output\n\n# find + xargs: act on many files safely (-print0/-0 handles spaces)\nfind . -name '*.tmp' -mtime +7 -print0 | xargs -0 rm -f\n\n# sed: stream-edit (in-place substitution)\nsed -i 's/localhost/127.0.0.1/g' config.ini\n\n# awk: field-aware processing with arithmetic\nawk -F: '$3 >= 1000 {print $1}' /etc/passwd   # users with UID >= 1000"
+        },
+        {
+          "type": "paragraph",
+          "text": "This is the Unix philosophy in action: grep filters lines, awk extracts and computes on fields, sort/uniq aggregate, sed transforms streams, and find locates files and feeds them to xargs, which batches them into command arguments. None of these tools knew about the others, yet they compose into a log-analysis pipeline. The -print0 / -0 pairing is important for correctness: it uses NUL separators so filenames containing spaces or newlines do not break the pipeline."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Rule of thumb for the toolkit: grep selects lines, sed transforms lines, awk works on columns/fields with logic, sort+uniq -c counts, and find+xargs applies a command across a fileset. Master these five and most ad-hoc data wrangling becomes a one-liner."
+        }
+      ]
+    },
+    {
+      "id": "process-inspection",
+      "heading": "Inspecting Processes and Resources",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "To see what is running and why a box is busy, you inspect processes and resource usage. ps gives a snapshot, top/htop give a live view sorted by CPU or memory, and nice/renice adjust scheduling priority (a higher nice value means 'be nicer', i.e. lower priority, ranging -20 to 19)."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "ps aux                       # all processes, user-oriented columns (USER PID %CPU %MEM ...)\nps -ef --forest             # process tree showing parent/child\ntop                          # live, interactive: press M (mem), P (cpu) to sort\nhtop                         # friendlier top (if installed)\n\nnice -n 10 ./batch_job.sh    # start a job at lower priority (yields CPU to others)\nrenice -n 5 -p 1234          # change priority of a running process\n\nkill -TERM 1234              # graceful stop\nkill -9 1234                 # forceful (last resort)\n\n# Resource limits and usage of a live process\ncat /proc/1234/status        # memory, threads, state\ncat /proc/1234/limits        # soft/hard limits (e.g. max open files)\nls /proc/1234/fd | wc -l     # how many file descriptors it has open\nfree -h                      # memory overview (used/free/cache)\ndf -h                        # disk free per filesystem\ndu -sh /var/log/*            # disk usage per item, human-readable"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "When a box is slow, check load average (uptime) against core count, look at %wa (I/O wait) in top, and watch for a process whose RES memory climbs steadily (a leak heading toward the OOM killer). df -h catching a 100%-full filesystem is the single most common 'why did everything break' root cause."
+        }
+      ]
+    },
+    {
+      "id": "networking-systemd",
+      "heading": "Networking Tools and systemd",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "For network triage, ss (the modern replacement for netstat) shows sockets and listening ports, curl/wget make HTTP requests, dig/nslookup resolve DNS, and ip manages addresses and routes. systemd is the init system (PID 1) on most modern distributions: it starts services as units, supervises and restarts them, and aggregates their logs in the journal."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "# Networking\nss -tlnp                     # TCP (t), listening (l), numeric (n), with process (p)\nss -tnp state established    # current established connections\ncurl -i https://example.com  # show response headers + body\ncurl -fsS -o file URL        # fail on error, silent, follow output to file\ndig +short example.com       # just the resolved A record(s)\nip addr                      # interfaces and IPs (replaces ifconfig)\nip route                     # routing table\n\n# systemd service management\nsystemctl status myapp       # is it running? recent log lines, PID, memory\nsystemctl start|stop|restart myapp\nsystemctl enable myapp       # start automatically on boot\nsystemctl daemon-reload      # reload unit files after editing\njournalctl -u myapp -f       # follow this service's logs (like tail -f)\njournalctl -u myapp --since '10 min ago' -p err   # only errors, recent"
+        },
+        {
+          "type": "paragraph",
+          "text": "A systemd unit file (in /etc/systemd/system/) declares how to run a service: the ExecStart command, the user, restart policy, and dependencies. The Restart=on-failure directive plus a backoff is how services self-heal; journalctl -u <unit> is where you find out why a restart happened. This declarative supervision is why you rarely write your own daemonization or PID-file logic anymore."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "netstat is deprecated in favor of ss (same flags, much faster on busy hosts) and ifconfig in favor of ip. Both old tools live in the net-tools package and may not be installed on minimal images - learn ss and ip."
+        }
+      ]
+    },
+    {
+      "id": "mistakes",
+      "heading": "Common Mistakes",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Unquoted variable expansions: `cp $src $dst` breaks on spaces and word-splits; always write \"$src\" \"$dst\". An empty unquoted variable in `rm -rf $DIR/` can become `rm -rf /`.",
+            "Reaching for kill -9 first - it gives no chance to clean up and can corrupt state; try SIGTERM and only escalate if it hangs.",
+            "chmod 777 to 'fix' permissions - it makes files world-writable; the real fix is correcting ownership or using the right group.",
+            "Forgetting set -euo pipefail in scripts, so a failed command mid-script is ignored and a broken pipeline reports success.",
+            "Parsing ls output in scripts (ls | grep ...) - filenames with spaces/newlines break it; use find -print0 | xargs -0 or globbing.",
+            "Editing a systemd unit and forgetting systemctl daemon-reload, so the old definition keeps running.",
+            "Confusing > (truncate) with >> (append) and clobbering a file; and forgetting 2>&1 so error output is lost."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Order matters in redirection: `cmd > file 2>&1` sends both streams to file, but `cmd 2>&1 > file` sends only stdout to file and leaves stderr on the terminal, because 2>&1 copies wherever stdout points AT THAT MOMENT (still the terminal) before > reassigns stdout. This subtle ordering bug silently loses error logs."
+        }
+      ]
+    },
+    {
+      "id": "bestpractices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Start every non-trivial script with `set -euo pipefail` and quote every variable expansion (\"$var\", \"${arr[@]}\").",
+            "Use SIGTERM for graceful shutdown and trap it in long-running scripts/services to clean up temp files and flush state.",
+            "Prefer find -print0 | xargs -0 (or find -exec) over parsing ls; it is correct for any filename.",
+            "Use ss and ip rather than the deprecated netstat and ifconfig; they are faster and present on minimal images.",
+            "Read service failures through journalctl -u <unit>, and always daemon-reload after editing unit files.",
+            "Apply least-privilege permissions: 600 for secrets/keys, 644 for normal files, 755 for executables/dirs - never 777.",
+            "Use /proc to inspect a live process's limits, fds, and memory before assuming the application is at fault."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Task", "Tool / idiom"],
+          "rows": [
+            ["List listening ports", "ss -tlnp"],
+            ["Follow a service's logs", "journalctl -u svc -f"],
+            ["Find + delete old files safely", "find . -mtime +7 -print0 | xargs -0 rm"],
+            ["Count occurrences", "... | sort | uniq -c | sort -rn"],
+            ["Graceful then forceful stop", "kill -TERM pid; then kill -9 if needed"],
+            ["Inspect a live process", "cat /proc/PID/status, ls /proc/PID/fd"],
+            ["Strict script mode", "set -euo pipefail"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "note-proc",
+      "heading": "Note: /proc Is the Kernel as Files",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "/proc is a virtual filesystem the kernel synthesizes on demand. There is no disk behind it; each read produces current state. /proc/PID/ exposes everything about a process: cmdline (the launch command), environ (its environment), status (memory, threads, state), limits (rlimits like max open files), fd/ (a directory of symlinks to every open file descriptor and socket), and maps (its memory regions). System-wide, /proc/meminfo, /proc/cpuinfo, /proc/loadavg, and /proc/stat back tools like free, top, and uptime."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "cat /proc/cpuinfo | grep -c processor   # number of logical CPUs\ncat /proc/meminfo | head -3              # total/free/available memory\ncat /proc/loadavg                        # 1/5/15-min load averages\nreadlink /proc/$$/exe                    # path of the current shell's binary\ncat /proc/1234/cmdline | tr '\\0' ' '     # exact command line of PID 1234"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Because /proc is just files, you can diagnose a process with nothing but cat - no special tooling required. This is invaluable in a minimal container or rescue shell where ps/top may be absent: ls /proc shows every PID, and /proc/PID/status tells you its state."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "process-tree",
+      "title": "The Linux Process Tree",
+      "type": "ascii",
+      "content": "PID 1  systemd (init)\n  |\n  +-- sshd\n  |     +-- sshd: alice@pts/0\n  |           +-- bash\n  |                 +-- vim\n  |\n  +-- nginx (master)\n  |     +-- nginx (worker)\n  |     +-- nginx (worker)\n  |\n  +-- dockerd\n        +-- containerd-shim\n              +-- node (app PID 1 inside container)\n\nEvery process has exactly one parent; orphans re-parent to PID 1."
+    },
+    {
+      "id": "pipeline-flow",
+      "title": "A Shell Pipeline: stdout to stdin",
+      "type": "mermaid",
+      "content": "flowchart LR\n    A[\"grep ' 500 '\\naccess.log\"] -->|stdout| B[\"awk '{print $1}'\"]\n    B -->|stdout| C[\"sort\"]\n    C -->|stdout| D[\"uniq -c\"]\n    D -->|stdout| E[\"sort -rn\"]\n    E -->|stdout| F[\"head -5\"]\n    F --> G[\"terminal\\n(top 5 IPs)\"]"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-sigterm-sigkill",
+      "question": "What is the difference between SIGTERM and SIGKILL, and which should you send first?",
+      "answer": "SIGTERM (signal 15) is the default, polite termination request: the target process can install a handler to catch it, finish in-flight work, flush buffers, release locks, and remove temp files before exiting. SIGKILL (signal 9) is enforced by the kernel and cannot be caught, blocked, or ignored - the process is destroyed immediately with no chance to clean up, which can leave corrupt files or held locks. You should always send SIGTERM first and give the process a grace period; escalate to SIGKILL only if it ignores TERM and hangs. This TERM-then-KILL pattern is exactly what Kubernetes uses during pod shutdown (SIGTERM, wait terminationGracePeriodSeconds, then SIGKILL).",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["signals", "processes"],
+      "followUps": ["What does SIGHUP conventionally mean for a daemon?", "How do you catch SIGTERM in a bash script?"]
+    },
+    {
+      "id": "q-permissions-octal",
+      "question": "What does chmod 755 mean, and how does the execute bit differ on a directory?",
+      "answer": "Permissions are three triads (owner, group, others), each summing read=4, write=2, execute=1. 755 means owner rwx (7), group r-x (5), others r-x (5): the owner can read, write, and execute; everyone else can read and execute but not modify. On a regular file, the execute bit allows running it as a program. On a directory the meaning shifts: read lets you list the names inside, write lets you create or delete entries, and execute lets you enter the directory (cd) and traverse into files by path. So a directory needs the x bit to be usable at all - a directory with 644 (no x) cannot be entered even though its contents are theoretically readable.",
+      "difficulty": "junior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["permissions", "chmod"],
+      "followUps": ["What does the sticky bit do on /tmp?", "What is umask and how does it affect new files?"]
+    },
+    {
+      "id": "q-pipes-redirection",
+      "question": "Explain pipes versus redirection, and what 2>&1 does.",
+      "answer": "Redirection wires a process's file descriptors to files: > points stdout (fd 1) at a file (truncating it), >> appends, < feeds stdin (fd 0) from a file, and 2> points stderr (fd 2) at a file. A pipe (|) instead connects one process's stdout directly to the next process's stdin, so data flows between programs without a temp file. 2>&1 means 'make fd 2 (stderr) point to wherever fd 1 (stdout) currently points', merging error output into the standard output stream. Order matters: `cmd > file 2>&1` sends both to the file, but `cmd 2>&1 > file` sends only stdout to the file because 2>&1 is evaluated while stdout still points at the terminal.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["pipes", "redirection", "shell"],
+      "followUps": ["How do you discard all output of a command?", "What is a here-document (<<EOF)?"]
+    },
+    {
+      "id": "q-grep-awk-sed",
+      "question": "When do you use grep vs sed vs awk?",
+      "answer": "These are the three pillars of text processing. grep filters lines by a pattern - it answers 'which lines match?' (with -v to invert, -c to count, -E for extended regex, -r to recurse). sed is a stream editor for line-wise transformations, most commonly substitution s/old/new/g, deletion, and in-place edits with -i; it answers 'transform each line'. awk is field-aware and Turing-complete: it splits each line into columns ($1, $2, ...), supports conditions, arithmetic, and aggregation (e.g. summing a column, printing rows where field 3 >= 1000); it answers 'compute over columns'. Rule of thumb: grep to select, sed to substitute, awk when you need fields plus logic or arithmetic.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["grep", "awk", "sed"],
+      "followUps": ["How would you sum the third column of a CSV with awk?", "Why prefer awk over a grep+cut pipeline sometimes?"]
+    },
+    {
+      "id": "q-find-xargs",
+      "question": "How do find and xargs work together, and why use -print0/-0?",
+      "answer": "find walks a directory tree selecting files by name, age, size, type, etc., and prints their paths (or runs a command with -exec). xargs reads those paths from stdin and builds them into arguments for another command, batching many files into few invocations (far faster than -exec running once per file). The catch is that filenames can contain spaces or newlines, which would split incorrectly if passed as whitespace-separated text. find -print0 emits paths separated by NUL bytes, and xargs -0 reads NUL-separated input, so even pathological filenames are handled safely. Example: `find . -name '*.log' -mtime +30 -print0 | xargs -0 rm -f` deletes logs older than 30 days correctly regardless of spaces in names.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["find", "xargs"],
+      "followUps": ["When is find -exec preferable to xargs?", "What does -mtime +7 mean exactly?"]
+    },
+    {
+      "id": "q-systemd-basics",
+      "question": "What is systemd and how do you manage and debug a service with it?",
+      "answer": "systemd is the init system (PID 1) on most modern Linux distributions. It starts and supervises services defined as unit files, handles dependencies and ordering, restarts failed services per a policy, and collects their stdout/stderr into the journal. You manage services with systemctl: start/stop/restart to control them, enable/disable to set whether they launch at boot, status to see the current state with recent log lines, and daemon-reload after editing a unit file. You debug with journalctl: `journalctl -u <unit> -f` follows a service's logs, `--since` and `-p err` filter by time and priority, so when a service crash-loops you read journalctl to see the error and exit code rather than hunting for a scattered log file.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["systemd", "journalctl"],
+      "followUps": ["What does Restart=on-failure do?", "Why must you run daemon-reload after editing a unit?"]
+    },
+    {
+      "id": "q-proc",
+      "question": "What is /proc and what can you learn from it?",
+      "answer": "/proc is a virtual filesystem synthesized by the kernel; nothing is stored on disk, and each read returns live state. Per-process directories /proc/PID/ expose cmdline (launch command), environ (environment variables), status (state, memory, thread count), limits (resource limits such as max open files), fd/ (symlinks to every open file descriptor and socket), and maps (memory regions). System-wide files like /proc/meminfo, /proc/cpuinfo, /proc/loadavg, and /proc/stat back tools such as free, top, and uptime. Its value is that you can diagnose a process with nothing but cat - vital in a minimal container or rescue shell where ps/top may not be installed: ls /proc lists every PID and /proc/PID/status reveals its state.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["proc", "diagnostics"],
+      "followUps": ["How do you find how many file descriptors a process has open?", "How does free read its numbers?"]
+    },
+    {
+      "id": "q-ss-vs-netstat",
+      "question": "How do you find which process is listening on a port?",
+      "answer": "Use ss (the modern, faster replacement for netstat): `ss -tlnp` lists TCP (t) sockets in the listening (l) state, numerically (n, no DNS/port-name lookups), with the owning process (p, requires privileges). For example `ss -tlnp | grep :8080` shows the PID and program bound to port 8080. The older equivalent is `netstat -tlnp`, but netstat is deprecated, slower on busy hosts, and often absent from minimal container images. To see established connections instead of listeners, use `ss -tnp state established`. Combined with lsof -i :PORT, these tell you exactly which process owns a port - the first step in diagnosing 'address already in use' errors.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": ["networking", "ss", "ports"],
+      "followUps": ["What does 'address already in use' mean and how do you resolve it?", "How do you list all UDP listeners?"]
+    },
+    {
+      "id": "q-tricky-redirection-order",
+      "question": "Tricky: Why does `cmd > out.log 2>&1` capture both stdout and stderr, but `cmd 2>&1 > out.log` does not?",
+      "answer": "Redirections are applied left to right, and 2>&1 means 'make fd 2 point to a COPY of wherever fd 1 currently points', captured at that instant - it does not create a permanent link to stdout. In `cmd > out.log 2>&1`, first > out.log makes fd 1 point to the file, THEN 2>&1 makes fd 2 also point to the file: both go to out.log. In `cmd 2>&1 > out.log`, the order is reversed: 2>&1 runs first while fd 1 still points to the terminal, so fd 2 is bound to the terminal; THEN > out.log repoints only fd 1 to the file. The result is stdout in the file but stderr still on the terminal. This ordering subtlety silently loses error logs and is a classic gotcha when people 'tidy up' a redirection.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": ["redirection", "shell", "gotcha"],
+      "followUps": ["How would you send only stderr to a file and stdout to the terminal?", "What does &> do in bash?"]
+    },
+    {
+      "id": "q-tricky-pipefail",
+      "question": "Tricky: A backup script runs `tar czf - /data | gzip > backup.gz` and the shell reports success, but tar actually failed. Why, and how do you fix it?",
+      "answer": "By default a pipeline's exit status is the exit status of the LAST command only (gzip here), so even if tar fails, as long as gzip exits 0 the pipeline 'succeeds' and the script continues, silently producing a truncated or empty backup. The fix is `set -o pipefail` (ideally as part of `set -euo pipefail`), which makes the pipeline return the exit status of the last command that exited non-zero - so a tar failure now fails the whole pipeline. Combined with `set -e` (exit on error) the script will abort instead of writing a bad backup. The deeper lesson: never trust a pipeline's success without pipefail, and validate critical outputs (e.g. check the archive size or run tar -tzf) rather than relying solely on exit codes.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": ["shell", "pipefail", "scripting", "gotcha"],
+      "followUps": ["What exactly does each letter of set -euo pipefail do?", "Why can `set -e` still miss errors inside command substitutions?"]
+    },
+    {
+      "id": "q-tricky-unquoted-var",
+      "question": "Tricky: Why can `rm -rf $DIR/build` be catastrophic, and how do quotes and strict mode prevent it?",
+      "answer": "If $DIR is unset or empty (a typo, an unsourced env file, a failed earlier command), the unquoted expansion collapses and the command becomes `rm -rf /build` - or worse, with a trailing pattern, effectively operating from root. Word-splitting compounds the danger: if DIR contains spaces, the path is split into multiple arguments. Two defenses: always quote expansions - `rm -rf \"$DIR/build\"` keeps an empty value as the literal string \"/build\" rather than silently vanishing, and prevents word-splitting; and use `set -u` (part of `set -euo pipefail`) so referencing an unset variable aborts the script with an error instead of expanding to nothing. Defensive scripts also guard explicitly: `[ -n \"$DIR\" ] || { echo 'DIR unset'; exit 1; }` before any destructive rm. The combination of quoting plus set -u turns a silent catastrophe into a loud, safe failure.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": ["shell", "quoting", "safety", "gotcha"],
+      "followUps": ["What does set -u do for unset variables?", "How would you make rm refuse to run on a root path?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-log-top-ips",
+      "title": "Top Error-Generating IPs from a Web Log",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "prompt": "Given an Nginx/Apache access log where each line begins with the client IP and contains the HTTP status code, write a one-line shell pipeline that prints the top 10 client IPs responsible for HTTP 5xx responses, with their counts, sorted descending. Assume the IP is field 1 and the status code is field 9 (common log format).",
+      "hints": [
+        "Use awk to filter on the status field and emit the IP only when the status is 5xx.",
+        "A 5xx status starts with '5' and is three digits; awk regex ~ /^5..$/ on $9 works.",
+        "Aggregate with sort | uniq -c, then sort -rn and head."
+      ],
+      "solutionCode": "awk '$9 ~ /^5[0-9][0-9]$/ {print $1}' access.log \\\n  | sort \\\n  | uniq -c \\\n  | sort -rn \\\n  | head -10\n\n# Equivalent fully in awk (no sort/uniq for the counting step):\n#   awk '$9 ~ /^5[0-9][0-9]$/ {c[$1]++}\n#        END {for (ip in c) print c[ip], ip}' access.log \\\n#     | sort -rn | head -10",
+      "solutionLanguage": "bash",
+      "explanation": "The awk filter `$9 ~ /^5[0-9][0-9]$/` keeps only lines whose 9th field is a three-digit status beginning with 5 (i.e. 500-599 server errors) and prints the client IP from field 1. Piping to `sort` groups identical IPs adjacently so that `uniq -c` (which only collapses CONSECUTIVE duplicates) counts them correctly; `sort -rn` then orders by count numerically and descending, and `head -10` takes the worst offenders. The all-awk variant uses an associative array c[ip]++ to count in a single pass without the first sort, which is more efficient on large logs since it avoids sorting every line - you only sort the much smaller per-IP summary. This pipeline is the canonical 'five small tools compose into log analysis' example and is exactly the kind of triage you run during an incident to spot a misbehaving client or a backend that is erroring for specific sources.",
+      "relatedTopic": "linux"
+    },
+    {
+      "id": "ch-safe-cleanup-script",
+      "title": "Safe Old-File Cleanup Script",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "prompt": "Write a robust Bash script that deletes files older than N days from a target directory. It must be safe: refuse to run if the directory variable is unset or empty, handle filenames with spaces, use strict mode, and support a --dry-run flag that prints what would be deleted without deleting. Default N is 30.",
+      "hints": [
+        "Start with `set -euo pipefail` and quote every expansion.",
+        "Validate the target directory exists and is non-empty before any find -delete.",
+        "Use find -mtime +N with -print0 | xargs -0, or find ... -delete; gate deletion behind the dry-run flag."
+      ],
+      "solutionCode": "#!/usr/bin/env bash\nset -euo pipefail\n\nTARGET=\"${1:-}\"          # first arg: directory (empty if missing)\nDAYS=\"${2:-30}\"          # second arg: age in days (default 30)\nDRY_RUN=\"${3:-}\"         # pass --dry-run to preview\n\n# Guard: refuse to run without a real, existing directory.\nif [[ -z \"$TARGET\" ]]; then\n  echo \"usage: $0 <directory> [days] [--dry-run]\" >&2\n  exit 1\nfi\nif [[ ! -d \"$TARGET\" ]]; then\n  echo \"error: '$TARGET' is not a directory\" >&2\n  exit 1\nfi\n\necho \"Cleaning files older than ${DAYS} days under: ${TARGET}\"\n\nif [[ \"$DRY_RUN\" == \"--dry-run\" ]]; then\n  # Preview only. -print0/-0 keeps spaces/newlines in names safe.\n  find \"$TARGET\" -type f -mtime +\"$DAYS\" -print0 | xargs -0 -r -I{} echo \"would delete: {}\"\nelse\n  find \"$TARGET\" -type f -mtime +\"$DAYS\" -print0 | xargs -0 -r rm -f --\n  echo \"done.\"\nfi",
+      "solutionLanguage": "bash",
+      "explanation": "The script demonstrates the core safety habits. `set -euo pipefail` makes it abort on any command failure (-e), on use of an unset variable (-u), and on any failing stage of a pipeline (pipefail), turning silent partial failures into loud aborts. Every variable is quoted (\"$TARGET\", \"$DAYS\") to survive spaces and to prevent an empty value from collapsing a command - critical because an unquoted empty TARGET in a find/rm could operate on the wrong path. We explicitly validate that TARGET is non-empty and is an existing directory before touching anything, refusing to run otherwise. find ... -mtime +DAYS selects files modified more than DAYS days ago, and -print0 paired with xargs -0 handles arbitrary filenames safely; xargs -r avoids running rm at all when there is nothing to delete, and the -- terminator stops a filename that looks like an option from being misinterpreted. The --dry-run mode reuses the same find expression but only echoes the targets, so an operator can verify the selection before any destructive action - exactly the verify-then-act discipline that prevents accidental data loss.",
+      "relatedTopic": "linux"
+    }
+  ],
+  "references": [
+    {"label": "The Linux Documentation Project", "url": "https://tldp.org/"},
+    {"label": "Filesystem Hierarchy Standard (FHS 3.0)", "url": "https://refspecs.linuxfoundation.org/FHS_3.0/fhs/index.html"},
+    {"label": "GNU Bash Reference Manual", "url": "https://www.gnu.org/software/bash/manual/bash.html"},
+    {"label": "systemd documentation (freedesktop.org)", "url": "https://www.freedesktop.org/wiki/Software/systemd/"},
+    {"label": "Greg's Bash Wiki / BashPitfalls", "url": "https://mywiki.wooledge.org/BashPitfalls"}
+  ]
+}

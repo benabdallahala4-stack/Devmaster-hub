@@ -94,3 +94,27 @@ export interface CategoryGroup {
   name: string;
   topics: TopicMeta[];
 }
+
+export type LogicCategory =
+  | 'Logic' | 'Probability' | 'Math & Aptitude' | 'Lateral Thinking'
+  | 'Estimation' | 'SQL Puzzle' | 'Brain Teaser';
+
+export interface RubricCriterion {
+  id: string;
+  text: string;     // e.g. "Identified the loop invariant"
+  points: number;   // weight (> 0); maxScore = sum of all points
+}
+
+export interface LogicProblem {
+  id: string;
+  title: string;
+  category: LogicCategory;
+  difficulty: Difficulty;
+  tags: string[];
+  prompt: ContentBlock[];
+  constraints?: string[];
+  hints: string[];               // progressive, >= 2
+  modelSolution: ContentBlock[]; // revealable worked solution
+  rubric: RubricCriterion[];     // 3-5 criteria
+  relatedTopic?: string;         // optional topic id
+}

@@ -31,6 +31,10 @@ visit.
   summary with history.
 - **Challenge engine** — production-grade coding & design problems with progressive hints,
   revealable solutions and deep explanations.
+- **Logic & Problem Solving** — a curated set of logic and algorithmic problems where you
+  write your own solution, then reveal the model answer, self-score against a weighted rubric
+  (≥3 criteria), and track attempts, average score and solved count (≥70%) on the Progress
+  page and Dashboard *Problem of the Day* tile.
 - **Progress tracking** — completion by category, completed topics, solved challenges and
   interview history, all persisted in `localStorage`.
 - **Polish** — dark/light themes, `⌘K` command palette, global search, syntax-highlighted
@@ -72,6 +76,22 @@ npm run content:validate   # check every topic against the senior-content minimu
 
 To add a topic: drop a new `topics/<id>.json` file, run `content:index`, and it appears in
 the sidebar, search, dashboard and interview pool automatically.
+
+### Logic problems
+
+Logic problem content lives in `src/assets/data/logic-problems.json` and follows the
+`LogicProblem` contract in [`src/app/core/models/content.model.ts`](src/app/core/models/content.model.ts).
+
+Each entry must satisfy:
+
+| Field | Requirement |
+|-------|-------------|
+| `prompt` | `ContentBlock[]` array describing the problem |
+| `modelSolution` | `ContentBlock[]` array with the reference solution |
+| `hints` | At least **2** hint strings |
+| `rubric` | At least **3** weighted scoring criteria |
+
+`npm run content:validate` now checks logic-problems.json alongside topics and challenges.
 
 ## Project structure
 

@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const topicsDir = join(root, 'src/assets/data/topics');
 const challengesPath = join(root, 'src/assets/data/challenges.json');
+const logicPath = join(root, 'src/assets/data/logic-problems.json');
 
 const SECTION_KINDS = ['intro', 'why', 'concept', 'example', 'mistake', 'bestpractice', 'note'];
 const BLOCK_TYPES = ['paragraph', 'heading', 'list', 'code', 'callout', 'table'];
@@ -65,6 +66,38 @@ else {
     const list = JSON.parse(readFileSync(challengesPath, 'utf8'));
     if (!Array.isArray(list) || list.length < 12) warn('challenges.json', `only ${list?.length ?? 0} challenges`);
   } catch (e) { fail('challenges.json', `invalid JSON: ${e.message}`); }
+}
+
+const LOGIC_CATS = ['Logic', 'Probability', 'Math & Aptitude', 'Lateral Thinking', 'Estimation', 'SQL Puzzle', 'Brain Teaser'];
+if (!existsSync(logicPath)) {
+  fail('logic-problems.json', 'file missing');
+} else {
+  let problems;
+  try { problems = JSON.parse(readFileSync(logicPath, 'utf8')); }
+  catch (e) { fail('logic-problems.json', `invalid JSON: ${e.message}`); problems = null; }
+  if (Array.isArray(problems)) {
+    if (problems.length < 12) warn('logic-problems.json', `only ${problems.length} problems (want >= 12)`);
+    const seen = new Set();
+    for (const p of problems) {
+      const pid = p.id || '(no id)';
+      if (seen.has(pid)) fail(pid, 'duplicate logic problem id');
+      seen.add(pid);
+      for (const k of ['id', 'title', 'category', 'difficulty'])
+        if (!p[k]) fail(pid, `missing required field "${k}"`);
+      if (p.difficulty && !DIFF.includes(p.difficulty)) fail(pid, `bad difficulty "${p.difficulty}"`);
+      if (p.category && !LOGIC_CATS.includes(p.category)) warn(pid, `unknown category "${p.category}"`);
+      if (!Array.isArray(p.prompt) || p.prompt.length === 0) fail(pid, 'prompt must be a non-empty block array');
+      if (!Array.isArray(p.modelSolution) || p.modelSolution.length === 0) fail(pid, 'modelSolution must be a non-empty block array');
+      if (!Array.isArray(p.hints) || p.hints.length < 2) warn(pid, 'fewer than 2 hints');
+      if (!Array.isArray(p.rubric) || p.rubric.length < 3) fail(pid, 'rubric needs >= 3 criteria');
+      else for (const c of p.rubric) {
+        if (!c.id || !c.text) fail(pid, `rubric criterion missing id/text`);
+        if (!(typeof c.points === 'number' && c.points > 0)) fail(pid, `rubric criterion "${c.id}" needs points > 0`);
+      }
+      for (const b of [...(p.prompt ?? []), ...(p.modelSolution ?? [])])
+        if (!BLOCK_TYPES.includes(b.type)) fail(pid, `bad block type "${b.type}"`);
+    }
+  }
 }
 
 console.log(`\n${errors === 0 ? '✓' : '✘'} Done — ${errors} errors, ${warns} warnings.`);

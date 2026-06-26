@@ -1,0 +1,501 @@
+{
+  "id": "nodejs",
+  "title": "Node.js",
+  "category": "Backend",
+  "subcategory": "Runtime",
+  "difficulty": "senior",
+  "tags": ["nodejs", "event-loop", "streams", "modules", "worker-threads", "error-handling"],
+  "description": "A senior-level deep dive into the Node.js runtime: the libuv event loop, non-blocking I/O, streams and backpressure, CJS vs ESM, clustering and worker_threads, and robust error handling.",
+  "estReadMinutes": 31,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Node.js is a JavaScript runtime built on V8 and libuv that runs JavaScript outside the browser, designed around a single-threaded, non-blocking, event-driven model. Instead of dedicating a thread per connection, Node uses one main thread that registers I/O operations with the operating system and continues processing other work while they complete, handling callbacks when results are ready. This makes it extremely efficient for I/O-bound workloads (APIs, proxies, real-time servers) but means CPU-bound work on the main thread blocks everything. Understanding the event loop, streams, and how to escape the single thread is the core of senior Node.js competence."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Single-threaded JavaScript execution, but I/O is offloaded to the OS or a libuv thread pool, so the main thread is rarely blocked waiting.",
+            "The libuv event loop runs in distinct phases (timers, pending, poll, check, close) and interleaves microtasks (promises) and process.nextTick.",
+            "Streams process data incrementally with backpressure, so you never load a 10GB file into memory at once.",
+            "CPU-bound work must move off the main thread (worker_threads) or across processes (cluster) to avoid blocking the event loop."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Node is not 'multi-threaded JavaScript'. Your JavaScript runs on one thread; libuv maintains a small thread pool (default 4) for certain operations like file system, DNS, and crypto. Network I/O uses the OS's async facilities, not the pool. Blocking the one JS thread freezes the entire server."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Node powers a huge share of backend services, and almost every serious Node production incident traces to one of a handful of model misunderstandings: a CPU-bound handler blocking the event loop and freezing all requests, a stream consumed without backpressure exhausting memory, an unhandled promise rejection crashing the process, or a misuse of the module system. Knowing the runtime well is what lets you build services that stay responsive under load, stream large payloads without OOM, fail safely, and use all the CPU cores instead of one."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Throughput: the non-blocking model lets a single process handle thousands of concurrent connections - but only if you never block the loop.",
+            "Stability: correct error handling (unhandledRejection, uncaughtException) is the difference between a graceful restart and a silent zombie process.",
+            "Memory safety: streams with backpressure keep memory bounded when processing large files or high-volume data.",
+            "Scalability: clustering and worker_threads let a service use every CPU core instead of leaving most of the machine idle."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The most common Node performance failure is a synchronous or CPU-heavy operation on the main thread - a big JSON.parse, a synchronous crypto hash, an unbounded loop, a regex catastrophe. While it runs, the event loop cannot process any other request, so every client hangs. The whole game is keeping the loop free."
+        }
+      ]
+    },
+    {
+      "id": "event-loop",
+      "heading": "The libuv Event Loop and Its Phases",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The event loop is libuv's mechanism for orchestrating asynchronous work on a single thread. Each iteration ('tick') passes through ordered phases: timers (due setTimeout/setInterval callbacks), pending callbacks (some deferred system callbacks), poll (retrieve new I/O events and run their callbacks - where the loop spends most of its time and may block waiting for I/O), check (setImmediate callbacks), and close (close-event callbacks like socket 'close'). In Node v11+, the `process.nextTick` queue and then the microtask (Promise) queue are drained after each individual callback completes, in every phase — not only between phases (which was the pre-v11 behavior)."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "console.log('1: sync start');\n\nsetTimeout(() => console.log('5: timer (setTimeout 0)'), 0);\nsetImmediate(() => console.log('6: check (setImmediate)'));\n\nPromise.resolve().then(() => console.log('4: microtask (promise)'));\nprocess.nextTick(() => console.log('3: nextTick'));\n\nconsole.log('2: sync end');\n\n// Typical output:\n// 1: sync start\n// 2: sync end\n// 3: nextTick          <- nextTick queue drains first, before promises\n// 4: microtask         <- then the promise microtask queue\n// 5: timer             <- then loop phases: timers...\n// 6: check             <- ...then check (order of 5/6 can vary at top level)"
+        },
+        {
+          "type": "paragraph",
+          "text": "Two queues sit outside the phases and take priority between callbacks: process.nextTick runs before promise microtasks, and both run to exhaustion before the loop proceeds to the next phase. This ordering is why process.nextTick is dangerous when misused - a recursive nextTick starves the loop and blocks I/O entirely, because the loop never advances past draining that queue. setImmediate (check phase) is the safer 'run after current poll phase' primitive, and inside an I/O callback setImmediate always fires before a setTimeout(0)."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "A recursive process.nextTick (or an unbounded promise microtask chain) never yields to the poll phase, so no I/O callbacks run and the server stops responding while CPU spins. For 'run after the current operation but still yield to I/O', prefer setImmediate. Reserve nextTick for deferring a callback to just after the current operation completes, not for looping."
+        }
+      ]
+    },
+    {
+      "id": "non-blocking-io",
+      "heading": "Non-Blocking I/O and the Single Thread",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Node's efficiency comes from never sitting idle waiting for I/O. When you make a network or file request, Node hands it to the OS (for sockets) or the libuv thread pool (for file system, DNS lookups, some crypto), registers a callback, and immediately returns to processing other work. When the I/O completes, its callback is queued and run in the appropriate event-loop phase. This is why a single Node process can juggle thousands of concurrent connections that are mostly waiting - the thread is free to serve others while each request's I/O is in flight."
+        },
+        {
+          "type": "heading",
+          "text": "Bad: a synchronous call blocks every concurrent request"
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "const fs = require('fs');\n\napp.get('/report', (req, res) => {\n  // BLOCKS the single event-loop thread for the entire read.\n  // Every other in-flight request is frozen until this returns.\n  const data = fs.readFileSync('/big/report.csv', 'utf8');\n  res.send(process(data));\n});\n\n// Same trap with synchronous CPU work:\napp.get('/hash', (req, res) => {\n  // Synchronous, CPU-bound: blocks the loop for the whole computation.\n  const hash = crypto.pbkdf2Sync(req.body.pw, salt, 1_000_000, 64, 'sha512');\n  res.send(hash.toString('hex'));\n});"
+        },
+        {
+          "type": "heading",
+          "text": "Good: asynchronous I/O and offloaded CPU"
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "const fs = require('fs/promises');\nconst crypto = require('crypto');\n\napp.get('/report', async (req, res, next) => {\n  try {\n    // Async read: the thread serves other requests while the OS/pool reads.\n    const data = await fs.readFile('/big/report.csv', 'utf8');\n    res.send(process(data));\n  } catch (err) { next(err); }\n});\n\napp.get('/hash', (req, res, next) => {\n  // Async crypto uses the libuv thread pool, off the main thread.\n  crypto.pbkdf2(req.body.pw, salt, 1_000_000, 64, 'sha512', (err, hash) => {\n    if (err) return next(err);\n    res.send(hash.toString('hex'));\n  });\n});"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The *Sync family (readFileSync, pbkdf2Sync, execSync) and synchronous loops are fine in scripts and at startup, but in a request handler they block the entire server. Async I/O moves the waiting off the thread; for heavy CPU work, even async pool-based APIs can saturate the small thread pool, so genuinely CPU-bound work belongs in a worker_thread."
+        }
+      ]
+    },
+    {
+      "id": "streams-backpressure",
+      "heading": "Streams and Backpressure",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Streams process data in chunks instead of all at once, keeping memory bounded for arbitrarily large payloads. The four types are Readable (source, e.g. a file read or HTTP request), Writable (sink, e.g. a file write or HTTP response), Duplex (both), and Transform (a Duplex that modifies data, e.g. gzip). Backpressure is the flow-control mechanism that prevents a fast producer from overwhelming a slow consumer: when a Writable's internal buffer fills, write() returns false, signaling the Readable to pause until the 'drain' event says the buffer has emptied. pipe() and pipeline() handle this automatically."
+        },
+        {
+          "type": "heading",
+          "text": "Bad: ignoring backpressure can exhaust memory"
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// BAD: reads the entire file into memory - OOM on a 10GB file.\nconst data = await fs.readFile('/big/10gb.log');\nawait fs.writeFile('/out/copy.log', data);\n\n// ALSO BAD: manual piping that ignores write()'s false return value,\n// so a slow disk lets the read buffer grow without bound.\nreadable.on('data', (chunk) => {\n  writable.write(chunk); // ignores backpressure -> memory balloons\n});"
+        },
+        {
+          "type": "heading",
+          "text": "Good: pipeline handles backpressure, errors, and cleanup"
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "const { pipeline } = require('stream/promises');\nconst fs = require('fs');\nconst zlib = require('zlib');\n\n// Streams the file through gzip to disk with automatic backpressure:\n// each stage pauses when the next is slow, so memory stays bounded.\n// pipeline also propagates errors and destroys all streams on failure.\nawait pipeline(\n  fs.createReadStream('/big/10gb.log'),\n  zlib.createGzip(),\n  fs.createWriteStream('/out/10gb.log.gz')\n);\n// Memory stays at a few buffer-sized chunks regardless of file size."
+        },
+        {
+          "type": "paragraph",
+          "text": "Always prefer pipeline() over manual pipe() chains or hand-rolled data handlers: pipeline propagates errors from any stage, destroys all streams on failure (preventing leaks), and respects backpressure throughout. The classic memory incident is buffering an entire request body or file in memory instead of streaming it, which works in testing with small inputs and then OOMs in production on a large one. Streaming keeps memory proportional to the chunk size, not the total data size."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Backpressure is the single most important streaming concept for interviews: write() returns false when the buffer is full, you stop writing and wait for 'drain', and pipe/pipeline automate this. Without it, a fast producer and slow consumer cause unbounded memory growth."
+        }
+      ]
+    },
+    {
+      "id": "modules",
+      "heading": "The Module System: CommonJS vs ESM",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Node has two module systems. CommonJS (CJS) - require() and module.exports - is synchronous, loads modules at runtime, resolves __dirname/__filename, and has been the historical default. ECMAScript Modules (ESM) - import/export - are the standard, are statically analyzable (enabling tree shaking), load asynchronously, support top-level await, and use import.meta.url instead of __dirname. A file is treated as ESM if it has a .mjs extension or the nearest package.json has \"type\": \"module\"; as CJS if .cjs or \"type\": \"commonjs\" (the default when unspecified)."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// --- CommonJS (CJS) ---\nconst path = require('path');                 // synchronous, runtime resolution\nmodule.exports = { helper };\nconst dir = __dirname;                          // available\n\n// --- ECMAScript Modules (ESM) ---\nimport path from 'path';                        // static, hoisted\nexport { helper };\nimport { fileURLToPath } from 'url';\nconst __filename = fileURLToPath(import.meta.url); // __dirname replacement\nconst data = await fetch(url);                  // top-level await allowed\n\n// Interop: ESM can import CJS (the module.exports becomes the default export),\n// but CJS cannot require() an ESM module synchronously - it must use\n// dynamic import(): const mod = await import('./esm-only.mjs');"
+        },
+        {
+          "type": "paragraph",
+          "text": "Key behavioral differences beyond syntax: CJS exports are a live binding to a mutable object resolved at runtime, so circular dependencies can yield a partially-populated exports object, whereas ESM bindings are live but resolved through static analysis with a well-defined live-binding semantics that handles cycles more predictably. ESM is asynchronous and strict-mode by default, has no __dirname/__filename/require/module, and supports import.meta. The interop rule that trips people up: a CommonJS module cannot synchronously require() an ESM module - it must use dynamic import() - while ESM can import CJS with the whole module.exports surfacing as the default export."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Default to ESM for new projects (standard, tree-shakeable, top-level await), but know the interop edges: no require() of ESM from CJS, named exports of a CJS module from ESM may need the default import, and __dirname must be reconstructed from import.meta.url. The 'type' field in package.json decides the mode for .js files."
+        }
+      ]
+    },
+    {
+      "id": "scaling",
+      "heading": "Scaling Beyond One Thread: cluster and worker_threads",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Because JavaScript runs on a single thread, one Node process uses one CPU core for JS. Two tools break past this. cluster forks multiple processes (workers) that share a server port, with the OS or Node load-balancing connections across them - ideal for scaling an I/O-bound HTTP server across all cores, since each process has its own event loop and memory. worker_threads create additional threads within one process that can share memory via SharedArrayBuffer and communicate via message passing - ideal for offloading CPU-bound computation off the main thread without spawning whole processes."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// cluster: one process per core, all sharing port 3000.\nconst cluster = require('cluster');\nconst os = require('os');\nconst http = require('http');\n\nif (cluster.isPrimary) {\n  for (let i = 0; i < os.cpus().length; i++) cluster.fork();\n  cluster.on('exit', (worker) => cluster.fork()); // respawn on crash\n} else {\n  http.createServer((req, res) => res.end('handled by ' + process.pid))\n      .listen(3000);\n}"
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// worker_threads: move a CPU-bound task off the main event loop.\n// main.js\nconst { Worker } = require('worker_threads');\nfunction runHeavy(input) {\n  return new Promise((resolve, reject) => {\n    const worker = new Worker('./heavy-worker.js', { workerData: input });\n    worker.once('message', resolve);   // main loop stays free meanwhile\n    worker.once('error', reject);\n    worker.once('exit', (code) => {\n      if (code !== 0) reject(new Error('Worker exited ' + code));\n    });\n  });\n}\n\n// heavy-worker.js\nconst { workerData, parentPort } = require('worker_threads');\nfunction fibonacci(n) { return n < 2 ? n : fibonacci(n - 1) + fibonacci(n - 2); }\nparentPort.postMessage(fibonacci(workerData)); // runs on its own thread"
+        },
+        {
+          "type": "paragraph",
+          "text": "The decision rule: use cluster (or a process manager / container replicas) to scale an I/O-bound server across cores, since each worker is a full process serving requests; use worker_threads to offload CPU-bound work (image processing, encryption, parsing, heavy computation) so the main thread keeps serving I/O. Threads are lighter than processes and can share memory, but message passing copies data by default (unless you use SharedArrayBuffer or transfer ownership), so chatty fine-grained tasks may not pay off. In containerized/serverless environments, horizontal scaling (more replicas) often replaces cluster."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Neither tool makes a single CPU-bound request faster on its own - they let you do more work in parallel. A request that needs heavy computation still needs that computation; worker_threads just keeps it from blocking the event loop, and cluster spreads independent requests across cores."
+        }
+      ]
+    },
+    {
+      "id": "error-handling-example",
+      "heading": "Example: Robust Error Handling and Graceful Shutdown",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Scenario: a service intermittently became a 'zombie' - the process stayed up but stopped serving requests. Root cause: an unhandled promise rejection in a background job left the process in an undefined state, and there was no top-level safety net or graceful shutdown. The fix establishes clear error boundaries and a controlled crash-and-restart."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// 1) Handle operational errors where they happen (preferred).\napp.get('/users/:id', async (req, res, next) => {\n  try {\n    const user = await db.getUser(req.params.id);\n    if (!user) return res.status(404).json({ error: 'not found' });\n    res.json(user);\n  } catch (err) {\n    next(err); // forward to centralized error middleware\n  }\n});\n\n// 2) Centralized Express error handler (4-arg signature).\napp.use((err, req, res, next) => {\n  logger.error({ err, path: req.path });\n  res.status(err.status || 500).json({ error: 'internal error' });\n});\n\n// 3) Last-resort process-level handlers. An unhandled rejection or\n//    uncaught exception means the app is in an UNKNOWN state: log,\n//    then exit and let the supervisor restart a clean process.\nprocess.on('unhandledRejection', (reason) => {\n  logger.fatal({ reason }, 'unhandledRejection');\n  shutdown(1);\n});\nprocess.on('uncaughtException', (err) => {\n  logger.fatal({ err }, 'uncaughtException');\n  shutdown(1);\n});\n\n// 4) Graceful shutdown: stop accepting new work, drain, then exit.\nasync function shutdown(code = 0) {\n  server.close(() => {           // stop taking new connections\n    Promise.resolve(db.close())  // release resources\n      .finally(() => process.exit(code));\n  });\n  // Force-exit if draining hangs.\n  setTimeout(() => process.exit(code), 10_000).unref();\n}\nprocess.on('SIGTERM', () => shutdown(0)); // e.g. container stop"
+        },
+        {
+          "type": "paragraph",
+          "text": "The principle: distinguish operational errors (expected runtime failures like a failed DB query or a 404 - handle these locally and recover) from programmer errors (bugs like reading a property of undefined - these leave the process untrustworthy). uncaughtException and unhandledRejection are not for recovering and continuing; by the time they fire, application state may be corrupt, so the correct response is to log, run a graceful shutdown, and let a process supervisor (PM2, systemd, Kubernetes) restart a fresh process. Continuing after an uncaught exception is how you get the zombie state."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Modern Node treats an unhandled promise rejection as fatal by default (it terminates the process). Embrace that: do not swallow rejections to keep limping along. Handle expected errors locally, and let truly unexpected ones crash-and-restart cleanly with graceful shutdown."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Blocking the event loop: synchronous I/O (*Sync), big synchronous JSON.parse/stringify, a catastrophic regex, or heavy CPU work in a request handler freezing all concurrent requests.",
+            "Ignoring backpressure: buffering an entire file or request body in memory, or piping without honoring write()'s false return, leading to OOM under large inputs.",
+            "Swallowing or ignoring promise rejections: a missing await or .catch leaving an unhandledRejection that, in modern Node, crashes the process - or worse, leaves it in a bad state.",
+            "Recursive process.nextTick or unbounded microtask chains starving the poll phase so I/O callbacks never run.",
+            "Module-system confusion: require()-ing an ESM module from CJS, missing __dirname in ESM, or wrong 'type' in package.json causing cryptic load errors.",
+            "Using cluster/worker_threads to 'speed up' a single CPU-bound request (they parallelize independent work, they do not make one task faster).",
+            "Treating uncaughtException as a place to recover and continue, leaving the process in an unknown, untrustworthy state.",
+            "Saturating the libuv thread pool with synchronous-style crypto or fs work and then being surprised that latency spikes (default pool size is only 4)."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Incident pattern: an endpoint did JSON.parse on a multi-megabyte payload synchronously inside the request handler. Each call blocked the event loop for hundreds of milliseconds, so during traffic spikes every concurrent request stalled and health checks timed out, triggering a restart loop. The fix was to stream-parse and to move heavy parsing to a worker thread."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Never block the event loop: use async I/O over *Sync in servers, avoid heavy synchronous CPU work in handlers, and watch for catastrophic regexes and large synchronous JSON operations.",
+            "Stream large data with pipeline(), which handles backpressure, error propagation, and cleanup; never buffer arbitrarily large inputs into memory.",
+            "Offload CPU-bound work to worker_threads and scale I/O-bound servers across cores with cluster or multiple replicas.",
+            "Handle operational errors locally (try/catch around awaits, centralized error middleware) and let programmer errors crash-and-restart via a supervisor.",
+            "Install process-level unhandledRejection and uncaughtException handlers that log and trigger graceful shutdown, not recovery-and-continue.",
+            "Implement graceful shutdown on SIGTERM/SIGINT: stop accepting new work, drain in-flight requests, release resources, then exit, with a forced-exit timeout.",
+            "Prefer ESM for new code, understand the CJS interop edges, and set 'type' explicitly in package.json.",
+            "Tune UV_THREADPOOL_SIZE if your workload leans on fs/crypto/DNS, and measure event-loop lag to detect blocking early."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Need", "Reach for", "Avoid"],
+          "rows": [
+            ["Concurrent I/O", "async/await, non-blocking APIs", "*Sync in request handlers"],
+            ["Large data processing", "streams + pipeline()", "readFile/JSON.parse of huge inputs"],
+            ["CPU-bound computation", "worker_threads", "Heavy compute on the main thread"],
+            ["Use all CPU cores (I/O server)", "cluster / replicas", "One process per machine"],
+            ["Expected runtime failure", "local try/catch, error middleware", "Swallowing rejections"],
+            ["Unexpected fatal error", "log + graceful shutdown + restart", "Recover and continue"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "note-eventemitter",
+      "heading": "EventEmitter: The Pattern Underneath Node",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Much of Node's API is built on EventEmitter, the publish/subscribe primitive: objects emit named events and listeners subscribe with on()/once(). Streams, HTTP servers, sockets, and the process object are all emitters. Two things to know for production: the special 'error' event - if an emitter emits 'error' with no listener attached, Node throws and can crash the process, so always attach an error listener to streams and sockets; and the max-listeners warning - adding more than the default (10) listeners for one event logs a possible-memory-leak warning, which usually means listeners are being registered without being removed. EventEmitter is also how you build your own decoupled event-driven components."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "const { EventEmitter } = require('events');\n\nclass Job extends EventEmitter {\n  run() {\n    this.emit('start');\n    doWork()\n      .then((result) => this.emit('done', result))\n      .catch((err) => this.emit('error', err)); // emit, do not throw\n  }\n}\n\nconst job = new Job();\njob.on('done', (r) => console.log('done', r));\njob.on('error', (e) => console.error('failed', e)); // REQUIRED: an unhandled\n                                                    // 'error' event crashes Node\njob.run();"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Always attach an 'error' listener to any EventEmitter that can emit one (streams, sockets, your own emitters). An emitted 'error' with no listener is rethrown by Node and will crash the process - one of the most common surprise crashes in stream-heavy code."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "event-loop-phases",
+      "title": "libuv Event Loop Phases (one tick)",
+      "type": "mermaid",
+      "content": "flowchart TD\n    T[timers: due setTimeout/setInterval] --> P[pending callbacks]\n    P --> I[idle/prepare: internal]\n    I --> Poll[poll: retrieve I/O events, run their callbacks]\n    Poll --> Check[check: setImmediate callbacks]\n    Check --> Close[close callbacks: socket close, etc.]\n    Close --> T\n    T -. after every callback in every phase .-> M[drain nextTick queue, then microtasks]\n    Poll -. after every callback in every phase .-> M\n    Check -. after every callback in every phase .-> M"
+    },
+    {
+      "id": "backpressure-flow",
+      "title": "Stream Backpressure",
+      "type": "ascii",
+      "content": "Readable (fast)        Writable (slow disk)\n   |  write(chunk) -> returns TRUE  -> keep flowing\n   |  write(chunk) -> returns FALSE -> buffer full!\n   v\n  PAUSE reading  <---- wait for 'drain' event\n   |\n   |  'drain' fires (buffer emptied)\n   v\n  RESUME reading -> write(chunk) ...\n\npipe() / pipeline() automate this pause/resume cycle,\nkeeping memory bounded regardless of total data size."
+    },
+    {
+      "id": "scaling-decision",
+      "title": "cluster vs worker_threads",
+      "type": "mermaid",
+      "content": "flowchart TD\n    Q[What are you scaling?] --> A{I/O-bound HTTP server?}\n    A -- yes --> C[cluster or replicas: one process per core]\n    A -- no --> B{CPU-bound computation?}\n    B -- yes --> W[worker_threads: offload off the main loop]\n    B -- no --> S[Single thread is fine; just stay non-blocking]"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-event-loop-phases",
+      "question": "Describe the phases of the Node.js event loop and where promises and process.nextTick fit.",
+      "answer": "Each event-loop iteration moves through ordered phases: timers (runs callbacks for setTimeout/setInterval whose time is due), pending callbacks (certain deferred system callbacks), poll (retrieves new I/O completion events and runs their callbacks - the loop spends most of its time here and may block waiting for I/O if there is nothing else to do), check (runs setImmediate callbacks), and close (runs close-event callbacks such as a socket's 'close'). Outside these phases are two priority queues drained between every callback: the process.nextTick queue, which runs first, and then the promise microtask queue. Both are drained to exhaustion before the loop proceeds, which is why a callback's nextTick/promise continuations run before the next timer or I/O callback - and why a recursive nextTick or unbounded microtask chain can starve the poll phase and block I/O entirely. setImmediate (check phase) is the safer primitive for 'run after the current poll phase' because it still lets I/O proceed.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["event-loop", "libuv", "nextTick"],
+      "followUps": ["When does setImmediate fire before setTimeout(0)?", "Why is recursive nextTick dangerous?"]
+    },
+    {
+      "id": "q-non-blocking",
+      "question": "How does Node.js achieve high concurrency on a single thread?",
+      "answer": "Node runs your JavaScript on a single thread but never blocks it waiting for I/O. When you issue a network or file operation, Node delegates the actual waiting to the operating system's asynchronous I/O facilities (for sockets) or to libuv's thread pool (for file system, DNS, and some crypto), registers a callback, and immediately returns to executing other JavaScript. When the I/O completes, libuv queues the callback to run in the appropriate event-loop phase. Because most server work is I/O-bound and spends its time waiting, the single thread can interleave thousands of in-flight requests - while one request's database query is pending, the thread serves others. This event-driven, non-blocking model avoids the per-connection thread overhead of traditional servers. The crucial caveat is that this only holds while the thread is not blocked: any synchronous or CPU-heavy work on the main thread stalls every concurrent request, because there is only one thread executing JavaScript.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["non-blocking-io", "concurrency", "event-loop"],
+      "followUps": ["What does the libuv thread pool handle?", "What is the default thread pool size?"]
+    },
+    {
+      "id": "q-streams-backpressure",
+      "question": "What is backpressure in Node streams and how is it handled?",
+      "answer": "Backpressure is flow control that prevents a fast data producer from overwhelming a slower consumer. A Writable stream has an internal buffer with a highWaterMark threshold; each call to write() returns a boolean - true means there is room for more, false means the buffer is full. When write() returns false, the producer should stop writing and wait for the Writable to emit a 'drain' event, signaling the buffer has emptied enough to resume. Without honoring this, a fast Readable feeding a slow Writable (e.g. a fast read feeding a slow network or disk) causes the buffer - and process memory - to grow without bound, eventually OOMing. The right way to handle backpressure is to let Node do it: pipe() and especially pipeline() automatically pause the source when the destination is full and resume on drain, and pipeline() additionally propagates errors and destroys all streams on failure. This is why you stream large files through pipeline() instead of reading them fully into memory, keeping memory proportional to chunk size rather than total data size.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["streams", "backpressure", "memory"],
+      "followUps": ["Why prefer pipeline() over pipe()?", "What is highWaterMark?"]
+    },
+    {
+      "id": "q-cjs-esm",
+      "question": "What are the differences between CommonJS and ES Modules in Node, and how do they interoperate?",
+      "answer": "CommonJS (CJS) uses require() and module.exports, loads modules synchronously at runtime, runs in non-strict mode by default, and provides __dirname, __filename, require, and module. ES Modules (ESM) use import/export, are resolved through static analysis (enabling tree shaking), load asynchronously, run in strict mode, support top-level await, and replace __dirname with import.meta.url. Node decides the mode by file extension (.mjs = ESM, .cjs = CJS) or the nearest package.json's \"type\" field (\"module\" makes .js files ESM, \"commonjs\" or absent makes them CJS). For interop: ESM can import a CJS module, with the CJS module.exports becoming the default export (named exports may or may not be detected); but a CJS module cannot synchronously require() an ESM module - it must use dynamic import(), which returns a promise. Other gotchas: in ESM you must reconstruct __dirname from fileURLToPath(import.meta.url), and circular dependencies behave differently (CJS may hand back a partially-populated exports object, ESM uses live bindings). New projects generally favor ESM.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["modules", "esm", "commonjs"],
+      "followUps": ["How do you get __dirname in ESM?", "Why can't CJS require() an ESM module?"]
+    },
+    {
+      "id": "q-cluster-worker",
+      "question": "When would you use cluster versus worker_threads?",
+      "answer": "Use cluster when you need to scale an I/O-bound server across CPU cores: it forks multiple independent processes that share a listening port, with connections load-balanced across them, and each process has its own event loop and memory. It is ideal for an HTTP API where the bottleneck is concurrent connections rather than computation, and it gives fault isolation - a crash in one worker does not take down the others. Use worker_threads when you need to run CPU-bound work without blocking the main event loop: they create additional threads inside one process, can share memory via SharedArrayBuffer, and communicate via message passing, making them suited to offloading image processing, encryption, compression, or heavy parsing so the main thread stays free to handle I/O. The key distinctions: cluster = multiple processes for scaling independent I/O work and isolation; worker_threads = threads within a process for parallelizing CPU work with optional shared memory. Neither makes a single CPU task intrinsically faster - they enable parallelism. In containerized deployments, running more replicas often replaces cluster.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["cluster", "worker-threads", "scaling"],
+      "followUps": ["How do worker_threads share memory?", "Why might replicas replace cluster in Kubernetes?"]
+    },
+    {
+      "id": "q-error-handling",
+      "question": "How should you handle errors at the process level in Node, and what is the right response to uncaughtException?",
+      "answer": "Distinguish operational errors from programmer errors. Operational errors are expected runtime conditions - a failed DB query, a 404, a network timeout - and should be handled locally with try/catch around awaits, error-first callbacks, or centralized error middleware, then recovered from gracefully. Programmer errors are bugs (reading a property of undefined, calling a non-function); they leave the process in an unknown state. The process-level handlers process.on('uncaughtException') and process.on('unhandledRejection') are a last-resort safety net, not a recovery mechanism: by the time they fire, application state may be corrupt, so the correct response is to log the error with full context, run a graceful shutdown (stop accepting new connections, drain in-flight work, release resources), and exit so a process supervisor (PM2, systemd, Kubernetes) restarts a clean process. Trying to swallow these and continue produces the classic 'zombie' process that is up but misbehaving. Modern Node already treats unhandled rejections as fatal by default, which encourages this crash-and-restart discipline rather than limping along.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["error-handling", "uncaughtException", "graceful-shutdown"],
+      "followUps": ["What is the difference between operational and programmer errors?", "Why not recover and continue after uncaughtException?"]
+    },
+    {
+      "id": "q-thread-pool",
+      "question": "What is the libuv thread pool, what uses it, and how is it different from network I/O?",
+      "answer": "libuv maintains a small pool of background threads (default size 4, configurable via UV_THREADPOOL_SIZE) used to perform operations that have no efficient asynchronous OS primitive or that are inherently blocking. The main consumers are file system operations (fs.*), DNS lookups via getaddrinfo (dns.lookup), some crypto functions (pbkdf2, randomBytes, scrypt), and zlib compression. These run on pool threads so they do not block the main JavaScript thread; their callbacks are queued back to the event loop when done. Network I/O is different: sockets use the operating system's native asynchronous mechanisms (epoll on Linux, kqueue on macOS, IOCP on Windows) through the poll phase, so network operations do not consume thread-pool slots. This distinction matters under load: a workload heavy in fs/crypto/DNS can saturate the 4 default pool threads and cause latency spikes even though the event loop itself is free, in which case raising UV_THREADPOOL_SIZE helps, whereas a purely network-bound workload is limited by the event loop and OS, not the pool.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["libuv", "thread-pool", "io"],
+      "followUps": ["How do you increase the pool size?", "Why doesn't network I/O use the pool?"]
+    },
+    {
+      "id": "q-eventemitter",
+      "question": "What is EventEmitter and what are the two production gotchas to know about it?",
+      "answer": "EventEmitter is Node's core publish/subscribe primitive: objects emit named events and consumers subscribe with on() (repeated) or once() (single). It underpins most of Node's API - streams, HTTP servers, sockets, and the process object are all emitters - and you can extend it to build your own event-driven components. Two production gotchas. First, the special 'error' event: if an emitter emits 'error' and no listener is attached, Node treats it as an unhandled exception and throws, which typically crashes the process; therefore you must always attach an 'error' listener to streams, sockets, and any emitter that can fail. Second, the max-listeners warning: by default an emitter warns when more than 10 listeners are added for a single event, surfacing a likely memory leak from registering listeners (often in a loop or per request) without ever removing them; the fix is to remove listeners when done (off/removeListener) or, only when intentional, raise the limit with setMaxListeners. Understanding these prevents both surprise crashes and slow memory growth.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["eventemitter", "events", "error-handling"],
+      "followUps": ["Why does an unhandled 'error' event crash the process?", "What causes the max-listeners warning?"]
+    },
+    {
+      "id": "q-tricky-settimeout-immediate",
+      "question": "Tricky: At the top level, setTimeout(fn, 0) and setImmediate(fn) print in non-deterministic order, but inside an I/O callback setImmediate always wins. Why?",
+      "answer": "It comes down to where each fires in the event loop and the timing of when the loop starts. setTimeout(0) schedules a timer callback for the timers phase, while setImmediate schedules for the check phase, which comes after poll. At the top level (in the main module), the order depends on how long process startup takes relative to the timer's 1ms minimum threshold: if the loop reaches the timers phase and the ~1ms has already elapsed, the timer runs first; if not, the loop proceeds to poll and then check, so setImmediate runs first - and because that startup timing is variable, the order is non-deterministic. Inside an I/O callback, however, you are already in the poll phase when both are scheduled; the loop next moves to the check phase (setImmediate) before it loops back around to the timers phase on the following tick, so setImmediate deterministically runs before the setTimeout(0). The deeper lesson is that 'fire after current I/O' should use setImmediate, not setTimeout(0), because only setImmediate has a defined position (check, right after poll) relative to I/O callbacks.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["event-loop", "setImmediate", "setTimeout", "gotcha"],
+      "followUps": ["Why does setTimeout have a minimum delay?", "Where does the poll phase sit relative to check?"]
+    },
+    {
+      "id": "q-tricky-nexttick-starve",
+      "question": "Tricky: A developer uses process.nextTick to 'yield' between chunks of a long computation so the server stays responsive, but requests still hang. Why?",
+      "answer": "Because process.nextTick does not yield to the event loop's phases at all - its queue is drained completely after the current operation and before the loop advances to any phase, including poll where I/O callbacks run. Re-queuing work with nextTick on each chunk means the nextTick queue is never empty, so the loop never reaches the poll phase, no incoming-request I/O callbacks execute, and the server appears frozen even though work is 'yielding' in some sense - it is yielding only to itself. The same is true of an unbounded promise-microtask chain, since microtasks also drain before the loop proceeds. The correct primitive for breaking up CPU work while still letting I/O run is setImmediate, which schedules the continuation in the check phase, allowing the poll phase (and thus pending request callbacks) to run on each tick between chunks. Better still for genuinely heavy CPU work is to move it entirely to a worker_thread so the main loop is never tied up. The lesson: nextTick and microtasks are for deferring to 'right after the current operation', not for cooperative multitasking with I/O.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["event-loop", "nextTick", "gotcha"],
+      "followUps": ["How does setImmediate let I/O proceed?", "When is worker_threads the right answer instead?"]
+    },
+    {
+      "id": "q-tricky-async-blocking",
+      "question": "Tricky: A handler uses async/await everywhere, yet under load the whole server's latency spikes for unrelated endpoints. The DB is healthy. What could be blocking?",
+      "answer": "async/await makes I/O non-blocking but does nothing to move CPU work off the main thread - the function body between awaits still runs synchronously on the single JS thread. So a handler that awaits a fast DB call but then does heavy synchronous CPU work (a large JSON.parse/stringify of a multi-megabyte payload, a synchronous crypto hash, an expensive synchronous transform, or a catastrophically backtracking regular expression) blocks the event loop for the duration of that computation, stalling every other in-flight request and unrelated endpoint. Being async does not help because there is no await inside the CPU-bound section to yield control. Diagnose it by measuring event-loop lag (e.g. monitoring the delay of a periodic timer) and profiling to find the synchronous hot path. Fixes: move CPU-bound work to a worker_thread or an external service, stream/chunk large parsing instead of doing it in one synchronous call, replace pathological regexes, and avoid synchronous APIs in handlers. The core misconception to correct is that async/await equals non-blocking - it only un-blocks the awaited I/O, not the synchronous JavaScript that runs between awaits.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["event-loop", "async", "cpu-bound", "gotcha"],
+      "followUps": ["How do you measure event-loop lag?", "Why doesn't await yield during CPU work?"]
+    },
+    {
+      "id": "q-graceful-shutdown",
+      "question": "What does a correct graceful shutdown look like in a Node service, and why does it matter?",
+      "answer": "A graceful shutdown ensures that when the process is asked to stop - via SIGTERM from a container orchestrator, SIGINT from Ctrl+C, or after a fatal error - it finishes in-flight work and releases resources instead of dropping requests or corrupting state. The sequence is: listen for the termination signal; stop accepting new work by calling server.close() (which stops new connections while letting existing requests complete); drain or wait for in-flight requests and background jobs to finish; close resources like database pools, message-queue connections, and file handles; then call process.exit with an appropriate code. Crucially, set a forced-exit timer (e.g. 10 seconds, unref'd so it does not keep the process alive) so a hung drain cannot block shutdown forever. It matters because without it, a deploy or scale-down (which sends SIGTERM) would sever active requests mid-flight, return errors to users, leak connections, and potentially leave transactions half-applied; with it, rolling deploys and autoscaling are seamless. The same routine is the proper response to uncaughtException/unhandledRejection: shut down cleanly and let the supervisor restart a fresh process.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["graceful-shutdown", "signals", "reliability"],
+      "followUps": ["Why unref the forced-exit timer?", "How does this interact with Kubernetes rolling deploys?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-stream-transform",
+      "title": "Stream-Process a Large File with Backpressure",
+      "difficulty": "senior",
+      "category": "Backend",
+      "prompt": "Write a function that reads a potentially multi-gigabyte newline-delimited JSON (NDJSON) file, transforms each record (e.g. redacting a field), and writes the result to a new NDJSON file - using constant memory regardless of file size. It must respect backpressure, propagate errors, and clean up streams on failure. Explain why a naive readFile approach fails.",
+      "hints": [
+        "Use createReadStream -> a line/Transform stage -> createWriteStream, joined by pipeline().",
+        "A Transform stream lets you process each chunk/record and push the result downstream.",
+        "pipeline() (from stream/promises) handles backpressure, error propagation, and stream destruction."
+      ],
+      "solutionCode": "const fs = require('fs');\nconst readline = require('readline');\nconst { pipeline } = require('stream/promises');\nconst { Transform } = require('stream');\n\nasync function redactNdjson(inputPath, outputPath) {\n  // Readable source: streams the file in chunks, never loading it all.\n  const input = fs.createReadStream(inputPath, { encoding: 'utf8' });\n\n  // Transform: parse each NDJSON line, redact, re-serialize.\n  // (For line splitting at scale, a split transform or readline is used;\n  //  here we build a Transform that buffers partial lines safely.)\n  let buffer = '';\n  const redact = new Transform({\n    readableObjectMode: false,\n    writableObjectMode: false,\n    transform(chunk, _enc, cb) {\n      buffer += chunk;\n      const lines = buffer.split('\\n');\n      buffer = lines.pop();              // keep the trailing partial line\n      try {\n        for (const line of lines) {\n          if (!line) continue;\n          const rec = JSON.parse(line);\n          delete rec.ssn;                // redact a sensitive field\n          this.push(JSON.stringify(rec) + '\\n');\n        }\n        cb();\n      } catch (err) {\n        cb(err);                         // propagate parse errors\n      }\n    },\n    flush(cb) {                          // handle the last line, no newline\n      try {\n        if (buffer.trim()) {\n          const rec = JSON.parse(buffer);\n          delete rec.ssn;\n          this.push(JSON.stringify(rec) + '\\n');\n        }\n        cb();\n      } catch (err) { cb(err); }\n    },\n  });\n\n  const output = fs.createWriteStream(outputPath);\n\n  // pipeline wires the stages, enforces backpressure, propagates errors,\n  // and destroys every stream if any stage fails.\n  await pipeline(input, redact, output);\n}\n\n// Usage:\n// await redactNdjson('/data/events.ndjson', '/data/events.redacted.ndjson');",
+      "solutionLanguage": "javascript",
+      "explanation": "The naive approach - const data = await fs.readFile(inputPath) then parse and write - loads the entire file into a single Buffer/string in memory. On a multi-gigabyte file that exhausts the heap and crashes with an out-of-memory error (and Node strings also have a maximum length limit). The streaming solution keeps memory bounded by processing the file in chunks: createReadStream emits manageable chunks, the Transform stage buffers only a partial trailing line plus the current chunk while it parses and redacts complete lines and pushes them downstream, and createWriteStream consumes the output. pipeline() is the key orchestrator: it connects the stages, automatically applies backpressure (pausing the read stream whenever the write stream's buffer fills and resuming on drain, so a slow disk cannot make memory balloon), propagates an error from any stage to the returned promise, and destroys all streams on failure to prevent file-handle and memory leaks - things a manual pipe() chain or raw 'data' listeners would not give you for free. The Transform's flush handles the final line that may lack a trailing newline. Memory stays proportional to the chunk size and one line, not the total file size, so the same code handles a 1KB or a 100GB file.",
+      "relatedTopic": "streams-backpressure"
+    },
+    {
+      "id": "ch-worker-offload",
+      "title": "Offload CPU-Bound Work to a Worker Thread",
+      "difficulty": "senior",
+      "category": "Backend",
+      "prompt": "An Express endpoint computes an expensive hash (or any heavy CPU task) that blocks the event loop and makes the whole server unresponsive under load. Refactor it to offload the computation to a worker_thread so the main event loop stays free to serve other requests, with proper error handling and a Promise-based interface. Explain why this fixes the responsiveness problem.",
+      "hints": [
+        "Create a Worker that performs the CPU task and posts the result back via parentPort.",
+        "Wrap worker creation in a Promise that resolves on 'message' and rejects on 'error' or non-zero 'exit'.",
+        "Consider a pool of workers to avoid the per-request worker spin-up cost in production."
+      ],
+      "solutionCode": "// hash-worker.js  (runs on a separate thread)\nconst { workerData, parentPort } = require('worker_threads');\nconst crypto = require('crypto');\n\n// CPU-bound work runs here, off the main event loop.\nconst hash = crypto.pbkdf2Sync(\n  workerData.password, workerData.salt, 1_000_000, 64, 'sha512'\n);\nparentPort.postMessage(hash.toString('hex'));\n\n// --- main server ---\nconst express = require('express');\nconst { Worker } = require('worker_threads');\nconst app = express();\napp.use(express.json());\n\nfunction hashInWorker(password, salt) {\n  return new Promise((resolve, reject) => {\n    const worker = new Worker('./hash-worker.js', {\n      workerData: { password, salt },\n    });\n    worker.once('message', (result) => {\n      resolve(result);\n      worker.terminate();            // clean up this one-shot worker\n    });\n    worker.once('error', reject);    // worker threw\n    worker.once('exit', (code) => {  // crashed before posting a message\n      if (code !== 0) reject(new Error('Worker stopped, exit code ' + code));\n    });\n  });\n}\n\napp.post('/hash', async (req, res, next) => {\n  try {\n    // The await yields to the event loop; other requests are served while\n    // the worker computes on its own thread.\n    const hash = await hashInWorker(req.body.password, 'static-salt');\n    res.json({ hash });\n  } catch (err) {\n    next(err);\n  }\n});\n\napp.listen(3000);",
+      "solutionLanguage": "javascript",
+      "explanation": "Originally the endpoint ran a million-iteration pbkdf2 synchronously on the main thread. Because Node executes all JavaScript on one thread, that computation monopolized the event loop for its entire duration, so no other request, timer, or I/O callback could run - the whole server appeared frozen, health checks timed out, and concurrent users saw hangs. Offloading to a worker_thread fixes this because the worker runs on a genuinely separate OS thread with its own event loop and V8 isolate: the heavy pbkdf2 executes there while the main thread is free to keep accepting connections and serving other requests. The main thread only does cheap work - spawning the worker, passing input via workerData, and awaiting a message - and the await yields control back to the event loop, so concurrency is preserved. The Promise wrapper turns the worker's event-based interface into a clean async API, resolving on the result message and rejecting on an error or a non-zero exit (a worker crash), which prevents hung requests. Note this does not make a single hash faster - it still takes the same CPU time - but it isolates that cost so it no longer blocks everyone else. In production you would maintain a fixed pool of pre-spawned workers rather than creating one per request, since worker startup has non-trivial overhead, and cap the pool to avoid oversubscribing CPU cores.",
+      "relatedTopic": "scaling"
+    }
+  ],
+  "references": [
+    {"label": "Node.js docs - The event loop, timers, and process.nextTick", "url": "https://nodejs.org/en/learn/asynchronous-work/event-loop-timers-and-nexttick"},
+    {"label": "Node.js docs - Stream", "url": "https://nodejs.org/api/stream.html"},
+    {"label": "Node.js docs - Backpressuring in Streams", "url": "https://nodejs.org/en/learn/modules/backpressuring-in-streams"},
+    {"label": "Node.js docs - Worker threads", "url": "https://nodejs.org/api/worker_threads.html"},
+    {"label": "Node.js docs - Modules: Packages (CJS/ESM)", "url": "https://nodejs.org/api/packages.html"},
+    {"label": "Node.js docs - Events (EventEmitter)", "url": "https://nodejs.org/api/events.html"}
+  ]
+}

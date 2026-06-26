@@ -1,0 +1,482 @@
+{
+  "id": "python",
+  "title": "Python",
+  "category": "Backend",
+  "subcategory": "Language",
+  "difficulty": "senior",
+  "tags": ["python", "gil", "asyncio", "data-model", "generators", "cpython"],
+  "description": "A staff-level tour of Python's data model, the GIL and its three concurrency models, generators and decorators, the memory/mutability model, and the gotchas that bite in production CPython.",
+  "estReadMinutes": 31,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Python is a dynamically-typed, garbage-collected language whose reference implementation is CPython - a bytecode interpreter written in C. Almost every senior Python question is really a question about CPython's runtime: how the Global Interpreter Lock shapes concurrency, how everything-is-an-object drives the data model, and how reference counting plus generational GC manage memory. This topic targets the parts that separate an intermediate Pythonista from someone who can debug a production memory leak or a deadlocked thread pool."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Data model: dunder methods make user types behave like built-ins.",
+            "The GIL: one thread runs Python bytecode at a time, which is why threading helps I/O but not CPU work.",
+            "Generators and iterators: lazy, memory-cheap pipelines and the basis of coroutines.",
+            "Decorators and context managers: composable wrapping of behavior and deterministic resource handling.",
+            "Memory model: names are bindings to objects; mutability and identity drive the classic gotchas."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "CPython is the reference, but it is not the only implementation. PyPy (JIT, no GIL-style different model), Jython, and the in-progress free-threaded CPython (PEP 703) all change the concurrency story. When someone says 'Python', they almost always mean CPython - say so explicitly in an interview."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Python's ergonomics hide a runtime with sharp edges. The same features that make it productive - everything is a mutable object, names are late-bound, default arguments are evaluated once - produce a recognizable family of production bugs. And the GIL means a naive 'just add threads' scaling strategy silently fails for CPU-bound code, sending teams down the wrong path for weeks."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Scaling decisions: choosing threading vs multiprocessing vs asyncio wrong wastes cores or blocks the event loop.",
+            "Correctness: mutable default arguments and late-binding closures cause data to leak across calls and loops.",
+            "Memory: reference cycles, lingering references, and unbounded caches are the usual leak sources in long-running services.",
+            "Performance: understanding that attribute access, dynamic dispatch, and the interpreter loop are the cost centers guides where to use C extensions, numpy, or vectorization."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The single most expensive mistake teams make is using a ThreadPoolExecutor to speed up CPU-bound Python and seeing no speedup (or a slowdown). The GIL serializes bytecode execution; only releasing it (in C extensions, I/O, or via processes) buys real parallelism."
+        }
+      ]
+    },
+    {
+      "id": "data-model",
+      "heading": "The Data Model and Dunder Methods",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Python's data model is the protocol layer: special 'dunder' (double-underscore) methods let your objects participate in language operators and built-in functions. len(x) calls x.__len__(); a + b dispatches to a.__add__(b) (and falls back to b.__radd__(a)); with x: calls __enter__/__exit__. The interpreter looks these up on the type, not the instance, which is why monkeypatching an instance attribute named __len__ does not change len()."
+        },
+        {
+          "type": "code",
+          "language": "python",
+          "code": "from functools import total_ordering\n\n@total_ordering\nclass Money:\n    __slots__ = ('cents',)            # no __dict__: smaller, faster attribute access\n\n    def __init__(self, cents: int):\n        self.cents = cents\n\n    def __repr__(self) -> str:        # unambiguous, for developers/logs\n        return f'Money(cents={self.cents})'\n\n    def __eq__(self, other) -> bool:\n        if not isinstance(other, Money):\n            return NotImplemented     # let Python try the reflected op\n        return self.cents == other.cents\n\n    def __lt__(self, other) -> bool:\n        if not isinstance(other, Money):\n            return NotImplemented\n        return self.cents < other.cents\n\n    def __hash__(self) -> int:        # must be defined if __eq__ is, to stay hashable\n        return hash(self.cents)\n\n    def __add__(self, other: 'Money') -> 'Money':\n        return Money(self.cents + other.cents)\n\n# @total_ordering fills in <=, >, >= from __eq__ and __lt__.\nassert Money(150) < Money(200)\nassert sorted([Money(200), Money(150)])[0] == Money(150)"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Return NotImplemented (the singleton, not the NotImplementedError exception) from comparison/arithmetic dunders for unsupported types. Python then tries the reflected operation on the other operand and only raises TypeError if both decline. Returning False instead silently breaks symmetric comparisons."
+        },
+        {
+          "type": "paragraph",
+          "text": "Defining __eq__ without __hash__ makes the type unhashable (Python sets __hash__ to None), so it cannot be a dict key or set member. __slots__ removes the per-instance __dict__, cutting memory and speeding attribute access - valuable for millions of small objects, at the cost of dynamic attribute assignment."
+        }
+      ]
+    },
+    {
+      "id": "gil-concurrency",
+      "heading": "The GIL and the Three Concurrency Models",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The Global Interpreter Lock is a mutex in CPython that allows only one thread to execute Python bytecode at a time. It exists because CPython's memory management (reference counting) is not thread-safe; the GIL makes refcount updates atomic without per-object locks. A running thread holds the GIL and periodically releases it (every few milliseconds via a check interval, or when it blocks on I/O or enters a GIL-releasing C call)."
+        },
+        {
+          "type": "paragraph",
+          "text": "The consequence is the rule every senior engineer must internalize: threads give you concurrency for I/O-bound work (where threads spend most time blocked with the GIL released) but NOT parallelism for CPU-bound Python work (where they fight over the one GIL). For CPU parallelism you need separate processes (multiprocessing), each with its own interpreter and GIL, or you must drop into C/numpy code that releases the GIL."
+        },
+        {
+          "type": "table",
+          "headers": ["Model", "Best for", "Parallelism", "Cost / caveat"],
+          "rows": [
+            ["threading", "I/O-bound (network, disk, blocking calls)", "No CPU parallelism (one GIL)", "Shared memory; need locks; cheap to spawn"],
+            ["multiprocessing", "CPU-bound (compute, parsing)", "Yes - one GIL per process", "IPC/pickling overhead; higher memory; fork vs spawn pitfalls"],
+            ["asyncio", "High-concurrency I/O (10k+ sockets)", "No - single thread, single GIL", "Cooperative: one blocking call stalls the whole loop"]
+          ]
+        },
+        {
+          "type": "code",
+          "language": "python",
+          "code": "import asyncio, aiohttp\n\nasync def fetch(session, url):\n    async with session.get(url) as resp:\n        return await resp.text()\n\nasync def fetch_all(urls):\n    async with aiohttp.ClientSession() as session:\n        # gather schedules all coroutines on ONE thread; awaits overlap I/O waits.\n        return await asyncio.gather(*(fetch(session, u) for u in urls))\n\n# asyncio shines here: thousands of concurrent sockets, no thread-per-connection.\n# But never call a blocking function (e.g. requests.get, time.sleep, heavy CPU)\n# inside a coroutine - it freezes the entire event loop. Offload with\n# loop.run_in_executor(None, blocking_fn) instead."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The classic asyncio incident: one synchronous DB driver call (or a CPU-heavy JSON parse) inside an async handler blocks the event loop, and EVERY in-flight request stalls until it returns. Latency p99 explodes for unrelated requests. Use async-native drivers or run blocking work in an executor."
+        }
+      ]
+    },
+    {
+      "id": "generators",
+      "heading": "Generators, Iterators, and Lazy Pipelines",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "An iterator implements __iter__ (returns self) and __next__ (returns the next value or raises StopIteration). A generator function - any function containing yield - returns a generator object that implements the iterator protocol automatically, suspending its frame at each yield and resuming on the next next() call. This makes generators ideal for streaming large or infinite data with O(1) memory."
+        },
+        {
+          "type": "code",
+          "language": "python",
+          "code": "def read_large_file(path):\n    # Streams one line at a time; never loads the whole file into RAM.\n    with open(path, 'r') as f:\n        for line in f:\n            yield line.rstrip('\\n')\n\ndef parse(lines):\n    for line in lines:\n        if line and not line.startswith('#'):\n            yield line.split(',')\n\n# Lazy pipeline: each stage pulls from the previous, one record at a time.\nrows = parse(read_large_file('huge.csv'))\nfirst_ten = [next(rows) for _ in range(10)]   # processes only 10 lines of a 10GB file\n\n# yield from delegates to a sub-iterator (and forwards send/throw):\ndef flatten(nested):\n    for item in nested:\n        if isinstance(item, list):\n            yield from flatten(item)\n        else:\n            yield item"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Generators are single-pass: once exhausted, iterating again yields nothing. A common bug is passing a generator to two consumers (e.g. computing len() then iterating) - the second sees an empty stream. Materialize with list() if you need multiple passes, accepting the memory cost."
+        }
+      ]
+    },
+    {
+      "id": "decorators-context",
+      "heading": "Decorators and Context Managers",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A decorator is a callable that takes a function and returns a replacement, applied with @ syntax. It is the idiomatic way to add cross-cutting behavior (timing, caching, retries, auth) without editing the wrapped function. Always wrap with functools.wraps to preserve the original __name__, __doc__, and signature, otherwise introspection and some frameworks break."
+        },
+        {
+          "type": "code",
+          "language": "python",
+          "code": "import functools, time\n\ndef retry(times=3, delay=0.1):\n    def decorator(fn):\n        @functools.wraps(fn)                 # preserve metadata of fn\n        def wrapper(*args, **kwargs):\n            last = None\n            for attempt in range(times):\n                try:\n                    return fn(*args, **kwargs)\n                except Exception as e:\n                    last = e\n                    time.sleep(delay * (2 ** attempt))   # exponential backoff\n            raise last\n        return wrapper\n    return decorator\n\n@retry(times=5)\ndef call_flaky_api():\n    ...\n\n# Context managers handle deterministic setup/teardown via __enter__/__exit__.\nfrom contextlib import contextmanager\n\n@contextmanager\ndef timed(label):\n    start = time.perf_counter()\n    try:\n        yield                                # body of the 'with' runs here\n    finally:\n        print(f'{label}: {time.perf_counter() - start:.3f}s')   # runs even on exception\n\nwith timed('query'):\n    result = run_query()"
+        },
+        {
+          "type": "paragraph",
+          "text": "The __exit__ method receives the exception type, value, and traceback if the block raised; returning a truthy value suppresses the exception (rarely what you want). The contextlib.contextmanager decorator turns a single-yield generator into a context manager - code before yield is setup, code in the finally is guaranteed teardown."
+        }
+      ]
+    },
+    {
+      "id": "memory-typing",
+      "heading": "Memory, Mutability, and Typing",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "In Python, a variable is a name bound to an object; assignment binds, it does not copy. Two names can reference the same object (aliasing), and mutating through one is visible through the other. is tests identity (same object, same id()); == tests equality. CPython caches small integers (-5 to 256) and some short strings (interning), so 'a is b' can surprisingly be True for small ints and False for large ones - never use is for value comparison."
+        },
+        {
+          "type": "code",
+          "language": "python",
+          "code": "a = [1, 2, 3]\nb = a            # b is an alias, NOT a copy\nb.append(4)\nprint(a)         # [1, 2, 3, 4]  -- mutation visible through both names\n\nc = a[:]         # shallow copy: new outer list, shared inner objects\nimport copy\nd = copy.deepcopy(a)   # fully independent\n\n# Identity vs equality:\nx = 256; y = 256\nprint(x is y)    # True  (cached small int)\nx = 257; y = 257\nprint(x is y)    # often False (separate objects) -- DO NOT rely on this"
+        },
+        {
+          "type": "paragraph",
+          "text": "CPython manages memory with reference counting (an object is freed immediately when its refcount hits zero) plus a generational garbage collector that detects reference cycles refcounting alone cannot. Type hints (PEP 484) are erased at runtime by default - they do not enforce types or affect performance; they exist for static checkers (mypy, pyright) and IDEs. Use them at API boundaries to catch errors before runtime."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Reference counting reclaims most garbage instantly and deterministically, which is why CPython rarely needs large GC pauses. But a __del__ method on objects in a reference cycle can prevent collection in older Python versions and complicates finalization - prefer context managers and weakref over __del__ for cleanup."
+        }
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: Diagnosing a Slow Worker Pool",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Scenario: a team runs an image-processing service. Each request resizes and re-encodes a batch of images in pure Python (PIL operations plus custom pixel math). To 'use all 8 cores' they wrapped the work in a ThreadPoolExecutor(max_workers=8). Throughput barely improved over a single thread, and CPU never exceeded ~110%. They paged on latency."
+        },
+        {
+          "type": "paragraph",
+          "text": "Root cause: the work is CPU-bound Python bytecode. With the GIL, the eight threads time-slice on a single core's worth of interpreter execution; the extra threads only add context-switch and lock-contention overhead. The 110% CPU was the GIL handoff cost, not parallel work."
+        },
+        {
+          "type": "code",
+          "language": "python",
+          "code": "# BEFORE: no real parallelism for CPU-bound work\nfrom concurrent.futures import ThreadPoolExecutor\nwith ThreadPoolExecutor(max_workers=8) as pool:\n    results = list(pool.map(process_image, batch))\n\n# AFTER: ProcessPoolExecutor gives one GIL per process -> true multicore.\nfrom concurrent.futures import ProcessPoolExecutor\nif __name__ == '__main__':                       # required on 'spawn' start method\n    with ProcessPoolExecutor(max_workers=8) as pool:\n        results = list(pool.map(process_image, batch))\n\n# EVEN BETTER for pixel math: push the hot loop into numpy / a C extension that\n# RELEASES the GIL. Then threads parallelize because the GIL is held only briefly.\n# numpy vectorized ops run in C with the GIL released for the heavy array work."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Switching to ProcessPoolExecutor took CPU to ~780% (near 8 cores) and cut p99 latency 6x. The deeper fix - vectorizing the pixel math in numpy - reduced per-image work so much that even a single process beat the original eight threads. Pick the model by whether the bottleneck is I/O (threads/asyncio) or CPU (processes/C)."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Gotchas",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "heading",
+          "text": "Mutable default argument"
+        },
+        {
+          "type": "code",
+          "language": "python",
+          "code": "def add_item(item, bucket=[]):       # BUG: default list created ONCE at def time\n    bucket.append(item)\n    return bucket\n\nadd_item('a')   # ['a']\nadd_item('b')   # ['a', 'b']  <-- shared across calls!\n\ndef add_item(item, bucket=None):     # FIX: sentinel, create fresh each call\n    if bucket is None:\n        bucket = []\n    bucket.append(item)\n    return bucket"
+        },
+        {
+          "type": "heading",
+          "text": "Late-binding closures"
+        },
+        {
+          "type": "code",
+          "language": "python",
+          "code": "funcs = [lambda: i for i in range(3)]\nprint([f() for f in funcs])          # [2, 2, 2]  -- all see final i\n\n# Closures capture the VARIABLE i, not its value at creation time. Bind early:\nfuncs = [lambda i=i: i for i in range(3)]\nprint([f() for f in funcs])          # [0, 1, 2]"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Using is to compare values ('x is 257', 'name is \"foo\"') - works for cached small ints/interned strings, fails otherwise. Use ==.",
+            "Catching bare 'except:' which also swallows KeyboardInterrupt and SystemExit; catch 'except Exception' or specific types.",
+            "Modifying a list while iterating it, skipping elements or raising; iterate a copy or build a new list.",
+            "Relying on dict insertion order before Python 3.7 - it is guaranteed only from 3.7 onward.",
+            "Assuming threads parallelize CPU work; assuming asyncio tolerates a blocking call - both are GIL/event-loop traps."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The mutable-default bug is insidious because it works in tests (often one call) and corrupts state in production under repeated calls. It is a textbook source of cross-request data leaks in long-lived web workers. Lint rules (e.g. ruff B006) catch it - enable them."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Choose the concurrency model by bottleneck: I/O-bound -> asyncio or threads; CPU-bound -> multiprocessing or native (numpy/C) code that releases the GIL.",
+            "Never block the asyncio event loop; use async-native libraries and run unavoidable blocking work via run_in_executor.",
+            "Use None as the default and create mutable defaults inside the function body.",
+            "Bind loop variables you capture in closures via default arguments or functools.partial.",
+            "Prefer context managers (with) for any resource needing deterministic cleanup; use contextlib.contextmanager for simple cases.",
+            "Add type hints at public API boundaries and run mypy/pyright in CI; remember hints are not runtime enforcement.",
+            "Use generators for large or streaming data to keep memory O(1); materialize only when you need multiple passes or random access.",
+            "Reach for dataclasses or __slots__ for many small objects to cut memory and boilerplate."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Goal", "Reach for", "Avoid"],
+          "rows": [
+            ["Parallel CPU work", "ProcessPoolExecutor / numpy", "ThreadPoolExecutor on pure Python"],
+            ["10k concurrent sockets", "asyncio + async drivers", "thread-per-connection"],
+            ["Deterministic cleanup", "with / context manager", "__del__ finalizers"],
+            ["Stream a huge file", "generator / yield", "readlines() into a list"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "note-cpython",
+      "heading": "CPython Internals in Brief",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "CPython compiles source to bytecode (visible via the dis module), stored in .pyc files, then executes it in a stack-based evaluation loop (the ceval loop). Names resolve through LEGB scoping (Local, Enclosing, Global, Built-in). Attribute access walks the type's MRO (method resolution order, computed by C3 linearization) and consults descriptors - which is how property, classmethod, and staticmethod work under the hood."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "PEP 703 (free-threaded CPython, opt-in from 3.13) removes the GIL by making refcounting thread-safe with biased reference counting and per-object locks. It enables true thread parallelism for CPU work but adds single-thread overhead - watch this space; it may reshape the threading-vs-multiprocessing answer over the next few releases."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "gil-timeline",
+      "title": "GIL: Threads Time-Slice on One Interpreter",
+      "type": "ascii",
+      "content": "CPU-bound, 3 threads, ONE GIL (no parallelism):\n  Thread A  |#####|     |#####|     |####|\n  Thread B        |####|     |####|      |###\n  Thread C  ------------ waiting for GIL -------\n            ^ only one runs bytecode at a time\n\nI/O-bound (GIL released during blocking I/O -> overlap):\n  Thread A  |run|...wait on socket...|run|\n  Thread B      |run|...wait on socket...|run|\n            ^ waits overlap; threads DO help here"
+    },
+    {
+      "id": "model-choice",
+      "title": "Choosing a Concurrency Model",
+      "type": "mermaid",
+      "content": "flowchart TD\n    A[Workload?] --> B{CPU-bound or I/O-bound?}\n    B -->|CPU-bound| C{Pure Python?}\n    C -->|Yes| D[multiprocessing / ProcessPool]\n    C -->|No, numpy/C| E[threads ok: GIL released in C]\n    B -->|I/O-bound| F{How many concurrent?}\n    F -->|Thousands| G[asyncio + async drivers]\n    F -->|Tens-hundreds| H[threading / ThreadPool]"
+    },
+    {
+      "id": "generator-pipeline",
+      "title": "Lazy Generator Pipeline (pull-based)",
+      "type": "ascii",
+      "content": "file ──> read_large_file ──> parse ──> consumer\n           (yield line)     (yield row)   next()\n\nEach next() pulls ONE record back through the chain.\nMemory: O(1) regardless of file size."
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-py-gil",
+      "question": "What is the GIL, why does CPython have one, and what does it mean for threading?",
+      "answer": "The Global Interpreter Lock is a mutex that allows only one thread to execute Python bytecode at a time in CPython. It exists because CPython's memory management relies on non-thread-safe reference counting; the GIL serializes refcount updates without needing a lock per object, which keeps single-threaded performance high. The practical consequence: threads provide concurrency for I/O-bound work because a thread releases the GIL while blocked on I/O, letting others run - but they provide no parallelism for CPU-bound Python because all threads contend for the single GIL. For CPU parallelism you use multiprocessing (one GIL per process) or call into C/numpy code that releases the GIL.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["gil", "concurrency", "threading"],
+      "followUps": ["How does multiprocessing get around the GIL?", "What does PEP 703 change?"]
+    },
+    {
+      "id": "q-py-async-vs-thread",
+      "question": "When would you choose asyncio over threading, and what is the danger of asyncio?",
+      "answer": "Choose asyncio for very high-concurrency I/O - thousands of simultaneous sockets - because it multiplexes all of them on a single thread with an event loop, avoiding the memory and context-switch cost of a thread per connection. Threads are simpler and fine for tens to low hundreds of blocking I/O tasks. The danger of asyncio is that it is cooperative single-threaded: any blocking call (a synchronous DB driver, time.sleep, a CPU-heavy computation, a non-async library) freezes the entire event loop, stalling every concurrent task and spiking p99 latency for unrelated requests. You must use async-native libraries or offload blocking work to an executor via loop.run_in_executor.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["asyncio", "threading", "event-loop"],
+      "followUps": ["How do you run blocking code from a coroutine?", "What is the difference between concurrency and parallelism here?"]
+    },
+    {
+      "id": "q-py-generator",
+      "question": "What is the difference between an iterator and a generator, and why are generators memory-efficient?",
+      "answer": "An iterator is any object implementing __iter__ (returning itself) and __next__ (returning the next value or raising StopIteration). A generator is a specific, convenient way to create an iterator: any function containing yield returns a generator object that implements the protocol automatically. Generators are memory-efficient because they are lazy - they compute and hold one value at a time, suspending the function's frame at each yield and resuming on the next call, so streaming a 10GB file uses O(1) memory instead of loading it all. The trade-off is they are single-pass: once exhausted they yield nothing, and they do not support random access or len().",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["generators", "iterators", "lazy"],
+      "followUps": ["What does 'yield from' do?", "How do generators relate to coroutines?"]
+    },
+    {
+      "id": "q-py-decorator",
+      "question": "How does a decorator work, and why is functools.wraps important?",
+      "answer": "A decorator is a callable that takes a function and returns a replacement function; @decorator above a def is syntactic sugar for fn = decorator(fn). It lets you add cross-cutting behavior - caching, retries, timing, auth - by wrapping the original in a closure that runs extra logic before/after calling it. functools.wraps is important because the wrapper function would otherwise replace the original's metadata: its __name__, __doc__, __module__, and signature would become the wrapper's. wraps copies that metadata back onto the wrapper, so introspection, debuggers, documentation tools, and frameworks that inspect signatures (e.g. some web routers and pytest) continue to see the original function.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["decorators", "functools", "closures"],
+      "followUps": ["How do you write a decorator that takes arguments?", "How would you make a class-based decorator?"]
+    },
+    {
+      "id": "q-py-context-manager",
+      "question": "What are the two ways to write a context manager and what guarantees does __exit__ provide?",
+      "answer": "You can write a context manager as a class implementing __enter__ (returns the resource bound by 'as') and __exit__ (cleanup), or as a generator decorated with @contextlib.contextmanager that yields exactly once - code before yield is setup, code after (ideally in a finally) is teardown. __exit__ is guaranteed to run when the with block exits, whether normally or via an exception; it receives the exception type, value, and traceback (or three Nones on normal exit). Returning a truthy value from __exit__ suppresses the propagating exception, which you should do only deliberately. This makes context managers the correct tool for deterministic cleanup of files, locks, transactions, and connections.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["context-manager", "contextlib", "resources"],
+      "followUps": ["When does __exit__ suppress an exception?", "Why prefer 'with' over try/finally for resources?"]
+    },
+    {
+      "id": "q-py-eq-hash",
+      "question": "If you define __eq__ on a class, what else must you consider, and why?",
+      "answer": "Defining __eq__ without __hash__ makes instances unhashable: Python automatically sets __hash__ to None, so the object can no longer be used as a dict key or set member, and any code that hashes it raises TypeError. If your objects are logically immutable and you want them hashable, define __hash__ consistently with __eq__ (equal objects must have equal hashes). If they are mutable, leaving them unhashable is often correct, because a mutating key would corrupt a dict/set. You should also return NotImplemented (not False) from __eq__ for unsupported operand types so Python can try the reflected comparison.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["data-model", "hashing", "equality"],
+      "followUps": ["What is the hash/eq invariant?", "Why might you keep a mutable object unhashable?"]
+    },
+    {
+      "id": "q-py-memory",
+      "question": "How does CPython manage memory, and what causes leaks in long-running Python services?",
+      "answer": "CPython uses reference counting as the primary mechanism: every object tracks how many references point to it, and it is freed immediately when the count reaches zero - deterministic and prompt. Reference counting cannot reclaim reference cycles (A references B references A), so CPython adds a generational garbage collector that periodically detects and collects unreachable cycles. Leaks in long-running services usually come from: unintended lingering references (objects kept alive by a global list, cache, or registry that never evicts), unbounded caches (a dict or lru_cache with no max size), reference cycles involving objects with finalizers, and C extensions that mishandle refcounts. Tools: tracemalloc, gc.get_objects, and objgraph to find what holds references.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["memory", "gc", "refcounting"],
+      "followUps": ["Why is a cycle a problem for refcounting?", "How would you debug a slow memory growth in production?"]
+    },
+    {
+      "id": "q-py-typing",
+      "question": "Are Python type hints enforced at runtime? What are they for?",
+      "answer": "No - by default type hints (PEP 484) are not enforced at runtime and do not affect performance. They are stored in __annotations__ and otherwise ignored by the interpreter; passing a str where an int is annotated raises no error from the hint itself. Their purpose is static analysis: tools like mypy and pyright, plus IDEs, use them to catch type errors before runtime and to power autocompletion and refactoring. Some libraries opt into runtime use of annotations - pydantic validates against them, FastAPI derives request parsing from them, and dataclasses read them - but that is the library acting on the annotations, not the language enforcing them.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["typing", "mypy", "annotations"],
+      "followUps": ["How does pydantic use annotations?", "What is the runtime cost of type hints?"]
+    },
+    {
+      "id": "q-py-tricky-default",
+      "question": "Tricky: A function `def append(x, acc=[]): acc.append(x); return acc` returns growing lists across calls. Why, and when exactly is the bug triggered?",
+      "answer": "Default argument values are evaluated exactly once, when the def statement executes (at function definition time), not on each call. So acc=[] creates a single list object that is reused as the default for every call that does not pass acc. Each call mutates that same shared list, so it accumulates across calls. The bug is triggered whenever the parameter is left to its default; passing an explicit list each time hides it. This is why it often passes a single-call unit test but corrupts state in a production web worker handling many requests. The fix is the None sentinel: def append(x, acc=None): if acc is None: acc = []; then a fresh list is created per call. The deeper lesson: never use a mutable object as a default argument value.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["gotcha", "mutable-default", "data-model"],
+      "followUps": ["Why is the default evaluated at def time and not call time?", "How would you intentionally use this behavior (e.g. caching)?"]
+    },
+    {
+      "id": "q-py-tricky-closure",
+      "question": "Tricky: `fns = [lambda: i for i in range(3)]; print([f() for f in fns])` prints [2, 2, 2], not [0, 1, 2]. Explain and fix.",
+      "answer": "Closures in Python capture variables by reference, not by value. All three lambdas close over the same loop variable i; they do not snapshot its value at creation. By the time you call them, the loop has finished and i is bound to its final value, 2, so every lambda returns 2. This is 'late binding'. The standard fix is to bind the current value as a default argument, which IS evaluated at def time: lambda i=i: i, giving [0, 1, 2]. Alternatives include functools.partial(lambda v: v, i) or wrapping creation in a factory function that takes i as a parameter, creating a fresh scope per iteration. The same trap appears with def inside loops and with deferred callbacks in async code.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["gotcha", "closures", "late-binding"],
+      "followUps": ["Why does the default-argument trick work here?", "Does this differ between a comprehension and a for loop?"]
+    },
+    {
+      "id": "q-py-tricky-is",
+      "question": "Tricky: `a = 256; b = 256; a is b` is True, but `a = 257; b = 257; a is b` is often False. Why, and what is the correct lesson?",
+      "answer": "CPython pre-allocates and caches small integer objects in the range -5 to 256 as a performance optimization (the 'small int cache'). Both names for 256 therefore reference the exact same cached object, so 'is' (identity) is True. 257 is outside the cache, so each literal can create a distinct object, and 'is' may be False - though it can be True if the compiler folds two literals in the same code object, which makes the behavior implementation- and context-dependent. The lesson is that 'is' tests object identity, not value, and must never be used to compare values. Use == for equality. The only correct uses of 'is' are comparisons to singletons: None, True, False, and sentinel objects.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["gotcha", "identity", "interning"],
+      "followUps": ["What other objects does CPython intern?", "Why is 'x is None' preferred over 'x == None'?"]
+    },
+    {
+      "id": "q-py-multiprocessing-fork",
+      "question": "What is the difference between the 'fork' and 'spawn' start methods in multiprocessing, and why does it matter?",
+      "answer": "With 'fork' (default on Linux historically) the child process is a copy of the parent's memory via the OS fork - fast and it inherits already-imported modules and open objects, but it can deadlock or corrupt state if the parent held locks or threads at fork time (fork in a multithreaded program is unsafe), and it does not work the same on Windows. With 'spawn' (default on Windows and macOS, and increasingly recommended) a fresh interpreter is started and the target plus arguments are pickled and sent over - slower to start and it requires the entry point to be guarded by if __name__ == '__main__' and arguments to be picklable, but it avoids the inherited-state hazards. It matters because fork-related deadlocks (e.g. mixing threads, logging locks, or CUDA contexts with fork) are a common, hard-to-debug class of production hang.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["multiprocessing", "fork", "spawn"],
+      "followUps": ["Why must the entry point be guarded with __main__ for spawn?", "Why is fork unsafe in a multithreaded process?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-py-lru-cache",
+      "title": "Implement a Bounded LRU Cache Decorator",
+      "difficulty": "senior",
+      "category": "Backend",
+      "prompt": "Without using functools.lru_cache, write a decorator `lru_cache(maxsize)` that memoizes a function's results keyed by its positional and keyword arguments, evicting the least-recently-used entry when the cache exceeds maxsize. A cache hit must move the entry to most-recently-used. Demonstrate it on a recursive fibonacci.",
+      "hints": [
+        "An OrderedDict (or dict, which preserves insertion order in 3.7+) tracks recency: move_to_end on access, popitem(last=False) to evict the oldest.",
+        "Build a hashable key from args and a sorted tuple of kwargs.items().",
+        "Use functools.wraps so the wrapped function keeps its metadata."
+      ],
+      "solutionCode": "import functools\nfrom collections import OrderedDict\n\ndef lru_cache(maxsize=128):\n    def decorator(fn):\n        cache = OrderedDict()\n        @functools.wraps(fn)\n        def wrapper(*args, **kwargs):\n            key = (args, tuple(sorted(kwargs.items())))\n            if key in cache:\n                cache.move_to_end(key)          # mark most-recently-used\n                return cache[key]\n            result = fn(*args, **kwargs)\n            cache[key] = result\n            cache.move_to_end(key)\n            if len(cache) > maxsize:\n                cache.popitem(last=False)        # evict least-recently-used\n            return result\n        wrapper.cache_clear = cache.clear\n        return wrapper\n    return decorator\n\n@lru_cache(maxsize=32)\ndef fib(n):\n    return n if n < 2 else fib(n - 1) + fib(n - 2)\n\nassert fib(30) == 832040\n",
+      "solutionLanguage": "python",
+      "explanation": "The decorator factory lru_cache(maxsize) returns a real decorator that closes over a per-function OrderedDict. The cache key combines the positional args tuple with a sorted tuple of kwargs items so it is hashable and order-independent for keyword arguments. On a hit, move_to_end marks the key as most-recently-used; on a miss we compute, store, and if the cache exceeds maxsize, popitem(last=False) evicts the oldest (least-recently-used) entry - the defining LRU behavior. functools.wraps preserves fib's metadata, and exposing cache_clear mirrors the stdlib API. The recursion benefits enormously: memoized fib(30) makes O(n) calls instead of exponential. Note this simple key construction assumes hashable arguments; the stdlib version handles edge cases like distinguishing int and bool keys and is thread-safe under the GIL for its critical section.",
+      "relatedTopic": "decorators-context"
+    },
+    {
+      "id": "ch-py-concurrent-fetch",
+      "title": "Parallelize I/O Without Blocking the Event Loop",
+      "difficulty": "senior",
+      "category": "Backend",
+      "prompt": "You are given a synchronous, blocking function `blocking_fetch(url) -> str` (it uses a legacy library you cannot change). You must fetch 100 URLs concurrently from inside an async application without freezing the event loop. Write an async function that runs all fetches concurrently and returns the list of results in input order, plus a brief note on why a naive call would be wrong.",
+      "hints": [
+        "Calling blocking_fetch directly in a coroutine blocks the whole loop - it must run in a thread pool.",
+        "loop.run_in_executor(None, fn, arg) schedules a blocking call on the default ThreadPoolExecutor and returns an awaitable.",
+        "asyncio.gather preserves the order of its arguments in the returned list."
+      ],
+      "solutionCode": "import asyncio\nfrom typing import Callable\n\ndef blocking_fetch(url: str) -> str:\n    # legacy blocking I/O (e.g. requests.get(url).text) - cannot be made async\n    ...\n\nasync def fetch_one(loop, fn: Callable[[str], str], url: str) -> str:\n    # Offload the blocking call to a thread; the GIL is released during I/O,\n    # so other coroutines keep running on the event loop.\n    return await loop.run_in_executor(None, fn, url)\n\nasync def fetch_all(urls: list[str]) -> list[str]:\n    loop = asyncio.get_running_loop()\n    tasks = [fetch_one(loop, blocking_fetch, u) for u in urls]\n    # gather runs them concurrently and returns results in the SAME order as urls.\n    return await asyncio.gather(*tasks)\n\n# Entry point\n# results = asyncio.run(fetch_all(my_100_urls))\n",
+      "solutionLanguage": "python",
+      "explanation": "A naive 'await blocking_fetch(url)' is doubly wrong: blocking_fetch is not awaitable, and even called directly (blocking_fetch(url)) it would execute synchronously on the event loop thread, freezing every other coroutine until it returns - the canonical asyncio mistake. The fix is loop.run_in_executor(None, fn, url), which submits the blocking call to the default ThreadPoolExecutor and hands back an awaitable; while that thread sits in blocking I/O it releases the GIL, so the event loop and the other worker threads make progress. asyncio.gather schedules all 100 awaitables concurrently and crucially returns results in the order the awaitables were passed, not the order they completed, so output stays aligned with input URLs. This is the correct bridge between a blocking library and an async application: keep CPU/blocking work off the loop, let the loop orchestrate.",
+      "relatedTopic": "gil-concurrency"
+    }
+  ],
+  "references": [
+    {"label": "Python Language Reference - The Data Model", "url": "https://docs.python.org/3/reference/datamodel.html"},
+    {"label": "Python Docs - asyncio", "url": "https://docs.python.org/3/library/asyncio.html"},
+    {"label": "PEP 703 - Making the GIL Optional in CPython", "url": "https://peps.python.org/pep-0703/"},
+    {"label": "Python Docs - concurrency (threading, multiprocessing, GIL note)", "url": "https://docs.python.org/3/library/concurrency.html"},
+    {"label": "PEP 484 - Type Hints", "url": "https://peps.python.org/pep-0484/"}
+  ]
+}

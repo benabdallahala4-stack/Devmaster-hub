@@ -1,0 +1,529 @@
+{
+  "id": "aws-dynamodb",
+  "title": "AWS DynamoDB",
+  "category": "Cloud",
+  "subcategory": "Database",
+  "difficulty": "senior",
+  "tags": ["aws", "dynamodb", "nosql", "single-table-design", "gsi", "capacity"],
+  "description": "A senior-level deep dive into Amazon DynamoDB: the partition-key/sort-key data model, access-pattern-first and single-table design, GSIs vs LSIs and their constraints, capacity modes and RCU/WCU, hot partitions, consistency, Streams, TTL, transactions, query vs scan, and when DynamoDB is the wrong choice.",
+  "estReadMinutes": 31,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Amazon DynamoDB is a fully managed, serverless key-value and document database that delivers single-digit-millisecond latency at virtually any scale. It is a direct descendant of the Dynamo paper and trades the relational model's ad-hoc querying and joins for predictable performance and horizontal scale. The fundamental shift for engineers coming from SQL: in DynamoDB you design the data model AROUND your access patterns, not the other way around, because there are no joins and no efficient ad-hoc queries."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Table: a collection of items; every item is a set of attributes identified by a primary key.",
+            "Partition key (PK / hash key): determines which physical partition stores the item; DynamoDB hashes it to distribute data.",
+            "Sort key (SK / range key): optional; items with the same PK are stored together, sorted by SK, enabling range queries within a partition.",
+            "Item: a row-equivalent, max 400 KB including all attributes and the key.",
+            "Attribute: a typed name-value pair; items are schemaless apart from the key attributes."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The primary key is either just a partition key (simple key, uniquely identifying an item) or a partition key + sort key (composite key, where PK groups items and SK orders/uniquely identifies within the group). Only the key attributes must exist on every item; everything else is per-item."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "DynamoDB removes the operational toil of scaling a database — no servers, no read replicas to manage, no vacuuming, automatic partitioning — and gives flat, predictable latency as data grows from megabytes to petabytes. That makes it the default choice for high-scale, well-understood access patterns: user sessions, shopping carts, IoT telemetry, leaderboards, and serverless backends. But that power comes with rigid constraints that punish a relational mindset."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Predictable performance at scale: latency stays single-digit ms whether the table has 1,000 or 1,000,000,000 items, because every well-designed query targets one partition.",
+            "Serverless economics: on-demand mode bills per request with zero idle cost, fitting spiky and unpredictable workloads.",
+            "Tight serverless integration: DynamoDB + Lambda + Streams is the canonical event-driven AWS stack.",
+            "The trade-off you accept: you must know your access patterns up front, model for them, and give up joins, ad-hoc queries, and (largely) flexible aggregation."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "DynamoDB rewards correct modeling and brutally punishes incorrect modeling. A schema that does not match the access patterns leads to expensive Scans, hot partitions, and throttling — problems you cannot 'query your way out of' as you could in SQL with a new index on a normalized schema."
+        }
+      ]
+    },
+    {
+      "id": "data-model",
+      "heading": "The Data Model: Partition Key and Sort Key",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "DynamoDB physically partitions a table by hashing the partition key. All items sharing a partition key live in the same partition, stored adjacently and sorted by the sort key. This is the entire basis of efficient access: a Query specifies one partition key and optionally a condition on the sort key, letting DynamoDB jump straight to the right partition and scan a contiguous, sorted range — never the whole table."
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "code": "// Items in a 'CustomerOrders' table with composite key (PK=CustomerId, SK=OrderDate).\n// Same PK => same partition, sorted by SK, so range queries are cheap.\n{ \"CustomerId\": \"CUST#42\", \"OrderDate\": \"2026-01-05\", \"Total\": 1999, \"Status\": \"SHIPPED\" }\n{ \"CustomerId\": \"CUST#42\", \"OrderDate\": \"2026-02-11\", \"Total\": 4500, \"Status\": \"PLACED\" }\n{ \"CustomerId\": \"CUST#42\", \"OrderDate\": \"2026-03-02\", \"Total\":  799, \"Status\": \"PLACED\" }\n\n// Query: 'orders for CUST#42 in Q1 2026' -> one partition, sorted range scan.\n// KeyConditionExpression:\n//   CustomerId = :c AND OrderDate BETWEEN :start AND :end"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "You can ONLY Query within a single partition key value. There is no efficient way to 'get all orders across all customers' except a full-table Scan or a secondary index. This is why choosing the partition key to match your most important access pattern is the most consequential decision you make."
+        }
+      ]
+    },
+    {
+      "id": "access-pattern-single-table",
+      "heading": "Access-Pattern-First and Single-Table Design",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "In relational modeling you design normalized entities first and write queries later. In DynamoDB you invert this: enumerate every access pattern up front, then design keys so each pattern is a single Query (or GetItem). Single-table design takes this further by storing MULTIPLE entity types in one table, using generic key names (PK, SK) and prefixed values so related entities co-locate and can be fetched together in one Query — emulating joins through data layout."
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "code": "// Single-table design: users, their orders, and order items in ONE table.\n// Generic keys PK/SK; entity type encoded in the key prefix.\n{ \"PK\": \"USER#42\",    \"SK\": \"PROFILE#\",        \"name\": \"Ada\", \"email\": \"ada@x.com\" }\n{ \"PK\": \"USER#42\",    \"SK\": \"ORDER#2026-03-02\", \"orderId\": \"O#900\", \"total\": 799 }\n{ \"PK\": \"USER#42\",    \"SK\": \"ORDER#2026-02-11\", \"orderId\": \"O#812\", \"total\": 4500 }\n{ \"PK\": \"ORDER#900\",  \"SK\": \"ITEM#1\",           \"sku\": \"ABC\", \"qty\": 2 }\n{ \"PK\": \"ORDER#900\",  \"SK\": \"ITEM#2\",           \"sku\": \"XYZ\", \"qty\": 1 }\n\n// Access pattern 'get user + all their orders' = ONE query:\n//   PK = USER#42  (returns the PROFILE item and all ORDER# items together)\n// Access pattern 'get an order's line items' = ONE query:\n//   PK = ORDER#900 AND begins_with(SK, 'ITEM#')"
+        },
+        {
+          "type": "paragraph",
+          "text": "The prefix convention (USER#, ORDER#, ITEM#) lets one partition hold a parent entity and its children, so a single Query returns the user profile and all their orders together — the layout IS the join. begins_with on the sort key selects a sub-collection within the partition. Overloaded GSIs (reusing the same GSI for several patterns by putting different values in the GSI key attributes) extend this to additional access patterns."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Single-table design is powerful but advanced and not always warranted. Its benefit is fetching related entities in one request and minimizing cost at very high scale; its cost is a model that is harder to evolve and reason about. For simple apps, a table per entity is perfectly fine — single-table is a tool, not a mandate."
+        }
+      ]
+    },
+    {
+      "id": "gsi-vs-lsi",
+      "heading": "GSIs vs LSIs",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Secondary indexes give you additional query patterns beyond the base table's primary key. There are two kinds, and their constraints are heavily tested because they are easy to confuse."
+        },
+        {
+          "type": "table",
+          "headers": ["Property", "Global Secondary Index (GSI)", "Local Secondary Index (LSI)"],
+          "rows": [
+            ["Partition key", "Can be ANY attribute (different from base PK)", "MUST be the same partition key as the base table"],
+            ["Sort key", "Any attribute (optional)", "An alternate sort key"],
+            ["When created", "Any time (add/remove after table creation)", "Only at table creation; cannot add later"],
+            ["Consistency", "EVENTUALLY consistent only", "Supports STRONGLY consistent reads"],
+            ["Capacity", "Own provisioned/on-demand capacity (separate RCU/WCU)", "Shares the base table's capacity"],
+            ["Item-collection size limit", "None", "All items sharing a PK across table + LSIs must fit in 10 GB"],
+            ["Count limit", "Up to 20 (default, adjustable)", "Up to 5, fixed at creation"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The crucial distinctions: a GSI lets you re-partition the data by a completely different attribute (e.g. query orders by status instead of by customer), can be added or dropped any time, but is ALWAYS eventually consistent and has its own capacity. An LSI keeps the SAME partition key as the base table but offers an alternate sort key, must be defined at table creation and can never be added later, supports strongly consistent reads, and shares the base table's throughput — but it imposes a hard 10 GB limit on the total size of any single item collection (all items with a given partition key, across the table and its LSIs)."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "If you need strongly consistent reads on a secondary index, you MUST use an LSI and decide at table creation — a GSI can never give strong consistency. Because of that and the 'create-time only' rule, most teams default to GSIs for flexibility and only reach for an LSI when strong consistency on an alternate sort key is a hard requirement."
+        }
+      ]
+    },
+    {
+      "id": "capacity-modes",
+      "heading": "Capacity Modes: On-Demand vs Provisioned, RCU/WCU",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "DynamoDB bills throughput in capacity units. A Write Capacity Unit (WCU) is one write per second for an item up to 1 KB. A Read Capacity Unit (RCU) is one STRONGLY consistent read per second for an item up to 4 KB, OR two EVENTUALLY consistent reads per second (eventually consistent reads cost half). Larger items round UP: a 5 KB item costs 2 RCUs (strong) and a 1.5 KB write costs 2 WCUs."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Provisioned mode: you set RCU/WCU (optionally with auto-scaling). Cheapest for steady, predictable traffic; you pay for provisioned capacity whether used or not, and exceeding it (without burst capacity) causes throttling.",
+            "On-demand mode: you pay per request with no capacity to manage; ideal for spiky, new, or unpredictable workloads. More expensive per request at steady high volume, but zero idle cost and instant scaling.",
+            "Transactions cost double: a transactional read is 2x a normal read's RCUs and a transactional write is 2x WCUs, because of the two-phase prepare/commit."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "Capacity math examples:\n  - Read a 3 KB item, strongly consistent:  ceil(3/4)=1 RCU\n  - Read a 9 KB item, strongly consistent:  ceil(9/4)=3 RCU\n  - Read a 9 KB item, eventually consistent: 3 / 2 = 1.5 -> rounded per-op = 1.5 RCU\n  - Write a 2.5 KB item:                     ceil(2.5/1)=3 WCU\n  - Transactional write of a 1 KB item:      1 * 2 = 2 WCU\n\nThroughput needed: 100 strongly-consistent reads/sec of 8 KB items\n  = 100 * ceil(8/4) = 100 * 2 = 200 RCU provisioned."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Rule of thumb: provisioned + auto-scaling for predictable, sustained traffic to minimize cost; on-demand for unknown, spiky, or brand-new workloads. You can switch modes (with a cooldown), so start on-demand to learn the pattern, then move to provisioned to optimize cost."
+        }
+      ]
+    },
+    {
+      "id": "hot-partitions-consistency",
+      "heading": "Hot Partitions and Read Consistency",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A hot partition occurs when a disproportionate share of reads or writes targets a single partition key, exceeding that partition's throughput share while the rest of the table sits idle. Because DynamoDB distributes data by hashing the partition key, a poorly chosen key concentrates load and causes throttling even when the table's TOTAL provisioned capacity is far from saturated."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Low-cardinality partition keys: using status ('ACTIVE') or a date ('2026-03-02') as the PK funnels huge traffic onto one key. Choose high-cardinality keys (user id, device id, order id).",
+            "Sequential/time-based keys for writes: a monotonically increasing key (timestamp, auto-increment) makes every new write hit the same 'latest' partition. Add a write-sharding suffix (e.g. PK = date#shard where shard is 0..N) to spread writes, and scatter-gather on read.",
+            "Celebrity/whale problem: one entity (a celebrity user, a viral item) draws outsized traffic to its key. Mitigate with write sharding, caching (DAX), or read replicas of that hot item.",
+            "Adaptive capacity helps automatically (DynamoDB redistributes throughput to busy partitions and can isolate a hot key), but it is a safety net, not a substitute for a high-cardinality, evenly-distributed key design."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "On consistency: DynamoDB replicates each item across multiple AZs. An EVENTUALLY consistent read (the default) may return slightly stale data but costs half an RCU and has the highest availability. A STRONGLY consistent read returns the most recent committed write, costs a full RCU, has higher latency, is not available on GSIs, and cannot be served if the leader replica is unreachable. Choose strong consistency only where read-your-writes recency truly matters (e.g. reading a balance you just updated)."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Throttling with plenty of unused table capacity is the signature of a hot partition. Do not just raise provisioned capacity — that wastes money and may not help. Fix the key design: increase cardinality, add write sharding, or cache the hot item."
+        }
+      ]
+    },
+    {
+      "id": "streams-ttl-transactions",
+      "heading": "Streams, TTL, and Transactions",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "heading",
+          "text": "DynamoDB Streams"
+        },
+        {
+          "type": "paragraph",
+          "text": "Streams capture an ordered, time-ordered (per partition key) log of item-level changes (INSERT/MODIFY/REMOVE) for 24 hours, with configurable views (keys only, new image, old image, or both). They are the backbone of event-driven patterns: trigger a Lambda on every change to maintain a materialized view, replicate to another store, send notifications, or implement the transactional-outbox/CDC pattern. Ordering is guaranteed per partition key, not globally."
+        },
+        {
+          "type": "heading",
+          "text": "TTL (Time To Live)"
+        },
+        {
+          "type": "paragraph",
+          "text": "TTL lets you mark items for automatic deletion by storing a Unix-epoch timestamp attribute; DynamoDB deletes expired items in the background at no extra write cost. Caveat: deletion is NOT immediate — it can lag the expiry time by up to ~48 hours, so expired items may still be returned by reads. Filter on the TTL attribute in queries if you need strict expiry semantics. TTL deletions also appear in Streams (as REMOVE with a principal of 'dynamodb'), enabling archival-on-expiry."
+        },
+        {
+          "type": "heading",
+          "text": "Transactions"
+        },
+        {
+          "type": "paragraph",
+          "text": "TransactWriteItems and TransactGetItems give ACID, all-or-nothing operations across up to 100 items (and even multiple tables) in one region, with condition checks. They use two-phase commit under the hood and therefore cost DOUBLE the capacity of equivalent non-transactional operations. Use them for genuine multi-item invariants (e.g. transfer money: debit one item and credit another atomically, or enforce a uniqueness constraint via a sentinel item), not as a default."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "TTL is for cost/cleanup, not precise scheduling: an item can linger up to ~48 hours past its TTL. If a read must never see expired data, add a filter expression on the TTL attribute rather than trusting TTL to have removed it already."
+        }
+      ]
+    },
+    {
+      "id": "query-vs-scan",
+      "heading": "Query vs Scan",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Query and Scan are the two read operations beyond GetItem, and confusing them is a top performance pitfall. A Query targets a single partition key (with optional sort-key condition) and reads only matching items — efficient and scalable. A Scan reads EVERY item in the table (or index) and then applies any filter, so its cost and latency grow with table size regardless of how few items match."
+        },
+        {
+          "type": "table",
+          "headers": ["Aspect", "Query", "Scan"],
+          "rows": [
+            ["Reads", "Only items under one partition key", "Every item in the table/index"],
+            ["Cost", "Proportional to matched items", "Proportional to TABLE size (filter applied AFTER read)"],
+            ["Use for", "Known access patterns (the norm)", "Rare admin/export/analytics jobs"],
+            ["Filter expression", "Narrows within the queried partition", "Does NOT reduce consumed capacity — items are read then filtered"]
+          ]
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// GOOD: Query a single partition by key condition.\nawait ddb.query({\n  TableName: 'CustomerOrders',\n  KeyConditionExpression: 'CustomerId = :c AND begins_with(OrderDate, :y)',\n  ExpressionAttributeValues: { ':c': 'CUST#42', ':y': '2026' }\n}); // reads only CUST#42's 2026 orders\n\n// BAD: Scan the whole table and filter -> reads (and bills) the ENTIRE table.\nawait ddb.scan({\n  TableName: 'CustomerOrders',\n  FilterExpression: 'CustomerId = :c',\n  ExpressionAttributeValues: { ':c': 'CUST#42' }\n}); // a filter is NOT an index; capacity consumed scales with table size"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "A FilterExpression is applied AFTER items are read from disk, so it reduces the RESULT size but NOT the consumed capacity. Scanning 1,000,000 items to filter down to 10 still costs you reading 1,000,000 items. If you find yourself scanning, you are missing an access pattern — add a GSI instead."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes (and When NOT to Use DynamoDB)",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Modeling relationally then bolting DynamoDB on: normalizing into many tables and trying to 'join' them in application code with multiple round trips, instead of designing keys around access patterns.",
+            "Low-cardinality or sequential partition keys causing hot partitions and throttling while total capacity is underused.",
+            "Using Scan for routine reads (and filtering), then paying to read the whole table; the fix is a Query backed by a GSI.",
+            "Expecting a GSI to be strongly consistent (it never is) or trying to add an LSI after table creation (impossible).",
+            "Forgetting transactions and strongly-consistent reads cost double/full capacity and budgeting only for eventual reads.",
+            "Trusting TTL for precise expiry and reading 'expired' items that have not been deleted yet (up to ~48h lag).",
+            "Ignoring the 400 KB item limit and the LSI 10 GB item-collection limit until production hits them."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "When NOT to use DynamoDB: workloads with unpredictable, ad-hoc queries and rich filtering/aggregation (analytics, reporting, BI) — a relational DB or a warehouse (Redshift/Athena) fits far better. Workloads requiring complex multi-row JOINs, strong relational integrity across many entities, or frequent schema-driven querying. Cases where access patterns are genuinely unknown or churning rapidly — DynamoDB's up-front modeling becomes a liability. Very large items or true full-text search (use S3 + a search engine). DynamoDB shines when access patterns are known and high-scale; it fights you when they are not."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Incident pattern: a team used order STATUS ('PENDING') as the partition key for a 'find pending orders' query. 90% of orders were PENDING, so one partition took nearly all write traffic and throttled hard while the table's total capacity sat mostly idle. The fix was a high-cardinality PK (order id) plus a GSI keyed on status with write sharding."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "List ALL access patterns before designing keys; design so each pattern is a single Query or GetItem, never a Scan.",
+            "Choose high-cardinality, evenly-distributed partition keys; add write sharding for sequential/time-series or celebrity keys.",
+            "Prefer GSIs for added query patterns (flexible, addable later); use LSIs only when you must have strong consistency on an alternate sort key, and define them at table creation.",
+            "Use eventually consistent reads by default (half the cost) and reserve strongly consistent reads for true read-your-writes needs.",
+            "Start on-demand for new/spiky workloads; move to provisioned + auto-scaling once the pattern is known to cut cost.",
+            "Reserve transactions for genuine multi-item invariants — they double capacity cost.",
+            "Use Streams + Lambda for derived views, replication, and CDC; remember ordering is per partition key.",
+            "Use TTL for cleanup but filter on the TTL attribute if reads must never see expired items; consider DAX caching for hot read keys."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Need", "Reach for"],
+          "rows": [
+            ["Query by an attribute other than the PK", "Global Secondary Index (eventually consistent)"],
+            ["Strongly consistent alternate sort key", "Local Secondary Index (at table creation)"],
+            ["Spiky / unknown traffic", "On-demand capacity"],
+            ["Steady, predictable traffic", "Provisioned + auto-scaling"],
+            ["Atomic multi-item update", "TransactWriteItems (2x cost)"],
+            ["React to changes / build views", "DynamoDB Streams + Lambda"],
+            ["Hot read key", "DAX cache or write sharding"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "note-mindset",
+      "heading": "The DynamoDB Mindset",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The single biggest shift is direction of design: SQL is data-first (model entities, query later); DynamoDB is query-first (enumerate access patterns, then shape keys and indexes so each is one efficient operation). Every other rule — high-cardinality keys to avoid hot partitions, GSIs to add patterns, single-table design to co-locate related entities, Scans treated as a smell — falls out of that one principle. If you cannot list your access patterns, you are not ready to design a DynamoDB table, and that may be the signal to use a relational database instead."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Interview tell: when asked to 'design a DynamoDB schema,' a senior answer starts by enumerating the access patterns and write/read ratios, THEN derives the partition key, sort key, and GSIs from them — and explicitly calls out hot-partition risk and consistency choices. Jumping straight to attributes signals a relational mindset misapplied."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "partitioning",
+      "title": "Partitioning by Hashed Partition Key",
+      "type": "ascii",
+      "content": "Table 'CustomerOrders' (PK=CustomerId, SK=OrderDate)\n\n  hash(CustomerId) -> physical partition\n\n  Partition P1            Partition P2            Partition P3\n  +------------------+    +------------------+    +------------------+\n  | CUST#42          |    | CUST#7           |    | CUST#99          |\n  |  2026-01-05 ...  |    |  2026-02-01 ...  |    |  2026-03-02 ...  |\n  |  2026-02-11 ...  |    |  2026-02-20 ...  |    |  2026-03-09 ...  |\n  |  2026-03-02 ...  |    | (sorted by SK)   |    | (sorted by SK)   |\n  +------------------+    +------------------+    +------------------+\n\n  Query(PK=CUST#42, SK between Jan..Mar) -> jumps to P1, scans sorted range.\n  Low-cardinality PK (e.g. Status) => one HOT partition, the rest idle."
+    },
+    {
+      "id": "gsi-lsi",
+      "title": "GSI vs LSI Key Structure",
+      "type": "mermaid",
+      "content": "flowchart TB\n    subgraph Base[Base table]\n        B[PK: CustomerId<br/>SK: OrderDate]\n    end\n    subgraph LSI[LSI - same PK, alt SK]\n        L[PK: CustomerId<br/>SK: Status<br/>strong reads, create-time only]\n    end\n    subgraph GSI[GSI - any PK/SK]\n        G[PK: Status<br/>SK: OrderDate<br/>eventually consistent, addable anytime]\n    end\n    B --> L\n    B --> G"
+    },
+    {
+      "id": "streams-flow",
+      "title": "DynamoDB Streams Event-Driven Flow",
+      "type": "mermaid",
+      "content": "flowchart LR\n    APP[App writes item] --> T[(DynamoDB Table)]\n    T -->|change record| S[DynamoDB Stream<br/>ordered per partition key]\n    S -->|trigger| L[Lambda]\n    L --> V[(Materialized view / GSI table)]\n    L --> N[Notifications]\n    L --> R[Replicate / archive to S3]"
+    }
+  ],
+  "questions": [
+    {
+      "id": "ddb-q-keys",
+      "question": "Explain the roles of the partition key and sort key, and what a Query can and cannot do.",
+      "answer": "The partition key (hash key) determines the physical partition: DynamoDB hashes it to place and locate the item, and all items with the same partition key live together in one partition. The sort key (range key) orders items WITHIN a partition key, enabling efficient range queries and uniquely identifying an item when combined with the PK (a composite key). A Query MUST specify exactly one partition key value and may add a condition on the sort key (equality, range, begins_with) to select a contiguous slice; it reads only items under that partition key, which is why it stays fast at any scale. A Query CANNOT span multiple partition key values, cannot do arbitrary filtering efficiently (FilterExpression runs after reading and does not reduce consumed capacity), and cannot query by a non-key attribute unless you create a secondary index. This is why the partition key must match your most important access pattern.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["partition-key", "sort-key", "query"],
+      "followUps": ["What sort-key conditions are supported?", "How do you query by a non-key attribute?"]
+    },
+    {
+      "id": "ddb-q-gsi-lsi",
+      "question": "Compare GSIs and LSIs, including their key, consistency, and creation-time constraints.",
+      "answer": "A Global Secondary Index (GSI) can use ANY attribute as its partition key (different from the base table's), supports an optional alternate sort key, can be added or removed at any time, has its OWN provisioned/on-demand capacity, and is ALWAYS eventually consistent — it can never serve strongly consistent reads. A Local Secondary Index (LSI) MUST use the SAME partition key as the base table and only provides an alternate sort key; it must be created AT table creation (you can never add or remove one afterward), shares the base table's capacity, and crucially CAN serve strongly consistent reads. The LSI also imposes a hard limit: the total size of any single item collection (all items sharing a partition key, across the base table plus all its LSIs) must stay under 10 GB. Practical guidance: default to GSIs for flexibility and the ability to re-partition by a new attribute; reach for an LSI only when you genuinely need strong consistency on an alternate sort key and can commit to it at creation time.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["gsi", "lsi", "secondary-index"],
+      "followUps": ["Why can't a GSI be strongly consistent?", "What is the LSI 10 GB limit about?"]
+    },
+    {
+      "id": "ddb-q-capacity",
+      "question": "Define RCU and WCU and compute the throughput for 100 strongly-consistent reads/sec of 8 KB items.",
+      "answer": "A Read Capacity Unit (RCU) provides one strongly consistent read per second for an item up to 4 KB, or two eventually consistent reads per second for that size (eventually consistent reads are half price). A Write Capacity Unit (WCU) provides one write per second for an item up to 1 KB. Sizes round UP. For 8 KB strongly consistent reads: each read consumes ceil(8 / 4) = 2 RCUs, so 100 reads/sec require 100 * 2 = 200 RCUs provisioned. If those reads were eventually consistent instead, each would cost half: 2 / 2 = 1 RCU, so 100 reads/sec would need 100 RCUs. Note transactional reads cost double a normal read, and transactional writes double a normal write, due to the two-phase commit.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["rcu", "wcu", "capacity"],
+      "followUps": ["What does the same workload cost with eventually consistent reads?", "How much does a transactional write cost?"]
+    },
+    {
+      "id": "ddb-q-hot-partition",
+      "question": "What causes a hot partition, and how do you fix one?",
+      "answer": "A hot partition is when a disproportionate share of reads or writes hits a single partition key, exceeding that partition's throughput share while the rest of the table is underused — causing throttling even though total table capacity is far from exhausted. Common causes: a low-cardinality partition key (status, a single date, a country) that concentrates traffic onto few keys; sequential/time-based keys for writes (timestamps, auto-increment) that always hit the 'newest' partition; and the celebrity/whale problem where one entity draws outsized traffic. Fixes: choose a high-cardinality, evenly distributed partition key (user id, device id); apply write sharding by appending a shard suffix (PK = base#shardN) to spread writes and scatter-gather on read; cache hot read items with DAX; and lean on adaptive capacity (which redistributes throughput to busy partitions and can isolate a hot key) as a safety net — but adaptive capacity is not a substitute for good key design. The diagnostic signature is throttling while total provisioned capacity sits largely idle; raising capacity does not fix it, fixing the key does.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["hot-partition", "write-sharding", "throttling"],
+      "followUps": ["How does write sharding work on read?", "What is adaptive capacity?"]
+    },
+    {
+      "id": "ddb-q-consistency",
+      "question": "What is the difference between eventually and strongly consistent reads in DynamoDB, and where can't you use strong consistency?",
+      "answer": "DynamoDB replicates each item across multiple Availability Zones. An eventually consistent read (the default) may return a value that does not yet reflect a very recent write because it might be served by a replica that has not caught up; it costs half an RCU and offers the highest availability. A strongly consistent read returns the most up-to-date data reflecting all prior successful writes, but costs a full RCU, has higher latency, and may be unavailable if the leader replica for the partition is unreachable. Crucially, strong consistency is NOT available on Global Secondary Indexes — GSIs are always eventually consistent — nor across regions in a global table. So you can only get strongly consistent reads on the base table or an LSI. Reserve strong consistency for genuine read-your-writes needs (e.g. reading a counter or balance you just wrote); use eventually consistent reads everywhere else to halve cost and improve availability.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["consistency", "rcu", "gsi"],
+      "followUps": ["Why is a GSI only eventually consistent?", "When is read-your-writes worth the cost?"]
+    },
+    {
+      "id": "ddb-q-query-vs-scan",
+      "question": "Why is Scan usually the wrong choice, and what does a FilterExpression actually do?",
+      "answer": "A Scan reads EVERY item in the table or index and then applies any filter, so its consumed capacity and latency grow with the total size of the table regardless of how many items match — it does not scale. A Query, by contrast, targets a single partition key and reads only the items under it, so its cost is proportional to the matched data and stays fast at any scale. The key gotcha is that a FilterExpression is applied AFTER items are read from disk: it reduces the size of the RESULT returned to you but NOT the capacity consumed. So scanning a million items and filtering down to ten still bills you for reading a million items. This is why a Scan-with-filter for a routine access pattern is an anti-pattern: it signals a missing index. The fix is to add a GSI keyed on the attribute you are filtering by so the access pattern becomes an efficient Query. Scans are legitimate only for rare full-table jobs like one-off exports, migrations, or analytics where you genuinely must read everything.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["query", "scan", "filter-expression"],
+      "followUps": ["When is a Scan actually appropriate?", "How does a GSI turn a Scan into a Query?"]
+    },
+    {
+      "id": "ddb-q-streams",
+      "question": "What are DynamoDB Streams and what patterns do they enable?",
+      "answer": "DynamoDB Streams provide an ordered (per partition key) log of item-level changes — INSERT, MODIFY, REMOVE — retained for 24 hours, with a configurable view type (keys only, new image, old image, or both new and old). They are typically consumed by Lambda (or the Kinesis Adapter) to drive event-driven patterns: maintaining materialized views and derived aggregations, replicating data to another store or region, fanning out notifications, and implementing change-data-capture / the transactional-outbox pattern (the write and its event are one item change, so you never lose an event). TTL deletions also surface in the stream as REMOVE records, enabling archive-on-expiry. The important caveat is that ordering is guaranteed only PER partition key, not globally across the table, so consumers must not assume a single total order across different keys.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["streams", "cdc", "event-driven"],
+      "followUps": ["What ordering guarantee do Streams give?", "How long are stream records retained?"]
+    },
+    {
+      "id": "ddb-q-tricky-ttl",
+      "question": "Tricky: You rely on DynamoDB TTL to expire sessions exactly at their timeout, but expired sessions are still being returned to users. What is wrong and how do you fix it?",
+      "answer": "TTL deletion is best-effort and NOT immediate. DynamoDB deletes expired items via a background process that can lag the TTL timestamp by up to roughly 48 hours, so during that window an 'expired' item is still physically present and will be returned by GetItem, Query, and Scan. TTL is designed for cost-effective cleanup of stale data, not as a precise scheduler or a guarantee that reads never see expired items. The fix is to enforce expiry at READ time: add a FilterExpression (or application-side check) that compares the item's TTL/expiry attribute against the current time and treats anything past it as absent, e.g. 'expiresAt > :now'. That way correctness no longer depends on when the background deleter runs, while TTL still does its job of eventually reclaiming the storage. (Bonus: TTL removals appear in Streams as REMOVE events if you want to react to actual deletion.)",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["ttl", "consistency", "gotcha"],
+      "followUps": ["How do you filter out logically-expired items?", "Do TTL deletes show up in Streams?"]
+    },
+    {
+      "id": "ddb-q-tricky-gsi-consistency",
+      "question": "Tricky: After writing an item, you immediately query a GSI for it and get nothing, then it appears a moment later. Is this a bug, and could you make the GSI read strongly consistent?",
+      "answer": "It is not a bug — it is expected behaviour. GSIs are maintained ASYNCHRONOUSLY: after a write to the base table, DynamoDB propagates the change to each GSI in the background, so there is a brief replication lag during which a GSI query may not yet reflect the write. GSIs are ALWAYS eventually consistent and there is no option to make a GSI read strongly consistent — that capability exists only for the base table and LSIs. So you cannot 'fix' it by requesting a consistent read on the GSI; the API will not even allow ConsistentRead=true on a GSI. Mitigations if you need read-your-writes on that access pattern: read from the base table (or an LSI) with a strongly consistent read instead of the GSI; design the access pattern so the just-written data is fetched by primary key rather than via the GSI; or tolerate the small lag in the UI (retry/poll). The deeper point: choosing a GSI for an access pattern inherently accepts eventual consistency for that pattern.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["gsi", "consistency", "gotcha"],
+      "followUps": ["How would you serve read-your-writes for this pattern?", "Why are GSIs maintained asynchronously?"]
+    },
+    {
+      "id": "ddb-q-tricky-when-not",
+      "question": "Tricky: A team wants to move their analytics/reporting workload (ad-hoc filters, aggregations, joins across entities) from PostgreSQL to DynamoDB 'for scale.' Why might a senior engineer object?",
+      "answer": "Because the workload is the opposite of what DynamoDB is good at. DynamoDB excels when access patterns are KNOWN, high-volume, and reducible to single-partition Queries or key lookups. Analytics and reporting are characterized by ad-hoc, unpredictable queries, arbitrary filtering, aggregations (SUM/GROUP BY), and joins across many entities — none of which DynamoDB supports efficiently. In DynamoDB, an ad-hoc filter becomes a full-table Scan (reading and billing the entire table), aggregations must be precomputed or done client-side, and joins must be emulated by data layout you would have had to anticipate. You cannot 'add an index and query differently' the way you can in SQL because there are no flexible secondary query paths for unanticipated questions. The right tools are a relational database (PostgreSQL, which they already have), a columnar warehouse (Redshift), or query-over-S3 (Athena) for large-scale analytics. A senior engineer would keep the transactional, known-pattern workloads on DynamoDB where it shines and route the analytical workload to a system built for it — possibly streaming DynamoDB changes into a warehouse via Streams/Kinesis. Moving analytics to DynamoDB 'for scale' trades a solved problem for an unsolvable modeling problem.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["when-not", "analytics", "gotcha"],
+      "followUps": ["How could you still feed DynamoDB data into analytics?", "What makes ad-hoc querying hard in DynamoDB?"]
+    },
+    {
+      "id": "ddb-q-single-table",
+      "question": "What is single-table design and what problem does it solve?",
+      "answer": "Single-table design stores MULTIPLE entity types (e.g. users, orders, order items) in ONE DynamoDB table, using generic key attribute names (PK, SK) and prefixed values (USER#42, ORDER#900, ITEM#1) so that related entities share a partition key and are stored together. The problem it solves is the absence of joins: because DynamoDB cannot join tables, fetching a parent and its children from separate tables would require multiple round trips. By co-locating them under one partition key, a single Query (e.g. PK = USER#42) returns the user profile AND all their orders in one request — the data layout emulates a join. begins_with on the sort key selects a sub-collection (all ITEM# under an order), and overloaded GSIs add further access patterns. The benefits are fewer requests, lower cost at very high scale, and atomic access to related items; the costs are a model that is harder to design, read, and evolve, plus the need to know all access patterns up front. It is an advanced optimization — for simple applications a table per entity is perfectly acceptable.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["single-table-design", "modeling", "joins"],
+      "followUps": ["How does begins_with enable sub-collections?", "When is single-table design overkill?"]
+    },
+    {
+      "id": "ddb-q-transactions",
+      "question": "When should you use DynamoDB transactions, and what do they cost?",
+      "answer": "Use DynamoDB transactions (TransactWriteItems / TransactGetItems) when you need ACID, all-or-nothing guarantees across multiple items — up to 100 items, possibly spanning multiple tables in one region — with optional condition checks. Classic use cases: moving money (atomically debit one account item and credit another so you can never have one without the other), enforcing a global uniqueness constraint by conditionally creating a sentinel/lookup item alongside the entity, or any multi-item invariant that must hold atomically. The cost is that transactions consume DOUBLE the capacity of the equivalent non-transactional operations — a transactional write costs 2 WCUs per 1 KB instead of 1, a transactional read 2 RCUs — because they use a two-phase prepare/commit protocol under the hood. They also fail the whole batch if any condition check fails or any item conflicts with a concurrent transaction. Because of the doubled cost and the all-or-nothing semantics, reserve them for genuine multi-item invariants rather than using them as a default for ordinary single-item writes (where a conditional PutItem/UpdateItem is cheaper and sufficient).",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["transactions", "acid", "capacity"],
+      "followUps": ["How do you enforce uniqueness with a sentinel item?", "When is a conditional write enough instead?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ddb-ch-single-table",
+      "title": "Model E-Commerce Access Patterns in a Single Table",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "prompt": "Design a single DynamoDB table to satisfy these access patterns: (1) get a user's profile; (2) get a user's profile AND all their orders in one request; (3) get all line items for an order; (4) list all orders with a given status, newest first. Specify the primary key, the item shapes for each entity, any GSI needed, and the exact key conditions for each access pattern. Provide the design as JSON item examples plus the query parameters.",
+      "hints": [
+        "Use generic PK/SK with type-prefixed values so a user and their orders share a partition.",
+        "Access pattern 4 queries by status (a non-key attribute) -> you need a GSI keyed on status, with a sort key that orders by recency.",
+        "begins_with on the SK lets you fetch a sub-collection (e.g. all ORDER# items under a user, or all ITEM# under an order)."
+      ],
+      "solutionCode": "// ---------- TABLE: 'Commerce' ----------\n// Primary key: PK (partition), SK (sort). Entity type encoded in key prefixes.\n// GSI1: PK = GSI1PK, SK = GSI1SK  (for status-based, recency-sorted queries)\n\n// ----- Items -----\n// User profile (lives under the user's partition)\n{ \"PK\": \"USER#42\", \"SK\": \"PROFILE#\",          \"type\": \"User\",  \"name\": \"Ada\", \"email\": \"ada@x.com\" }\n\n// Orders for a user (same partition as the user => fetched together)\n{ \"PK\": \"USER#42\", \"SK\": \"ORDER#2026-03-02#O900\", \"type\": \"Order\", \"orderId\": \"O900\", \"status\": \"PLACED\",  \"total\": 799,\n  \"GSI1PK\": \"STATUS#PLACED\",  \"GSI1SK\": \"2026-03-02T10:00:00Z#O900\" }\n{ \"PK\": \"USER#42\", \"SK\": \"ORDER#2026-02-11#O812\", \"type\": \"Order\", \"orderId\": \"O812\", \"status\": \"SHIPPED\", \"total\": 4500,\n  \"GSI1PK\": \"STATUS#SHIPPED\", \"GSI1SK\": \"2026-02-11T09:00:00Z#O812\" }\n\n// Line items for an order (their OWN partition keyed by order id)\n{ \"PK\": \"ORDER#O900\", \"SK\": \"ITEM#1\", \"type\": \"OrderItem\", \"sku\": \"ABC\", \"qty\": 2, \"price\": 300 }\n{ \"PK\": \"ORDER#O900\", \"SK\": \"ITEM#2\", \"type\": \"OrderItem\", \"sku\": \"XYZ\", \"qty\": 1, \"price\": 199 }\n\n// ----- Access patterns -----\n\n// (1) Get a user's profile -> GetItem on the exact key.\n{ \"op\": \"GetItem\", \"Key\": { \"PK\": \"USER#42\", \"SK\": \"PROFILE#\" } }\n\n// (2) Get user profile + ALL their orders in ONE request.\n//     Same partition (USER#42); SK begins_with selects profile+orders.\n{ \"op\": \"Query\",\n  \"KeyConditionExpression\": \"PK = :pk\",\n  \"ExpressionAttributeValues\": { \":pk\": \"USER#42\" } }\n// (returns PROFILE# and every ORDER#... item for that user, sorted by SK)\n\n// (3) Get all line items for an order.\n{ \"op\": \"Query\",\n  \"KeyConditionExpression\": \"PK = :pk AND begins_with(SK, :p)\",\n  \"ExpressionAttributeValues\": { \":pk\": \"ORDER#O900\", \":p\": \"ITEM#\" } }\n\n// (4) List all orders with a given status, NEWEST FIRST -> GSI1.\n//     GSI1PK groups by status; GSI1SK is an ISO timestamp so sorting works;\n//     ScanIndexForward=false gives descending (newest first).\n{ \"op\": \"Query\", \"IndexName\": \"GSI1\",\n  \"KeyConditionExpression\": \"GSI1PK = :s\",\n  \"ExpressionAttributeValues\": { \":s\": \"STATUS#PLACED\" },\n  \"ScanIndexForward\": false }\n\n// ----- GSI definition (conceptual) -----\n// GSI1: partition key = GSI1PK (e.g. STATUS#PLACED), sort key = GSI1SK (timestamp#orderId)\n// Note: querying by status this way risks a HOT GSI partition if one status\n// dominates; mitigate with status#shardN as GSI1PK and scatter-gather, or by\n// time-bucketing (STATUS#PLACED#2026-03).",
+      "solutionLanguage": "json",
+      "explanation": "The design is derived access-pattern-first, which is the correct DynamoDB methodology. Generic PK/SK with type-prefixed values let unrelated entities coexist in one table. Pattern 1 is a direct GetItem on (USER#42, PROFILE#). Pattern 2 exploits co-location: because the user's profile and all their orders share the partition key USER#42, a single Query on PK=USER#42 returns them together, sorted by SK — the data layout emulates a join with zero extra requests. Pattern 3 puts an order's line items in their own partition (ORDER#O900) and uses begins_with(SK, 'ITEM#') to fetch just that sub-collection. Pattern 4 is the interesting one: 'orders by status' queries a NON-KEY attribute, which a base-table Query cannot do, so it requires a GSI. GSI1 re-partitions orders by status (GSI1PK = STATUS#PLACED) with an ISO-timestamp sort key (GSI1SK) so results sort by recency; ScanIndexForward=false returns newest first. The solution also flags the real-world risk: if one status holds most orders, the GSI partition for that status becomes hot — the mitigation is to shard the GSI partition key (STATUS#PLACED#shardN with scatter-gather) or time-bucket it (STATUS#PLACED#2026-03). This demonstrates the core skills: co-locating related entities, using begins_with for sub-collections, adding a GSI only where an access pattern needs a non-key query, sorting via the sort key, and proactively reasoning about hot partitions and the GSI's eventual consistency.",
+      "relatedTopic": "access-pattern-single-table"
+    },
+    {
+      "id": "ddb-ch-write-sharding",
+      "title": "Fix a Hot Partition with Write Sharding",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "prompt": "An IoT system writes one telemetry item per device reading, all under PK = 'sensor-data' with SK = timestamp, so every write hits one partition and the table throttles despite high total provisioned capacity. Redesign the keys to spread writes across partitions using write sharding, and show how to read back all readings for a time range via scatter-gather. Provide write and read code (pseudocode/JS) and explain the cost/benefit trade-off.",
+      "hints": [
+        "The single partition key 'sensor-data' is the hot key — every write funnels to it. Introduce a shard suffix to spread writes.",
+        "Pick a shard count N and derive the shard deterministically (hash of device id) or randomly; PK becomes 'sensor-data#<shard>'.",
+        "To read a time range you must query EACH shard partition and merge (scatter-gather), because the data is now spread across N partitions."
+      ],
+      "solutionCode": "// ---------- BEFORE (hot partition) ----------\n// PK = 'sensor-data' (constant!) , SK = timestamp\n// Every write -> the SAME partition -> throttling regardless of table capacity.\n\n// ---------- AFTER (write sharding) ----------\nconst SHARD_COUNT = 10; // tune to spread load across enough partitions\n\n// Deterministic shard from a stable attribute (device id) so a device's data\n// is reproducible; use a random shard if you do not need per-device locality.\nfunction shardFor(deviceId) {\n  let h = 0;\n  for (const ch of deviceId) h = (h * 31 + ch.charCodeAt(0)) >>> 0;\n  return h % SHARD_COUNT; // 0..9\n}\n\nasync function writeReading(ddb, deviceId, timestamp, value) {\n  const shard = shardFor(deviceId);\n  await ddb.putItem({\n    TableName: 'Telemetry',\n    Item: {\n      PK: `sensor-data#${shard}`,         // spreads writes across 10 partitions\n      SK: `${timestamp}#${deviceId}`,      // sortable; unique within the shard\n      deviceId, value,\n    },\n  });\n}\n\n// ---------- READ: scatter-gather across all shards for a time range ----------\nasync function readRange(ddb, startTs, endTs) {\n  const queries = [];\n  for (let shard = 0; shard < SHARD_COUNT; shard++) {\n    queries.push(ddb.query({\n      TableName: 'Telemetry',\n      KeyConditionExpression: 'PK = :pk AND SK BETWEEN :s AND :e',\n      ExpressionAttributeValues: {\n        ':pk': `sensor-data#${shard}`,\n        ':s': `${startTs}#`,\n        ':e': `${endTs}#\\uffff`,           // \\uffff makes the range inclusive of all device ids\n      },\n    }));\n  }\n  // Run all shard queries in parallel, then merge + sort by timestamp.\n  const results = await Promise.all(queries);\n  const items = results.flatMap(r => r.Items);\n  return items.sort((a, b) => a.SK.localeCompare(b.SK));\n}\n\n// If reads are usually per-DEVICE, prefer PK = `device#${deviceId}` instead:\n// that gives a high-cardinality key AND single-partition reads per device,\n// avoiding scatter-gather entirely. Sharding under a constant prefix is for\n// when you must read ACROSS all devices by time.",
+      "solutionLanguage": "javascript",
+      "explanation": "The root cause is a constant, low-cardinality partition key ('sensor-data'): because DynamoDB partitions by hashing the PK, every write lands on the one partition that key maps to, so a single partition's throughput is the bottleneck and the table throttles even though total provisioned capacity is high — the textbook hot-partition signature. Write sharding fixes the WRITE side by appending a shard suffix (PK = 'sensor-data#<0..9>'), spreading writes across SHARD_COUNT partitions; here the shard is derived deterministically from the device id so a device's readings are reproducible, though a random shard works too. The cost is on the READ side: because the data is now scattered across N partitions, a 'all readings in a time range' query can no longer hit one partition — you must Query each shard partition and merge the results (scatter-gather), which is N queries and a client-side sort. The trade-off is therefore: sharding trades simple single-partition reads for distributed, throttle-free writes; choose SHARD_COUNT high enough to spread load but not so high that scatter-gather reads become expensive. Crucially, the solution notes the better design when the dominant access pattern is per-device: keying by PK = 'device#<id>' is itself high-cardinality and gives single-partition reads per device with NO scatter-gather — sharding under a constant prefix is only warranted when you must read across ALL devices by time. This demonstrates the core senior skills: diagnosing a hot partition from the symptom, applying write sharding correctly, understanding the scatter-gather read cost it imposes, and recognizing that the best fix is often a naturally high-cardinality key chosen to match the real access pattern.",
+      "relatedTopic": "hot-partitions-consistency"
+    }
+  ],
+  "references": [
+    {"label": "AWS - Amazon DynamoDB Developer Guide", "url": "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Introduction.html"},
+    {"label": "AWS - Best Practices for DynamoDB (partition keys, hot partitions)", "url": "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/best-practices.html"},
+    {"label": "AWS - Global vs Local Secondary Indexes", "url": "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/SecondaryIndexes.html"},
+    {"label": "AWS - Read/Write Capacity Mode", "url": "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/HowItWorks.ReadWriteCapacityMode.html"},
+    {"label": "AWS - DynamoDB Streams", "url": "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Streams.html"},
+    {"label": "Alex DeBrie - The DynamoDB Book / single-table design", "url": "https://www.dynamodbbook.com/"},
+    {"label": "DeCandia et al. - Dynamo paper", "url": "https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf"}
+  ]
+}

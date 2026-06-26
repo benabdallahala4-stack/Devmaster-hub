@@ -1,0 +1,504 @@
+{
+  "id": "aws-vpc",
+  "title": "AWS VPC & Networking",
+  "category": "Cloud",
+  "subcategory": "Networking",
+  "difficulty": "senior",
+  "tags": ["aws", "vpc", "networking", "security-groups", "nacl", "nat-gateway"],
+  "description": "A senior-level guide to AWS VPC networking: subnets and route tables, internet vs NAT gateways, stateful security groups vs stateless NACLs, CIDR planning, peering vs Transit Gateway, gateway and interface endpoints, DNS, flow logs, and a methodical approach to debugging connectivity.",
+  "estReadMinutes": 31,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A Virtual Private Cloud (VPC) is a logically isolated, software-defined network you control inside an AWS region. You carve it into subnets (each pinned to a single Availability Zone), attach gateways, and control traffic with route tables, security groups, and network ACLs. Everything you launch — EC2 instances, RDS databases, load balancers, Lambda ENIs — lives on this network, so VPC design underpins the security, availability, and connectivity of every workload."
+        },
+        {
+          "type": "list",
+          "items": [
+            "VPC: a regional network defined by one or more CIDR blocks (e.g. 10.0.0.0/16).",
+            "Subnet: a slice of the VPC CIDR bound to ONE Availability Zone; 'public' or 'private' depends entirely on its route table.",
+            "Route table: rules mapping destination CIDRs to targets (IGW, NAT, peering, endpoint). Each subnet is associated with exactly one route table.",
+            "Internet Gateway (IGW): horizontally-scaled, highly-available VPC component enabling bidirectional IPv4 internet access for instances with public IPs.",
+            "NAT Gateway: managed component allowing private-subnet instances to make OUTBOUND internet connections while blocking unsolicited inbound."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A subnet is not 'public' because of a flag — it is public because its route table has a 0.0.0.0/0 route to an Internet Gateway AND the instance has a public/Elastic IP. Remove either and it is effectively private."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "VPC design is one of the few AWS decisions that is hard to change later. CIDR ranges, subnet layout, and account/VPC topology get baked in as workloads and peering relationships accumulate; an overlapping CIDR or an undersized subnet discovered in year two is a painful, sometimes migration-level, fix. Networking is also where the majority of 'it can't connect' incidents and a large share of security exposure originate."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Security posture: the public/private subnet split, security groups, and NACLs are your primary network defense — a database in a public subnet with an open security group is a breach waiting to happen.",
+            "Cost: NAT Gateways and inter-AZ/cross-region data transfer are common surprise line items; VPC endpoints can eliminate NAT charges for AWS-service traffic.",
+            "Availability: subnets are AZ-scoped, so multi-AZ subnet design is what makes a workload survive an AZ failure.",
+            "Connectivity at scale: choosing peering vs Transit Gateway early determines whether your network grows linearly or into an unmanageable mesh."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Overlapping CIDR blocks are the cardinal sin of VPC planning: two VPCs with overlapping ranges cannot be peered or routed together. Plan a non-overlapping address scheme across all accounts and regions before you create the first VPC."
+        }
+      ]
+    },
+    {
+      "id": "subnets-routing",
+      "heading": "Subnets, Route Tables, and Gateways",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Routing is what makes a subnet public or private. Every subnet associates with one route table; the route table's most-specific matching route wins (longest-prefix match), with the local route for the VPC CIDR always present and highest priority for in-VPC traffic."
+        },
+        {
+          "type": "table",
+          "headers": ["Subnet type", "Default route (0.0.0.0/0) target", "Inbound from internet?", "Outbound to internet?"],
+          "rows": [
+            ["Public", "Internet Gateway (igw-...)", "Yes (if instance has public/EIP)", "Yes"],
+            ["Private (with NAT)", "NAT Gateway (nat-...) in a public subnet", "No", "Yes (outbound only)"],
+            ["Private (isolated)", "none (only local route)", "No", "No internet (VPC + endpoints only)"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The canonical pattern: public subnets host only internet-facing entry points (load balancers, NAT Gateways, bastions); application servers and databases live in private subnets and reach out via a NAT Gateway. The NAT Gateway itself sits in a PUBLIC subnet (it needs an IGW route and an Elastic IP) and provides outbound-only access for private instances."
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "code": "// Private subnet route table: in-VPC local route + outbound via NAT.\n{\n  \"Routes\": [\n    { \"DestinationCidrBlock\": \"10.0.0.0/16\", \"GatewayId\": \"local\" },\n    { \"DestinationCidrBlock\": \"0.0.0.0/0\",  \"NatGatewayId\": \"nat-0abc123\" }\n  ]\n}\n// Public subnet route table: in-VPC local route + IGW for the internet.\n{\n  \"Routes\": [\n    { \"DestinationCidrBlock\": \"10.0.0.0/16\", \"GatewayId\": \"local\" },\n    { \"DestinationCidrBlock\": \"0.0.0.0/0\",  \"GatewayId\": \"igw-0def456\" }\n  ]\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "A NAT Gateway is single-AZ. For high availability deploy one NAT Gateway per AZ and route each AZ's private subnets to the NAT in the SAME AZ — otherwise an AZ outage breaks outbound traffic AND cross-AZ NAT traffic incurs data-transfer charges."
+        }
+      ]
+    },
+    {
+      "id": "sg-vs-nacl",
+      "heading": "Security Groups (Stateful) vs NACLs (Stateless)",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "AWS gives you two firewall layers. Security groups operate at the instance/ENI level and are STATEFUL; network ACLs operate at the subnet boundary and are STATELESS. The stateful/stateless distinction is the single most-tested VPC concept and the source of countless connectivity bugs."
+        },
+        {
+          "type": "table",
+          "headers": ["Property", "Security Group", "Network ACL"],
+          "rows": [
+            ["Scope", "Instance / ENI", "Subnet"],
+            ["State", "Stateful (return traffic auto-allowed)", "Stateless (must allow return traffic explicitly)"],
+            ["Rules", "Allow only (no deny rules)", "Allow AND deny rules"],
+            ["Evaluation", "All rules evaluated; any match allows", "Rules processed in numbered order; first match wins"],
+            ["Default", "Deny all inbound, allow all outbound", "Default NACL allows all; custom NACL denies all until you add rules"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Stateful (security group): if you allow inbound on port 443, the response traffic is automatically permitted regardless of outbound rules — the SG tracks the connection. Stateless (NACL): the NACL evaluates each packet independently with no memory of the connection, so you must add BOTH an inbound rule for the request AND an outbound rule for the response. Because responses use ephemeral source ports, a NACL must allow the ephemeral port range (commonly 1024-65535) outbound for return traffic; forgetting this is the classic NACL footgun."
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "Allowing an inbound HTTPS request to a web server:\n\nSecurity Group (stateful) -- ONE rule is enough:\n  Inbound : ALLOW tcp 443 from 0.0.0.0/0\n  (return traffic on the ephemeral port is auto-allowed)\n\nNetwork ACL (stateless) -- you need TWO rules:\n  Inbound  rule 100 : ALLOW tcp 443         from 0.0.0.0/0\n  Outbound rule 100 : ALLOW tcp 1024-65535  to   0.0.0.0/0  <-- ephemeral return\n  (omit the outbound rule and the response is silently dropped)"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Security groups can reference OTHER security groups as a source (e.g. 'allow 5432 from the app-tier SG'), which is the idiomatic way to let tiers talk without hardcoding IPs. NACLs cannot reference SGs — they only understand CIDR ranges and ports."
+        }
+      ]
+    },
+    {
+      "id": "cidr-planning",
+      "heading": "CIDR Planning",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "CIDR planning is allocate-once-live-with-it. A VPC CIDR can be /16 down to /28; you cannot shrink it, and while you can ADD secondary CIDR blocks later, overlaps with peers are unfixable. Plan a hierarchical, non-overlapping scheme across accounts/regions, and leave room to grow."
+        },
+        {
+          "type": "list",
+          "items": [
+            "AWS reserves 5 IPs in every subnet: the first four (network, VPC router, DNS, future use) and the last (broadcast). A /24 (256 addresses) yields only 251 usable.",
+            "Use private RFC 1918 ranges: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16. The 10/8 space gives the most room for a large org.",
+            "Size subnets for their AZ workload plus headroom; remember Lambda, EKS pods (which can consume an IP per pod with the VPC CNI), and ENIs all draw from subnet addresses.",
+            "Keep public subnets small (just LBs/NAT) and private subnets larger (the bulk of compute)."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "Example non-overlapping plan (region eu-west-1, VPC 10.20.0.0/16):\n  AZ a  public  10.20.0.0/24   (251 usable)  - ALB, NAT-a\n  AZ a  private 10.20.16.0/20  (4091 usable) - app + data\n  AZ b  public  10.20.1.0/24                 - ALB, NAT-b\n  AZ b  private 10.20.32.0/20                - app + data\n  AZ c  public  10.20.2.0/24                 - ALB, NAT-c\n  AZ c  private 10.20.48.0/20                - app + data\nOther VPCs/accounts use 10.21.0.0/16, 10.22.0.0/16, ... (no overlap)."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A /28 is the smallest VPC/subnet (16 addresses, 11 usable after reservations) and a /16 is the largest VPC (65,536 addresses). Going wider than /16 requires adding secondary CIDR blocks to the VPC."
+        }
+      ]
+    },
+    {
+      "id": "peering-tgw",
+      "heading": "VPC Peering vs Transit Gateway",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "To connect VPCs you choose between VPC peering (point-to-point) and AWS Transit Gateway (a hub-and-spoke router). The decision is about scale and topology."
+        },
+        {
+          "type": "table",
+          "headers": ["Aspect", "VPC Peering", "Transit Gateway"],
+          "rows": [
+            ["Topology", "Point-to-point, one connection per pair", "Hub-and-spoke, central router"],
+            ["Transitivity", "Non-transitive (A-B and B-C does NOT give A-C)", "Transitive (all attached VPCs can route via the hub)"],
+            ["Scaling", "N VPCs need N(N-1)/2 connections (mesh explosion)", "N VPCs need N attachments to one TGW"],
+            ["Cost", "No hourly charge; data transfer only", "Hourly per-attachment + data processing charge"],
+            ["Best for", "A few VPCs, simple, lowest cost", "Many VPCs/accounts, hybrid (VPN/DX), central control"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The killer property is transitivity. VPC peering is NOT transitive: if A peers with B and B peers with C, A still cannot reach C — you would need a direct A-C peering. With three VPCs that is fine; with ten it is 45 peerings to fully mesh, each with route-table entries to maintain. Transit Gateway gives every attached VPC transitive routing through a central hub, and it also terminates VPN and Direct Connect, making it the standard for multi-account, hybrid networks. Note that peered VPCs must NOT have overlapping CIDRs — this is why CIDR planning matters."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Heuristic: a handful of VPCs that mostly talk in pairs -> peering (cheaper, simpler). Many VPCs across accounts, or any need for transitive routing or on-prem connectivity -> Transit Gateway."
+        }
+      ]
+    },
+    {
+      "id": "endpoints-dns",
+      "heading": "VPC Endpoints and DNS",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "VPC endpoints let resources reach AWS services privately, without traversing the public internet or a NAT Gateway. There are two kinds, and the difference is frequently tested."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Gateway endpoints: only for S3 and DynamoDB. They work by adding a prefix-list route to your route table (a routing-level construct), cost nothing, and keep S3/DynamoDB traffic on the AWS network. No ENI, no hourly charge.",
+            "Interface endpoints (AWS PrivateLink): for almost every other AWS service (and your own services). They provision an Elastic Network Interface with a private IP in your subnet and you reach the service via that ENI's private DNS name. They incur an hourly charge plus per-GB processing.",
+            "Cost angle: routing S3 traffic through a Gateway endpoint instead of a NAT Gateway eliminates NAT data-processing charges for that traffic — a common, easy cost win."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "DNS in a VPC is provided by the Amazon-provided resolver at the VPC base + 2 address (e.g. 10.0.0.2 for a 10.0.0.0/16 VPC), reachable via the special 169.254.169.253 link-local resolver. Two VPC attributes control behaviour: enableDnsSupport (turns on the resolver) and enableDnsHostnames (gives instances public DNS names). For private name resolution across VPCs and on-prem you use Route 53 Resolver (private hosted zones, inbound/outbound resolver endpoints)."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Interface endpoints rely on private DNS to override the public service name with the endpoint's private IP. If 'Enable DNS name' is off, or enableDnsHostnames/enableDnsSupport are disabled, clients keep resolving the public endpoint and your private-endpoint traffic silently goes out over the internet/NAT instead."
+        }
+      ]
+    },
+    {
+      "id": "flow-logs-debug",
+      "heading": "Flow Logs and Connectivity Debugging",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "VPC Flow Logs capture metadata about IP traffic at the VPC, subnet, or ENI level, recording the 5-tuple plus an ACCEPT/REJECT action and byte/packet counts. They are the primary tool for answering 'is traffic even arriving, and what dropped it?' Note they capture metadata, not payloads, and do not log certain traffic (e.g. to the Amazon DNS server, DHCP, instance metadata)."
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "Flow log record (default format), one rejected SSH attempt:\n2 123456789012 eni-0abc 203.0.113.5 10.0.1.10 51234 22 6 4 240 1690000000 1690000060 REJECT OK\n                         ^srcaddr     ^dstaddr   ^sport ^dport ^proto       ^action\n\nReading it: a packet from 203.0.113.5 to 10.0.1.10 on dst port 22 (SSH),\nprotocol 6 (TCP), was REJECTED. REJECT here = denied by a security group\nor NACL. If you see the inbound ACCEPT but no return traffic, suspect a\nstateless NACL missing the ephemeral outbound rule."
+        },
+        {
+          "type": "paragraph",
+          "text": "A methodical connectivity-debugging checklist, outermost to innermost: (1) Route table — is there a route to the destination and a valid target (IGW/NAT/peering/endpoint)? (2) NACL — both inbound AND outbound (ephemeral) rules allow it, on BOTH subnets for cross-subnet traffic? (3) Security group — inbound rule on the destination allows the source (SG or CIDR); remember SGs are stateful so you usually do not need an outbound rule. (4) Public IP / NAT — does the resource have a public IP (public subnet) or a NAT route (private subnet) for internet access? (5) DNS — is the name resolving to the address you expect? (6) The application itself — is the process actually listening on that port? Flow logs tell you at which hop traffic is being dropped."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "AWS Reachability Analyzer and Network Access Analyzer can trace a path between two ENIs/resources and tell you exactly which component (route, SG, NACL) blocks it, without sending real packets — often faster than reading flow logs by hand."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Forgetting NACLs are stateless: allowing inbound 443 but not the outbound ephemeral range (1024-65535), so requests arrive but responses are dropped. Security groups would not have this problem.",
+            "Placing a database in a public subnet (route to IGW) with a wide-open security group — direct internet exposure of data.",
+            "A single NAT Gateway for all AZs: an AZ outage kills outbound for every private subnet, plus cross-AZ data-transfer charges. Use one NAT per AZ.",
+            "Overlapping CIDRs across VPCs, discovered only when you try to peer or attach to a Transit Gateway — by then it is a re-IP migration.",
+            "Assuming VPC peering is transitive and expecting A to reach C through B; it never will without a direct peering or a Transit Gateway.",
+            "Routing S3/DynamoDB traffic through a NAT Gateway and paying NAT processing charges when a free Gateway endpoint would keep it on the AWS network.",
+            "Disabling enableDnsHostnames/enableDnsSupport (or the endpoint's private DNS) and then wondering why interface-endpoint traffic still leaves via NAT."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Classic incident: an app could open connections to a new partner API but every response timed out. Security groups were fine (stateful), but a hardened custom NACL on the subnet allowed outbound 443 yet had no inbound rule for the ephemeral return ports, so all reply packets were silently dropped at the subnet boundary. The fix was a single inbound NACL rule for 1024-65535."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Plan a hierarchical, non-overlapping CIDR scheme across all accounts and regions BEFORE creating any VPC; leave growth room and keep public subnets small.",
+            "Use the public/private subnet pattern: only internet-facing entry points (ALB, NAT, bastion) in public subnets; all compute and data in private subnets.",
+            "Deploy one NAT Gateway per AZ and route each AZ's private subnets to its local NAT for availability and to avoid cross-AZ charges.",
+            "Prefer security groups as the primary control and reference SGs as sources between tiers; treat NACLs as a coarse, subnet-wide backstop and remember to allow ephemeral return traffic.",
+            "Use Gateway endpoints for S3/DynamoDB (free, keeps traffic off NAT) and Interface endpoints (PrivateLink) for other services where private access matters.",
+            "Choose Transit Gateway over a peering mesh once you have many VPCs/accounts or need transitive or hybrid (VPN/DX) connectivity.",
+            "Enable VPC Flow Logs (at least at REJECT granularity) and use Reachability Analyzer to debug paths quickly.",
+            "Define the whole topology as code (Terraform/CloudFormation) so subnet, route-table, SG, and NACL changes are reviewable and reproducible."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Goal", "Reach for"],
+          "rows": [
+            ["Outbound internet from private subnet", "NAT Gateway (one per AZ)"],
+            ["Private access to S3/DynamoDB", "Gateway endpoint (free)"],
+            ["Private access to other AWS services", "Interface endpoint (PrivateLink)"],
+            ["Connect many VPCs/accounts", "Transit Gateway"],
+            ["Tier-to-tier access control", "Security group referencing another SG"],
+            ["Trace why traffic is blocked", "Flow Logs + Reachability Analyzer"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "note-mental-model",
+      "heading": "A Layered Mental Model",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Picture a packet's journey and the gates it passes: the route table decides WHERE it can go, the NACL is a stateless gate at the subnet edge (check both directions), the security group is a stateful gate at the ENI (responses are free), and the gateway (IGW/NAT/endpoint) decides whether it leaves the VPC and how. Debugging is just walking those gates in order. Architecture is just deciding, per workload, which subnets, gateways, and controls it sits behind."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Whenever connectivity fails, resist guessing: list the gates (route -> NACL -> SG -> gateway -> DNS -> app) and verify each with flow logs or Reachability Analyzer. The stateless NACL and a missing 0.0.0.0/0 route are the two most common culprits."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "vpc-topology",
+      "title": "Standard Public/Private VPC Topology",
+      "type": "mermaid",
+      "content": "flowchart TB\n    IGW[Internet Gateway]\n    subgraph VPC[VPC 10.20.0.0/16]\n        subgraph Pub[Public subnet 10.20.0.0/24]\n            ALB[Application Load Balancer]\n            NAT[NAT Gateway + EIP]\n        end\n        subgraph Priv[Private subnet 10.20.16.0/20]\n            APP[App servers]\n            DB[(RDS - private)]\n        end\n    end\n    Internet((Internet)) --> IGW --> ALB --> APP\n    APP --> DB\n    APP -->|outbound| NAT --> IGW --> Internet"
+    },
+    {
+      "id": "sg-nacl-packet",
+      "title": "Packet Gates: NACL (stateless) vs SG (stateful)",
+      "type": "ascii",
+      "content": "Inbound HTTPS request to a web server in a private subnet:\n\n  Internet --> [Route Table: 0.0.0.0/0 -> IGW] --> reaches subnet edge\n            --> [NACL inbound : ALLOW 443]        (stateless gate, subnet)\n            --> [Security Group inbound : ALLOW 443 from ALB-SG]  (stateful, ENI)\n            --> Instance (app listening on 443)\n\nResponse back to client (ephemeral port, e.g. 52000):\n            <-- [Security Group]  auto-allowed (STATEFUL: remembers conn)\n            <-- [NACL outbound : must ALLOW 1024-65535]  (STATELESS: explicit!)\n            <-- out via IGW/NAT\n\nMissing the NACL outbound ephemeral rule => request arrives, reply dropped."
+    },
+    {
+      "id": "peering-vs-tgw",
+      "title": "Peering Mesh vs Transit Gateway Hub",
+      "type": "mermaid",
+      "content": "flowchart LR\n    subgraph Peering[VPC Peering - non-transitive mesh]\n        A1[VPC A] --- B1[VPC B]\n        B1 --- C1[VPC C]\n        A1 --- C1\n    end\n    subgraph TGW[Transit Gateway - hub and spoke]\n        T((Transit Gateway))\n        A2[VPC A] --- T\n        B2[VPC B] --- T\n        C2[VPC C] --- T\n        VPN[VPN / Direct Connect] --- T\n    end"
+    }
+  ],
+  "questions": [
+    {
+      "id": "vpc-q-public-subnet",
+      "question": "What exactly makes a subnet 'public' in a VPC?",
+      "answer": "A subnet is public when its associated route table has a default route (0.0.0.0/0) pointing to an Internet Gateway, AND the instances in it have a public IPv4 or Elastic IP address. There is no boolean 'public' flag on a subnet itself — the designation is purely a function of routing plus addressing. Remove the IGW route and the subnet becomes private (no internet path); keep the route but give instances no public IP and they still cannot be reached from the internet (though outbound via IGW needs a public IP for NAT-less internet, which is why private instances use a NAT Gateway instead). The 'auto-assign public IP' subnet setting is a convenience that affects new instances, not a definition of public-ness.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["subnet", "routing", "igw"],
+      "followUps": ["Where does a NAT Gateway have to live and why?", "What is the local route?"]
+    },
+    {
+      "id": "vpc-q-sg-vs-nacl",
+      "question": "Explain the difference between a security group and a network ACL, and give a practical consequence.",
+      "answer": "A security group is a STATEFUL firewall at the instance/ENI level: it has allow-only rules, evaluates all of them (any match permits), and automatically permits return traffic for an allowed connection. A network ACL is a STATELESS firewall at the subnet boundary: it has both allow and deny rules processed in numbered order (first match wins) and treats every packet independently, so it does NOT auto-allow return traffic. The practical consequence: with a security group, allowing inbound 443 is enough — the response is automatically allowed. With a NACL you must add BOTH an inbound rule for the request AND an outbound rule for the response, and since responses use ephemeral source ports you must allow the ephemeral range (e.g. 1024-65535) outbound. Forgetting the ephemeral outbound rule is the classic bug where requests arrive but replies are silently dropped. Also, SGs can reference other SGs as a source; NACLs only understand CIDRs.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["security-group", "nacl", "stateful"],
+      "followUps": ["Why do you need the ephemeral port range in a NACL?", "Can a NACL reference a security group?"]
+    },
+    {
+      "id": "vpc-q-nat-direction",
+      "question": "What does a NAT Gateway do, where must it be placed, and what does it NOT allow?",
+      "answer": "A NAT Gateway lets instances in PRIVATE subnets initiate OUTBOUND connections to the internet (or other VPCs) while preventing the internet from initiating INBOUND connections to those instances — it performs source NAT on egress and only allows return traffic for connections the private instance started. It must be placed in a PUBLIC subnet because it itself needs a route to an Internet Gateway and an Elastic IP. Private subnets then route 0.0.0.0/0 to the NAT Gateway. It does NOT allow unsolicited inbound traffic, does NOT work for IPv6 (use an egress-only internet gateway for that), and is single-AZ — so for high availability you deploy one per AZ and route each AZ's private subnets to its local NAT to avoid both an AZ-failure outage and cross-AZ data-transfer charges.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["nat-gateway", "subnet", "availability"],
+      "followUps": ["How do you make NAT highly available?", "What handles IPv6 egress-only?"]
+    },
+    {
+      "id": "vpc-q-gateway-vs-interface-endpoint",
+      "question": "What is the difference between a Gateway endpoint and an Interface endpoint?",
+      "answer": "A Gateway endpoint is a routing-level construct available only for S3 and DynamoDB: it adds an AWS-managed prefix-list route to your route table so traffic to those services stays on the AWS network instead of going via the internet or NAT. It has no ENI and no hourly charge — it is free. An Interface endpoint (AWS PrivateLink) is available for almost all other AWS services (and your own services behind a Network Load Balancer): it provisions an Elastic Network Interface with a private IP in your subnet, and clients reach the service through that ENI using its private DNS name. Interface endpoints incur an hourly charge plus per-GB data processing. A common cost optimization is using a Gateway endpoint for S3 to avoid paying NAT Gateway processing charges for S3 traffic.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["vpc-endpoint", "privatelink", "s3"],
+      "followUps": ["Which services support Gateway endpoints?", "How does private DNS affect interface endpoints?"]
+    },
+    {
+      "id": "vpc-q-peering-transitive",
+      "question": "Is VPC peering transitive, and how does that drive the choice of Transit Gateway?",
+      "answer": "No, VPC peering is NOT transitive. If VPC A is peered with B and B is peered with C, A cannot reach C through B — you would need a direct A-C peering connection (and matching route-table entries). This is fine for a few VPCs, but fully meshing N VPCs requires N(N-1)/2 peerings, which explodes operationally (10 VPCs = 45 connections, each with routes to maintain). Transit Gateway solves this with a hub-and-spoke model: each VPC has a single attachment to the TGW, routing is transitive through the hub, and the TGW can also terminate VPN and Direct Connect for hybrid connectivity. So the heuristic is: a few VPCs talking in pairs favour peering (cheaper, no hourly fee); many VPCs/accounts or any need for transitive or on-prem routing favour Transit Gateway. In both cases the connected VPCs must have non-overlapping CIDRs.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["peering", "transit-gateway", "topology"],
+      "followUps": ["How many peerings to fully mesh 6 VPCs?", "Can peered VPCs have overlapping CIDRs?"]
+    },
+    {
+      "id": "vpc-q-cidr-reserved",
+      "question": "How many usable IPs are in a /24 subnet on AWS, and why?",
+      "answer": "A /24 has 256 total addresses but only 251 are usable, because AWS reserves 5 IPs in every subnet: the network address (.0), the VPC router (.1), the Amazon DNS / reserved (.2), a fourth reserved for future use (.3), and the network broadcast address (.255) — though AWS does not actually support broadcast, that last address is still reserved. So total minus 5 reserved = 251 usable. This matters when sizing subnets for services that consume many IPs, like the EKS VPC CNI (which can assign an IP per pod) or large fleets of ENIs/Lambda — a subnet that looks big can run out of addresses faster than expected.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["cidr", "subnet", "ip-planning"],
+      "followUps": ["What is the smallest and largest VPC CIDR?", "Why can EKS exhaust subnet IPs quickly?"]
+    },
+    {
+      "id": "vpc-q-flow-logs",
+      "question": "What do VPC Flow Logs capture, and how do you use them to debug a connectivity problem?",
+      "answer": "VPC Flow Logs capture metadata (not payloads) about IP traffic at the VPC, subnet, or ENI level: the 5-tuple (source/destination IP and port, protocol), an ACCEPT or REJECT action, byte/packet counts, and timestamps. They are published to CloudWatch Logs, S3, or Kinesis. To debug, you look at the relevant ENI/subnet logs: a REJECT tells you a security group or NACL denied the packet (so you check those rules); seeing an inbound ACCEPT but no corresponding return-direction traffic points to a stateless NACL missing the ephemeral outbound rule; seeing no record at all for the expected source suggests a routing problem upstream (the packet never reached this ENI). Note they do not log some traffic, such as to the Amazon DNS server or instance metadata service. For faster, packet-free path analysis, AWS Reachability Analyzer pinpoints exactly which component blocks a path between two resources.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["flow-logs", "debugging", "observability"],
+      "followUps": ["What does a REJECT vs no-record tell you?", "What is Reachability Analyzer?"]
+    },
+    {
+      "id": "vpc-q-tricky-nacl-ephemeral",
+      "question": "Tricky: An EC2 instance can SSH OUT to a server, but inbound SSH to it fails, even though the security group allows 22 from your IP. The subnet uses a custom NACL. What is the most likely cause?",
+      "answer": "The most likely cause is the stateless NACL missing the inbound rule for SSH and/or the outbound rule for the ephemeral return ports. Because the security group is stateful, allowing inbound 22 there is sufficient at the ENI level — so the SG is not the problem. But a custom NACL denies everything until you add rules and is stateless, so it needs explicit rules in BOTH directions: an INBOUND rule allowing TCP 22 from your IP (for the request) AND an OUTBOUND rule allowing the ephemeral port range (e.g. 1024-65535) back to your IP (for the SSH response). If the inbound 22 NACL rule is present but the outbound ephemeral rule is missing, the connection request is accepted but the server's reply is dropped at the subnet boundary, so the handshake never completes and inbound SSH 'fails.' The fact that outbound SSH works is consistent: for outbound the instance's response path uses different rule directions. The fix is to add the outbound ephemeral allow rule (and verify the inbound 22 rule) on the NACL. This is the canonical 'forgot NACLs are stateless' bug.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["nacl", "ephemeral", "debugging", "gotcha"],
+      "followUps": ["Why doesn't the security group exhibit this problem?", "What ephemeral range should you allow?"]
+    },
+    {
+      "id": "vpc-q-tricky-endpoint-dns",
+      "question": "Tricky: You created an Interface endpoint for SSM in a private subnet so instances can use Session Manager without a NAT Gateway, but instances still fail to reach SSM and you see NAT traffic. What did you miss?",
+      "answer": "Almost certainly DNS. An Interface endpoint works by having its PRIVATE DNS name resolve to the endpoint ENI's private IP, transparently overriding the public service name (e.g. ssm.region.amazonaws.com). For that override to happen you need: (1) 'Enable DNS name' (private DNS) turned ON for the endpoint, and (2) the VPC attributes enableDnsSupport AND enableDnsHostnames both enabled. If any of these is off, clients keep resolving the PUBLIC SSM endpoint, so their traffic tries to go out to the internet — which, if a NAT route exists, explains the NAT traffic, and if no NAT/IGW exists, simply fails. The other things to verify are that the endpoint's security group allows inbound 443 from the instances' subnet/SG, and that SSM actually needs three endpoints (ssm, ssmmessages, ec2messages) — missing ssmmessages is a common reason Session Manager specifically fails. But the 'still seeing NAT traffic' symptom is the DNS-override tell.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["interface-endpoint", "dns", "privatelink", "gotcha"],
+      "followUps": ["Which VPC attributes must be enabled?", "Which endpoints does Session Manager require?"]
+    },
+    {
+      "id": "vpc-q-tricky-overlap-tgw",
+      "question": "Tricky: Two teams built VPCs both using 10.0.0.0/16. They now must communicate. Can a Transit Gateway fix the overlap, and what are the real options?",
+      "answer": "No — a Transit Gateway does not magically resolve overlapping CIDRs. TGW routes by destination CIDR, and if both VPCs claim 10.0.0.0/16 the route is ambiguous, so standard transitive routing cannot distinguish them. Overlap is a fundamental addressing conflict, not a connectivity-tool gap; the same blocker applies to VPC peering. The real options, in rough order of preference: (1) Re-IP one VPC onto a non-overlapping range — the clean, correct fix, painful but permanent. (2) If only a few hosts need to talk, expose them via PrivateLink (an Interface endpoint to an NLB), which works across overlapping CIDRs because the consumer reaches a private IP in its OWN VPC, not the provider's address. (3) Use private NAT (a NAT Gateway in private-NAT mode) to translate one side's overlapping range to a distinct range before it hits the TGW. (4) For broad connectivity, there is no clean shortcut — re-IP is the answer. The lesson reinforces why non-overlapping CIDR planning across all accounts must happen before the first VPC is created.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["cidr", "overlap", "transit-gateway", "gotcha"],
+      "followUps": ["How does PrivateLink sidestep CIDR overlap?", "What is private NAT used for?"]
+    },
+    {
+      "id": "vpc-q-debug-order",
+      "question": "Give a systematic order for debugging 'instance can't reach the internet' in a private subnet.",
+      "answer": "Walk the gates outward-in and check one thing at a time. (1) Route table: does the private subnet's route table have a 0.0.0.0/0 route, and does it point to a healthy NAT Gateway (not an IGW — private instances cannot use an IGW without a public IP)? (2) NAT Gateway: is it in a PUBLIC subnet, in the AVAILABLE state, with an Elastic IP, and does ITS subnet route 0.0.0.0/0 to the IGW? (3) NACL: does the private subnet's NACL allow outbound to 0.0.0.0/0 on the needed ports AND inbound on the ephemeral range for return traffic (stateless)? (4) Security group: does the instance's SG allow the outbound traffic (default SGs allow all outbound, but a hardened one may not)? (5) DNS: is the destination name resolving (check enableDnsSupport and the resolver)? (6) Application/destination: is the remote endpoint actually up and is the instance trying the right port? Use VPC Flow Logs to see at which hop packets are REJECTed or simply absent, or run Reachability Analyzer to have AWS identify the blocking component directly.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["debugging", "nat", "routing"],
+      "followUps": ["Why can't a private instance use the IGW directly?", "What would flow logs show if the NAT is the problem?"]
+    },
+    {
+      "id": "vpc-q-igw-vs-nat",
+      "question": "Compare an Internet Gateway and a NAT Gateway.",
+      "answer": "An Internet Gateway (IGW) is a horizontally-scaled, redundant, region/VPC-level component that enables BIDIRECTIONAL IPv4 internet connectivity for resources that have a public IPv4 or Elastic IP — it performs 1:1 NAT between a public IP and the instance's private IP. There is one IGW per VPC and it has no bandwidth constraints or charges of its own. A NAT Gateway is a managed, per-AZ component placed in a PUBLIC subnet that gives PRIVATE-subnet instances OUTBOUND-only internet access via source NAT, blocking unsolicited inbound; it has an hourly cost plus data-processing charges and is bounded per-gateway in throughput (scaling automatically up to a high limit). In short: the IGW is the VPC's door to the internet (needed by anything reaching the internet, including the NAT Gateway), while the NAT Gateway is the mechanism that lets private instances use that door for egress without being exposed to ingress. A NAT Gateway always sits behind an IGW.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["igw", "nat-gateway", "comparison"],
+      "followUps": ["Does the NAT Gateway need an IGW?", "How is an IGW billed compared to a NAT Gateway?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "vpc-ch-layout",
+      "title": "Design a Highly-Available 3-Tier VPC Layout",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "prompt": "Design a non-overlapping, highly-available VPC for a 3-tier web app (ALB, app servers, RDS) across two AZs in one region. Specify the VPC CIDR, subnet CIDRs (public + private per AZ), route tables, NAT Gateway placement, and the security-group rules between tiers. Express the core layout and SG rules as Terraform-style HCL.",
+      "hints": [
+        "One public subnet (ALB + NAT) and one private subnet (app + db) per AZ; keep public subnets small.",
+        "One NAT Gateway per AZ; each AZ's private route table points to its OWN NAT for HA and to avoid cross-AZ charges.",
+        "Use SG-references between tiers: ALB-SG -> App-SG on 443, App-SG -> DB-SG on 5432; nothing references 0.0.0.0/0 except the ALB inbound."
+      ],
+      "solutionCode": "# VPC and CIDR plan (non-overlapping; this VPC owns 10.20.0.0/16)\nresource \"aws_vpc\" \"main\" {\n  cidr_block           = \"10.20.0.0/16\"\n  enable_dns_support   = true   # Amazon resolver\n  enable_dns_hostnames = true   # required for private DNS / interface endpoints\n}\n\n# --- Subnets: small public, large private, one pair per AZ ---\n# AZ a\nresource \"aws_subnet\" \"public_a\"  { vpc_id = aws_vpc.main.id  cidr_block = \"10.20.0.0/24\"   availability_zone = \"eu-west-1a\"  map_public_ip_on_launch = true }\nresource \"aws_subnet\" \"private_a\" { vpc_id = aws_vpc.main.id  cidr_block = \"10.20.16.0/20\"  availability_zone = \"eu-west-1a\" }\n# AZ b\nresource \"aws_subnet\" \"public_b\"  { vpc_id = aws_vpc.main.id  cidr_block = \"10.20.1.0/24\"   availability_zone = \"eu-west-1b\"  map_public_ip_on_launch = true }\nresource \"aws_subnet\" \"private_b\" { vpc_id = aws_vpc.main.id  cidr_block = \"10.20.32.0/20\"  availability_zone = \"eu-west-1b\" }\n\nresource \"aws_internet_gateway\" \"igw\" { vpc_id = aws_vpc.main.id }\n\n# One NAT Gateway PER AZ (HA + no cross-AZ NAT charges).\nresource \"aws_eip\" \"nat_a\" { domain = \"vpc\" }\nresource \"aws_eip\" \"nat_b\" { domain = \"vpc\" }\nresource \"aws_nat_gateway\" \"a\" { allocation_id = aws_eip.nat_a.id  subnet_id = aws_subnet.public_a.id }\nresource \"aws_nat_gateway\" \"b\" { allocation_id = aws_eip.nat_b.id  subnet_id = aws_subnet.public_b.id }\n\n# Public route table: 0.0.0.0/0 -> IGW (shared by both public subnets).\nresource \"aws_route_table\" \"public\" {\n  vpc_id = aws_vpc.main.id\n  route { cidr_block = \"0.0.0.0/0\"  gateway_id = aws_internet_gateway.igw.id }\n}\nresource \"aws_route_table_association\" \"pub_a\" { subnet_id = aws_subnet.public_a.id  route_table_id = aws_route_table.public.id }\nresource \"aws_route_table_association\" \"pub_b\" { subnet_id = aws_subnet.public_b.id  route_table_id = aws_route_table.public.id }\n\n# Private route tables: each AZ -> its OWN NAT (no cross-AZ).\nresource \"aws_route_table\" \"private_a\" {\n  vpc_id = aws_vpc.main.id\n  route { cidr_block = \"0.0.0.0/0\"  nat_gateway_id = aws_nat_gateway.a.id }\n}\nresource \"aws_route_table\" \"private_b\" {\n  vpc_id = aws_vpc.main.id\n  route { cidr_block = \"0.0.0.0/0\"  nat_gateway_id = aws_nat_gateway.b.id }\n}\nresource \"aws_route_table_association\" \"priv_a\" { subnet_id = aws_subnet.private_a.id  route_table_id = aws_route_table.private_a.id }\nresource \"aws_route_table_association\" \"priv_b\" { subnet_id = aws_subnet.private_b.id  route_table_id = aws_route_table.private_b.id }\n\n# --- Security groups: reference each other, never hardcode IPs between tiers ---\nresource \"aws_security_group\" \"alb\" { name = \"alb-sg\"  vpc_id = aws_vpc.main.id }\nresource \"aws_security_group\" \"app\" { name = \"app-sg\"  vpc_id = aws_vpc.main.id }\nresource \"aws_security_group\" \"db\"  { name = \"db-sg\"   vpc_id = aws_vpc.main.id }\n\n# ALB: the ONLY place 0.0.0.0/0 ingress is allowed (HTTPS from the internet).\nresource \"aws_security_group_rule\" \"alb_in_https\" {\n  type = \"ingress\" security_group_id = aws_security_group.alb.id\n  protocol = \"tcp\" from_port = 443 to_port = 443 cidr_blocks = [\"0.0.0.0/0\"]\n}\n# App accepts traffic ONLY from the ALB SG (stateful: return is automatic).\nresource \"aws_security_group_rule\" \"app_in_from_alb\" {\n  type = \"ingress\" security_group_id = aws_security_group.app.id\n  protocol = \"tcp\" from_port = 443 to_port = 443 source_security_group_id = aws_security_group.alb.id\n}\n# DB accepts Postgres ONLY from the App SG.\nresource \"aws_security_group_rule\" \"db_in_from_app\" {\n  type = \"ingress\" security_group_id = aws_security_group.db.id\n  protocol = \"tcp\" from_port = 5432 to_port = 5432 source_security_group_id = aws_security_group.app.id\n}",
+      "solutionLanguage": "hcl",
+      "explanation": "The layout follows the canonical highly-available three-tier pattern. CIDR: the VPC owns a single non-overlapping /16 (10.20.0.0/16) so it can later peer or attach to a Transit Gateway without conflict; public subnets are small /24s (just ALB + NAT) and private subnets are large /20s for the bulk of compute and data. Availability: there is a public/private subnet pair in EACH of two AZs, and critically one NAT Gateway per AZ with each AZ's private route table pointing at its OWN NAT — this means an AZ failure does not sever the other AZ's egress, and outbound traffic never crosses an AZ boundary (avoiding cross-AZ data-transfer charges). Routing: the shared public route table sends 0.0.0.0/0 to the IGW; each private route table sends 0.0.0.0/0 to its local NAT; the implicit local route handles in-VPC traffic. Security: the security groups reference each other instead of hardcoding IPs — the ALB SG is the only place internet (0.0.0.0/0) ingress is permitted (443), the App SG accepts traffic only from the ALB SG, and the DB SG accepts Postgres only from the App SG. Because security groups are stateful, no outbound rules are needed for return traffic, and this SG-reference chain means scaling any tier requires no rule changes. enable_dns_hostnames/support are on so that interface endpoints (e.g. for private access to AWS APIs) would resolve correctly if added later.",
+      "relatedTopic": "subnets-routing"
+    },
+    {
+      "id": "vpc-ch-debug",
+      "title": "Diagnose a Stateless-NACL Connectivity Failure",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "prompt": "A web server in a private subnet (behind an ALB) returns nothing to clients: the ALB health check times out. The security group allows inbound 443 from the ALB SG and the app is confirmed listening on 443. The subnet has a custom NACL. Using flow logs reasoning, identify the failure and provide the corrected NACL rule set (inbound and outbound) that fixes it without over-opening the subnet.",
+      "hints": [
+        "Security groups are stateful, so an inbound 443 allow is enough there — look at the stateless NACL instead.",
+        "A NACL must explicitly allow the EPHEMERAL return ports outbound for responses to leave.",
+        "Flow logs will show the inbound 443 as ACCEPT but the return packets as REJECT (or absent), pinpointing the missing outbound ephemeral rule."
+      ],
+      "solutionCode": "# DIAGNOSIS (from VPC Flow Logs on the web server's ENI):\n#   ... ALB_IP  WEB_IP  45000 443        6  ACCEPT   <- request arrives, allowed\n#   ... WEB_IP  ALB_IP  443   45000      6  REJECT   <- response BLOCKED outbound\n# The inbound request is ACCEPTed (SG + NACL inbound 443 ok), but the server's\n# reply, sourced from 443 to the ALB's EPHEMERAL port (45000), is REJECTed by the\n# stateless NACL because there is no outbound rule covering the ephemeral range.\n# Security group is fine (stateful); the bug is the NACL's missing outbound rule.\n\n# CORRECTED NACL (subnet of the web server). Rules are ordered; first match wins.\n# Inbound rules:\n#   rule#  type   proto  port-range     source         action\n#   100    HTTPS  TCP    443            <ALB-subnet-CIDR>  ALLOW   # client/ALB -> web\n#   110    TCP    TCP    1024-65535     <ALB-subnet-CIDR>  ALLOW   # return traffic FROM ALB's responses (if web initiates)\n#   *      ALL    ALL    ALL            0.0.0.0/0          DENY    # implicit catch-all\n#\n# Outbound rules:\n#   rule#  type   proto  port-range     dest           action\n#   100    TCP    TCP    1024-65535     <ALB-subnet-CIDR>  ALLOW   # <-- THE FIX: ephemeral responses to ALB\n#   110    HTTPS  TCP    443            0.0.0.0/0          ALLOW   # web -> upstream HTTPS (e.g. via NAT)\n#   *      ALL    ALL    ALL            0.0.0.0/0          DENY    # implicit catch-all\n\n# Terraform equivalent of the critical outbound ephemeral rule that was missing:\nresource \"aws_network_acl_rule\" \"web_out_ephemeral\" {\n  network_acl_id = aws_network_acl.web.id\n  rule_number    = 100\n  egress         = true\n  protocol       = \"tcp\"\n  rule_action    = \"allow\"\n  cidr_block     = var.alb_subnet_cidr   # scope to ALB subnets, not 0.0.0.0/0\n  from_port      = 1024\n  to_port        = 65535\n}\n# And confirm the matching inbound 443 rule exists:\nresource \"aws_network_acl_rule\" \"web_in_https\" {\n  network_acl_id = aws_network_acl.web.id\n  rule_number    = 100\n  egress         = false\n  protocol       = \"tcp\"\n  rule_action    = \"allow\"\n  cidr_block     = var.alb_subnet_cidr\n  from_port      = 443\n  to_port        = 443\n}",
+      "solutionLanguage": "hcl",
+      "explanation": "The failure is the textbook 'forgot NACLs are stateless' bug. The security group correctly allows inbound 443 from the ALB SG, and because security groups are STATEFUL the response is automatically permitted at the ENI level — so the SG is not the culprit. The custom NACL, however, is STATELESS: it evaluates each packet independently and has no memory of the connection. The flow log proves it — the inbound packet to port 443 is ACCEPTed, but the server's reply (sourced from port 443 to the ALB's ephemeral client port, e.g. 45000) is REJECTed outbound because the NACL has no outbound rule covering the ephemeral range. The fix is to add an outbound ALLOW rule for TCP 1024-65535 so reply packets can leave, scoped to the ALB subnet CIDR rather than 0.0.0.0/0 to avoid over-opening the subnet. The Terraform shows that one missing egress ephemeral rule (plus confirming the inbound 443 rule) restores connectivity. The broader lesson: with a custom NACL you must always reason about BOTH directions and remember that responses ride ephemeral ports, whereas a security group would never have exhibited this because it tracks connection state.",
+      "relatedTopic": "sg-vs-nacl"
+    }
+  ],
+  "references": [
+    {"label": "AWS - What is Amazon VPC?", "url": "https://docs.aws.amazon.com/vpc/latest/userguide/what-is-amazon-vpc.html"},
+    {"label": "AWS - Security groups vs network ACLs comparison", "url": "https://docs.aws.amazon.com/vpc/latest/userguide/infrastructure-security.html"},
+    {"label": "AWS - NAT gateways", "url": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html"},
+    {"label": "AWS - VPC endpoints (Gateway and Interface)", "url": "https://docs.aws.amazon.com/vpc/latest/privatelink/concepts.html"},
+    {"label": "AWS - Transit Gateway", "url": "https://docs.aws.amazon.com/vpc/latest/tgw/what-is-transit-gateway.html"},
+    {"label": "AWS - VPC Flow Logs", "url": "https://docs.aws.amazon.com/vpc/latest/userguide/flow-logs.html"},
+    {"label": "AWS - Subnet sizing and reserved IPs", "url": "https://docs.aws.amazon.com/vpc/latest/userguide/subnet-sizing.html"}
+  ]
+}

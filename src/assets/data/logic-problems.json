@@ -1,0 +1,432 @@
+[
+  {
+    "id": "hundred-lockers",
+    "title": "The Hundred Lockers",
+    "category": "Math & Aptitude",
+    "difficulty": "mid",
+    "tags": ["divisors", "parity", "number-theory"],
+    "prompt": [
+      { "type": "paragraph", "text": "There are 100 lockers, all closed, and 100 students numbered 1 to 100. Student k toggles (opens if closed, closes if open) every locker whose number is a multiple of k. So student 1 toggles every locker, student 2 toggles 2, 4, 6, …, student 3 toggles 3, 6, 9, …, and so on through student 100." },
+      { "type": "paragraph", "text": "After all 100 students have passed, which lockers are left OPEN, and how many are there?" }
+    ],
+    "constraints": ["All lockers start closed.", "Student k toggles exactly the multiples of k.", "There are exactly 100 lockers and 100 students."],
+    "hints": [
+      "Locker n is toggled once by each student k that divides n — so it is toggled exactly d(n) times, where d(n) is the number of divisors of n.",
+      "A locker ends OPEN only if it was toggled an ODD number of times, i.e. d(n) is odd.",
+      "Divisors come in pairs (k, n/k), so d(n) is odd only when one divisor pairs with itself — meaning n is a perfect square."
+    ],
+    "modelSolution": [
+      { "type": "paragraph", "text": "Locker n is toggled exactly once by each student k for which k divides n. Therefore locker n is toggled d(n) times, where d(n) is the number of positive divisors of n. A locker starts closed, so it ends OPEN precisely when it is toggled an odd number of times — that is, when d(n) is odd." },
+      { "type": "paragraph", "text": "Divisors normally come in pairs (k, n/k) with k ≠ n/k, so they cancel out in parity. The only way d(n) is odd is when some divisor pairs with itself, i.e. k = n/k ⇒ n = k². So d(n) is odd exactly when n is a perfect square." },
+      { "type": "paragraph", "text": "The perfect squares from 1 to 100 are 1, 4, 9, 16, 25, 36, 49, 64, 81, 100." },
+      { "type": "callout", "variant": "success", "text": "Answer: the open lockers are the perfect squares 1, 4, 9, 16, 25, 36, 49, 64, 81, 100 — exactly 10 lockers." }
+    ],
+    "rubric": [
+      { "id": "divisor-count", "text": "Recognized each locker is toggled d(n) times (once per divisor)", "points": 2 },
+      { "id": "odd-parity", "text": "Connected 'ends open' to an odd number of toggles", "points": 1 },
+      { "id": "perfect-squares", "text": "Showed d(n) is odd exactly for perfect squares (divisor pairing)", "points": 2 },
+      { "id": "answer-10", "text": "Gave the correct answer: 10 open lockers (the perfect squares)", "points": 1 }
+    ],
+    "relatedTopic": "data-structures-algorithms"
+  },
+  {
+    "id": "two-eggs-100-floors",
+    "title": "Two Eggs, 100 Floors",
+    "category": "Logic",
+    "difficulty": "mid",
+    "tags": ["optimization", "worst-case", "search"],
+    "prompt": [
+      { "type": "paragraph", "text": "You have two identical eggs and a 100-floor building. An egg breaks if dropped from floor F or above, and survives below F (same threshold for both eggs). Find the strategy that minimizes the number of drops in the WORST case to determine F. What is that worst-case number?" },
+      { "type": "callout", "variant": "info", "text": "A naive linear scan from floor 1 costs up to 100 drops. Binary search does not work because once the first egg breaks you can only step linearly with the second." }
+    ],
+    "constraints": ["Exactly two eggs.", "Both eggs are identical (same breaking threshold).", "An egg that survives a drop can be reused."],
+    "hints": [
+      "If the first egg breaks at floor X, the second egg must be tried one floor at a time from the last known-safe floor up to X-1.",
+      "Make the cost of every 'first-egg breaks here' case equal by decreasing the gap each time.",
+      "If the first jump is k floors, the next should be k-1, then k-2, ... so the total worst case stays k. Solve k(k+1)/2 >= 100."
+    ],
+    "modelSolution": [
+      { "type": "paragraph", "text": "Drop the first egg at increasing-but-shrinking intervals so every failure path costs the same. Start at floor k, then k+(k-1), then k+(k-1)+(k-2), and so on. The worst case is k drops total, and you need k(k+1)/2 >= 100." },
+      { "type": "paragraph", "text": "The smallest k satisfying k(k+1)/2 >= 100 is k = 14 (14*15/2 = 105 >= 100). So the first egg is dropped at floor 14, then 27, 39, 50, 60, 69, 77, 84, 90, 95, 99, 100." },
+      { "type": "callout", "variant": "success", "text": "Answer: 14 drops in the worst case. The trick is equalizing the cost of every branch, which turns the problem into the triangular-number inequality." }
+    ],
+    "rubric": [
+      { "id": "why-not-binary", "text": "Explained why binary search fails with only two eggs", "points": 1 },
+      { "id": "equal-cost", "text": "Used the equal-worst-case-cost insight (shrinking intervals)", "points": 2 },
+      { "id": "triangular", "text": "Reduced it to k(k+1)/2 >= 100", "points": 1 },
+      { "id": "answer-14", "text": "Arrived at the correct answer of 14 drops", "points": 1 }
+    ],
+    "relatedTopic": "data-structures-algorithms"
+  },
+  {
+    "id": "blue-eyed-islanders",
+    "title": "The Blue-Eyed Islanders",
+    "category": "Lateral Thinking",
+    "difficulty": "senior",
+    "tags": ["common-knowledge", "induction", "epistemic-logic"],
+    "prompt": [
+      { "type": "paragraph", "text": "On an island live 100 perfectly logical people, each with blue eyes. Nobody knows their own eye color, there are no mirrors, and they may never discuss eye color. The rule: any islander who deduces with certainty that they have blue eyes must leave on the ferry that night at midnight." },
+      { "type": "paragraph", "text": "One day a trusted outsider announces publicly to everyone: 'At least one of you has blue eyes.' This is something all of them could already see. What happens, and on which night?" }
+    ],
+    "constraints": ["All 100 islanders have blue eyes.", "Everyone is a perfect logician and reasons about everyone else's reasoning.", "Each islander sees everyone else's eyes but not their own."],
+    "hints": [
+      "Start small: if there were exactly 1 blue-eyed person, what would the announcement tell them?",
+      "Now reason about 2 blue-eyed people: each sees one blue, and expects that person to leave on night 1 — when they don't, what does that reveal?",
+      "Induction: with n blue-eyed people, nobody leaves until night n, and then all n leave simultaneously."
+    ],
+    "modelSolution": [
+      { "type": "paragraph", "text": "Although everyone already sees blue eyes, the announcement creates COMMON KNOWLEDGE: now everyone knows that everyone knows … (to all depths) that at least one blue-eyed person exists. That shared baseline is what makes the induction run." },
+      { "type": "paragraph", "text": "Base case (n=1): the single blue-eyed person sees no other blue eyes; the announcement means it must be them, so they leave on night 1." },
+      { "type": "paragraph", "text": "Inductive step: suppose with n-1 blue-eyed people they all leave on night n-1. With n blue-eyed people, each one sees n-1 others and reasons: 'If I had brown eyes, those n-1 would leave on night n-1.' When night n-1 passes and nobody leaves, each deduces their own eyes must be blue. So on night n, all n leave together." },
+      { "type": "callout", "variant": "success", "text": "Answer: with 100 blue-eyed islanders, nothing happens for 99 nights, then on the 100th night all 100 leave simultaneously. The announcement matters because it converts mutual knowledge into common knowledge." }
+    ],
+    "rubric": [
+      { "id": "common-knowledge", "text": "Identified that the announcement adds common knowledge, not new visible facts", "points": 2 },
+      { "id": "base-case", "text": "Correctly handled the n=1 base case", "points": 1 },
+      { "id": "induction", "text": "Built the inductive 'if nobody leaves on night n-1' argument", "points": 2 },
+      { "id": "answer-night-100", "text": "Concluded all 100 leave on the 100th night", "points": 1 }
+    ]
+  },
+  {
+    "id": "bayes-medical-test",
+    "title": "The Surprising Medical Test",
+    "category": "Probability",
+    "difficulty": "mid",
+    "tags": ["bayes-theorem", "conditional-probability", "base-rate"],
+    "prompt": [
+      { "type": "paragraph", "text": "A disease affects 1% of a population. A test for it is 99% sensitive (detects the disease when present) and 99% specific (correctly negative when absent). A randomly chosen person tests POSITIVE. What is the probability they actually have the disease?" },
+      { "type": "callout", "variant": "warning", "text": "Most people guess ~99%. The true answer is much lower because the disease is rare — the base rate dominates." }
+    ],
+    "constraints": ["Prevalence = 1%.", "Sensitivity P(positive | disease) = 99%.", "Specificity P(negative | no disease) = 99%, so the false-positive rate is 1%."],
+    "hints": [
+      "Imagine a concrete population of 10,000 people instead of working with abstract percentages.",
+      "Count the true positives and the false positives separately.",
+      "Bayes: P(disease | positive) = true positives / (true positives + false positives)."
+    ],
+    "modelSolution": [
+      { "type": "paragraph", "text": "Use a natural-frequency table over 10,000 people. 1% have the disease ⇒ 100 sick, 9,900 healthy." },
+      { "type": "table", "headers": ["Group", "Count", "Test positive"], "rows": [["Sick (1%)", "100", "99 (99% sensitivity)"], ["Healthy (99%)", "9,900", "99 (1% false positive)"], ["Total positives", "—", "198"]] },
+      { "type": "paragraph", "text": "Among 198 positive tests, only 99 are truly sick. So P(disease | positive) = 99 / 198 = 0.5." },
+      { "type": "paragraph", "text": "By Bayes' theorem: P(D|+) = [0.99 × 0.01] / [0.99 × 0.01 + 0.01 × 0.99] = 0.0099 / 0.0198 = 0.5." },
+      { "type": "callout", "variant": "success", "text": "Answer: about 50%. Even with a 99%-accurate test, a positive result on a rare disease is only a coin flip — because false positives among the large healthy group rival true positives among the tiny sick group." }
+    ],
+    "rubric": [
+      { "id": "base-rate", "text": "Recognized the base rate / prevalence matters (base-rate fallacy)", "points": 2 },
+      { "id": "bayes-setup", "text": "Set up Bayes' theorem or an equivalent frequency table correctly", "points": 2 },
+      { "id": "answer-50", "text": "Computed the correct posterior of ~50%", "points": 1 }
+    ]
+  },
+  {
+    "id": "twelve-coins-balance",
+    "title": "Twelve Coins, One Fake",
+    "category": "Logic",
+    "difficulty": "senior",
+    "tags": ["information-theory", "balance-puzzle", "deduction"],
+    "prompt": [
+      { "type": "paragraph", "text": "You have 12 visually identical coins. Exactly one is counterfeit and differs in weight — but you do NOT know whether it is heavier or lighter than the genuine coins. Using a balance scale only 3 times, identify the fake coin AND determine whether it is heavy or light." }
+    ],
+    "constraints": ["Exactly one coin is fake.", "The fake may be heavier OR lighter — unknown in advance.", "You get exactly 3 weighings on a two-pan balance."],
+    "hints": [
+      "Each weighing has 3 outcomes (left down, balance, right down), so 3 weighings distinguish up to 3³ = 27 cases; you must distinguish 24 (12 coins × heavy/light), so it is just barely possible.",
+      "First weigh 4 vs 4. Track which coins were on which side so a later tilt tells you direction.",
+      "Carefully reuse known-genuine coins as references in later weighings to pin down both the coin and its heavy/light status."
+    ],
+    "modelSolution": [
+      { "type": "paragraph", "text": "Label the coins 1–12. Weighing 1: put {1,2,3,4} on the left, {5,6,7,8} on the right; {9,10,11,12} aside." },
+      { "type": "paragraph", "text": "Case A — they BALANCE. The fake is among {9,10,11,12}. Weighing 2: weigh 9,10,11 against three known-good coins (say 1,2,3). If they balance, 12 is fake — weigh 12 vs a good coin to learn heavy/light (weighing 3). If 9,10,11 tip, you know the direction (heavy or light) for that group; weighing 3: weigh 9 vs 10. The heavier/lighter one (per the known direction) is fake; if they balance, 11 is the fake." },
+      { "type": "paragraph", "text": "Case B — they DON'T balance (say left {1,2,3,4} is heavier). The fake is among these 8 and {9..12} are genuine. Weighing 2: rearrange to compare {1,2,5} vs {3,4,6} (move some across, bring in a known-good 6). Reasoning from which way it now tips — including the possibility it balances (then fake is 7 or 8, light) — narrows it to at most 3 suspects with a known candidate direction. Weighing 3 then isolates the single coin and confirms heavy or light." },
+      { "type": "callout", "variant": "success", "text": "Answer: yes, 3 weighings suffice. The key is that 3 weighings yield 3³ = 27 distinguishable outcomes, enough to cover all 24 (coin × heavy/light) possibilities, and that careful tracking of which side each coin sat on reveals the direction, not just the culprit." }
+    ],
+    "rubric": [
+      { "id": "info-bound", "text": "Argued the 3³ = 27 ≥ 24 information bound makes it just feasible", "points": 1 },
+      { "id": "first-split", "text": "Chose a sound first weighing (4 vs 4) and split on balance vs tilt", "points": 2 },
+      { "id": "direction-tracking", "text": "Used side-tracking / known-good references to recover heavy-vs-light", "points": 2 },
+      { "id": "completes-in-3", "text": "Resolved every branch within 3 weighings", "points": 1 }
+    ]
+  },
+  {
+    "id": "wolf-goat-cabbage",
+    "title": "Wolf, Goat, and Cabbage",
+    "category": "Logic",
+    "difficulty": "junior",
+    "tags": ["state-space", "river-crossing", "constraints"],
+    "prompt": [
+      { "type": "paragraph", "text": "A farmer must ferry a wolf, a goat, and a cabbage across a river. The boat holds the farmer plus at most one item. If left together unattended, the wolf eats the goat, and the goat eats the cabbage. How does the farmer get all three across intact?" }
+    ],
+    "constraints": ["The boat carries the farmer plus at most one of {wolf, goat, cabbage}.", "Wolf + goat alone ⇒ goat eaten.", "Goat + cabbage alone ⇒ cabbage eaten.", "The farmer must be present to prevent eating."],
+    "hints": [
+      "The goat is the universal victim AND predator — it conflicts with both other items, so it should move first.",
+      "It is allowed (and necessary) to bring an item BACK across the river.",
+      "After taking the second item over, swap it for the goat and bring the goat back temporarily."
+    ],
+    "modelSolution": [
+      { "type": "paragraph", "text": "The goat conflicts with both other items, so isolate it. The trick is that the farmer may ferry the goat back to break a forbidden pairing." },
+      { "type": "list", "items": ["1. Take the GOAT across; leave it on the far bank. (Wolf + cabbage are safe together.)", "2. Return alone.", "3. Take the WOLF across.", "4. Bring the GOAT back to the near bank. (Wolf is now alone on the far side — fine.)", "5. Take the CABBAGE across; leave it with the wolf. (Wolf + cabbage are safe.)", "6. Return alone.", "7. Take the GOAT across again."] },
+      { "type": "callout", "variant": "success", "text": "Answer: 7 trips. All three end up on the far bank and nothing is ever left in a forbidding pair. The crucial move is bringing the goat back on trip 4." }
+    ],
+    "rubric": [
+      { "id": "goat-first", "text": "Moved the goat first / identified it as the conflicting item", "points": 1 },
+      { "id": "return-trip", "text": "Used the back-trip insight (bringing the goat back)", "points": 2 },
+      { "id": "valid-sequence", "text": "Produced a full sequence with no forbidden pairing left unattended", "points": 2 }
+    ]
+  },
+  {
+    "id": "gas-stations-fermi",
+    "title": "Gas Stations in the USA",
+    "category": "Estimation",
+    "difficulty": "mid",
+    "tags": ["fermi-estimation", "assumptions", "back-of-envelope"],
+    "prompt": [
+      { "type": "paragraph", "text": "Estimate how many gas stations there are in the United States. State your assumptions; a defensible chain of reasoning matters far more than a precise number." }
+    ],
+    "constraints": ["No internet lookups — reason from first principles.", "State every assumption explicitly.", "An order-of-magnitude answer with sound logic is the goal."],
+    "hints": [
+      "Anchor on the US population (~330 million) and how many cars that implies.",
+      "Estimate how much fuel one car needs per week, and how much one station can dispense.",
+      "Cross-check from a different angle (e.g. stations per town) to sanity-test your number."
+    ],
+    "modelSolution": [
+      { "type": "paragraph", "text": "Demand-side chain: US population ≈ 330 million. Assume roughly 1 car per 2 people ⇒ ~165 million cars. Each car is refueled about once a week ⇒ ~165M fill-ups per week, or ~23–24 million fill-ups per day." },
+      { "type": "paragraph", "text": "Supply-side: a typical station has ~8 pumps; assume a fill-up takes ~6 minutes and the station is busy ~12 hours/day at moderate utilization. That is roughly 8 pumps × (60/6) fills/hour × 12 hours ≈ 960, call it ~1,000 fill-ups per station per day." },
+      { "type": "paragraph", "text": "Stations ≈ daily fill-ups / fills per station ≈ 23,000,000 / 1,000 ≈ 23,000 → round to an order of ~10⁴–10⁵, i.e. on the order of 100,000 with looser utilization assumptions." },
+      { "type": "paragraph", "text": "Cross-check by geography: the US has on the order of 19,000 incorporated places; allowing several stations per town and many along highways lands in the same 100,000-ish range." },
+      { "type": "callout", "variant": "info", "text": "Answer: order of ~10⁵ — roughly 100,000 gas stations. (The real figure is ~115,000.) The exact value is unimportant; the credit is in a clearly-stated population → cars → daily fuel → station-throughput chain plus a sanity cross-check." }
+    ],
+    "rubric": [
+      { "id": "population-anchor", "text": "Anchored on population and derived a car count with a stated ratio", "points": 1 },
+      { "id": "demand-chain", "text": "Built a demand chain (fuel per car → daily fill-ups)", "points": 2 },
+      { "id": "supply-throughput", "text": "Estimated per-station throughput to convert demand into station count", "points": 1 },
+      { "id": "sanity-check", "text": "Provided a second-angle sanity check and a reasonable order of magnitude", "points": 1 }
+    ]
+  },
+  {
+    "id": "nth-highest-salary",
+    "title": "Nth-Highest Salary in SQL",
+    "category": "SQL Puzzle",
+    "difficulty": "mid",
+    "tags": ["sql", "window-functions", "ranking"],
+    "prompt": [
+      { "type": "paragraph", "text": "Given an Employee table with columns (id, salary), write a query that returns the Nth-highest DISTINCT salary. If there is no Nth-highest salary (fewer than N distinct values), return NULL. Handle ties correctly — the 2nd-highest of [100, 100, 90] is 90." }
+    ],
+    "constraints": ["Salaries may contain duplicates; rank DISTINCT values.", "Return NULL when fewer than N distinct salaries exist.", "Assume a standard SQL engine supporting window functions."],
+    "hints": [
+      "DENSE_RANK() collapses ties so equal salaries share a rank — exactly what 'distinct nth highest' needs (unlike ROW_NUMBER or RANK).",
+      "Filter the ranked rows to the row where the dense rank equals N.",
+      "To return NULL when N exceeds the number of distinct salaries, wrap the result in an aggregate like MAX so an empty set yields NULL."
+    ],
+    "modelSolution": [
+      { "type": "paragraph", "text": "Use DENSE_RANK() to number distinct salary values from the top, then pick the rank = N. Wrapping in MAX() guarantees a single NULL row when no such rank exists." },
+      { "type": "code", "language": "sql", "code": "SELECT MAX(salary) AS nth_highest_salary\nFROM (\n  SELECT salary,\n         DENSE_RANK() OVER (ORDER BY salary DESC) AS rnk\n  FROM Employee\n) ranked\nWHERE rnk = :N;" },
+      { "type": "paragraph", "text": "Why DENSE_RANK and not RANK or ROW_NUMBER: ROW_NUMBER gives every row a unique number (duplicates would be miscounted); RANK leaves gaps after ties (so the 'rank = N' row may not exist). DENSE_RANK assigns the same rank to equal salaries and never skips numbers, which matches 'Nth-highest distinct salary'." },
+      { "type": "paragraph", "text": "Portable alternative without window functions (e.g. MySQL ≤ 5.7) using OFFSET/LIMIT on distinct salaries:" },
+      { "type": "code", "language": "sql", "code": "SELECT (\n  SELECT DISTINCT salary\n  FROM Employee\n  ORDER BY salary DESC\n  LIMIT 1 OFFSET (:N - 1)\n) AS nth_highest_salary;" },
+      { "type": "callout", "variant": "success", "text": "Answer: rank distinct salaries with DENSE_RANK() OVER (ORDER BY salary DESC) and select rank = N, wrapped in MAX() so a missing Nth salary returns NULL. The OFFSET/LIMIT form is the window-function-free equivalent." }
+    ],
+    "rubric": [
+      { "id": "dense-rank", "text": "Used DENSE_RANK (or an equivalent distinct-ranking) to handle ties", "points": 2 },
+      { "id": "distinct-handling", "text": "Correctly ranked DISTINCT salaries, not raw rows", "points": 1 },
+      { "id": "null-when-missing", "text": "Returned NULL when fewer than N distinct salaries exist", "points": 1 },
+      { "id": "explains-choice", "text": "Explained why RANK/ROW_NUMBER would be wrong here", "points": 1 }
+    ],
+    "relatedTopic": "databases-sql"
+  },
+  {
+    "id": "bridge-and-torch",
+    "title": "Bridge and Torch Crossing",
+    "category": "Logic",
+    "difficulty": "mid",
+    "tags": ["optimization", "scheduling", "greedy-vs-optimal"],
+    "prompt": [
+      { "type": "paragraph", "text": "Four people must cross a rickety bridge at night. They have ONE torch and the bridge holds at most two people at a time. Each crossing goes at the speed of the slower person. Their individual crossing times are 1, 2, 5, and 10 minutes. The torch must accompany every crossing (so someone has to walk it back). What is the minimum total time for all four to cross?" }
+    ],
+    "constraints": ["At most 2 people on the bridge at once.", "Every crossing requires the single torch.", "A pair crosses at the slower person's pace."],
+    "hints": [
+      "The obvious greedy strategy is to use the fastest person (1) as the torch-bearer to shuttle everyone — but that is NOT optimal.",
+      "The two slow people (5 and 10) should cross TOGETHER so the 10 is 'absorbed' into one crossing.",
+      "Send the two fastest over first to park a fast returner on the far side."
+    ],
+    "modelSolution": [
+      { "type": "paragraph", "text": "The key insight is to make the two slowest people (5 and 10) cross together, so the 10-minute cost is paid only once. To set that up, ferry the two fastest first." },
+      { "type": "table", "headers": ["Step", "Crossing", "Time"], "rows": [["1", "1 and 2 cross →", "2"], ["2", "1 returns ←", "1"], ["3", "5 and 10 cross →", "10"], ["4", "2 returns ←", "2"], ["5", "1 and 2 cross →", "2"]] },
+      { "type": "paragraph", "text": "Total = 2 + 1 + 10 + 2 + 2 = 17 minutes. The greedy 'fastest shuttles everyone' approach gives 2 + 1 + 5 + 1 + 10 = 19, which is worse, because it forces the 5 and 10 to cross on separate trips." },
+      { "type": "callout", "variant": "success", "text": "Answer: 17 minutes. Pairing the two slowest together (and using the two fastest to shuttle the torch) beats the intuitive greedy strategy." }
+    ],
+    "rubric": [
+      { "id": "pair-slow", "text": "Paired the two slowest people (5 and 10) on one crossing", "points": 2 },
+      { "id": "beats-greedy", "text": "Showed the naive fastest-shuttles strategy (19 min) is suboptimal", "points": 1 },
+      { "id": "valid-schedule", "text": "Gave a valid crossing schedule respecting the torch/2-person rules", "points": 1 },
+      { "id": "answer-17", "text": "Reached the correct minimum of 17 minutes", "points": 1 }
+    ]
+  },
+  {
+    "id": "monty-hall",
+    "title": "The Monty Hall Problem",
+    "category": "Probability",
+    "difficulty": "junior",
+    "tags": ["conditional-probability", "counterintuitive", "bayes"],
+    "prompt": [
+      { "type": "paragraph", "text": "On a game show there are three doors. Behind one is a car; behind the other two are goats. You pick a door. The host — who knows what is behind every door — opens a DIFFERENT door, always revealing a goat, and offers you the chance to switch to the remaining unopened door. Should you switch, stay, or does it not matter? What is your probability of winning the car if you switch?" }
+    ],
+    "constraints": ["The host always opens a door with a goat.", "The host never opens your chosen door or the car.", "If the host has a choice of two goat doors, they pick at random."],
+    "hints": [
+      "Your initial pick is right with probability 1/3 and wrong with probability 2/3 — the host's reveal does not change your original odds.",
+      "The host's action is informative: he is constrained to avoid the car, which concentrates probability on the door he leaves closed.",
+      "Enumerate all three equally-likely initial positions of the car and see what switching does in each."
+    ],
+    "modelSolution": [
+      { "type": "paragraph", "text": "Your first choice has a 1/3 chance of being the car and a 2/3 chance of being a goat. The host then always opens a goat door among the others." },
+      { "type": "paragraph", "text": "Enumerate the car's location (you initially picked door 1, say):" },
+      { "type": "table", "headers": ["Car behind", "You picked", "Host opens", "Switch lands on", "Switch wins?"], "rows": [["Door 1 (prob 1/3)", "Door 1", "Door 2 or 3 (goat)", "the other goat", "No"], ["Door 2 (prob 1/3)", "Door 1", "Door 3 (forced)", "Door 2 (car)", "Yes"], ["Door 3 (prob 1/3)", "Door 1", "Door 2 (forced)", "Door 3 (car)", "Yes"]] },
+      { "type": "paragraph", "text": "Switching wins in 2 of the 3 equally-likely cases. So P(win | switch) = 2/3, while P(win | stay) = 1/3." },
+      { "type": "callout", "variant": "success", "text": "Answer: ALWAYS switch — you win with probability 2/3 (double the 1/3 from staying). The host's reveal is not random; his constraint to show a goat transfers your original 2/3 'I was wrong' probability onto the single remaining door." }
+    ],
+    "rubric": [
+      { "id": "initial-odds", "text": "Identified the 1/3 vs 2/3 split of the initial choice", "points": 1 },
+      { "id": "host-information", "text": "Explained the host's reveal is constrained/informative, not random", "points": 2 },
+      { "id": "enumeration", "text": "Enumerated cases or used Bayes to justify the result", "points": 1 },
+      { "id": "answer-switch", "text": "Concluded switch wins with probability 2/3", "points": 1 }
+    ]
+  },
+  {
+    "id": "burning-ropes-45min",
+    "title": "Measuring 45 Minutes with Two Ropes",
+    "category": "Brain Teaser",
+    "difficulty": "mid",
+    "tags": ["timing", "lateral-thinking", "rates"],
+    "prompt": [
+      { "type": "paragraph", "text": "You have two ropes. Each rope burns from one end to the other in exactly 60 minutes, but the ropes burn UNEVENLY — half the rope may not take 30 minutes. Using only these two ropes and a lighter, measure exactly 45 minutes." }
+    ],
+    "constraints": ["Each rope takes 60 minutes to burn end-to-end.", "Burning is non-uniform, so you cannot measure by length.", "You may light either or both ends of a rope at any time."],
+    "hints": [
+      "If you light a 60-minute rope at BOTH ends simultaneously, it is fully consumed in 30 minutes regardless of unevenness.",
+      "Lighting both ends of one rope while lighting only one end of the other lets the second rope keep '30 minutes worth' of itself unburned.",
+      "When the first rope finishes (30 min), the second rope has 30 minutes of burn time left — now light its other end."
+    ],
+    "modelSolution": [
+      { "type": "paragraph", "text": "Key fact: a 60-minute rope lit at BOTH ends burns up in exactly 30 minutes, because the two flames meet after consuming the whole rope's worth of burn time, no matter how uneven it is." },
+      { "type": "list", "items": ["t = 0: light rope A at BOTH ends, and light rope B at ONE end.", "t = 30 min: rope A is fully burned (both-ends ⇒ 30 min). Rope B has exactly 30 minutes of burn time remaining (it has been burning from one end for 30 min). At this instant, light rope B's OTHER end.", "Rope B now burns from both ends, consuming its remaining 30-minutes-worth in 15 minutes.", "t = 45 min: rope B is fully consumed."] },
+      { "type": "callout", "variant": "success", "text": "Answer: 30 + 15 = 45 minutes. Light A at both ends and B at one end; when A dies at 30 min, light B's second end, and B finishes 15 min later at exactly 45 minutes." }
+    ],
+    "rubric": [
+      { "id": "both-ends-30", "text": "Used the both-ends-burns-in-30-min insight", "points": 2 },
+      { "id": "second-rope-setup", "text": "Started rope B at one end simultaneously to bank 30 minutes", "points": 1 },
+      { "id": "relight-15", "text": "Lit B's other end at t=30 to get the final 15 minutes", "points": 1 },
+      { "id": "answer-45", "text": "Concluded exactly 45 minutes", "points": 1 }
+    ]
+  },
+  {
+    "id": "poison-wine-bottles",
+    "title": "Poison Among 1000 Bottles",
+    "category": "Logic",
+    "difficulty": "senior",
+    "tags": ["binary-encoding", "information-theory", "bit-tricks"],
+    "prompt": [
+      { "type": "paragraph", "text": "A king has 1000 bottles of wine, exactly one of which is poisoned. The poison is fatal but takes effect only after 24 hours, with no other symptoms. The king has prisoners he can use as testers, and only 24 hours before the feast. What is the MINIMUM number of prisoners needed to guarantee identifying the single poisoned bottle, and how?" }
+    ],
+    "constraints": ["Exactly one of the 1000 bottles is poisoned.", "Poison shows its effect only once, after 24 hours.", "You have a single 24-hour testing window (one round)."],
+    "hints": [
+      "Each prisoner is a single bit: after 24 hours they are either alive (0) or dead (1).",
+      "With n prisoners you can read 2ⁿ distinct alive/dead patterns — you need 2ⁿ ≥ 1000.",
+      "Number the bottles 0–999 in binary; prisoner i drinks from every bottle whose i-th bit is 1."
+    ],
+    "modelSolution": [
+      { "type": "paragraph", "text": "Think of each prisoner as one bit of information: after 24 hours they are either alive (0) or dead (1). With n prisoners, the set of who-dies forms an n-bit pattern, giving 2ⁿ distinguishable outcomes. To tell 1000 bottles apart you need 2ⁿ ≥ 1000 ⇒ n ≥ 10 (2¹⁰ = 1024 ≥ 1000)." },
+      { "type": "paragraph", "text": "Encoding: number the bottles 0 to 999 and write each number in 10-bit binary. Prisoner i (for i = 0..9) takes a sip from EVERY bottle whose binary representation has a 1 in bit position i." },
+      { "type": "paragraph", "text": "After 24 hours, read off the deaths: the dead prisoners' bit positions spell out, in binary, the index of the poisoned bottle. For example, if prisoners 0, 3, and 5 die, the poisoned bottle is number 2⁰ + 2³ + 2⁵ = 1 + 8 + 32 = 41." },
+      { "type": "callout", "variant": "success", "text": "Answer: 10 prisoners. Treat each as a binary digit, label bottles 0–999 in binary, have prisoner i drink the bottles with bit i set, and the death pattern is the binary index of the poisoned bottle (2¹⁰ = 1024 ≥ 1000)." }
+    ],
+    "rubric": [
+      { "id": "bit-per-prisoner", "text": "Modeled each prisoner as a bit (alive/dead)", "points": 2 },
+      { "id": "log-bound", "text": "Derived the 2ⁿ ≥ 1000 ⇒ n = 10 bound", "points": 2 },
+      { "id": "decode", "text": "Explained how the death pattern decodes to the bottle's binary index", "points": 1 }
+    ]
+  },
+  {
+    "id": "trailing-zeros-factorial",
+    "title": "Trailing Zeros of N Factorial",
+    "category": "Math & Aptitude",
+    "difficulty": "junior",
+    "tags": ["number-theory", "factorials", "prime-factorization"],
+    "prompt": [
+      { "type": "paragraph", "text": "How many trailing zeros does N! (N factorial) have? Give a formula in terms of N, then apply it to compute the number of trailing zeros in 100!." }
+    ],
+    "constraints": ["N is a non-negative integer.", "A trailing zero is a 0 at the end of the decimal representation.", "Provide a general formula, not just the value for 100."],
+    "hints": [
+      "A trailing zero comes from a factor of 10 = 2 × 5 in the product 1 × 2 × … × N.",
+      "Factors of 2 are far more plentiful than factors of 5, so the count of trailing zeros equals the number of factors of 5.",
+      "Count multiples of 5, then add extra for multiples of 25, 125, … (each contributes additional 5s): floor(N/5) + floor(N/25) + floor(N/125) + …"
+    ],
+    "modelSolution": [
+      { "type": "paragraph", "text": "Each trailing zero corresponds to a factor of 10 = 2 × 5 in N!. In 1 × 2 × … × N there are always far more factors of 2 than of 5, so the number of trailing zeros is limited by — and equals — the number of factors of 5." },
+      { "type": "paragraph", "text": "Count factors of 5 with Legendre's formula: Z(N) = floor(N/5) + floor(N/25) + floor(N/125) + …  (multiples of 25 supply a second 5, multiples of 125 a third, and so on)." },
+      { "type": "paragraph", "text": "For N = 100: floor(100/5) = 20, floor(100/25) = 4, floor(100/125) = 0. Sum = 20 + 4 = 24." },
+      { "type": "callout", "variant": "success", "text": "Answer: 100! has 24 trailing zeros. In general, the count is floor(N/5) + floor(N/25) + floor(N/125) + …, because trailing zeros are governed by the scarcer prime factor, 5." }
+    ],
+    "rubric": [
+      { "id": "ten-is-two-five", "text": "Identified that a trailing zero = a factor of 10 = 2 × 5", "points": 1 },
+      { "id": "fives-limit", "text": "Argued factors of 5 are the limiting count (fewer than 2s)", "points": 1 },
+      { "id": "legendre", "text": "Gave the floor(N/5)+floor(N/25)+… formula including higher powers", "points": 2 },
+      { "id": "answer-24", "text": "Computed 24 trailing zeros for 100!", "points": 1 }
+    ]
+  },
+  {
+    "id": "cheryls-birthday",
+    "title": "Cheryl's Birthday",
+    "category": "Lateral Thinking",
+    "difficulty": "senior",
+    "tags": ["epistemic-logic", "elimination", "deduction"],
+    "prompt": [
+      { "type": "paragraph", "text": "Cheryl gives Albert the MONTH of her birthday and Bernard the DAY. The candidates are: May 15, May 16, May 19, June 17, June 18, July 14, July 16, August 14, August 15, August 17." },
+      { "type": "paragraph", "text": "Albert: 'I don't know when Cheryl's birthday is, but I know that Bernard does not know either.' Bernard: 'At first I didn't know, but now I do.' Albert: 'Then I also know now.' When is Cheryl's birthday?" }
+    ],
+    "constraints": ["Albert knows only the month; Bernard knows only the day.", "Each statement is true and both reason perfectly.", "Use the three statements in order to eliminate dates."],
+    "hints": [
+      "The unique days 18 (June) and 19 (May) would let Bernard know immediately — Albert's certainty that Bernard does NOT know rules out the entire months May and June.",
+      "After eliminating May and June, Bernard now knowing the date eliminates the duplicated day 14 (it appears in both July and August).",
+      "Among the survivors, Albert now knowing the date forces a month with a single remaining option."
+    ],
+    "modelSolution": [
+      { "type": "paragraph", "text": "Statement 1 (Albert): Albert is sure Bernard does NOT know. The days 19 (only in May) and 18 (only in June) are unique, so if the day were 18 or 19 Bernard would already know. For Albert to be CERTAIN Bernard doesn't know, Cheryl's month must contain no unique day — this eliminates all of MAY and JUNE." },
+      { "type": "paragraph", "text": "Remaining candidates: July 14, July 16, August 14, August 15, August 17." },
+      { "type": "paragraph", "text": "Statement 2 (Bernard): Bernard now knows. If his day were 14 he still couldn't tell July 14 from August 14, so the day is not 14. Eliminate both 14s, leaving: July 16, August 15, August 17." },
+      { "type": "paragraph", "text": "Statement 3 (Albert): Albert now also knows. If the month were August there would still be two options (15 and 17), so Albert couldn't be sure. Therefore the month is July, leaving only July 16." },
+      { "type": "callout", "variant": "success", "text": "Answer: July 16. Albert's first remark eliminates May and June; Bernard's certainty eliminates day 14; Albert's final certainty eliminates August — leaving exactly July 16." }
+    ],
+    "rubric": [
+      { "id": "eliminate-may-june", "text": "Used Albert's statement to eliminate May and June (unique days 18, 19)", "points": 2 },
+      { "id": "eliminate-14", "text": "Used Bernard's new knowledge to eliminate the duplicated day 14", "points": 2 },
+      { "id": "eliminate-august", "text": "Used Albert's final certainty to eliminate August", "points": 1 },
+      { "id": "answer-july-16", "text": "Concluded July 16", "points": 1 }
+    ]
+  },
+  {
+    "id": "running-median-stream",
+    "title": "Running Median of a Stream",
+    "category": "Math & Aptitude",
+    "difficulty": "senior",
+    "tags": ["heaps", "data-structures", "streaming"],
+    "prompt": [
+      { "type": "paragraph", "text": "Design a data structure that ingests numbers one at a time from an unbounded stream and, at any point, can report the MEDIAN of all values seen so far in better than O(n) per query. Describe the structure and the time complexity of insertion and median queries." }
+    ],
+    "constraints": ["Numbers arrive one at a time; total count is unknown in advance.", "Median may be requested after any insertion.", "Aim for O(log n) insertion and O(1) median retrieval."],
+    "hints": [
+      "Keep the lower half and the upper half of the data in two separate heaps.",
+      "Use a MAX-heap for the lower half (its top is the largest small value) and a MIN-heap for the upper half (its top is the smallest large value).",
+      "Keep the heap sizes balanced (differ by at most 1); the median is then a heap top, or the average of the two tops."
+    ],
+    "modelSolution": [
+      { "type": "paragraph", "text": "Maintain TWO heaps that split the data at the median: a MAX-heap 'lo' holding the smaller half, and a MIN-heap 'hi' holding the larger half. Invariant: every element of lo ≤ every element of hi, and their sizes differ by at most 1." },
+      { "type": "paragraph", "text": "Insert(x): push x onto lo, then move lo's top to hi (to keep ordering correct); if hi is now larger than lo, move hi's top back to lo. This rebalancing keeps |size(lo) − size(hi)| ≤ 1. Each insert does a constant number of heap operations ⇒ O(log n)." },
+      { "type": "paragraph", "text": "Median(): if lo has one more element than hi, the median is lo's top. If hi has one more, it is hi's top. If the sizes are equal, the median is the average of the two tops. This read is O(1)." },
+      { "type": "code", "language": "text", "code": "insert(x):\n  lo.push(x)            # max-heap of the lower half\n  hi.push(lo.pop())     # shift the boundary element up\n  if size(hi) > size(lo):\n     lo.push(hi.pop())   # rebalance so lo >= hi in size\n\nmedian():\n  if size(lo) > size(hi): return lo.top\n  else:                   return (lo.top + hi.top) / 2" },
+      { "type": "callout", "variant": "success", "text": "Answer: use two balanced heaps (a max-heap for the lower half, a min-heap for the upper half). Insertion is O(log n) and median retrieval is O(1) — far better than re-sorting (O(n log n)) or scanning (O(n)) per query." }
+    ],
+    "rubric": [
+      { "id": "two-heaps", "text": "Proposed two heaps splitting low/high halves", "points": 2 },
+      { "id": "heap-orientation", "text": "Got the orientation right (max-heap low, min-heap high)", "points": 1 },
+      { "id": "balancing", "text": "Maintained the size-balance invariant on insert", "points": 1 },
+      { "id": "complexity", "text": "Stated O(log n) insert and O(1) median", "points": 1 }
+    ],
+    "relatedTopic": "data-structures-algorithms"
+  }
+]

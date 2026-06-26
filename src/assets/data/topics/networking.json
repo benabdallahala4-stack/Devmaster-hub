@@ -1,0 +1,538 @@
+{
+  "id": "networking",
+  "title": "Computer Networking",
+  "category": "Computer Science",
+  "subcategory": "Systems",
+  "difficulty": "senior",
+  "tags": ["networking", "tcp", "http", "dns", "tls", "quic"],
+  "description": "A senior-level survey of computer networking for interviews: the OSI and TCP/IP layers, TCP vs UDP, the TCP handshake/teardown with flow and congestion control, the evolution from HTTP/1.1 to HTTP/2 to HTTP/3 (QUIC), DNS resolution, the TLS handshake, NAT, IP subnetting, latency vs bandwidth, and the ports you must know.",
+  "estReadMinutes": 31,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Networking is the study of how independent machines exchange bytes reliably across an unreliable, shared medium. The dominant design idea is layering: each layer offers a service to the one above and uses the one below, so you can reason about HTTP without thinking about voltage levels, and about routing without thinking about retransmission. The two reference models are the seven-layer OSI model (a teaching abstraction) and the four-layer TCP/IP model (what the Internet actually runs)."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Link layer: frames on a physical segment (Ethernet, Wi-Fi), addressed by MAC.",
+            "Internet/Network layer: best-effort packet delivery across networks (IP), addressed by IP address, routed hop by hop.",
+            "Transport layer: end-to-end channels between processes (TCP for reliable streams, UDP for datagrams), addressed by port.",
+            "Application layer: the protocols you speak (HTTP, DNS, TLS, SMTP) carrying meaningful messages."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Encapsulation is the mechanism behind layering: each layer wraps the layer above in its own header (and sometimes trailer). An HTTP request becomes a TCP segment, inside an IP packet, inside an Ethernet frame - peeled off in reverse on receipt."
+        }
+      ]
+    },
+    {
+      "id": "why",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Almost every production performance and reliability problem above the application is a networking problem in disguise: tail latency caused by TCP retransmits or head-of-line blocking, throughput capped by the bandwidth-delay product and a too-small window, an outage caused by a DNS TTL or a TLS certificate expiry, or a connectivity bug rooted in NAT and subnetting. Senior engineers are expected to reason from first principles about why a request is slow and where in the stack to look."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Latency budgets: every TLS handshake and DNS lookup adds round trips; understanding RTTs is how you decide between connection reuse, HTTP/2 multiplexing, and HTTP/3's 0-RTT.",
+            "Throughput: the bandwidth-delay product determines the window size needed to fill a pipe; congestion control decides how fast you may send.",
+            "Reliability: TCP's guarantees (ordered, reliable, flow-controlled) versus UDP's lack of them dictate which to choose for video, gaming, DNS, or RPC.",
+            "Debuggability: knowing the handshake, common ports, and NAT behavior lets you read a packet capture and localize a fault to a layer in minutes."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The number-one networking insight for system design: latency and bandwidth are independent. Adding bandwidth does nothing for a chatty, round-trip-bound protocol. You cut latency by removing round trips (connection reuse, 0-RTT, edge/CDN), not by buying a fatter pipe."
+        }
+      ]
+    },
+    {
+      "id": "layers",
+      "heading": "The OSI and TCP/IP Layer Models",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The OSI model has seven layers; the TCP/IP model collapses the top three and the bottom two, giving the four layers the Internet actually uses. Knowing both, and which real protocols live where, is a staple interview question."
+        },
+        {
+          "type": "table",
+          "headers": ["OSI layer", "TCP/IP layer", "Unit", "Address", "Examples"],
+          "rows": [
+            ["7 Application / 6 Presentation / 5 Session", "Application", "Message", "-", "HTTP, DNS, TLS, SMTP"],
+            ["4 Transport", "Transport", "Segment / Datagram", "Port", "TCP, UDP, QUIC"],
+            ["3 Network", "Internet", "Packet", "IP address", "IP, ICMP, routing"],
+            ["2 Data Link / 1 Physical", "Link", "Frame / Bits", "MAC", "Ethernet, Wi-Fi, ARP"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "A useful subtlety: TLS does not fit neatly into one OSI layer (it sits between transport and application, often called layer 6-ish), and QUIC deliberately blurs the boundary by running a TCP-like transport plus TLS inside UDP at the application layer. The models are maps, not territory - real protocols cross the lines when it is useful."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Mnemonic for OSI top-to-bottom: 'All People Seem To Need Data Processing' (Application, Presentation, Session, Transport, Network, Data link, Physical)."
+        }
+      ]
+    },
+    {
+      "id": "tcp-vs-udp",
+      "heading": "TCP vs UDP",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "TCP and UDP are the two main transport protocols. TCP is connection-oriented and provides a reliable, ordered, byte stream with flow control and congestion control - at the cost of handshake latency and head-of-line blocking. UDP is connectionless and provides only best-effort datagram delivery with a checksum: no ordering, no retransmission, no congestion control - but minimal overhead and no per-connection state, which is why latency-sensitive and broadcast workloads prefer it (often adding their own reliability on top, as QUIC does)."
+        },
+        {
+          "type": "table",
+          "headers": ["Property", "TCP", "UDP"],
+          "rows": [
+            ["Connection", "Connection-oriented (handshake)", "Connectionless"],
+            ["Reliability", "Reliable, retransmits lost data", "Best-effort, no retransmit"],
+            ["Ordering", "In-order delivery guaranteed", "No ordering"],
+            ["Flow/congestion control", "Yes (windows, AIMD)", "No (app must add it)"],
+            ["Header size", "20+ bytes", "8 bytes"],
+            ["Use cases", "HTTP, SSH, email, DB", "DNS, VoIP, gaming, video, QUIC"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "TCP guarantees in-order delivery to the application, which creates head-of-line blocking: a single lost segment stalls delivery of everything behind it even if that data already arrived. This is the core motivation for HTTP/3 moving to QUIC over UDP."
+        }
+      ]
+    },
+    {
+      "id": "tcp-handshake",
+      "heading": "TCP Handshake, Teardown, and Congestion Control",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "TCP establishes a connection with a three-way handshake. The client sends SYN with an initial sequence number; the server replies SYN-ACK acknowledging the client's number and supplying its own; the client sends ACK. Both sides now have synchronized sequence numbers and the connection is ESTABLISHED. This costs one full round trip before any data flows - a fixed latency tax that connection reuse and TCP Fast Open try to avoid."
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "Three-way handshake:                Four-way teardown:\n  Client            Server            Client            Server\n    |  --- SYN --->   |                  | --- FIN --->     |\n    |  <-- SYN/ACK -- |                  | <-- ACK -----    |\n    |  --- ACK --->   |                  | <-- FIN -----    |\n    |  (ESTABLISHED)  |                  | --- ACK --->     |\n                                        | (TIME_WAIT 2*MSL on initiator)"
+        },
+        {
+          "type": "paragraph",
+          "text": "Teardown is four-way because TCP is full-duplex: each direction is closed independently. One side sends FIN, the other ACKs it, then sends its own FIN, which is ACKed. The active closer then sits in TIME_WAIT for 2*MSL (maximum segment lifetime) to absorb stray delayed segments and ensure the final ACK arrives - which is why a busy server that initiates closes can exhaust ports with thousands of sockets stuck in TIME_WAIT."
+        },
+        {
+          "type": "paragraph",
+          "text": "Flow control prevents a fast sender from overwhelming a slow receiver: the receiver advertises a receive window (rwnd) of free buffer space, and the sender never has more unacknowledged data outstanding than that. Congestion control prevents overwhelming the network: TCP maintains a congestion window (cwnd) and may send no more than min(rwnd, cwnd). Classic TCP uses slow start (cwnd grows exponentially until a threshold), then congestion avoidance (additive increase, +1 MSS per RTT). On loss it does multiplicative decrease - this Additive-Increase/Multiplicative-Decrease (AIMD) is what makes TCP fair and stable. A triple-duplicate ACK triggers fast retransmit/fast recovery (halve cwnd); a timeout is treated as more severe and drops cwnd back to 1."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Bandwidth-delay product (BDP = bandwidth * RTT) is the amount of in-flight data needed to keep a pipe full. If the window is smaller than the BDP, throughput is capped well below the link rate no matter how much bandwidth you have - a common cause of slow long-distance transfers."
+        }
+      ]
+    },
+    {
+      "id": "http-evolution",
+      "heading": "HTTP/1.1 vs HTTP/2 vs HTTP/3 (QUIC)",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "HTTP has evolved primarily to kill head-of-line (HOL) blocking. HTTP/1.1 sends one request per connection at a time; pipelining was specified but is effectively unusable, so browsers open ~6 parallel TCP connections per origin. HTTP/2 introduces a single connection with multiplexed streams (many concurrent requests interleaved as binary frames), header compression (HPACK), and server push. But HTTP/2 still runs over TCP, so a single lost TCP segment stalls ALL streams - HOL blocking moved from the application layer down to the transport layer."
+        },
+        {
+          "type": "paragraph",
+          "text": "HTTP/3 fixes transport-level HOL blocking by replacing TCP with QUIC, a reliable transport built on UDP. QUIC gives each stream its own delivery context, so a lost packet only stalls the stream it belonged to, not the others. QUIC also integrates TLS 1.3 into the transport handshake, cutting connection setup to one round trip (or zero with 0-RTT resumption), and supports connection migration - a connection survives an IP change (Wi-Fi to cellular) because it is identified by a connection ID, not the 4-tuple."
+        },
+        {
+          "type": "table",
+          "headers": ["Feature", "HTTP/1.1", "HTTP/2", "HTTP/3"],
+          "rows": [
+            ["Transport", "TCP", "TCP", "QUIC over UDP"],
+            ["Multiplexing", "No (6 conns/origin)", "Yes, one TCP conn", "Yes, independent streams"],
+            ["HOL blocking", "App level (per conn)", "Transport level (TCP)", "Eliminated per stream"],
+            ["Header compression", "None", "HPACK", "QPACK"],
+            ["Handshake RTTs", "TCP + TLS (2-3)", "TCP + TLS (2-3)", "1 (or 0-RTT)"],
+            ["Connection migration", "No", "No", "Yes (connection ID)"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The most-tested distinction: HTTP/2 solves APPLICATION-layer HOL blocking but is still vulnerable to TRANSPORT-layer HOL blocking because all streams share one ordered TCP byte stream. HTTP/3 over QUIC eliminates transport-layer HOL blocking by making each stream independently ordered over UDP."
+        }
+      ]
+    },
+    {
+      "id": "tls-handshake-example",
+      "heading": "Example: The TLS 1.3 Handshake",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "TLS provides confidentiality, integrity, and authentication on top of TCP. TLS 1.3 streamlined the handshake to a single round trip. The client sends ClientHello including its supported cipher suites and, crucially, a key share (an ephemeral Diffie-Hellman public value) for its guessed group. The server responds with ServerHello (chosen cipher and its own key share), and from that point both sides can derive the shared secret via ephemeral Diffie-Hellman (ECDHE) - giving forward secrecy, since the ephemeral keys are discarded and a future compromise of the server's long-term key cannot decrypt past sessions."
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "TLS 1.3 (1-RTT) handshake:\n\n  Client                                   Server\n    | --- ClientHello -------------------->  |\n    |     (cipher suites, key_share,         |\n    |      supported groups, SNI)            |\n    |                                        |\n    | <-- ServerHello --------------------   |  chooses cipher,\n    |     key_share                          |  sends its key_share\n    | <-- {EncryptedExtensions}              |  (rest is now encrypted)\n    | <-- {Certificate}                      |  server's cert chain\n    | <-- {CertificateVerify}                |  signs handshake -> proves key ownership\n    | <-- {Finished} ----------------------  |\n    |                                        |\n    | --- {Finished} --------------------->  |  handshake complete\n    | === application data (encrypted) ===   |\n\n  Both derive the session keys from the ECDHE shared secret;\n  the server's CertificateVerify authenticates it; the client\n  validates the certificate chain up to a trusted root CA."
+        },
+        {
+          "type": "paragraph",
+          "text": "Authentication works through the certificate: the server presents an X.509 certificate chaining to a Certificate Authority the client trusts, and CertificateVerify is a signature over the handshake transcript proving the server holds the certificate's private key. The client validates the chain, hostname (SNI), and expiry. TLS 1.3 also supports 0-RTT resumption, where a returning client sends early data encrypted with a pre-shared key from a previous session - saving the round trip but at the cost of replay risk for that early data."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Forward secrecy is the headline property: because the session key comes from EPHEMERAL Diffie-Hellman keys that are thrown away, recording today's encrypted traffic and stealing the server's private key tomorrow does NOT let an attacker decrypt it. TLS 1.3 makes ephemeral key exchange mandatory."
+        }
+      ]
+    },
+    {
+      "id": "dns",
+      "heading": "DNS Resolution",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "DNS translates human names (example.com) into IP addresses through a distributed, hierarchical, heavily cached database. A recursive resolver does the work on the client's behalf: if the answer is not cached, it queries a root server (which points to the TLD server for .com), then the .com TLD server (which points to the domain's authoritative name servers), then the authoritative server (which returns the record). Each level returns a referral until the authoritative answer is found. DNS normally runs over UDP port 53 for speed, falling back to TCP for large responses (and DNS-over-TLS/HTTPS for privacy)."
+        },
+        {
+          "type": "table",
+          "headers": ["Record", "Purpose"],
+          "rows": [
+            ["A / AAAA", "Hostname to IPv4 / IPv6 address"],
+            ["CNAME", "Alias one name to another"],
+            ["MX", "Mail exchange servers for a domain"],
+            ["NS", "Authoritative name servers for a zone"],
+            ["TXT", "Arbitrary text (SPF, DKIM, domain verification)"],
+            ["SOA", "Zone authority and serial/TTL parameters"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Caching is governed by each record's TTL. A long TTL speeds resolution but slows propagation of changes - which is why you LOWER TTLs (e.g. to 60s) hours before a planned IP migration so clients re-resolve quickly. Stale DNS caches are a classic cause of 'it works for me but not for them' incidents."
+        }
+      ]
+    },
+    {
+      "id": "ip-nat-subnetting",
+      "heading": "IP, Subnetting, and NAT",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "An IPv4 address is 32 bits, written as four dotted octets. CIDR notation appends a prefix length: 10.0.0.0/24 means the first 24 bits are the network and the remaining 8 are host bits, giving 2^8 = 256 addresses (254 usable, since the all-zeros address is the network and all-ones is broadcast). The subnet mask 255.255.255.0 expresses the same /24. Subnetting splits an address block into smaller networks by borrowing host bits for the network portion."
+        },
+        {
+          "type": "table",
+          "headers": ["CIDR", "Mask", "Total addresses", "Usable hosts"],
+          "rows": [
+            ["/24", "255.255.255.0", "256", "254"],
+            ["/25", "255.255.255.128", "128", "126"],
+            ["/26", "255.255.255.192", "64", "62"],
+            ["/30", "255.255.255.252", "4", "2 (point-to-point)"],
+            ["/16", "255.255.0.0", "65536", "65534"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Network Address Translation (NAT) lets many devices on a private network (RFC 1918 ranges 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) share one public IP. The NAT router rewrites the source IP and port of outgoing packets (PAT - port address translation) and keeps a translation table to route replies back to the right internal host. NAT conserves scarce IPv4 addresses and incidentally hides internal topology, but it breaks protocols that embed addresses in the payload and complicates peer-to-peer connectivity, requiring techniques like STUN/TURN/ICE for hole punching."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "NAT is a workaround for IPv4 exhaustion, not a security feature, though it incidentally blocks unsolicited inbound connections. IPv6's enormous address space removes the need for NAT, restoring true end-to-end addressing."
+        }
+      ]
+    },
+    {
+      "id": "latency-bandwidth-ports",
+      "heading": "Latency, Bandwidth, and Common Ports",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Latency is the time for one bit to travel end to end (dominated by propagation delay, ~the speed of light in fiber, plus queuing and processing). Bandwidth is the rate - bits per second the link can carry. They are independent: a satellite link can have huge bandwidth but ~600 ms round-trip latency, while a short copper link has tiny bandwidth but microsecond latency. Throughput for a window-based protocol like TCP is bounded by window / RTT, so high-latency links need large windows to achieve high throughput (the bandwidth-delay product again)."
+        },
+        {
+          "type": "table",
+          "headers": ["Port", "Protocol", "Service"],
+          "rows": [
+            ["22", "TCP", "SSH"],
+            ["53", "UDP/TCP", "DNS"],
+            ["80", "TCP", "HTTP"],
+            ["443", "TCP/UDP", "HTTPS (TCP for HTTP/1.1-2, UDP/QUIC for HTTP/3)"],
+            ["25 / 587", "TCP", "SMTP / submission"],
+            ["5432 / 3306", "TCP", "PostgreSQL / MySQL"],
+            ["6379", "TCP", "Redis"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Ports 0-1023 are well-known (privileged - binding usually requires root on Unix), 1024-49151 are registered, and 49152-65535 are ephemeral, assigned by the OS to the client side of a connection. A connection is uniquely identified by the 4-tuple (src IP, src port, dst IP, dst port)."
+        }
+      ]
+    },
+    {
+      "id": "mistakes",
+      "heading": "Common Mistakes",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Believing HTTP/2 eliminated head-of-line blocking entirely - it removes it at the application layer but TCP still imposes transport-level HOL blocking; only HTTP/3 over QUIC fixes that.",
+            "Thinking more bandwidth cuts latency - they are independent; round-trip-bound protocols need fewer round trips, not a bigger pipe.",
+            "Treating UDP as 'TCP without the slow parts' - it has no ordering, reliability, flow, or congestion control; if you need those over UDP you must build them (as QUIC does).",
+            "Forgetting TIME_WAIT - a server that actively closes huge numbers of short connections can run out of ephemeral ports; prefer keep-alive/connection reuse or let the client close.",
+            "Assuming DNS changes take effect instantly - the old record persists until its TTL expires across every cache; lower the TTL before a migration.",
+            "Confusing flow control (protect the receiver, rwnd) with congestion control (protect the network, cwnd); the sender obeys min(rwnd, cwnd).",
+            "Treating NAT as a firewall/security boundary - it is an address-conservation hack that only incidentally blocks unsolicited inbound traffic."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Real incident pattern: a service set DNS TTL to 24h, then failed over to a new IP during an outage. Clients kept hitting the dead old IP for up to a day because their resolvers cached the stale A record. Always pre-lower TTLs before planned failovers."
+        }
+      ]
+    },
+    {
+      "id": "bestpractices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Reuse connections (HTTP keep-alive, connection pools) to amortize the TCP + TLS handshake across many requests - setup latency dominates short transfers.",
+            "Prefer HTTP/2 or HTTP/3 for multiplexed APIs; use HTTP/3 where lossy or mobile networks make transport-level HOL blocking and connection migration matter.",
+            "Use TLS 1.3 for the 1-RTT handshake and mandatory forward secrecy; enable session resumption (and 0-RTT only for idempotent requests, given replay risk).",
+            "Size TCP windows for the bandwidth-delay product on long-haul links; enable window scaling so throughput is not capped below the link rate.",
+            "Lower DNS TTLs ahead of planned IP changes and keep them moderate otherwise to balance resolution speed against propagation lag.",
+            "Choose UDP/QUIC for real-time (voice, video, gaming) where timeliness beats perfect reliability, and TCP for anything needing an ordered reliable stream.",
+            "Push static content to a CDN/edge to cut latency by shortening the physical round trip, not by adding origin bandwidth."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Goal", "Lever"],
+          "rows": [
+            ["Cut per-request latency", "Connection reuse, TLS 1.3, 0-RTT, edge/CDN"],
+            ["Fill a long-haul pipe", "Larger window >= bandwidth-delay product"],
+            ["Avoid transport HOL blocking", "HTTP/3 over QUIC"],
+            ["Survive network switch (mobile)", "QUIC connection migration"],
+            ["Fast, fault-tolerant failover", "Low DNS TTL + health-checked records"],
+            ["Real-time media", "UDP / WebRTC / QUIC"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "note-https-request-walkthrough",
+      "heading": "Note: What Really Happens When You Type a URL",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A single https://example.com request exercises most of the stack. The browser resolves example.com via DNS (recursive resolver, possibly cached). It opens a TCP connection to the resolved IP on port 443 (three-way handshake, one RTT). It performs a TLS 1.3 handshake (one RTT) negotiating keys and authenticating the server's certificate. It sends the HTTP request over the now-encrypted channel; the server responds; TCP delivers the bytes reliably and in order; congestion control governs how fast. With HTTP/3, the TCP and TLS handshakes merge into a single QUIC handshake over UDP, and 0-RTT resumption can elide even that for a returning visitor."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Counting round trips is the key skill: cold HTTP/1.1+TLS1.2 can cost DNS + TCP(1) + TLS(2) before the first byte; HTTP/3 with 0-RTT can send the request in the very first packet. Every removed RTT is real wall-clock latency saved, especially on high-RTT mobile links."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "encapsulation-stack",
+      "title": "Encapsulation Through the TCP/IP Layers",
+      "type": "ascii",
+      "content": "Send direction (headers added going down):\n\n  Application:   [ HTTP message                                  ]\n  Transport:     [ TCP hdr | HTTP message                        ]\n  Internet:      [ IP hdr  | TCP hdr | HTTP message              ]\n  Link:          [ Eth hdr | IP hdr  | TCP hdr | HTTP message |FCS]\n                  -------->  on the wire as bits  -------->\n\n  Receive: each layer strips its own header and passes the\n  payload up, the mirror image of the send path."
+    },
+    {
+      "id": "tcp-state-handshake",
+      "title": "TCP Connection Lifecycle (Handshake to Teardown)",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n    participant C as Client\n    participant S as Server\n    C->>S: SYN (seq=x)\n    S->>C: SYN+ACK (seq=y, ack=x+1)\n    C->>S: ACK (ack=y+1)\n    Note over C,S: ESTABLISHED - data flows\n    C->>S: FIN\n    S->>C: ACK\n    S->>C: FIN\n    C->>S: ACK\n    Note over C: TIME_WAIT (2*MSL)"
+    },
+    {
+      "id": "congestion-window",
+      "title": "TCP Congestion Window: Slow Start and AIMD",
+      "type": "ascii",
+      "content": "cwnd\n  |              /\\            (loss -> multiplicative decrease)\n  |             /  \\         /\n  |   slow     /    \\___    /   <- congestion avoidance\n  |   start   /     (additive increase +1 MSS/RTT)\n  |  (exp)  _/\n  |       _/   ^ ssthresh\n  +------/-----------------------------> time\n  cwnd grows exponentially until ssthresh, then linearly;\n  a loss event halves cwnd (fast recovery) or, on timeout, resets to 1."
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-tcp-vs-udp",
+      "question": "What are the differences between TCP and UDP, and when would you choose each?",
+      "answer": "TCP is connection-oriented and provides a reliable, in-order byte stream with flow control and congestion control, established via a three-way handshake; the cost is setup latency and head-of-line blocking. UDP is connectionless and gives only best-effort datagram delivery with a checksum - no ordering, retransmission, flow, or congestion control - but minimal 8-byte headers and no per-connection state. Choose TCP when correctness and ordering matter (HTTP, SSH, databases, file transfer). Choose UDP when timeliness beats perfect delivery or when you provide your own reliability layer: DNS, VoIP, live video, gaming, and QUIC (which rebuilds reliability and congestion control on top of UDP).",
+      "difficulty": "junior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["tcp", "udp"],
+      "followUps": ["Why does QUIC build on UDP rather than TCP?", "What is head-of-line blocking in TCP?"]
+    },
+    {
+      "id": "q-tcp-handshake",
+      "question": "Walk through the TCP three-way handshake and four-way teardown. Why is teardown four steps?",
+      "answer": "Handshake: the client sends SYN with an initial sequence number x; the server replies SYN-ACK (its own seq y, acking x+1); the client sends ACK (acking y+1). Both ends now have synchronized sequence numbers and the connection is ESTABLISHED, costing one round trip. Teardown is four-way because TCP is full-duplex and each direction closes independently: one side sends FIN, the peer ACKs it (that direction is now half-closed), then the peer sends its own FIN, which is ACKed. The active closer enters TIME_WAIT for 2*MSL to absorb delayed duplicate segments and ensure its final ACK was received before the socket can be reused. A server that initiates many closes can pile up TIME_WAIT sockets and exhaust ephemeral ports.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["tcp", "handshake"],
+      "followUps": ["Why does TIME_WAIT last 2*MSL?", "What is TCP Fast Open?"]
+    },
+    {
+      "id": "q-congestion-control",
+      "question": "Explain TCP congestion control: slow start, congestion avoidance, and AIMD.",
+      "answer": "Congestion control protects the network (distinct from flow control, which protects the receiver). TCP keeps a congestion window cwnd and sends no more than min(rwnd, cwnd) unacknowledged bytes. It begins in slow start: cwnd grows exponentially (roughly doubling each RTT) until it reaches a threshold ssthresh. It then switches to congestion avoidance, growing additively (+1 MSS per RTT). On detecting loss it cuts cwnd multiplicatively - the Additive-Increase/Multiplicative-Decrease (AIMD) policy that makes competing flows converge to a fair, stable share. A triple-duplicate ACK signals mild loss and triggers fast retransmit/fast recovery (roughly halve cwnd), while a retransmission timeout is treated as severe congestion and resets cwnd to 1 MSS, re-entering slow start.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["tcp", "congestion-control"],
+      "followUps": ["How does flow control differ from congestion control?", "What does BBR do differently from loss-based control?"]
+    },
+    {
+      "id": "q-http-evolution",
+      "question": "How do HTTP/1.1, HTTP/2, and HTTP/3 differ?",
+      "answer": "HTTP/1.1 is text-based and processes one request per connection at a time (usable pipelining never materialized), so browsers open ~6 TCP connections per origin. HTTP/2 uses one TCP connection with binary framing and multiplexed streams, plus HPACK header compression and server push, eliminating application-layer head-of-line blocking. But because all streams share one ordered TCP byte stream, a single lost segment stalls every stream - transport-layer HOL blocking. HTTP/3 replaces TCP with QUIC (a reliable transport over UDP) where each stream is independently ordered, so loss on one stream does not stall the others; it also folds TLS 1.3 into the handshake (1-RTT or 0-RTT) and supports connection migration via a connection ID so a session survives an IP change.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["http", "http2", "http3", "quic"],
+      "followUps": ["Why can't HTTP/2 fix transport-layer HOL blocking?", "What is connection migration in QUIC?"]
+    },
+    {
+      "id": "q-tls-handshake",
+      "question": "Describe the TLS 1.3 handshake and explain forward secrecy.",
+      "answer": "In TLS 1.3 the client sends ClientHello with its cipher suites, supported groups, SNI, and an ephemeral Diffie-Hellman key_share for its guessed group. The server replies ServerHello with the chosen cipher and its own key_share; both can now derive a shared secret via ephemeral elliptic-curve Diffie-Hellman (ECDHE). The server then sends (now encrypted) its certificate and a CertificateVerify - a signature over the handshake transcript proving it holds the certificate's private key - plus Finished; the client validates the certificate chain to a trusted CA, checks the hostname and expiry, and sends its own Finished. This completes in a single round trip, after which application data flows encrypted. Forward secrecy comes from the ephemeral DH keys being discarded after the session: recording the ciphertext and later stealing the server's long-term key cannot decrypt past sessions. TLS 1.3 makes ephemeral key exchange mandatory and also supports 0-RTT resumption for returning clients.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["tls", "security", "forward-secrecy"],
+      "followUps": ["What is the replay risk of 0-RTT early data?", "How does the certificate authenticate the server?"]
+    },
+    {
+      "id": "q-dns-resolution",
+      "question": "How does DNS resolve a name, and what role does TTL play?",
+      "answer": "DNS is a distributed, hierarchical, cached database. A recursive resolver, on a cache miss, queries a root server (which refers it to the .com TLD servers), then the TLD server (which refers it to the domain's authoritative name servers), then the authoritative server, which returns the record (e.g. an A record). Each step is a referral down the hierarchy until the authoritative answer is found, after which the resolver caches it. DNS runs over UDP port 53 for speed and falls back to TCP for large responses or zone transfers. Each record carries a TTL controlling how long caches may keep it: high TTLs speed resolution but slow propagation of changes, so operators lower TTLs before planned IP migrations so clients re-resolve promptly and avoid hitting a dead address.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["dns"],
+      "followUps": ["What is the difference between a recursive and an authoritative server?", "What are A vs CNAME vs MX records?"]
+    },
+    {
+      "id": "q-subnetting",
+      "question": "What does 10.0.0.0/24 mean, and how many usable hosts does it have?",
+      "answer": "The /24 is a CIDR prefix length: the first 24 of the 32 IPv4 bits identify the network and the remaining 8 bits identify hosts, equivalent to the subnet mask 255.255.255.0. That gives 2^8 = 256 total addresses (10.0.0.0 through 10.0.0.255), but two are reserved: 10.0.0.0 is the network address and 10.0.0.255 is the broadcast address, leaving 254 usable host addresses. In general a /n network has 2^(32-n) total and 2^(32-n) - 2 usable hosts (the -2 vanishes at /31 and /32, used for point-to-point and host routes). Subnetting borrows host bits to create smaller networks.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["ip", "subnetting", "cidr"],
+      "followUps": ["How many usable hosts in a /26?", "Why do /31 subnets exist?"]
+    },
+    {
+      "id": "q-nat",
+      "question": "What is NAT, why does it exist, and what does it break?",
+      "answer": "Network Address Translation lets many hosts on a private network (RFC 1918 ranges like 192.168.0.0/16) share one public IPv4 address. The NAT router rewrites the source IP and port of outbound packets and records the mapping in a translation table so it can route replies back to the correct internal host - port address translation (PAT). Its main purpose is conserving scarce IPv4 addresses; a side effect is hiding internal hosts and blocking unsolicited inbound connections, which people mistake for security. NAT breaks protocols that embed IP addresses in their payloads (classic FTP, SIP) and complicates peer-to-peer connectivity, since neither peer is directly addressable - hence STUN/TURN/ICE for NAT traversal and hole punching. IPv6's vast address space removes the need for NAT, restoring end-to-end addressing.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["nat", "ip"],
+      "followUps": ["How does STUN help peer-to-peer connections?", "Is NAT a security feature?"]
+    },
+    {
+      "id": "q-tricky-hol-blocking",
+      "question": "Tricky: A teammate claims upgrading from HTTP/1.1 to HTTP/2 'completely eliminates head-of-line blocking.' Are they correct?",
+      "answer": "Not completely. HTTP/2 eliminates head-of-line blocking at the APPLICATION layer by multiplexing many streams over one connection, so requests no longer queue behind each other as they did in HTTP/1.1. However, all those streams ride a single ordered TCP byte stream, and TCP guarantees in-order delivery to the application. So if one TCP segment is lost, TCP withholds all subsequently received data - including data belonging to other, unrelated streams - until the missing segment is retransmitted. That is TRANSPORT-layer head-of-line blocking, and HTTP/2 cannot avoid it because the problem lives in TCP, not HTTP. Only HTTP/3, by running over QUIC where each stream is independently ordered atop UDP, eliminates transport-layer HOL blocking; a lost packet then stalls only its own stream. So the correct statement is 'HTTP/2 removes application-layer HOL blocking; HTTP/3 removes transport-layer HOL blocking too.'",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["http2", "http3", "hol-blocking", "gotcha"],
+      "followUps": ["Why can QUIC do this when TCP cannot?", "On a lossless network, is there any HOL difference between HTTP/2 and HTTP/3?"]
+    },
+    {
+      "id": "q-tricky-latency-bandwidth",
+      "question": "Tricky: Your large file transfer between two continents is slow. The ISP offers to double your bandwidth. Will that fix it?",
+      "answer": "Probably not, and the reason is the bandwidth-delay product and TCP windowing. Throughput for a window-based protocol is bounded by window_size / RTT. On a high-latency intercontinental link, if the TCP receive/congestion window is smaller than the bandwidth-delay product (bandwidth * RTT), the sender runs out of in-flight data and must wait for ACKs, leaving the pipe underutilized - so the link is not actually the bottleneck and doubling its capacity does nothing. The real fixes are enabling TCP window scaling and tuning buffers so the window can exceed the BDP, using parallel streams, or using a protocol/congestion control designed for high BDP (e.g. BBR). Only if you have measured that the window already fills the pipe (you are genuinely bandwidth-bound) would more bandwidth help. This is the classic latency-vs-bandwidth distinction: more bandwidth cannot overcome a window/round-trip limit.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["tcp", "latency", "bandwidth", "gotcha"],
+      "followUps": ["How do you compute the required window from BDP?", "Why do parallel TCP streams sometimes help?"]
+    },
+    {
+      "id": "q-tricky-0rtt-replay",
+      "question": "Tricky: TLS 1.3 0-RTT lets a returning client send request data in the very first packet. Why is this dangerous, and what kind of requests are safe for it?",
+      "answer": "0-RTT early data is encrypted with a pre-shared key from a previous session and sent before the handshake completes, which saves a round trip but removes the server's ability to guarantee freshness. An attacker who captured the early-data packet can REPLAY it - resend the same encrypted request - and the server cannot distinguish the replay from the original within the early-data window. For a non-idempotent operation (transfer money, place an order, increment a counter) a replay causes a duplicate side effect. Therefore 0-RTT must be restricted to idempotent, side-effect-free requests (typically GETs), and servers should add anti-replay defenses (single-use tickets, recording recent nonces, or strict idempotency keys). The general rule: never accept state-changing requests over 0-RTT early data. This replay exposure is the price paid for eliminating the handshake round trip.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["tls", "0-rtt", "security", "gotcha"],
+      "followUps": ["How can a server bound the replay window?", "Why is 1-RTT data not replayable?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-cidr-calculator",
+      "title": "CIDR Subnet Calculator",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "prompt": "Given an IPv4 address and a CIDR prefix length (e.g. '192.168.1.130/26'), compute and return the network address, broadcast address, subnet mask, and number of usable hosts. Use bitwise operations on the 32-bit integer form of the address.",
+      "hints": [
+        "Parse the dotted address into a single 32-bit unsigned integer.",
+        "The mask is the top `prefix` bits set: mask = prefix == 0 ? 0 : 0xFFFFFFFF << (32 - prefix).",
+        "network = ip & mask; broadcast = network | ~mask; usable = 2^(32-prefix) - 2 (with care for /31 and /32)."
+      ],
+      "solutionCode": "public class Cidr {\n    static long toInt(String ip) {\n        String[] o = ip.split(\"\\\\.\");\n        long v = 0;\n        for (String part : o) v = (v << 8) | Integer.parseInt(part);\n        return v & 0xFFFFFFFFL;\n    }\n    static String toIp(long v) {\n        return String.format(\"%d.%d.%d.%d\",\n            (v >> 24) & 0xFF, (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);\n    }\n    public static String describe(String cidr) {\n        String[] parts = cidr.split(\"/\");\n        long ip = toInt(parts[0]);\n        int prefix = Integer.parseInt(parts[1]);\n        long mask = prefix == 0 ? 0L : (0xFFFFFFFFL << (32 - prefix)) & 0xFFFFFFFFL;\n        long network = ip & mask;\n        long broadcast = network | (~mask & 0xFFFFFFFFL);\n        long total = 1L << (32 - prefix);\n        long usable = prefix >= 31 ? total : total - 2;  // /31, /32 have no net/bcast reserved pair\n        return \"network=\" + toIp(network)\n             + \" broadcast=\" + toIp(broadcast)\n             + \" mask=\" + toIp(mask)\n             + \" usableHosts=\" + usable;\n    }\n    // describe(\"192.168.1.130/26\") ->\n    //   network=192.168.1.128 broadcast=192.168.1.191 mask=255.255.255.192 usableHosts=62\n}",
+      "solutionLanguage": "java",
+      "explanation": "We convert the dotted-quad to a 32-bit value by shifting each octet into place. The subnet mask is the high `prefix` bits set, built by left-shifting 0xFFFFFFFF by (32 - prefix); we mask back to 32 bits because Java longs are 64-bit. The network address is ip & mask (zeroing the host bits), and the broadcast address is network | ~mask (setting all host bits). Total addresses in the block are 2^(32-prefix); usable hosts subtract the network and broadcast addresses (total - 2), except /31 (point-to-point, RFC 3021) and /32 (single host) where that pair is not reserved. For 192.168.1.130/26 the mask is 255.255.255.192, the host bits span .128-.191, giving network .128, broadcast .191, and 62 usable hosts - demonstrating how bitwise AND/OR with the mask directly yield the subnet boundaries.",
+      "relatedTopic": "networking"
+    },
+    {
+      "id": "ch-retry-backoff",
+      "title": "Reliable Request with Exponential Backoff and Jitter",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "prompt": "Network calls fail transiently (packet loss, brief congestion, a server restart). Implement a retry wrapper that retries an idempotent request up to N times using exponential backoff with full jitter, and that does NOT retry on non-retryable errors (e.g. HTTP 400/401). Explain why jitter matters.",
+      "hints": [
+        "Backoff base delay should double each attempt: base * 2^attempt, capped at a maximum.",
+        "Apply FULL jitter: sleep a random amount in [0, computed_delay] to de-synchronize many clients.",
+        "Classify errors: retry timeouts/5xx/connection resets; fail fast on 4xx client errors."
+      ],
+      "solutionCode": "import java.util.concurrent.ThreadLocalRandom;\nimport java.util.function.Supplier;\n\npublic class Retry {\n    public interface Call<T> { T run() throws Exception; }\n\n    static boolean retryable(Exception e) {\n        // Retry transient transport/server faults, not client (4xx) mistakes.\n        if (e instanceof java.net.SocketTimeoutException) return true;\n        if (e instanceof java.io.IOException) return true;        // conn reset, etc.\n        if (e instanceof HttpException h) return h.status >= 500; // 5xx only\n        return false;\n    }\n\n    public static <T> T withBackoff(Call<T> call, int maxAttempts,\n                                    long baseMs, long capMs) throws Exception {\n        Exception last = null;\n        for (int attempt = 0; attempt < maxAttempts; attempt++) {\n            try {\n                return call.run();\n            } catch (Exception e) {\n                last = e;\n                if (!retryable(e) || attempt == maxAttempts - 1) throw e;\n                long exp = Math.min(capMs, baseMs * (1L << attempt)); // base * 2^attempt, capped\n                long sleep = ThreadLocalRandom.current().nextLong(exp + 1); // FULL jitter [0, exp]\n                Thread.sleep(sleep);\n            }\n        }\n        throw last;\n    }\n\n    static class HttpException extends Exception { final int status; HttpException(int s){this.status=s;} }\n}",
+      "solutionLanguage": "java",
+      "explanation": "Exponential backoff (base * 2^attempt, capped) gives a struggling server progressively more breathing room rather than hammering it, while the cap prevents unbounded waits. Full jitter - sleeping a uniformly random amount in [0, computed_delay] - is the crucial detail: without it, many clients that failed at the same instant (e.g. during a brief outage) would all retry at exactly t, 2t, 4t, creating synchronized thundering-herd spikes that re-overload the recovering server. Randomizing each client's delay spreads the retries out and smooths load. Equally important is error classification: we retry only transient transport faults and 5xx server errors, and fail fast on 4xx client errors (a malformed request will never succeed on retry, so retrying just wastes time and amplifies load). Retries should also be limited to idempotent operations, or guarded by an idempotency key, so a retried-but-actually-succeeded request does not cause a duplicate side effect.",
+      "relatedTopic": "networking"
+    }
+  ],
+  "references": [
+    {"label": "Computer Networking: A Top-Down Approach (Kurose & Ross)", "url": "https://gaia.cs.umass.edu/kurose_ross/index.php"},
+    {"label": "RFC 9000 - QUIC: A UDP-Based Multiplexed and Secure Transport", "url": "https://www.rfc-editor.org/rfc/rfc9000"},
+    {"label": "RFC 8446 - The TLS 1.3 Protocol", "url": "https://www.rfc-editor.org/rfc/rfc8446"},
+    {"label": "High Performance Browser Networking (Ilya Grigorik)", "url": "https://hpbn.co/"},
+    {"label": "Cloudflare Learning Center - HTTP/3 and QUIC", "url": "https://www.cloudflare.com/learning/performance/what-is-http3/"}
+  ]
+}

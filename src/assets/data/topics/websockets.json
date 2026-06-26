@@ -1,0 +1,501 @@
+{
+  "id": "websockets",
+  "title": "WebSockets & Realtime",
+  "category": "Backend",
+  "subcategory": "Realtime",
+  "difficulty": "senior",
+  "tags": ["websockets", "realtime", "sse", "scaling", "pubsub", "backpressure"],
+  "description": "A staff-level guide to realtime transports: the WebSocket handshake and framing, WS vs SSE vs long-polling, scaling with sticky sessions and Redis pub/sub fan-out, backpressure, heartbeats, auth, and delivery semantics.",
+  "estReadMinutes": 30,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "WebSocket (RFC 6455) is a protocol that upgrades a single HTTP connection into a persistent, full-duplex, bidirectional channel over one TCP connection. Unlike request/response HTTP, either side can send messages at any time with low per-message overhead. It is the workhorse for chat, collaborative editing, live dashboards, multiplayer, and trading feeds. Senior interviews probe not the API but the operational realities: how the handshake works, how you scale a stateful long-lived connection across many servers, and how you handle backpressure, reconnection, and delivery guarantees."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Handshake: an HTTP/1.1 GET with an Upgrade header that switches the TCP connection's protocol to WebSocket.",
+            "Framing: messages are split into frames with opcodes (text, binary, ping/pong, close); client frames are masked.",
+            "Full-duplex: both peers send independently - no request/response coupling.",
+            "Stateful: a connection lives on one server, which complicates horizontal scaling.",
+            "Alternatives: SSE (server->client only, over HTTP) and long-polling are simpler for one-way streams."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "WebSocket is a transport, not a full messaging system. It gives you a pipe; you still design framing of application messages, reconnection, auth, ordering, and delivery semantics on top. Many teams reach for a library (Socket.IO, SignalR, Phoenix Channels) precisely because those concerns are non-trivial."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Realtime transport choices have outsized operational consequences. A WebSocket connection is stateful and long-lived, so it breaks the stateless-load-balancer assumptions most HTTP infrastructure is built on. Get the architecture wrong and you cannot scale past one box, you drop messages on deploys, or a slow client exhausts server memory. Choosing WS where SSE would do adds needless complexity; choosing SSE where you need client->server streaming forces ugly workarounds."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Scaling: a message published on server A must reach a subscriber connected to server B - you need a pub/sub backplane.",
+            "Backpressure: a slow consumer cannot keep up; unbounded server-side buffering is an OOM waiting to happen.",
+            "Deploys: long-lived connections must be drained gracefully or every client reconnects in a thundering herd.",
+            "Auth: the handshake is HTTP (cookies/headers available), but per-message authorization and token expiry need explicit handling.",
+            "Delivery: WebSocket gives ordered, reliable delivery only while the TCP connection is up; reconnection creates gaps you must reconcile."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The number one realtime scaling mistake is treating a WebSocket server like a stateless web server behind a round-robin load balancer. Connections are pinned to one process; without sticky routing and a shared pub/sub layer, messages simply never reach clients on other nodes."
+        }
+      ]
+    },
+    {
+      "id": "handshake",
+      "heading": "The Handshake and Upgrade",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A WebSocket connection begins as an ordinary HTTP/1.1 GET request carrying an Upgrade header. The client sends a random 16-byte nonce, base64-encoded, in Sec-WebSocket-Key. The server proves it understood the protocol by concatenating that key with the fixed GUID 258EAFA5-E914-47DA-95CA-C5AB0DC85B11, taking the SHA-1 hash, base64-encoding it, and returning it in Sec-WebSocket-Accept with a 101 Switching Protocols status. After the 101, the bytes on the socket are WebSocket frames, not HTTP."
+        },
+        {
+          "type": "code",
+          "language": "http",
+          "code": "GET /chat HTTP/1.1\nHost: example.com\nUpgrade: websocket\nConnection: Upgrade\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\nSec-WebSocket-Version: 13\nSec-WebSocket-Protocol: chat.v1\nOrigin: https://example.com\n\n---- server responds ----\n\nHTTP/1.1 101 Switching Protocols\nUpgrade: websocket\nConnection: Upgrade\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\nSec-WebSocket-Protocol: chat.v1"
+        },
+        {
+          "type": "list",
+          "items": [
+            "The Sec-WebSocket-Key/Accept exchange is NOT security - it just prevents caching proxies and non-WS servers from accidentally completing an upgrade.",
+            "Sec-WebSocket-Version is 13 for RFC 6455; older draft versions are obsolete.",
+            "Sec-WebSocket-Protocol negotiates an application subprotocol; the server echoes the one it selects.",
+            "Origin lets the server enforce same-origin policy - browsers send it, so check it to prevent cross-site WebSocket hijacking.",
+            "Because the handshake is HTTP, cookies and standard headers ARE available at connect time for authentication."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Use wss:// (WebSocket over TLS) in production, never ws://. Besides confidentiality, TLS dramatically improves the odds of the upgrade succeeding through intermediary proxies and corporate firewalls, which often mangle or block plaintext upgrades."
+        }
+      ]
+    },
+    {
+      "id": "frames",
+      "heading": "Frames and Message Structure",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "After the handshake, data flows as frames. Each frame has a FIN bit (is this the last frame of a message), an opcode (0x1 text, 0x2 binary, 0x0 continuation, 0x8 close, 0x9 ping, 0xA pong), a MASK bit, and a payload length encoded in 7, 7+16, or 7+64 bits. A logical message can span multiple frames (fragmentation): the first frame carries the opcode, subsequent frames use the continuation opcode 0x0, and the final one sets FIN=1. Control frames (close/ping/pong) must not be fragmented and have payloads of 125 bytes or fewer."
+        },
+        {
+          "type": "paragraph",
+          "text": "A critical rule: all frames sent from client to server MUST be masked with a per-frame 32-bit key XORed over the payload; frames from server to client MUST NOT be masked. Masking exists to defend caching proxies against a specific cache-poisoning attack where attacker-controlled payloads could be interpreted as an HTTP request by an intermediary. The server rejects an unmasked client frame, and a browser will refuse to process a masked server frame."
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": " 0                   1                   2                   3\n 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1\n+-+-+-+-+-------+-+-------------+-------------------------------+\n|F|R|R|R| opcode|M| Payload len |    Extended payload length    |\n|I|S|S|S|  (4)  |A|     (7)     |             (16/64)           |\n|N|V|V|V|       |S|             |   (if payload len==126/127)   |\n| |1|2|3|       |K|             |                               |\n+-+-+-+-+-------+-+-------------+ - - - - - - - - - - - - - - - +\n|     Masking-key (4 bytes, present if MASK set)  | Payload ... |\n+---------------------------------------------------------------+\n opcodes: 0x0 continuation  0x1 text  0x2 binary\n          0x8 close  0x9 ping  0xA pong"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Text frames must be valid UTF-8; a server must fail the connection (close code 1007) on invalid UTF-8 in a text frame. Send raw bytes as binary frames (0x2) instead of stuffing them into text. Mixing this up causes intermittent disconnects that are painful to debug."
+        }
+      ]
+    },
+    {
+      "id": "vs-alternatives",
+      "heading": "WebSockets vs SSE vs Long-Polling",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Long-polling simulates push over plain HTTP: the client makes a request, the server holds it open until there is data (or a timeout), responds, and the client immediately re-requests. It works everywhere but has high overhead (a full request/response per message round) and awkward latency. Server-Sent Events (SSE) is a standard one-way streaming protocol over a single long-lived HTTP response (text/event-stream): the server pushes events to the client, with built-in auto-reconnect and a Last-Event-ID mechanism for resuming. WebSocket is full-duplex and binary-capable, the only option when the client must also stream to the server with low latency."
+        },
+        {
+          "type": "table",
+          "headers": ["Property", "Long-polling", "SSE", "WebSocket"],
+          "rows": [
+            ["Direction", "Server->client (emulated)", "Server->client only", "Full-duplex"],
+            ["Protocol", "Plain HTTP", "HTTP (text/event-stream)", "Upgraded TCP (RFC 6455)"],
+            ["Auto-reconnect / resume", "Manual", "Built-in (Last-Event-ID)", "Manual (you implement it)"],
+            ["Binary payloads", "Yes (per response)", "No (UTF-8 text only)", "Yes (binary frames)"],
+            ["Proxy/firewall friendliness", "Highest", "High (it is just HTTP)", "Good with wss, can be blocked"],
+            ["Overhead per message", "High (full HTTP round)", "Low", "Lowest"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Decision rule: if you only push server->client (notifications, live prices, progress, feeds), prefer SSE - it is simpler, rides on HTTP/2 multiplexing, and gives reconnection/resume for free. Choose WebSocket when you genuinely need low-latency client->server streaming (chat typing, collaborative editing, games) or binary. Long-polling is a fallback for environments that block both."
+        }
+      ]
+    },
+    {
+      "id": "scaling",
+      "heading": "Scaling: Sticky Sessions and Pub/Sub Fan-Out",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A WebSocket connection is pinned to the single server process that accepted it; that process holds the in-memory state for that client. Two problems follow at scale. First, the initial HTTP upgrade must reach a server willing to keep the connection, and any reconnect should ideally land somewhere consistent - sticky sessions (by IP hash or a routing cookie) or a connection-aware load balancer handle this. Second, and more fundamental: a message produced on server A (or by a client on A) must be delivered to a subscriber whose connection lives on server B. A single process cannot see other processes' connections."
+        },
+        {
+          "type": "paragraph",
+          "text": "The standard solution is a pub/sub backplane: each server subscribes to channels in a shared broker (Redis pub/sub, NATS, Kafka, or a cloud equivalent). When server A needs to broadcast to room 'lobby', it publishes to the 'lobby' channel; every server that has local connections subscribed to 'lobby' receives the message and writes it to its own sockets. This decouples message production from connection location and lets you add servers horizontally."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Each app server: local socket registry + Redis pub/sub backplane.\nconst rooms = new Map();          // room -> Set<WebSocket> (local connections only)\n\nsub.subscribe('room:lobby');\nsub.on('message', (channel, payload) => {\n  const room = channel.split(':')[1];\n  const conns = rooms.get(room);\n  if (!conns) return;\n  for (const ws of conns) {\n    if (ws.readyState === ws.OPEN) ws.send(payload);   // deliver to LOCAL sockets\n  }\n});\n\n// Broadcasting from ANY server: publish once; every server fans out locally.\nfunction broadcast(room, message) {\n  pub.publish(`room:${room}`, JSON.stringify(message));\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Plain Redis pub/sub is fire-and-forget: if a server is momentarily disconnected from Redis or a subscriber is mid-reconnect, that message is gone. For at-least-once delivery you need a durable log (Redis Streams, Kafka, or a per-client outbox with offsets), not vanilla pub/sub. Know which one your requirements demand."
+        }
+      ]
+    },
+    {
+      "id": "backpressure-heartbeat",
+      "heading": "Backpressure, Heartbeats, and Reconnection",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Backpressure is the central reliability problem of a fast producer and a slow consumer. If the server sends faster than a client's TCP socket can drain, data queues in the server's send buffer. Most WebSocket APIs expose this - in browsers and Node's ws, bufferedAmount tells you how many bytes are queued but not yet sent. If you ignore it and keep pushing, memory grows without bound until the process is OOM-killed. You must apply backpressure: pause/drop/coalesce messages, or disconnect a client that falls too far behind."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "const MAX_BUFFER = 1 << 20;        // 1 MB ceiling per connection\n\nfunction safeSend(ws, data) {\n  if (ws.bufferedAmount > MAX_BUFFER) {\n    // Slow client: do not pile on. Drop, coalesce, or disconnect.\n    ws.close(1013, 'try again later');   // 1013 = Try Again Later\n    return false;\n  }\n  ws.send(data);\n  return true;\n}\n\n// Heartbeat: detect half-open connections (peer vanished without a close frame).\nfunction heartbeat(ws) {\n  ws.isAlive = true;\n  ws.on('pong', () => { ws.isAlive = true; });\n}\nsetInterval(() => {\n  for (const ws of wss.clients) {\n    if (!ws.isAlive) { ws.terminate(); continue; }  // missed last pong -> dead\n    ws.isAlive = false;\n    ws.ping();                       // peer must answer with pong\n  }\n}, 30000);"
+        },
+        {
+          "type": "paragraph",
+          "text": "Heartbeats (ping/pong control frames) detect half-open connections, where a peer disappeared - a laptop slept, a NAT timed out - without sending a close frame; the TCP socket can stay 'open' indefinitely. Periodic pings with a pong deadline let the server reclaim dead connections. On the client side, you implement reconnection with exponential backoff plus jitter (to avoid a thundering herd when a server restarts), and on reconnect you re-subscribe and reconcile missed messages using a sequence number or last-event-id, because the new connection started with empty state."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Reconnects after a deploy or network blip arrive all at once. Without jitter in the backoff, thousands of clients reconnect on the same tick and stampede the new server, which then falls over, causing more reconnects. Always randomize backoff and cap the maximum delay."
+        }
+      ]
+    },
+    {
+      "id": "auth-delivery",
+      "heading": "Auth, Ordering, and Delivery Semantics",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Authentication happens at the handshake, which is an HTTP request - so cookies (with same-site protection) or an Authorization header are available. Browsers' WebSocket API cannot set custom headers, so token auth from a browser typically passes the token in a cookie, in the subprotocol field, or via a short-lived ticket fetched over HTTPS and presented as a query parameter (avoid long-lived tokens in URLs, which leak into logs). Crucially, auth at connect time is not enough: tokens expire mid-connection, so you need a strategy to re-validate (e.g. require periodic re-auth messages, or close the socket when the token's TTL elapses) and to authorize each action, not just the connection."
+        },
+        {
+          "type": "paragraph",
+          "text": "Ordering and delivery: while a single WebSocket connection is open, messages are delivered reliably and in order because it rides on one TCP stream. But that guarantee ends at reconnection - the new connection cannot replay what was missed unless you build it. So end-to-end you typically get at-most-once by default. To get at-least-once you add per-message sequence numbers and client acks (resend unacked messages on reconnect), accepting that the client must dedupe (idempotency) because a resend may duplicate a message it already processed. Exactly-once is achieved as at-least-once plus idempotent handling, not as a transport guarantee."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Cross-site WebSocket hijacking: a WebSocket handshake from another origin still carries the victim's cookies (the browser does not enforce CORS on WS the way it does on fetch). Always validate the Origin header server-side and use CSRF-resistant tokens, or an attacker's page can open an authenticated socket as the victim."
+        }
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: Chat That Lost Messages on Deploy",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Scenario: a chat app ran fine on one server. Scaled to three behind a round-robin load balancer, users reported that messages from people 'on a different server' never arrived, and every deploy dropped in-flight messages and caused a reconnect storm that briefly took the cluster down. Three distinct realtime bugs converged."
+        },
+        {
+          "type": "list",
+          "items": [
+            "No backplane: each server only knew its own sockets, so a message from a user on server A never reached a user on server B. Fixed by publishing every chat message to Redis (channel per room) and having each server fan out to its local sockets.",
+            "No sticky routing for reconnects: clients re-handshaking landed on arbitrary servers; combined with the backplane this was tolerable, but adding an IP-hash routing cookie kept a client's reconnect on a warm node.",
+            "Hard deploys: SIGKILL severed all sockets at once and clients reconnected with no backoff. Fixed with graceful drain (stop accepting new connections, send a close frame with code 1001 'going away', let clients reconnect with jittered exponential backoff) and per-room sequence numbers so reconnecting clients fetch missed messages from a Redis Stream."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Graceful shutdown: drain instead of dropping.\nprocess.on('SIGTERM', async () => {\n  server.close();                          // stop accepting NEW http upgrades\n  for (const ws of wss.clients) {\n    ws.send(JSON.stringify({ type: 'reconnect', after: lastSeq }));\n    ws.close(1001, 'server shutting down'); // 1001 'going away' -> client reconnects\n  }\n  await flushPendingToRedisStream();        // persist so nothing is lost\n  process.exit(0);\n});"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "After adding the Redis backplane, sticky reconnect routing, graceful drain, and per-room sequence numbers backed by a Redis Stream, cross-server delivery worked, deploys stopped dropping messages, and the reconnect storm flattened. The takeaway: WebSocket scaling is a distributed-systems problem - state location, fan-out, and graceful degradation - not just a socket API."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "No pub/sub backplane behind multiple servers: messages only reach clients on the same node; cross-node delivery silently fails.",
+            "Ignoring backpressure (bufferedAmount): a slow client's send buffer grows unbounded and OOM-kills the server.",
+            "No heartbeats: half-open connections (NAT/laptop sleep) accumulate, leaking memory and file descriptors and skewing presence counts.",
+            "Reconnect without jitter: a deploy triggers a synchronized reconnect stampede that overloads the new servers.",
+            "Auth only at connect: an expired token keeps an authenticated socket alive indefinitely; per-action authorization is missing.",
+            "Not validating Origin: enables cross-site WebSocket hijacking because cookies are sent on the handshake.",
+            "Assuming WebSocket gives at-least-once delivery: it gives in-order delivery only while connected; reconnection creates gaps you must reconcile.",
+            "Using a text frame for binary data (or sending invalid UTF-8 in a text frame), causing intermittent 1007 disconnects."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Incident pattern: a market-data feed pushed ticks faster than mobile clients could consume. The server never checked bufferedAmount, so per-connection send buffers ballooned; under a market spike the process hit the memory limit and was OOM-killed, disconnecting every client simultaneously. Backpressure with a buffer ceiling (drop/coalesce/disconnect) would have contained the blast radius."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Use wss:// (TLS) everywhere; validate the Origin header on the handshake to block cross-site hijacking.",
+            "Behind multiple servers, use a pub/sub backplane (Redis/NATS/Kafka) for fan-out, and a durable log (Streams/Kafka) if you need at-least-once.",
+            "Enforce backpressure: monitor bufferedAmount and drop, coalesce, or disconnect slow clients with a buffer ceiling.",
+            "Send periodic ping/pong heartbeats with a pong deadline; terminate connections that miss it to reclaim half-open sockets.",
+            "Implement client reconnection with exponential backoff plus jitter and a max cap; resume with a sequence number / last-event-id.",
+            "Authenticate at the handshake and re-validate over the connection's lifetime; authorize each action, not just the connection.",
+            "Prefer SSE for one-way server->client streams; reserve WebSocket for full-duplex or binary needs.",
+            "Drain gracefully on deploy: stop new upgrades, send close 1001, persist in-flight messages, let clients reconnect with backoff."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Concern", "Mechanism", "Failure if ignored"],
+          "rows": [
+            ["Cross-node delivery", "Pub/sub backplane", "Messages never reach other servers' clients"],
+            ["Slow consumer", "bufferedAmount ceiling", "Unbounded memory -> OOM"],
+            ["Dead connections", "Ping/pong heartbeat", "Leaked sockets, wrong presence"],
+            ["Deploys/blips", "Backoff + jitter, graceful drain", "Reconnect stampede, lost messages"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "note-http2-3",
+      "heading": "WebSocket, HTTP/2, and HTTP/3",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Classic RFC 6455 WebSocket runs over HTTP/1.1. RFC 8441 defines bootstrapping WebSocket over an HTTP/2 stream (using the extended CONNECT method), which lets a WS connection share a multiplexed H2 connection rather than monopolizing a TCP connection. Over HTTP/3 (QUIC), RFC 9220 extends the same idea. In practice support varies across servers and proxies, so many production stacks still use HTTP/1.1 WebSocket or choose SSE (which benefits directly from HTTP/2 multiplexing, removing the old six-connections-per-origin limit that historically hampered SSE)."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "If your only need is server->client push and you are on HTTP/2 or HTTP/3, SSE is often the pragmatic winner: it multiplexes cleanly, gives auto-reconnect and resume for free, and avoids the stateful-upgrade complexity. Save WebSocket for when bidirectional or binary is a real requirement."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "ws-handshake-seq",
+      "title": "WebSocket Handshake Sequence",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n    participant C as Client\n    participant S as Server\n    C->>S: GET /chat HTTP/1.1\\nUpgrade: websocket\\nSec-WebSocket-Key: <nonce>\n    Note over S: SHA1(key + GUID), base64\n    S-->>C: 101 Switching Protocols\\nSec-WebSocket-Accept: <hash>\n    Note over C,S: Connection is now full-duplex WS frames\n    C->>S: masked text frame (opcode 0x1)\n    S-->>C: unmasked text frame (opcode 0x1)\n    C->>S: ping (0x9)\n    S-->>C: pong (0xA)"
+    },
+    {
+      "id": "ws-fanout",
+      "title": "Pub/Sub Fan-Out Across Servers",
+      "type": "mermaid",
+      "content": "flowchart LR\n    CA[Client A] -->|conn| S1[Server 1]\n    CB[Client B] -->|conn| S2[Server 2]\n    CC[Client C] -->|conn| S2\n    S1 -->|publish room:lobby| R[(Redis Pub/Sub)]\n    R -->|deliver| S1\n    R -->|deliver| S2\n    S2 -->|local send| CB\n    S2 -->|local send| CC"
+    },
+    {
+      "id": "ws-vs-sse",
+      "title": "Transport Direction Comparison",
+      "type": "ascii",
+      "content": "Long-polling:  C --req--> S   (S holds, then responds) --> C re-requests\nSSE:           C ========> S   then  S ===events===> C   (one-way stream)\nWebSocket:     C <=======> S   full-duplex, either side sends anytime\n\nPick by direction + payload:\n  one-way text   -> SSE\n  two-way/binary -> WebSocket\n  blocked nets   -> long-polling fallback"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-ws-handshake",
+      "question": "Walk through the WebSocket handshake. What is the Sec-WebSocket-Key/Accept exchange for?",
+      "answer": "The client sends an HTTP/1.1 GET with Upgrade: websocket, Connection: Upgrade, a base64-encoded random 16-byte nonce in Sec-WebSocket-Key, and Sec-WebSocket-Version: 13. The server computes Sec-WebSocket-Accept by concatenating the client's key with the fixed GUID 258EAFA5-E914-47DA-95CA-C5AB0DC85B11, taking SHA-1, and base64-encoding the result, then replies 101 Switching Protocols with that value. After the 101, the TCP connection carries WebSocket frames instead of HTTP. The key/accept exchange is NOT a security mechanism - it cannot authenticate anyone since the GUID is public. Its purpose is to ensure both endpoints actually speak WebSocket and to prevent caching proxies or non-WS servers from mistakenly treating the request as a normal HTTP request and completing an upgrade by accident.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["handshake", "upgrade", "rfc6455"],
+      "followUps": ["Why is the handshake done over HTTP at all?", "What status code signals a successful upgrade?"]
+    },
+    {
+      "id": "q-ws-vs-sse",
+      "question": "When would you choose SSE over WebSocket, and vice versa?",
+      "answer": "Choose SSE when the data flow is purely server->client - notifications, live prices, progress updates, log tailing, feeds. SSE is simpler: it is just a long-lived HTTP response with content-type text/event-stream, it gives automatic reconnection and resume-from-last-event-id for free, and it multiplexes cleanly over HTTP/2. Choose WebSocket when you need genuine full-duplex, low-latency client->server streaming (chat with typing indicators, collaborative editing, multiplayer games, control channels) or when you need to send binary frames, which SSE cannot do (it is UTF-8 text only). The decision is mostly about direction and payload type. Long-polling is the fallback when an environment blocks both. A common senior point: teams reach for WebSocket reflexively when SSE would be simpler and more robust for one-way streams.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["sse", "comparison", "transport"],
+      "followUps": ["Why can't SSE send binary?", "How does HTTP/2 change the SSE trade-off?"]
+    },
+    {
+      "id": "q-ws-scaling",
+      "question": "How do you scale WebSockets across many servers, and why is a load balancer alone insufficient?",
+      "answer": "A WebSocket connection is stateful and pinned to the single process that accepted it; that process holds the only reference to the client's socket. A load balancer can spread connections across servers and provide sticky routing for reconnects, but it cannot solve the core problem: a message produced on server A must reach a subscriber whose connection lives on server B, and neither server can see the other's sockets. The solution is a pub/sub backplane - a shared broker (Redis pub/sub, NATS, Kafka, or cloud equivalent). Each server subscribes to the channels/rooms its local clients care about; to broadcast, a server publishes once to the broker, and every server with relevant local connections receives it and writes to its own sockets. Sticky sessions plus a pub/sub backplane together enable horizontal scaling.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["scaling", "pubsub", "sticky-sessions"],
+      "followUps": ["What does plain Redis pub/sub not guarantee?", "When do you need a durable log instead?"]
+    },
+    {
+      "id": "q-ws-backpressure",
+      "question": "What is backpressure in WebSockets and how do you handle a slow consumer?",
+      "answer": "Backpressure is the problem of a producer sending faster than a consumer can receive. When the server pushes faster than a client's TCP socket can drain, unsent data accumulates in the server's per-connection send buffer (exposed as bufferedAmount in browser and Node ws APIs). If you keep sending regardless, that buffer grows without bound and eventually OOM-kills the process - and one slow client can take down the whole server. You handle it by monitoring bufferedAmount against a ceiling and then applying a policy: stop sending until it drains, drop messages, coalesce/throttle (e.g. send only the latest state for a live dashboard), or disconnect the client (close code 1013 'try again later'). The key principle is that buffering is bounded; a client that cannot keep up must be slowed or shed, never buffered indefinitely.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["backpressure", "memory", "reliability"],
+      "followUps": ["What does bufferedAmount tell you?", "How does coalescing help a live dashboard?"]
+    },
+    {
+      "id": "q-ws-heartbeat",
+      "question": "Why are heartbeats (ping/pong) necessary, and how do they work?",
+      "answer": "TCP does not promptly notify you when a peer silently disappears - a laptop sleeps, a phone loses signal, a NAT or load balancer drops idle state - so a connection can become 'half-open': one side thinks it is still connected while no data will ever flow. Heartbeats detect this. The server periodically sends a WebSocket ping control frame (opcode 0x9); a healthy peer must reply with a pong (0xA). If a pong is not received within a deadline (e.g. before the next ping interval), the server treats the connection as dead and terminates it, reclaiming the socket, file descriptor, and any associated state, and correcting presence/online counts. Heartbeats also keep idle connections alive through intermediaries that would otherwise time them out. Both endpoints can initiate pings; browsers answer pongs automatically.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["heartbeat", "ping-pong", "half-open"],
+      "followUps": ["What is a half-open connection?", "Why do idle connections get dropped by proxies?"]
+    },
+    {
+      "id": "q-ws-delivery",
+      "question": "What delivery and ordering guarantees does WebSocket provide?",
+      "answer": "While a single WebSocket connection is open, messages are delivered reliably and in order, because the connection rides on one TCP stream that provides ordered, reliable byte delivery. That guarantee ends at the connection boundary: if the connection drops and the client reconnects, the new connection has no memory of what was sent or missed, so end-to-end you effectively get at-most-once delivery by default - anything sent while disconnected is lost. To achieve at-least-once you must build it on top: assign per-message sequence numbers, have the client track the last sequence it processed, and on reconnect replay or fetch the gap (e.g. from a durable log keyed by sequence). Because replays can duplicate, the client must dedupe, making handlers idempotent. Exactly-once is at-least-once plus idempotency, not a transport feature.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["delivery", "ordering", "reliability"],
+      "followUps": ["How do you reconcile missed messages on reconnect?", "Why is idempotency required for at-least-once?"]
+    },
+    {
+      "id": "q-ws-auth",
+      "question": "How do you authenticate a WebSocket connection, and why is connect-time auth not enough?",
+      "answer": "Because the handshake is an HTTP request, you can authenticate at connect time using whatever HTTP carries: a session cookie (with same-site protection), or a token. Browsers cannot set custom headers on the WebSocket API, so token auth typically passes through a cookie, the Sec-WebSocket-Protocol subprotocol field, or a short-lived single-use ticket obtained over HTTPS (avoid long-lived tokens in the URL, which leak into logs and referrers). Connect-time auth alone is insufficient because the connection is long-lived: a token validated at connect may expire minutes later while the socket stays open, so you need lifecycle handling - re-validate periodically, require a re-auth message, or close the socket when the token's TTL elapses - and you must authorize each action/message, not just the initial connection, since a user's permissions can change. You should also validate the Origin header to prevent cross-site WebSocket hijacking.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["auth", "security", "tokens"],
+      "followUps": ["How do you handle token expiry mid-connection?", "Why validate Origin?"]
+    },
+    {
+      "id": "q-ws-masking",
+      "question": "Why must client-to-server WebSocket frames be masked?",
+      "answer": "RFC 6455 requires that every frame sent from a client to a server be masked: the client picks a random 32-bit key per frame and XORs it over the payload, and includes the key in the frame. Server-to-client frames must NOT be masked. The reason is defense against cache-poisoning attacks on intermediaries. Without masking, an attacker controlling a browser script could craft a payload that, as it passes through a non-WebSocket-aware caching proxy, looks like a valid HTTP request, potentially poisoning the proxy's cache for other users. Randomized per-frame masking makes the on-the-wire bytes unpredictable, so an attacker cannot reliably forge such a request through the proxy. It is not encryption (the key travels with the frame) and provides no confidentiality - that is what wss/TLS is for; masking solely thwarts the proxy cache-poisoning vector.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["framing", "masking", "security"],
+      "followUps": ["Why don't server frames need masking?", "Does masking provide confidentiality?"]
+    },
+    {
+      "id": "q-ws-tricky-loadbalancer",
+      "question": "Tricky: Your WebSocket app works on one server but breaks behind a load balancer with round-robin. What are the likely failures, and is sticky sessions enough to fix them?",
+      "answer": "Two distinct things break. First, the upgrade and any reconnect can land on different servers; if the LB does not understand WebSocket or balances mid-connection, the persistent connection fails - sticky sessions (IP hash or routing cookie) fix the routing so a connection and its reconnects stay on a consistent node. Second, and the part sticky sessions do NOT fix: a message produced on server A still cannot reach a client connected to server B, because each server only knows its own sockets. Sticky sessions keep a client on one server but do nothing to share messages across servers. The complete fix needs a pub/sub backplane (Redis/NATS/Kafka) so any server can publish and all servers fan out to their local connections. The trap in the question is assuming sticky sessions alone solve scaling - they solve connection affinity, not cross-node message delivery, which is the deeper problem.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["scaling", "sticky-sessions", "gotcha"],
+      "followUps": ["What exactly do sticky sessions solve and not solve?", "How would WebSocket-aware L7 load balancing help?"]
+    },
+    {
+      "id": "q-ws-tricky-pubsub-loss",
+      "question": "Tricky: You added Redis pub/sub for fan-out and now multi-server works, but users occasionally miss messages. Why might plain pub/sub lose messages, and what fixes it?",
+      "answer": "Redis pub/sub is fire-and-forget with no persistence and no acknowledgement. A published message is delivered only to subscribers connected at that instant; there is no buffer, retry, or replay. So messages are lost whenever: a server is momentarily disconnected from Redis (network blip, failover) and misses the publish; a target client is mid-reconnect and its server has no socket to deliver to yet; or a server is restarting during a deploy. None of these are detectable or recoverable with vanilla pub/sub. The fix is a durable, offset-based log: Redis Streams (with consumer groups and XACK), Kafka, or a per-client outbox storing messages with sequence numbers. Subscribers track their last consumed offset and, on reconnect or after a blip, fetch everything since that offset, giving at-least-once delivery. The subtle lesson is that pub/sub solves fan-out but not durability; conflating the two leads to silent, intermittent message loss that is very hard to reproduce.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["pubsub", "durability", "gotcha"],
+      "followUps": ["How do Redis Streams differ from pub/sub here?", "Where do per-client sequence numbers fit in?"]
+    },
+    {
+      "id": "q-ws-tricky-thundering-herd",
+      "question": "Tricky: After every deploy your cluster briefly falls over even though each server is healthy. Connections all dropped and reconnected. What is happening and how do you prevent it?",
+      "answer": "This is a reconnect thundering herd. When you deploy, all existing WebSocket connections are severed at roughly the same moment. If clients reconnect immediately (or with a fixed delay), thousands of them hit the new servers within the same brief window. The synchronized surge of TLS handshakes, WebSocket upgrades, auth checks, and state rehydration overwhelms the fresh servers, which then drop or reject connections - causing yet another synchronized retry, a feedback loop that amplifies the spike. Prevention has two parts. On the client: exponential backoff WITH jitter (randomized delay) and a capped maximum, so reconnects spread out over time instead of arriving on the same tick. On the server: graceful draining - stop accepting new upgrades, send close code 1001 'going away' so clients reconnect intentionally, and persist in-flight state - plus optionally staggering the rollout (rolling deploy) so not all servers restart simultaneously. The core insight is that synchronized client behavior, not server weakness, causes the outage; desynchronizing it with jitter is the fix.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["reconnect", "thundering-herd", "gotcha"],
+      "followUps": ["Why is jitter essential and not just backoff?", "How does graceful drain reduce message loss?"]
+    },
+    {
+      "id": "q-ws-close-codes",
+      "question": "What are WebSocket close codes, and name a few important ones.",
+      "answer": "When either side closes a WebSocket, it sends a close control frame (opcode 0x8) that may carry a 2-byte status code and an optional UTF-8 reason. The codes communicate why the connection ended. Important ones: 1000 Normal Closure (clean, purposeful); 1001 Going Away (server shutting down or browser navigating away - clients should reconnect); 1002 Protocol Error; 1003 Unsupported Data (received a type it cannot accept); 1006 Abnormal Closure (reserved - set locally when the connection dropped without a close frame, e.g. network loss, and never sent on the wire); 1007 Invalid Frame Payload Data (e.g. non-UTF-8 in a text frame); 1009 Message Too Big; 1011 Internal Server Error; and 1013 Try Again Later (used to shed load, e.g. when a client is too slow). Codes 1004, 1005, and 1006 are reserved and must not appear on the wire. Knowing 1001 (deploy/drain) and 1006 (unexpected drop) is especially useful operationally.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["close-codes", "protocol", "operations"],
+      "followUps": ["Why is 1006 never sent on the wire?", "Which close code signals a graceful server shutdown?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-ws-accept-key",
+      "title": "Compute the Sec-WebSocket-Accept Value",
+      "difficulty": "mid",
+      "category": "Backend",
+      "prompt": "Implement the server side of the WebSocket handshake key computation. Given the client's Sec-WebSocket-Key header value, compute the Sec-WebSocket-Accept value the server must return. Verify that for input 'dGhlIHNhbXBsZSBub25jZQ==' the output is 's3pPLMBiTxaQ9kYGzzhZRbK+xOo='.",
+      "hints": [
+        "The magic GUID is the literal string 258EAFA5-E914-47DA-95CA-C5AB0DC85B11.",
+        "Concatenate the client key with the GUID, SHA-1 hash the UTF-8 bytes, then base64-encode the raw 20-byte digest.",
+        "Do not decode the client key first - concatenate it as the received base64 string."
+      ],
+      "solutionCode": "import crypto from 'crypto';\n\nconst WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';\n\nfunction computeAccept(secWebSocketKey) {\n  return crypto\n    .createHash('sha1')\n    .update(secWebSocketKey + WS_GUID)   // concatenate the received key string + GUID\n    .digest('base64');                   // base64 of the raw 20-byte SHA-1 digest\n}\n\n// RFC 6455 worked example:\nconst accept = computeAccept('dGhlIHNhbXBsZSBub25jZQ==');\nconsole.assert(accept === 's3pPLMBiTxaQ9kYGzzhZRbK+xOo=', accept);\nconsole.log(accept); // s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\n",
+      "solutionLanguage": "javascript",
+      "explanation": "The server proves it speaks WebSocket by deriving Sec-WebSocket-Accept deterministically from the client's nonce. The algorithm from RFC 6455 is: take the client's Sec-WebSocket-Key exactly as received (it is already a base64 string - do not decode it), append the fixed magic GUID 258EAFA5-E914-47DA-95CA-C5AB0DC85B11, compute the SHA-1 hash of that ASCII concatenation, and base64-encode the raw 20-byte digest. The result goes back in the 101 Switching Protocols response. This is the canonical worked example from the spec: 'dGhlIHNhbXBsZSBub25jZQ==' yields 's3pPLMBiTxaQ9kYGzzhZRbK+xOo='. The point of the exercise is to internalize that this exchange is a protocol sanity check, not authentication: the GUID is public and constant, so anyone can compute it - it only confirms both ends understand WebSocket and stops a caching proxy or plain HTTP server from accidentally completing an upgrade.",
+      "relatedTopic": "handshake"
+    },
+    {
+      "id": "ch-ws-backpressure-broadcast",
+      "title": "Broadcast With Backpressure and Heartbeats",
+      "difficulty": "senior",
+      "category": "Backend",
+      "prompt": "Write a broadcast(clients, message) function for a Node 'ws' server that sends a message to all connected clients but protects the server from slow consumers: skip (or disconnect) any client whose outbound buffer exceeds 1 MB, and only send to clients in the OPEN state. Also add a heartbeat interval that terminates clients that did not answer the previous ping.",
+      "hints": [
+        "ws.readyState must equal ws.OPEN before sending.",
+        "ws.bufferedAmount is the bytes queued but not yet flushed to the OS - compare it to a ceiling.",
+        "For heartbeats, mark ws.isAlive=false before each ping and set it true in the 'pong' handler; terminate if still false next tick."
+      ],
+      "solutionCode": "const MAX_BUFFER = 1 << 20;   // 1 MB per-connection ceiling\n\nfunction broadcast(clients, message) {\n  const payload = typeof message === 'string' ? message : JSON.stringify(message);\n  for (const ws of clients) {\n    if (ws.readyState !== ws.OPEN) continue;        // skip CONNECTING/CLOSING/CLOSED\n    if (ws.bufferedAmount > MAX_BUFFER) {            // slow consumer: do not pile on\n      ws.close(1013, 'too slow');                   // 1013 Try Again Later\n      continue;\n    }\n    ws.send(payload);\n  }\n}\n\n// Heartbeat: detect and reclaim half-open connections.\nfunction setupHeartbeat(wss, intervalMs = 30000) {\n  wss.on('connection', (ws) => {\n    ws.isAlive = true;\n    ws.on('pong', () => { ws.isAlive = true; });    // peer answered our ping\n  });\n  const timer = setInterval(() => {\n    for (const ws of wss.clients) {\n      if (ws.isAlive === false) { ws.terminate(); continue; }  // missed last pong\n      ws.isAlive = false;\n      ws.ping();                                     // expect a pong before next tick\n    }\n  }, intervalMs);\n  wss.on('close', () => clearInterval(timer));\n  return timer;\n}\n",
+      "solutionLanguage": "javascript",
+      "explanation": "broadcast guards two things on every send. First it checks ws.readyState === ws.OPEN, because sending to a CONNECTING, CLOSING, or CLOSED socket throws or is silently dropped. Second, it enforces backpressure: ws.bufferedAmount reports bytes the application has handed to ws but that have not yet been flushed to the OS socket - if that exceeds the 1 MB ceiling, the client is consuming too slowly, and rather than letting its buffer grow unbounded (the classic OOM path where one slow client kills the server) we disconnect it with close code 1013 'Try Again Later'. Alternatives to closing are dropping or coalescing messages, but a hard ceiling is what bounds memory. The heartbeat loop solves half-open connections: TCP will not promptly tell you a peer vanished, so each tick we mark every client not-alive and send a ping; a healthy peer's automatic pong flips isAlive back to true, and any client still false on the next tick is terminated, reclaiming its socket and file descriptor. Together these are the two load-bearing reliability mechanisms of a production WebSocket fan-out.",
+      "relatedTopic": "backpressure-heartbeat"
+    }
+  ],
+  "references": [
+    {"label": "RFC 6455 - The WebSocket Protocol", "url": "https://datatracker.ietf.org/doc/html/rfc6455"},
+    {"label": "MDN - Writing WebSocket servers", "url": "https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers"},
+    {"label": "MDN - Server-Sent Events", "url": "https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events"},
+    {"label": "RFC 8441 - Bootstrapping WebSockets with HTTP/2", "url": "https://datatracker.ietf.org/doc/html/rfc8441"},
+    {"label": "ws (Node.js) - Backpressure & bufferedAmount docs", "url": "https://github.com/websockets/ws/blob/master/doc/ws.md"}
+  ]
+}

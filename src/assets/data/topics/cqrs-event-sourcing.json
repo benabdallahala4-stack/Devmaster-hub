@@ -1,0 +1,498 @@
+{
+  "id": "cqrs-event-sourcing",
+  "title": "CQRS & Event Sourcing",
+  "category": "Architecture",
+  "subcategory": "Patterns",
+  "difficulty": "senior",
+  "tags": ["cqrs", "event-sourcing", "ddd", "eventual-consistency", "projections", "saga"],
+  "description": "A senior-level deep dive into CQRS and Event Sourcing: separate read/write models, events as the source of truth, the event store, projections and snapshots, eventual consistency between sides, event versioning and upcasting, process managers/sagas, the relationship to DDD aggregates, and — critically — when NOT to use any of it.",
+  "estReadMinutes": 31,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "CQRS (Command Query Responsibility Segregation) and Event Sourcing (ES) are two distinct patterns that are frequently used together but are independent. CQRS says: use a different model to update information (the write/command side) than the model you use to read it (the read/query side). Event Sourcing says: persist the state of an entity as the full ordered sequence of state-changing events, and derive current state by replaying them, rather than storing only the latest snapshot in mutable rows."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Command: an intent to change state (PlaceOrder). It can be rejected. Imperative, named in the imperative mood.",
+            "Event: a fact that already happened (OrderPlaced). It cannot be rejected or undone — only compensated. Named in the past tense.",
+            "Write model (aggregate): validates commands and emits events; the consistency boundary.",
+            "Read model (projection): a denormalized, query-optimized view built by consuming events. Often there are many, one per query need."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "You can do CQRS without Event Sourcing (e.g. separate read replicas / denormalized read tables fed from a normalized write DB) and Event Sourcing without elaborate CQRS. But ES naturally pushes you toward CQRS, because the event log is a poor structure to query directly, so you build read models from it."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The traditional CRUD-over-a-single-model approach forces one schema to serve both writes (where you need invariants and transactional integrity) and reads (where you need fast, denormalized, often very different shapes). As systems grow, that single model becomes a battleground: complex object-relational mappings, lock contention, and read queries that fight the write schema. CQRS and ES separate these concerns, and ES additionally turns your data into a perfect, replayable audit log."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Audit and temporal queries: with ES you have the entire history for free — you can answer 'what was the balance on March 3rd?' and 'why is this value what it is?' because every change is a stored fact.",
+            "Independent scaling: the read side can be scaled, cached, and denormalized differently from the write side, and you can spin up new read models without touching the write model.",
+            "Debugging and reproducibility: you can replay events into a fresh projection to fix a bug in a read model, or to build a brand-new view of historical data.",
+            "Domain expressiveness: events are the ubiquitous language of the business made durable, which aligns beautifully with Domain-Driven Design."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "These benefits are real but expensive. ES makes deletes/GDPR, schema evolution, and developer onboarding genuinely harder, and CQRS introduces eventual consistency the UI must account for. They are power tools for the parts of a system that need them, not a default architecture."
+        }
+      ]
+    },
+    {
+      "id": "cqrs-concept",
+      "heading": "CQRS: Separate Read and Write Models",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "In CQRS the command side and query side are different models, potentially different databases, deployed and scaled independently. Commands flow into aggregates that enforce invariants and produce a result (accepted/rejected); queries hit read models that are pure data, no behaviour. The two sides are kept in sync by propagating changes (events) from write to read."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Command side: validates and changes state, returns no data (or just an id/ack).\ninterface PlaceOrderCommand { orderId: string; customerId: string; lines: Line[]; }\n\nclass OrderCommandHandler {\n  constructor(private repo: AggregateRepository<Order>) {}\n  async handle(cmd: PlaceOrderCommand): Promise<void> {\n    const order = Order.place(cmd.orderId, cmd.customerId, cmd.lines); // invariants here\n    await this.repo.save(order); // persists emitted events\n  }\n}\n\n// Query side: returns denormalized data, never mutates. Different model entirely.\ninterface OrderSummaryView { orderId: string; customerName: string; total: number; status: string; }\nclass OrderQueryHandler {\n  constructor(private readDb: ReadDatabase) {}\n  getSummary(orderId: string): Promise<OrderSummaryView> {\n    return this.readDb.fetchOne('order_summaries', orderId); // a flat, pre-joined row\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "CQRS is not 'two databases' by definition. The essence is two MODELS. You can run both on the same database. Splitting the datastore is an optimization you add when read and write workloads genuinely diverge — adding it prematurely buys complexity, not benefit."
+        }
+      ]
+    },
+    {
+      "id": "event-sourcing-concept",
+      "heading": "Event Sourcing: Events as the Source of Truth",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "In event sourcing the durable, authoritative state of an entity is the append-only sequence of events that happened to it. Current state is a left-fold (reduce) over that sequence. You never UPDATE or DELETE a row representing 'the order'; you append OrderPlaced, ItemAdded, OrderShipped, and rebuild the order by replaying them in order."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "type DomainEvent =\n  | { type: 'AccountOpened'; balance: number }\n  | { type: 'MoneyDeposited'; amount: number }\n  | { type: 'MoneyWithdrawn'; amount: number };\n\nclass Account {\n  private balance = 0;\n  private version = 0;\n\n  // Rebuild state by folding over history (left-fold / reduce).\n  static fromHistory(events: DomainEvent[]): Account {\n    const a = new Account();\n    for (const e of events) a.apply(e);\n    return a;\n  }\n\n  // apply mutates in-memory state; it NEVER validates (history is already true).\n  private apply(e: DomainEvent): void {\n    switch (e.type) {\n      case 'AccountOpened':  this.balance = e.balance; break;\n      case 'MoneyDeposited': this.balance += e.amount; break;\n      case 'MoneyWithdrawn': this.balance -= e.amount; break;\n    }\n    this.version++;\n  }\n\n  // A command validates, then emits a NEW event (which is then applied + persisted).\n  withdraw(amount: number): DomainEvent {\n    if (amount > this.balance) throw new Error('Insufficient funds'); // invariant\n    const event: DomainEvent = { type: 'MoneyWithdrawn', amount };\n    this.apply(event);\n    return event; // caller appends this to the event store\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Critical distinction: applying an event (rebuilding state) must NEVER run validation, because the event already happened and is a fact. Validation belongs only in command handling, BEFORE a new event is emitted. Putting an 'if balance < 0 throw' inside apply() will make old, legitimate histories un-replayable."
+        }
+      ]
+    },
+    {
+      "id": "event-store",
+      "heading": "The Event Store",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The event store is the database of record. Conceptually it is an append-only log partitioned into streams, where a stream is the event history of one aggregate (e.g. order-123). Each event has a global position and a per-stream sequence number used for ordering and optimistic concurrency."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- A minimal event store table. The UNIQUE constraint gives optimistic concurrency.\nCREATE TABLE events (\n    global_position BIGSERIAL PRIMARY KEY,   -- total order across all streams\n    stream_id       TEXT    NOT NULL,        -- e.g. 'order-123'\n    version         INT     NOT NULL,        -- per-stream sequence: 1,2,3,...\n    event_type      TEXT    NOT NULL,        -- 'OrderPlaced'\n    payload         JSONB   NOT NULL,        -- the event data\n    metadata        JSONB   NOT NULL,        -- correlationId, causationId, timestamp, schemaVersion\n    UNIQUE (stream_id, version)              -- two writers at the same version => one fails\n);\n\n-- Append with optimistic concurrency: expectedVersion must match the current tail.\n-- If another writer already wrote version N, this INSERT violates UNIQUE and the\n-- command is retried by re-reading the stream. This is how ES enforces invariants\n-- without locking the whole aggregate."
+        },
+        {
+          "type": "paragraph",
+          "text": "Optimistic concurrency control is central: a command loads the stream up to version N, decides, and appends at version N+1 with 'expectedVersion = N'. If a concurrent command already advanced the stream, the unique (stream_id, version) constraint rejects the append, and the handler re-loads and retries. This protects the aggregate's invariants without pessimistic locking, but it means the aggregate (one stream) is the unit of strong consistency — anything spanning multiple aggregates is eventually consistent."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Events are immutable and append-only. You never edit a stored event. To correct a mistake you append a new, compensating event (e.g. PaymentRefunded), preserving the true history. This is what makes the audit trail trustworthy."
+        }
+      ]
+    },
+    {
+      "id": "projections-readmodels",
+      "heading": "Projections and Read Models",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A projection is a function that consumes the event stream and maintains a read model — a denormalized view optimized for a specific query. You can have many projections from the same events: a per-customer order list, a daily revenue rollup, a search index. Because they are derived, read models are disposable: drop and rebuild from the events to fix a bug or add a new field."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// A projection that maintains an 'order_summaries' read table.\nclass OrderSummaryProjection {\n  constructor(private readDb: ReadDatabase) {}\n\n  // Called for each event in order. Must be idempotent: store the last processed\n  // global_position (checkpoint) so a replay/restart does not double-apply.\n  async on(event: StoredEvent): Promise<void> {\n    switch (event.type) {\n      case 'OrderPlaced':\n        await this.readDb.upsert('order_summaries', {\n          orderId: event.payload.orderId,\n          total: event.payload.total,\n          status: 'PLACED',\n        });\n        break;\n      case 'OrderShipped':\n        await this.readDb.update('order_summaries', event.payload.orderId, { status: 'SHIPPED' });\n        break;\n    }\n    await this.readDb.saveCheckpoint('order_summaries', event.global_position);\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Projections must be idempotent and checkpointed. Event delivery is at-least-once, and a crash mid-projection means re-delivery. Track the last processed global position and make each handler safe to re-run (upserts, not blind inserts) so replays converge to the same read model."
+        }
+      ]
+    },
+    {
+      "id": "snapshots-eventual",
+      "heading": "Snapshots and Eventual Consistency",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Two practical realities of ES + CQRS: replay cost and the consistency gap between sides."
+        },
+        {
+          "type": "heading",
+          "text": "Snapshots"
+        },
+        {
+          "type": "paragraph",
+          "text": "Rebuilding an aggregate by folding thousands of events on every command becomes slow. A snapshot stores the aggregate's computed state at version N; to load, you read the latest snapshot and replay only events after N. Snapshots are a pure optimization and must be discardable — if a snapshot is corrupt or its schema changed, you can always rebuild from the events. Rule of thumb: snapshot every K events (e.g. 100), and keep snapshots derivable, never authoritative."
+        },
+        {
+          "type": "heading",
+          "text": "Eventual consistency between write and read"
+        },
+        {
+          "type": "paragraph",
+          "text": "Because projections consume events asynchronously, the read model lags the write model by a small, variable delay. A user who just placed an order and immediately re-queries the list might not see it yet. This is inherent to CQRS, not a bug. You must design the UX for it: optimistic UI updates, returning the new id/version from the command so the client can wait for it, polling until the projection catches up, or read-your-writes via a session-pinned synchronous read of the write side for the just-acted-on entity."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Never validate a command against the READ model. The read model is stale by definition; a uniqueness or balance check done there can pass on stale data and violate an invariant. All invariant checks must happen on the write side, inside the aggregate, against its own up-to-date event stream."
+        }
+      ]
+    },
+    {
+      "id": "versioning-upcasting",
+      "heading": "Event Versioning and Upcasting",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Events live forever, so their schema will outlive the code that wrote them. When you need to change an event's shape, you cannot edit the stored events — you must handle old versions on read. The common techniques:"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Weak schema / tolerant reader: add only optional fields with sensible defaults, and have deserializers ignore unknown fields. This handles most additive changes with zero migration.",
+            "Versioned events: stamp each event with a schemaVersion in metadata, and keep a deserializer per version.",
+            "Upcasting: a pipeline step that transforms an old event version into the current shape as it is read from the store, before the aggregate or projection sees it. The store stays untouched; the in-memory representation is always current.",
+            "New event type: for a breaking semantic change, introduce a new event type (CustomerRenamedV2) and let handlers cope with both, rather than mutating the old one."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Upcaster: transforms a v1 event into the current v2 on read.\n// v1 had a single 'name'; v2 splits into firstName/lastName.\nfunction upcastCustomerRegistered(raw: StoredEvent): CustomerRegisteredV2 {\n  if (raw.metadata.schemaVersion === 2) return raw.payload as CustomerRegisteredV2;\n  const [firstName, ...rest] = (raw.payload.name as string).split(' ');\n  return { firstName, lastName: rest.join(' ') || '', schemaVersion: 2 };\n}\n// The aggregate/projection only ever sees the current shape, so app code is not\n// littered with version checks. The stored events remain immutable and untouched."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Prefer additive, backward-compatible changes (tolerant reader) over upcasting, and upcasting over rewriting history. Never edit stored events in place — that destroys the audit guarantee and breaks any consumer that already processed them."
+        }
+      ]
+    },
+    {
+      "id": "sagas-ddd",
+      "heading": "Process Managers, Sagas, and DDD Aggregates",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "An aggregate is the consistency boundary of the write side and the natural unit of an event stream. In DDD, an aggregate is a cluster of objects treated as one unit for data changes, with an aggregate root enforcing all invariants; you modify exactly one aggregate per transaction. In ES, that maps cleanly: one command targets one aggregate, loads its stream, validates invariants, and appends events atomically to that single stream."
+        },
+        {
+          "type": "paragraph",
+          "text": "When a business process spans multiple aggregates, you cannot do it in one transaction. A process manager (often called a saga in ES circles, distinct from but related to the distributed-transaction saga) coordinates it: it subscribes to events, holds the process state, and issues new commands in reaction. For example, an OrderProcess listens for OrderPlaced, sends a ReservePayment command, listens for PaymentReserved, sends ReserveStock, and on failure issues compensating commands. It turns a multi-aggregate workflow into a sequence of single-aggregate transactions glued by events — providing eventual consistency with compensation, exactly like the distributed saga pattern."
+        },
+        {
+          "type": "list",
+          "items": [
+            "One aggregate per transaction: keeps strong consistency local and cheap; cross-aggregate consistency is eventual via process managers.",
+            "Process manager is itself often event-sourced: its decisions are stored as events so it can recover its position after a crash.",
+            "Idempotency again: a process manager re-receives events, so its command emissions must be deduplicated (correlation/causation IDs)."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Aggregate sizing is the highest-leverage design decision in ES. Too large and you serialize unrelated writes and grow huge streams; too small and you push invariants that should be local into eventually-consistent process managers. Model the true transactional consistency boundary of the business."
+        }
+      ]
+    },
+    {
+      "id": "when-not",
+      "heading": "When NOT to Use It (Common Mistakes)",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The most senior judgment here is restraint. ES + CQRS solve specific problems and impose a steep, permanent tax. Greg Young and Martin Fowler both warn that applying them by default is an anti-pattern."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Do NOT use ES for simple CRUD with no audit/temporal requirements — you pay all the complexity (eventual consistency, versioning, replay tooling) for no domain benefit.",
+            "Do NOT adopt it system-wide. Apply ES/CQRS to the few aggregates whose history and complex behaviour justify it; keep the rest CRUD. Mixing styles per bounded context is normal and healthy.",
+            "Do NOT validate commands against the read model (stale data passes invalid commands).",
+            "Do NOT put validation inside event apply() — it makes old histories un-replayable.",
+            "Do NOT treat snapshots as the source of truth — they must remain rebuildable from events.",
+            "Do NOT forget GDPR/deletes: an immutable log makes 'erase this user' hard. Plan for crypto-shredding (store PII encrypted per-subject and throw away the key) or a redaction strategy up front.",
+            "Do NOT assume CQRS requires Event Sourcing, two databases, or message buses — those are optional, separable choices."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Incident pattern: a team adopted full ES for a basic admin CRUD app 'for the audit log,' then spent months building replay tooling, fighting projection lag in the UI, and handling event versioning — for data that a single audit_log table on a normal database would have covered. The cost was real and the benefit illusory."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Scope ES/CQRS to bounded contexts and aggregates where audit, temporal queries, or complex write behaviour genuinely pay for the complexity; leave the rest CRUD.",
+            "Name events as immutable past-tense facts (OrderShipped), commands as imperative intents (ShipOrder).",
+            "Keep validation only in command handling; make apply() a pure state mutation with no rules.",
+            "Use optimistic concurrency (expectedVersion + unique (stream, version)) to protect aggregate invariants instead of locks.",
+            "Make every projection idempotent and checkpointed; treat read models as disposable and rebuildable.",
+            "Design the UI for eventual consistency from day one (optimistic updates, return-and-await the new version, or read-your-writes on the write side).",
+            "Plan event evolution early: prefer tolerant readers and additive changes, use upcasting for shape changes, never edit stored events.",
+            "Plan PII handling (crypto-shredding) before going to production to keep the immutable log compatible with deletion requirements."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Concern", "Write side (command)", "Read side (query)"],
+          "rows": [
+            ["Purpose", "Enforce invariants, emit events", "Serve fast denormalized queries"],
+            ["Consistency", "Strong, within one aggregate", "Eventual, lags the write side"],
+            ["Source of truth", "Event store (with ES)", "Derived, disposable, rebuildable"],
+            ["Scaling", "By aggregate / partition", "By view, cache freely"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "note-relationship",
+      "heading": "How the Pieces Fit",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Read the flow end to end: a command hits a command handler, which loads the target aggregate by replaying its event stream (accelerated by a snapshot), validates the command against the aggregate's invariants, and appends new events with optimistic concurrency. Those events are published; projections consume them to update read models (eventually consistent), and process managers consume them to drive multi-aggregate workflows by issuing further commands. CQRS is the read/write split; ES is the storage-as-events choice; together they give you an auditable, replayable, independently scalable system — for the slice of the domain that needs it."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Litmus test for adopting ES/CQRS on an aggregate: do you need the full history as a first-class asset (audit, temporal queries, replay) AND does the write model have rich behaviour/invariants? If yes to both, it pays. If the answer is 'we just want an audit log,' a normal append-only audit table is almost always the right, cheaper tool."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "cqrs-es-flow",
+      "title": "CQRS + Event Sourcing End-to-End Flow",
+      "type": "mermaid",
+      "content": "flowchart LR\n    U[Client] -->|Command| CH[Command Handler]\n    CH -->|load + replay| ES[(Event Store)]\n    CH -->|validate invariants| AGG[Aggregate]\n    AGG -->|append events| ES\n    ES -->|publish events| P1[Projection A]\n    ES -->|publish events| P2[Projection B]\n    ES -->|publish events| PM[Process Manager]\n    P1 --> RM1[(Read Model A)]\n    P2 --> RM2[(Read Model B)]\n    PM -->|new commands| CH\n    U -->|Query| Q[Query Handler]\n    Q --> RM1"
+    },
+    {
+      "id": "es-rebuild",
+      "title": "Rebuilding State: Snapshot + Replay",
+      "type": "ascii",
+      "content": "Stream: order-123\n\n  v1 OrderPlaced  v2 ItemAdded  v3 ItemAdded ... v100 ItemAdded  v101 OrderPaid\n        |                                              |               |\n        +------------- folded into ------------------> [SNAPSHOT @100]  |\n                                                        |              |\n  Load = read SNAPSHOT@100, then replay only v101+ ---> apply v101 --> current state\n\n  (No snapshot => fold ALL events v1..v101. Snapshot is an optimization,\n   always rebuildable from the events, never the source of truth.)"
+    },
+    {
+      "id": "command-vs-event",
+      "title": "Command vs Event Lifecycle",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n    participant C as Client\n    participant H as Command Handler\n    participant A as Aggregate\n    participant S as Event Store\n    participant P as Projection\n    C->>H: PlaceOrder (command, can be rejected)\n    H->>S: load stream (replay)\n    H->>A: place(...)\n    A-->>H: OrderPlaced (event = fact)\n    H->>S: append OrderPlaced @ expectedVersion\n    S-->>P: OrderPlaced (async, at-least-once)\n    P->>P: update read model (idempotent)\n    Note over C,P: Read model now eventually consistent"
+    }
+  ],
+  "questions": [
+    {
+      "id": "cqrs-q-define",
+      "question": "What is CQRS, and is Event Sourcing required to use it?",
+      "answer": "CQRS (Command Query Responsibility Segregation) means using a different model to change state (the command/write side, which enforces invariants and emits results) than the model used to read state (the query/read side, which serves denormalized, query-optimized views). The two are kept in sync by propagating changes from write to read. Event Sourcing is NOT required: you can implement CQRS with a normalized write database and separate denormalized read tables/replicas fed by ordinary change propagation, no event log at all. They are independent patterns that compose well — ES tends to lead to CQRS because the event log is awkward to query directly, so you project it into read models — but each is usable without the other.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["cqrs", "event-sourcing"],
+      "followUps": ["Does CQRS require two databases?", "Why does ES push you toward CQRS?"]
+    },
+    {
+      "id": "cqrs-q-es-state",
+      "question": "How is current state derived in an event-sourced aggregate, and what is the role of apply() vs a command method?",
+      "answer": "Current state is derived by replaying the aggregate's ordered event history and left-folding (reducing) over it: starting from an empty aggregate, each stored event is passed to apply(), which mutates in-memory state. apply() must be pure state transition with NO validation, because every stored event is a fact that already happened and must remain replayable forever. A command method (e.g. withdraw) is the only place validation lives: it checks invariants against the current (replayed) state, and if valid, EMITS a new event, which is then applied and appended to the store. So the cycle is: replay history via apply -> command validates -> emit new event -> apply it -> persist. Putting validation in apply() would make legitimate old histories fail to replay when rules change.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["event-sourcing", "aggregate", "apply"],
+      "followUps": ["Why must apply() never throw on old events?", "Where do snapshots fit in?"]
+    },
+    {
+      "id": "cqrs-q-concurrency",
+      "question": "How does an event store enforce aggregate invariants under concurrent commands without locking?",
+      "answer": "Through optimistic concurrency control on the stream. A command loads the aggregate's stream up to its current version N, decides, and appends new events at version N+1 declaring expectedVersion = N. The store has a unique constraint on (stream_id, version), so if a concurrent command already advanced the stream to N+1, the second append violates the constraint and fails. The losing handler re-reads the now-newer stream, re-validates its command against fresh state, and retries (or rejects). This guarantees that invariants are always checked against an up-to-date view of the single aggregate without pessimistic locks. The corollary is that strong consistency is scoped to one aggregate/stream; anything spanning multiple aggregates is eventually consistent.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["event-store", "optimistic-concurrency", "consistency"],
+      "followUps": ["What is the consistency boundary in ES?", "What happens on a version conflict?"]
+    },
+    {
+      "id": "cqrs-q-projection",
+      "question": "What is a projection, and why must it be idempotent and checkpointed?",
+      "answer": "A projection is a function that consumes the event stream and maintains a read model — a denormalized view optimized for a particular query (e.g. an order summary table or a daily revenue rollup). It must be idempotent because event delivery from the store to projections is at-least-once: after a crash or replay the same event can be delivered again, so handlers use upserts and ON CONFLICT rather than blind inserts so re-processing converges to the same state. It must be checkpointed (persist the last processed global position) so that on restart it resumes from the right place rather than reprocessing the entire log or skipping events. Together these make read models disposable and rebuildable: you can drop a read model and replay events to recreate it, which is how you fix projection bugs or add new fields.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["projection", "read-model", "idempotency"],
+      "followUps": ["How do you rebuild a read model?", "What is a checkpoint?"]
+    },
+    {
+      "id": "cqrs-q-snapshot",
+      "question": "What problem do snapshots solve, and what invariant must they preserve?",
+      "answer": "Snapshots solve the replay-cost problem: an aggregate with thousands of events would be slow to load if you folded the entire history on every command. A snapshot persists the aggregate's computed state at version N, so loading reads the latest snapshot and replays only events after N. The invariant they must preserve is that snapshots are a pure optimization and never the source of truth: they must always be discardable and rebuildable from the events alone. If a snapshot is corrupt, its schema changed, or you suspect it, you can throw it away and fold from the events. This is why you should be able to delete all snapshots and have the system still be correct, just slower.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["snapshot", "event-sourcing", "performance"],
+      "followUps": ["How often should you snapshot?", "What if the snapshot schema changes?"]
+    },
+    {
+      "id": "cqrs-q-upcasting",
+      "question": "How do you evolve an event's schema when stored events are immutable?",
+      "answer": "Since you cannot edit stored events, you handle old shapes on read. The toolbox, in order of preference: (1) Tolerant reader / weak schema — make changes additive with optional fields and ignore unknown fields, which covers most evolution with zero migration; (2) Versioned events — stamp a schemaVersion in metadata and keep a deserializer per version; (3) Upcasting — a pipeline step that transforms an old event version into the current shape as it is read, so aggregates and projections only ever see the current representation while the store stays untouched; (4) New event type — for breaking semantic changes, introduce a new type (e.g. V2) and have handlers cope with both. The hard rule across all of these: never rewrite stored events in place, because that breaks the audit guarantee and any consumer that already processed the originals.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["versioning", "upcasting", "schema-evolution"],
+      "followUps": ["When do you prefer a new event type over upcasting?", "What is a tolerant reader?"]
+    },
+    {
+      "id": "cqrs-q-process-manager",
+      "question": "What is a process manager (saga) in event sourcing, and how does it relate to aggregates?",
+      "answer": "A process manager (often called a saga in ES) coordinates a business process that spans multiple aggregates, which cannot be done in a single transaction because each command targets exactly one aggregate. It subscribes to events, maintains its own process state (frequently itself event-sourced for crash recovery), and reacts by issuing new commands — e.g. on OrderPlaced it sends ReservePayment, then on PaymentReserved sends ReserveStock, and on failure issues compensating commands. This turns a multi-aggregate workflow into a chain of single-aggregate transactions glued by events, giving eventual consistency with compensation — the same shape as the distributed-transaction saga. Because it re-receives events at-least-once, its command emissions must be deduplicated via correlation/causation IDs.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["saga", "process-manager", "aggregate"],
+      "followUps": ["Why can't you modify two aggregates in one transaction?", "How is this saga related to the 2PC/saga choice?"]
+    },
+    {
+      "id": "cqrs-q-tricky-readmodel-validate",
+      "question": "Tricky: To enforce 'email must be unique,' a developer queries the read model in the command handler before accepting RegisterUser. Why is this unsafe, and what is the correct approach?",
+      "answer": "It is unsafe because the read model is eventually consistent — it lags the write side. Two concurrent RegisterUser commands for the same email can both query a read model that has not yet been updated by the other's UserRegistered event, both see 'email free,' and both succeed — producing a duplicate the invariant was supposed to prevent. The read model can never be a basis for enforcing a write invariant. Correct approaches: (1) make the uniqueness itself an aggregate so the constraint is enforced by the event store's optimistic concurrency — e.g. a stream keyed by the email (email-<hash>) whose creation fails on a duplicate via the unique (stream, version) constraint; (2) use a dedicated strongly-consistent reservation/lookup with a unique key in the same transactional boundary as the append; or (3) accept the duplicate and resolve it with a process manager if the domain truly allows eventual de-duplication. The key principle: invariants must be checked on the write side against strongly-consistent state, never against the stale read model.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["consistency", "invariants", "gotcha"],
+      "followUps": ["How do you model a global uniqueness constraint in ES?", "What is a 'unique key' stream?"]
+    },
+    {
+      "id": "cqrs-q-tricky-validate-apply",
+      "question": "Tricky: An account has a 'never go negative' rule. A developer puts 'if (balance - amount < 0) throw' inside apply() for MoneyWithdrawn so it can never be violated. What breaks?",
+      "answer": "Replaying history breaks. apply() runs for EVERY stored event when rebuilding state, including legitimate historical withdrawals that were valid when they happened. Putting validation in apply() means that if the rule ever changes, or if any past event combination would momentarily look invalid under the current rule, the rebuild THROWS and the aggregate becomes un-loadable — you have made true, already-happened facts un-replayable. apply() must be a pure, total state transition that never rejects, because an event is a fact. The negative-balance rule belongs only in the COMMAND method (withdraw), which checks the current replayed balance BEFORE emitting MoneyWithdrawn; if invalid, no event is ever created. The deeper lesson: validation gates the creation of events; replay must blindly accept them.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["event-sourcing", "apply", "gotcha"],
+      "followUps": ["Where exactly should the negative-balance check live?", "What if business rules change over time?"]
+    },
+    {
+      "id": "cqrs-q-tricky-when-not",
+      "question": "Tricky: A team wants Event Sourcing 'so we get an audit log.' Why might a staff engineer push back, and when would ES actually be justified?",
+      "answer": "Because 'we want an audit log' alone does not justify ES. An ordinary append-only audit_log table on a normal CRUD database gives you a full audit trail at a fraction of the cost — without inheriting eventual consistency in the UI, event versioning/upcasting, replay tooling, snapshot management, GDPR-deletion headaches against an immutable log, and the steep onboarding curve. ES pays off only when you need the history as a first-class, queryable, REPLAYABLE asset AND the write model has rich behaviour/invariants that benefit from being expressed as events — for example: temporal queries ('balance as of date X'), the ability to build entirely new read models from past data, complex domains where the sequence of decisions is itself the truth (trading, accounting, logistics). The senior move is to apply ES to the few aggregates that meet that bar and keep everything else CRUD; reaching for ES system-wide 'for audit' is the classic over-engineering anti-pattern Fowler and Greg Young warn about.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["when-not", "audit", "gotcha"],
+      "followUps": ["What is crypto-shredding for GDPR in ES?", "Can you mix ES and CRUD in one system?"]
+    },
+    {
+      "id": "cqrs-q-eventual-ux",
+      "question": "How do you handle the read-your-writes problem caused by eventual consistency in CQRS?",
+      "answer": "The read model lags the write model, so a user who just issued a command and immediately re-queries may not see the effect. Options, from cheapest to strongest: (1) Optimistic UI — the client renders the expected result locally from the command it just sent, without waiting for the projection. (2) Return the new id/version from the command and have the client poll or subscribe until the read model reflects that version (a 'wait for projection catch-up' token). (3) Read-your-writes via the write side — for the just-acted-on entity, serve that one read from the strongly-consistent write model/aggregate rather than the lagging read model, so the acting user always sees their own change. (4) Make critical projections synchronous (update the read model in the same transaction as the append) — strongest, but it sacrifices the independent scaling that motivated CQRS, so reserve it for the few views that truly need immediate consistency. The right choice depends on how visible and how critical the staleness is for that interaction.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["eventual-consistency", "read-your-writes", "ux"],
+      "followUps": ["What is a projection catch-up token?", "When are synchronous projections acceptable?"]
+    },
+    {
+      "id": "cqrs-q-aggregate-sizing",
+      "question": "Why is aggregate sizing such an important decision in event sourcing?",
+      "answer": "Because the aggregate is the unit of strong consistency, the unit of an event stream, and the unit of optimistic-concurrency contention. Make an aggregate too LARGE and you (a) serialize unrelated writes — every command on any part of it contends on the same stream version, hurting throughput; (b) grow very long streams that are slow to replay; and (c) bundle invariants that did not need to be transactionally together. Make it too SMALL and you push invariants that are genuinely one transactional rule out into eventually-consistent process managers, which is more complex and weaker (no atomic guarantee). The correct size is the true transactional consistency boundary of the business — the smallest cluster of data that must change together to keep an invariant. Getting this right is the highest-leverage modeling decision because almost every other property (concurrency, consistency, performance, complexity) flows from it.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["aggregate", "ddd", "consistency-boundary"],
+      "followUps": ["How do DDD aggregate rules map to ES streams?", "What goes wrong with a giant aggregate?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "cqrs-ch-bank-account",
+      "title": "Implement an Event-Sourced Bank Account",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "prompt": "Implement an event-sourced BankAccount aggregate with three commands (open, deposit, withdraw) enforcing a non-negative-balance invariant. State must be rebuilt by replaying events, apply() must contain NO validation, and withdraw must reject overdrafts at command time. Then show that rebuilding from a stored history (including a past withdrawal) replays cleanly even though apply() never validates.",
+      "hints": [
+        "Separate 'decide' (command -> new events, with validation) from 'evolve/apply' (event -> new state, no validation).",
+        "Rebuild via a left-fold over the event array; the same apply() used during rebuild is used after emitting a new event.",
+        "withdraw checks the CURRENT replayed balance before emitting MoneyWithdrawn; if it would go negative, throw and emit nothing."
+      ],
+      "solutionCode": "type Event =\n  | { type: 'AccountOpened'; openingBalance: number }\n  | { type: 'MoneyDeposited'; amount: number }\n  | { type: 'MoneyWithdrawn'; amount: number };\n\nclass BankAccount {\n  private opened = false;\n  private balance = 0;\n  version = 0;\n  // Uncommitted events emitted by commands, to be appended to the store.\n  readonly pending: Event[] = [];\n\n  // ----- Rebuild: pure fold over history, NO validation. -----\n  static fromHistory(history: Event[]): BankAccount {\n    const acc = new BankAccount();\n    for (const e of history) acc.apply(e);\n    return acc;\n  }\n\n  // evolve/apply: event -> state. A fact already happened; never reject here.\n  private apply(e: Event): void {\n    switch (e.type) {\n      case 'AccountOpened':  this.opened = true; this.balance = e.openingBalance; break;\n      case 'MoneyDeposited': this.balance += e.amount; break;\n      case 'MoneyWithdrawn': this.balance -= e.amount; break;\n    }\n    this.version++;\n  }\n\n  private emit(e: Event): void { this.apply(e); this.pending.push(e); }\n\n  // ----- Commands: validate against current state, then emit. -----\n  open(openingBalance: number): void {\n    if (this.opened) throw new Error('Already open');\n    if (openingBalance < 0) throw new Error('Opening balance cannot be negative');\n    this.emit({ type: 'AccountOpened', openingBalance });\n  }\n  deposit(amount: number): void {\n    if (!this.opened) throw new Error('Account not open');\n    if (amount <= 0) throw new Error('Deposit must be positive');\n    this.emit({ type: 'MoneyDeposited', amount });\n  }\n  withdraw(amount: number): void {\n    if (!this.opened) throw new Error('Account not open');\n    if (amount <= 0) throw new Error('Withdraw must be positive');\n    if (amount > this.balance) throw new Error('Insufficient funds'); // invariant at COMMAND time\n    this.emit({ type: 'MoneyWithdrawn', amount });\n  }\n  getBalance(): number { return this.balance; }\n}\n\n// --- Live command flow ---\nconst a = new BankAccount();\na.open(100);\na.deposit(50);   // balance 150\na.withdraw(120); // OK: 120 <= 150 -> balance 30\ntry { a.withdraw(1000); } catch (e) { /* rejected: Insufficient funds, no event emitted */ }\nconsole.log(a.getBalance()); // 30\nconsole.log(a.pending.map(e => e.type)); // ['AccountOpened','MoneyDeposited','MoneyWithdrawn']\n\n// --- Rebuild from a STORED history that includes a past withdrawal ---\nconst stored: Event[] = [\n  { type: 'AccountOpened', openingBalance: 100 },\n  { type: 'MoneyDeposited', amount: 50 },\n  { type: 'MoneyWithdrawn', amount: 120 },\n];\nconst rebuilt = BankAccount.fromHistory(stored); // apply() never validates -> replays cleanly\nconsole.log(rebuilt.getBalance(), rebuilt.version); // 30 3",
+      "solutionLanguage": "typescript",
+      "explanation": "The design rigorously separates the two responsibilities of an event-sourced aggregate. apply() is the 'evolve' function: it takes an event and folds it into state with zero validation, because every event it ever sees — whether just emitted or replayed from storage — is a fact that already happened. fromHistory() rebuilds current state by left-folding the stored events through that same apply(). The command methods (open/deposit/withdraw) are the only place rules live: withdraw checks the CURRENT replayed balance against the non-negative invariant and, only if valid, emits MoneyWithdrawn (which is applied and queued in pending for the store). The demonstration is the crux: rebuilding from a stored history that contains a 120 withdrawal replays cleanly to balance 30, even though apply() has no validation — precisely because validation happened once, at command time, before that event was ever created. This is why putting an 'if balance < 0 throw' inside apply() is a bug: it would make legitimate stored histories un-replayable. In a real store you would append pending events at expectedVersion using optimistic concurrency, then clear pending; loading would use a snapshot plus the tail of events for performance.",
+      "relatedTopic": "event-sourcing-concept"
+    },
+    {
+      "id": "cqrs-ch-projection",
+      "title": "Build an Idempotent, Checkpointed Projection",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "prompt": "Build a projection that maintains a 'customer_order_totals' read model (one row per customer with their lifetime order total and order count) from OrderPlaced and OrderCancelled events. The projection must be idempotent (safe to re-run on redelivered events) and checkpointed (resume from the last processed global position). Show how rebuilding from scratch and replaying after a crash both converge to the correct totals.",
+      "hints": [
+        "Track the last processed global_position per projection; skip any event whose position you have already passed.",
+        "Use upserts/atomic increments keyed by customerId rather than blind inserts so redelivery is safe.",
+        "To rebuild, reset the read model and checkpoint to zero and replay the whole stream; the same handler must produce the same result."
+      ],
+      "solutionCode": "// Read model row: { customerId, totalCents, orderCount }\n// Projection state row: { name, lastPosition }\n\nclass CustomerOrderTotalsProjection {\n  constructor(private db: Db) {}\n  private readonly name = 'customer_order_totals';\n\n  async handle(event: StoredEvent): Promise<void> {\n    // 1) Idempotency / ordering guard via checkpoint.\n    const checkpoint = await this.db.getCheckpoint(this.name); // -1 if none\n    if (event.globalPosition <= checkpoint) return; // already processed -> skip\n\n    // 2) Apply the event with idempotent, atomic operations.\n    switch (event.type) {\n      case 'OrderPlaced':\n        await this.db.upsertIncrement('customer_order_totals', event.payload.customerId, {\n          totalCents: +event.payload.totalCents,\n          orderCount: +1,\n        });\n        break;\n      case 'OrderCancelled':\n        await this.db.upsertIncrement('customer_order_totals', event.payload.customerId, {\n          totalCents: -event.payload.totalCents,\n          orderCount: -1,\n        });\n        break;\n      // unknown event types are ignored (tolerant reader)\n    }\n\n    // 3) Advance the checkpoint. In a real system steps 2 and 3 are in ONE\n    //    transaction so a crash between them cannot double-apply or skip.\n    await this.db.setCheckpoint(this.name, event.globalPosition);\n  }\n\n  // Rebuild from scratch: reset read model + checkpoint, then replay everything.\n  async rebuild(eventStore: EventStore): Promise<void> {\n    await this.db.truncate('customer_order_totals');\n    await this.db.setCheckpoint(this.name, -1);\n    for await (const event of eventStore.readAll()) {\n      await this.handle(event);\n    }\n  }\n}\n\n// --- Convergence demonstration (pseudo) ---\n// Stream (globalPosition: event):\n//   1: OrderPlaced   {cust:'A', total:1000}\n//   2: OrderPlaced   {cust:'A', total:500}\n//   3: OrderCancelled{cust:'A', total:500}\n//   4: OrderPlaced   {cust:'B', total:2000}\n//\n// Normal run -> A: {total:1000, count:1}, B: {total:2000, count:1}\n//\n// Crash + redelivery of position 2 AFTER it was already applied:\n//   getCheckpoint() returns 2, event.globalPosition (2) <= 2 -> SKIPPED.\n//   Totals stay correct (no double-count). Idempotent. \n//\n// Full rebuild -> truncate, checkpoint=-1, replay 1..4 -> identical result.",
+      "solutionLanguage": "typescript",
+      "explanation": "The projection guarantees correctness under at-least-once delivery through two cooperating mechanisms. First, a CHECKPOINT stores the last processed global position; any redelivered event whose position is at or below the checkpoint is skipped, so a crash that causes the store to re-send an already-applied event cannot double-count (the demonstration shows position 2 being safely ignored on redelivery). Second, the handlers use IDEMPOTENT atomic operations — an upsert with an increment keyed by customerId — rather than blind inserts, which keeps the write well-defined even in edge cases and lets the model be created on first sight of a customer. Crucially, advancing the checkpoint and applying the event should occur in a single transaction on the read store; otherwise a crash between them reintroduces a double-apply or skip window. Because the read model is purely derived, rebuild() simply truncates it, resets the checkpoint to -1, and replays the entire event log through the exact same handle() function, converging to an identical result — this is the disposable, rebuildable nature of CQRS read models that lets you fix projection bugs or add new fields by replaying history rather than migrating mutable data.",
+      "relatedTopic": "projections-readmodels"
+    }
+  ],
+  "references": [
+    {"label": "Martin Fowler - CQRS", "url": "https://martinfowler.com/bliki/CQRS.html"},
+    {"label": "Martin Fowler - Event Sourcing", "url": "https://martinfowler.com/eaaDev/EventSourcing.html"},
+    {"label": "Greg Young - CQRS Documents", "url": "https://cqrs.files.wordpress.com/2010/11/cqrs_documents.pdf"},
+    {"label": "Microsoft - CQRS pattern (Azure Architecture Center)", "url": "https://learn.microsoft.com/en-us/azure/architecture/patterns/cqrs"},
+    {"label": "Microsoft - Event Sourcing pattern", "url": "https://learn.microsoft.com/en-us/azure/architecture/patterns/event-sourcing"},
+    {"label": "Eric Evans - Domain-Driven Design (aggregates)", "url": "https://www.domainlanguage.com/ddd/reference/"}
+  ]
+}

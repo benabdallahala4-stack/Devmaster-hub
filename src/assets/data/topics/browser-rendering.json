@@ -1,0 +1,512 @@
+{
+  "id": "browser-rendering",
+  "title": "Browser & Rendering",
+  "category": "Frontend",
+  "subcategory": "Platform",
+  "difficulty": "senior",
+  "tags": ["browser", "rendering", "event-loop", "reflow", "compositing", "core-web-vitals"],
+  "description": "How browsers turn HTML, CSS, and JS into pixels: the critical rendering path, reflow vs repaint, compositing layers, the event loop, and the mechanics behind Core Web Vitals.",
+  "estReadMinutes": 30,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "When a browser loads a page it runs a pipeline that converts bytes into pixels: it parses HTML into the DOM and CSS into the CSSOM, combines them into a render tree, computes the geometry of every box (layout), fills in pixels (paint), and assembles the layers onto the screen (composite). On top of this sits the event loop, which schedules JavaScript, rendering, and user input so that a single-threaded main thread can stay responsive. Understanding this machinery is what separates engineers who can explain a jank or a slow load from those who only guess."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Critical rendering path: HTML -> DOM, CSS -> CSSOM, then render tree -> layout -> paint -> composite.",
+            "Reflow (layout) recomputes geometry; repaint refills pixels; compositing moves existing layers on the GPU - in increasing order of cheapness.",
+            "The event loop interleaves tasks (macrotasks), microtasks (promises), and rendering (requestAnimationFrame, style, layout, paint) on the main thread.",
+            "Core Web Vitals - LCP, CLS, INP - are user-centric metrics whose root causes live in this pipeline."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The main thread does almost everything: parsing, JavaScript, layout, paint, and event handling. Anything that monopolizes it - a long script, a forced synchronous layout, a heavy paint - blocks rendering and input. Most perf work is really about keeping the main thread free for the next frame."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Rendering behavior directly determines what users feel: how fast a page becomes visible, whether it shifts under their finger, and whether it responds when they tap. These translate into business outcomes (conversion, bounce, SEO ranking via Core Web Vitals) and into debuggability - you cannot fix jank you cannot explain. At a senior level, knowing which pipeline stage a change triggers (does this animation cause layout, or just compositing?) is the difference between a smooth 60fps interaction and a stuttering one, and between a quick fix and a week of guesswork."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Perceived performance: the critical rendering path decides how soon the user sees meaningful content and can interact.",
+            "Smoothness: animating layout-triggering properties causes reflow on every frame and drops frames; animating transform/opacity stays on the compositor.",
+            "Responsiveness: long tasks on the main thread block input handling, hurting INP and making the UI feel frozen.",
+            "SEO and ranking: Core Web Vitals are a Google ranking signal, so these mechanics have direct business impact."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Reading a layout property (offsetWidth, getBoundingClientRect, scrollTop) right after mutating the DOM forces the browser to synchronously recompute layout - a 'forced reflow' or 'layout thrash'. In a loop this turns an O(n) update into O(n squared) layouts and is a top cause of jank."
+        }
+      ]
+    },
+    {
+      "id": "critical-rendering-path",
+      "heading": "The Critical Rendering Path",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The critical rendering path is the sequence the browser follows to first paint. It parses the HTML into the DOM tree, parses all CSS into the CSSOM tree, and combines them into the render tree, which contains only visible elements with their computed styles (elements with display: none are excluded; visibility: hidden elements are kept but invisible). It then runs layout (also called reflow) to compute the exact position and size of every box, paints those boxes into layers, and composites the layers to the screen. Reducing the number, size, and blocking nature of the resources on this path is how you speed up first render."
+        },
+        {
+          "type": "heading",
+          "text": "Render-blocking resources"
+        },
+        {
+          "type": "code",
+          "language": "html",
+          "code": "<head>\n  <!-- CSS is render-blocking: the browser will not paint until the\n       CSSOM is built, to avoid a flash of unstyled content. -->\n  <link rel=\"stylesheet\" href=\"/styles.css\">\n\n  <!-- A plain script is parser-blocking: HTML parsing pauses while it\n       downloads AND executes, delaying DOM construction. -->\n  <script src=\"/app.js\"></script>\n\n  <!-- defer: download in parallel, execute after the DOM is parsed,\n       in order. Best default for app scripts. -->\n  <script src=\"/app.js\" defer></script>\n\n  <!-- async: download in parallel, execute as soon as ready (order not\n       guaranteed). Good for independent third-party scripts. -->\n  <script src=\"/analytics.js\" async></script>\n</head>"
+        },
+        {
+          "type": "paragraph",
+          "text": "CSS blocks rendering because the browser must build the full CSSOM before it can compute the render tree (otherwise it would paint unstyled content). Synchronous JavaScript blocks the parser because a script can call document.write or read/modify the DOM, so the parser must pause to run it; crucially, a script also waits for any pending CSS to finish because it might query computed styles. This is why you inline critical CSS, load the rest non-blocking, and use defer or async for scripts."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "defer is the right default for first-party application scripts: it keeps HTML parsing uninterrupted, preserves execution order, and runs scripts right before DOMContentLoaded. Use async only for truly independent scripts (analytics) where order does not matter and earlier execution is acceptable."
+        }
+      ]
+    },
+    {
+      "id": "reflow-repaint-composite",
+      "heading": "Reflow, Repaint, and Compositing",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Changes to the page fall into three tiers of cost. Reflow (layout) recomputes the geometry of affected boxes and often cascades to descendants, ancestors, and siblings - it is the most expensive. Repaint refills pixels for elements whose appearance changed (color, background, box-shadow, visibility) without changing geometry. Compositing simply re-positions or blends existing painted layers on the GPU, with no layout or paint at all - it is the cheapest and is what enables smooth 60fps animation. Knowing which tier a property change triggers is the core skill of animation performance."
+        },
+        {
+          "type": "table",
+          "headers": ["Change", "Triggers", "Cost"],
+          "rows": [
+            ["width, height, top, left, margin, font-size", "Layout -> Paint -> Composite", "Most expensive"],
+            ["color, background, box-shadow, visibility", "Paint -> Composite", "Medium"],
+            ["transform, opacity", "Composite only (on its own layer)", "Cheapest"],
+            ["Adding/removing DOM nodes", "Layout -> Paint -> Composite", "Expensive"]
+          ]
+        },
+        {
+          "type": "heading",
+          "text": "Bad: animating layout properties drops frames"
+        },
+        {
+          "type": "code",
+          "language": "css",
+          "code": "/* BAD: animating left forces layout + paint every frame. Janky. */\n.box {\n  position: absolute;\n  left: 0;\n  transition: left 300ms;\n}\n.box.moved { left: 300px; }"
+        },
+        {
+          "type": "heading",
+          "text": "Good: animate transform, which stays on the compositor"
+        },
+        {
+          "type": "code",
+          "language": "css",
+          "code": "/* GOOD: transform is composited; no layout or paint per frame.\n   will-change hints the browser to promote it to its own layer ahead of time. */\n.box {\n  transition: transform 300ms;\n  will-change: transform;\n}\n.box.moved { transform: translateX(300px); }"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "will-change and 3D transforms promote an element to its own compositor layer, which makes its animation cheap - but each layer costs GPU memory and layer-management overhead. Promote the few elements you animate, not everything; over-promotion (a will-change on hundreds of nodes) can hurt more than it helps."
+        }
+      ]
+    },
+    {
+      "id": "event-loop",
+      "heading": "The Browser Event Loop: Tasks, Microtasks, and Frames",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "JavaScript on the main thread is single-threaded and coordinated by the event loop. Each iteration runs one macrotask (a script, a setTimeout callback, an event handler) to completion, then drains the entire microtask queue (promise callbacks, queueMicrotask, MutationObserver) before doing anything else, and then - when it is time for a frame - runs requestAnimationFrame callbacks followed by style, layout, paint, and composite. Microtasks always run before the next macrotask and before rendering, which is why an unbounded chain of promises can starve rendering entirely."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "console.log('1: sync');\n\nsetTimeout(() => console.log('4: macrotask (setTimeout)'), 0);\n\nPromise.resolve().then(() => console.log('3: microtask (promise)'));\n\nconsole.log('2: sync');\n\n// Output order: 1, 2, 3, 4\n// Both sync logs run first (current task), THEN the microtask queue drains\n// (the promise), and only then does the next macrotask (setTimeout) run."
+        },
+        {
+          "type": "paragraph",
+          "text": "requestAnimationFrame schedules work to run just before the next paint, so it is the correct place for animation updates - the callback fires once per frame, in sync with the display, and is skipped when the tab is hidden. The key timing facts to internalize: microtasks run to exhaustion after every task and before rendering; rendering (rAF -> style -> layout -> paint) happens at most once per frame (typically ~16.7ms at 60Hz); and a long synchronous task delays the next frame, input handling, and everything else because nothing can interrupt a running task."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "A recursive promise chain (function loop() { Promise.resolve().then(loop); }) never yields to rendering or input: microtasks are drained completely before the loop moves on, so the page freezes. Use setTimeout, scheduler.yield, or breaking work into tasks to give the browser a chance to render and respond."
+        }
+      ]
+    },
+    {
+      "id": "layers-gpu",
+      "heading": "Layers and GPU Compositing",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Modern browsers paint content into compositor layers, then the compositor (often on the GPU and on a separate thread) assembles those layers into the final image. Because compositing is independent of layout and paint, an animation confined to compositing (transform, opacity) can run on the compositor thread even while the main thread is busy - it stays smooth under JavaScript load. An element is promoted to its own layer by certain triggers: a 3D or will-change: transform, opacity animation, <video>/<canvas>, position: fixed in some cases, and elements with certain filters."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Diagnosing layers and forced reflow in DevTools terms:\n// 1) Open Performance panel, record an interaction.\n// 2) Purple 'Layout' bars = reflow; green 'Paint' = repaint;\n//    the Compositing track shows GPU work.\n// 3) A 'Recalculate Style' or 'Layout' immediately after a style write,\n//    inside a loop, flags layout thrashing.\n\n// Layout thrash: read-after-write in a loop forces a reflow each iteration.\nfunction badResize(elements) {\n  for (const el of elements) {\n    el.style.width = el.offsetWidth + 10 + 'px'; // write then read -> reflow each time\n  }\n}\n\n// Fix: batch reads, then batch writes (read all, then write all).\nfunction goodResize(elements) {\n  const widths = elements.map(el => el.offsetWidth); // all reads first\n  elements.forEach((el, i) => { el.style.width = widths[i] + 10 + 'px'; }); // then writes\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "The mental model for smooth animation: keep the work on the compositor by animating only transform and opacity, avoid touching layout-affecting properties during animation, and batch DOM reads and writes so you never interleave them (interleaving forces the browser to flush layout to answer a read). Libraries like FastDOM formalize this read/write batching; frameworks that schedule DOM updates also help avoid forced synchronous layout."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The compositor thread can scroll and run transform/opacity animations even when the main thread is jammed - which is why a transform-based animation stays smooth during heavy JS while a left/top animation stutters. This thread separation is the whole reason to prefer compositor-only properties."
+        }
+      ]
+    },
+    {
+      "id": "core-web-vitals",
+      "heading": "Core Web Vitals Mechanics",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Core Web Vitals are three user-centric metrics, each rooted in the rendering pipeline. LCP (Largest Contentful Paint) measures when the largest visible content element finishes rendering - it is gated by the critical rendering path, render-blocking resources, and slow image/font loads. CLS (Cumulative Layout Shift) measures unexpected movement of visible content - caused by layout (reflow) shifting elements after they were painted, typically from images without dimensions, injected content, or late-loading fonts. INP (Interaction to Next Paint) measures the latency from a user interaction to the next visual update - gated by main-thread availability and long tasks blocking the event loop."
+        },
+        {
+          "type": "table",
+          "headers": ["Metric", "Measures", "Pipeline root cause", "Good threshold"],
+          "rows": [
+            ["LCP", "Time to render largest content", "Critical path, render-blocking CSS/JS, slow images/fonts", "<= 2.5s"],
+            ["CLS", "Unexpected layout movement", "Reflow shifting painted elements", "<= 0.1"],
+            ["INP", "Interaction-to-paint latency", "Long tasks blocking the main thread/event loop", "<= 200ms"]
+          ]
+        },
+        {
+          "type": "code",
+          "language": "html",
+          "code": "<!-- CLS fix: always reserve space so late-loading media cannot shift content. -->\n<img src=\"hero.jpg\" width=\"1200\" height=\"600\" alt=\"...\">\n<!-- or with CSS aspect-ratio when dimensions are fluid -->\n<style>.hero { aspect-ratio: 2 / 1; width: 100%; }</style>\n\n<!-- LCP fix: prioritize the hero image and preload it. -->\n<link rel=\"preload\" as=\"image\" href=\"hero.jpg\">\n<img src=\"hero.jpg\" fetchpriority=\"high\" alt=\"...\">\n\n<!-- font CLS fix: reserve space and avoid invisible-text swap -->\n<style>@font-face { font-family: Inter; src: url(inter.woff2); font-display: swap; }</style>"
+        },
+        {
+          "type": "paragraph",
+          "text": "Each metric maps to a concrete pipeline fix. For LCP: shrink and prioritize the critical path - inline critical CSS, defer non-critical JS, preload the LCP image, and serve it in a modern format. For CLS: reserve space for everything that loads late (width/height on images, aspect-ratio, font-display strategy, skeleton placeholders) so no reflow displaces painted content. For INP: break up long tasks, defer non-urgent work, and yield to the event loop so input handlers and the next paint are not blocked."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "INP replaced FID as a Core Web Vital in 2024 because FID only measured input delay of the first interaction, while INP measures the full interaction-to-paint latency across the whole session - a far better proxy for how responsive the page actually feels."
+        }
+      ]
+    },
+    {
+      "id": "thrash-example",
+      "heading": "Example: Eliminating Layout Thrash in a Resize Loop",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Scenario: a dashboard synced the heights of paired left/right rows by, for each row, reading the taller side's height and writing it to the shorter side - inside a single loop. With 200 rows the page froze for ~400ms on every resize. The Performance panel showed 200 alternating 'Layout' events: a textbook forced synchronous layout (layout thrash)."
+        },
+        {
+          "type": "heading",
+          "text": "Before: interleaved reads and writes force a reflow each iteration"
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "function syncHeights(pairs) {\n  for (const { left, right } of pairs) {\n    // READ forces the browser to flush pending layout to give a fresh value...\n    const h = Math.max(left.offsetHeight, right.offsetHeight);\n    // ...then this WRITE invalidates layout again. Next iteration's read\n    // forces ANOTHER full reflow. O(n) reads each triggering O(n) layout.\n    left.style.height = h + 'px';\n    right.style.height = h + 'px';\n  }\n}"
+        },
+        {
+          "type": "heading",
+          "text": "After: batch all reads, then all writes"
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "function syncHeights(pairs) {\n  // Phase 1: READ everything first. Layout is computed once for all reads.\n  const heights = pairs.map(({ left, right }) =>\n    Math.max(left.offsetHeight, right.offsetHeight)\n  );\n\n  // Phase 2: WRITE everything. No reads in between, so the browser\n  // batches these into a single layout pass before the next frame.\n  pairs.forEach(({ left, right }, i) => {\n    left.style.height = heights[i] + 'px';\n    right.style.height = heights[i] + 'px';\n  });\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Root cause: each layout-reading property (offsetHeight) right after a style write forces the browser to synchronously recompute layout so it can return an accurate value, because the previous write had invalidated it. Interleaving reads and writes in a loop therefore triggers a full reflow per iteration - quadratic behavior. Separating the loop into a read phase and a write phase lets the browser compute layout once for all reads and flush all writes together in the next frame, collapsing 200 reflows into effectively one. The freeze dropped from ~400ms to a few milliseconds."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The read/write batching rule generalizes: whenever you must both measure and mutate the DOM, do all measurements first and all mutations after. Never read a layout property in the same loop body where you write a style."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Performance Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Forced synchronous layout (layout thrash): reading offsetWidth/getBoundingClientRect/scrollTop right after a DOM write, especially in a loop, turning updates quadratic.",
+            "Animating layout-triggering properties (left/top/width/height/margin) instead of transform/opacity, causing reflow on every frame and dropped frames.",
+            "Blocking the critical path: large synchronous scripts in <head> without defer/async, or huge non-critical CSS that delays first paint.",
+            "Starving rendering with microtasks: recursive promise chains or massive synchronous loops that never yield, freezing the UI and tanking INP.",
+            "Images and ads without reserved dimensions, causing layout shift (CLS) as they load and push content down.",
+            "Over-promoting layers: will-change on hundreds of elements, exhausting GPU memory and adding compositing overhead instead of helping.",
+            "Late-loading web fonts with the default font-display, causing invisible text (FOIT) or a reflow when the font swaps in."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Incident pattern: a feature added a getBoundingClientRect() call inside a scroll handler that also wrote inline styles. Every scroll event forced a synchronous layout, the main thread saturated, scrolling stuttered, and INP collapsed. Moving the measurement into a requestAnimationFrame and batching the writes restored 60fps scrolling."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Animate only transform and opacity for smooth motion; keep animations on the compositor and off the layout/paint path.",
+            "Batch DOM reads and writes: measure everything first, mutate everything after, and never interleave them in a loop.",
+            "Shrink the critical rendering path: inline critical CSS, load the rest non-blocking, and defer/async scripts so they do not block parsing.",
+            "Break long tasks into smaller chunks and yield to the event loop (setTimeout, scheduler.yield, isInputPending) so input and rendering are not blocked, protecting INP.",
+            "Reserve space for everything that loads late - width/height on images, aspect-ratio, font-display: swap, skeletons - to keep CLS near zero.",
+            "Use requestAnimationFrame for visual updates so they run once per frame, aligned with paint, and pause when the tab is hidden.",
+            "Promote only the few elements you actually animate to their own layer (will-change); remove the hint when the animation ends.",
+            "Measure in the DevTools Performance panel: purple Layout bars reveal reflow, and a Layout immediately after a style write reveals thrash."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Symptom", "Likely cause", "Fix"],
+          "rows": [
+            ["Janky animation", "Animating left/top/width", "Use transform/opacity"],
+            ["Page freezes on update", "Layout thrash or microtask starvation", "Batch read/write; yield to loop"],
+            ["Content jumps while loading", "Unreserved image/font space (CLS)", "width/height, aspect-ratio, font-display"],
+            ["Slow first paint", "Render-blocking CSS/JS (LCP)", "Inline critical CSS; defer JS; preload LCP"],
+            ["Taps feel unresponsive", "Long tasks blocking main thread (INP)", "Chunk work; yield; offload to worker"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "note-offmainthread",
+      "heading": "Getting Work Off the Main Thread",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Because the main thread runs JavaScript, layout, paint, and event handling, the most powerful lever for responsiveness is moving CPU-bound work off it. Web Workers run JavaScript on a separate thread with no DOM access, communicating via postMessage - ideal for parsing, image processing, or heavy computation that would otherwise block input. OffscreenCanvas lets you render to a canvas from a worker. For work that must touch the DOM, the answer is to slice it into tasks and yield between them so the event loop can service input and paint. The unifying principle: never let any single piece of work hold the main thread long enough to miss a frame or delay an interaction."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A task longer than ~50ms is officially a 'long task' and directly threatens INP, because any interaction arriving during it must wait for it to finish before the handler can run. Splitting work below that threshold and yielding is the core technique for responsive UIs under load."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "crp-pipeline",
+      "title": "The Critical Rendering Path",
+      "type": "mermaid",
+      "content": "flowchart TD\n    HTML[HTML bytes] --> DOM[Parse -> DOM tree]\n    CSS[CSS bytes] --> CSSOM[Parse -> CSSOM tree]\n    DOM --> RT[Render tree: visible nodes + computed styles]\n    CSSOM --> RT\n    RT --> L[Layout / reflow: geometry of every box]\n    L --> P[Paint: fill pixels into layers]\n    P --> C[Composite: assemble layers on GPU]\n    C --> Screen[Pixels on screen]"
+    },
+    {
+      "id": "event-loop-diagram",
+      "title": "One Turn of the Browser Event Loop",
+      "type": "mermaid",
+      "content": "flowchart TD\n    A[Pick one macrotask] --> B[Run it to completion]\n    B --> C[Drain ALL microtasks]\n    C --> D{Time to render this frame?}\n    D -- no --> A\n    D -- yes --> E[requestAnimationFrame callbacks]\n    E --> F[Recalculate style]\n    F --> G[Layout]\n    G --> H[Paint]\n    H --> I[Composite]\n    I --> A"
+    },
+    {
+      "id": "change-cost-ladder",
+      "title": "Cost Ladder: Layout vs Paint vs Composite",
+      "type": "ascii",
+      "content": "Most expensive\n  +--------------------------------------------+\n  | LAYOUT (reflow)  width/height/top/left     |\n  |   -> recompute geometry, cascades widely   |\n  +--------------------------------------------+\n  | PAINT (repaint)  color/background/shadow   |\n  |   -> refill pixels, no geometry change     |\n  +--------------------------------------------+\n  | COMPOSITE        transform/opacity         |\n  |   -> move/blend existing layers on the GPU |\n  +--------------------------------------------+\nCheapest -> animate here for 60fps"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-crp",
+      "question": "Walk through the critical rendering path from HTML bytes to pixels.",
+      "answer": "The browser receives HTML bytes and parses them into the DOM tree, and parses all CSS (external, inline, and imported) into the CSSOM tree. It combines the DOM and CSSOM into the render tree, which includes only the elements that will be visible together with their computed styles - display: none elements are excluded entirely, while visibility: hidden elements remain in the tree but render invisibly. Next it runs layout (reflow) to compute the exact position and size of every box in the render tree, then paint to fill in the pixels for each box into one or more layers, and finally composite to assemble those layers (often on the GPU) into the final image shown on screen. Performance work on first render focuses on minimizing the resources that block this path: making CSS and JavaScript smaller and non-blocking so the render tree can be built and painted sooner.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["critical-rendering-path", "rendering"],
+      "followUps": ["Why is the render tree different from the DOM?", "Which resources block this path?"]
+    },
+    {
+      "id": "q-reflow-repaint",
+      "question": "What is the difference between reflow and repaint, and why does it matter for animation?",
+      "answer": "Reflow (layout) is the browser recomputing the geometry - position and size - of elements, which happens when you change properties like width, height, top, left, margin, font-size, or add/remove DOM nodes; it is expensive because a change can cascade to descendants, ancestors, and following siblings. Repaint refills the pixels of an element whose visual appearance changed but whose geometry did not, such as color, background-color, or box-shadow; it skips layout but still rasterizes. The third, cheapest tier is compositing, which only moves or blends already-painted layers and is triggered by transform and opacity. It matters for animation because a property animated every frame multiplies its cost by ~60 per second: animating a layout property reflows and repaints each frame and drops frames, whereas animating transform/opacity stays on the compositor (often on a separate thread) and remains smooth even under main-thread load. The senior rule is to animate only transform and opacity.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["reflow", "repaint", "compositing", "animation"],
+      "followUps": ["Which properties are composite-only?", "What does will-change do?"]
+    },
+    {
+      "id": "q-microtask-macrotask",
+      "question": "Explain the difference between macrotasks and microtasks in the browser event loop.",
+      "answer": "A macrotask (or simply 'task') is a unit of work like running a script, a setTimeout/setInterval callback, an event handler, or a message event; the event loop runs exactly one macrotask per iteration, to completion. Microtasks are smaller callbacks queued by promises (.then/.catch/.finally), queueMicrotask, and MutationObserver. The critical rule is that after each macrotask finishes, the event loop drains the entire microtask queue - running every queued microtask, including any newly queued during draining - before it picks the next macrotask or performs rendering. This is why a promise callback always runs before a setTimeout(0) scheduled earlier in the same task, and why a recursive microtask chain can starve rendering and input entirely: the loop will not move on or paint until the microtask queue is empty. Rendering (requestAnimationFrame, style, layout, paint) happens after microtasks, at most once per frame.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["event-loop", "microtasks", "macrotasks"],
+      "followUps": ["Where does requestAnimationFrame run relative to microtasks?", "How can microtasks starve rendering?"]
+    },
+    {
+      "id": "q-raf",
+      "question": "When and why should you use requestAnimationFrame?",
+      "answer": "requestAnimationFrame schedules a callback to run just before the browser's next repaint, so it is the correct mechanism for any visual update driven by JavaScript - animations, scroll-linked effects, or canvas drawing. Its advantages over setTimeout/setInterval: it fires in sync with the display's refresh (typically ~60Hz, so ~16.7ms apart), so animation steps line up with actual frames and look smooth; it is automatically throttled or paused when the tab is hidden, saving CPU and battery; and it runs at the right point in the event loop, after microtasks and before style/layout/paint, so DOM changes you make in it are picked up by the same frame's rendering. It is also the right place to do DOM measurements that must reflect the latest layout, and to batch writes so they coalesce into one layout pass. Using setTimeout for animation instead causes drift, jank, and wasted work in background tabs.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["requestAnimationFrame", "event-loop", "animation"],
+      "followUps": ["Why does rAF pause in background tabs?", "How does rAF help avoid layout thrash?"]
+    },
+    {
+      "id": "q-render-blocking",
+      "question": "Why is CSS render-blocking and synchronous JavaScript parser-blocking, and how do defer/async change script loading?",
+      "answer": "CSS is render-blocking because the browser must construct the complete CSSOM before it can build the render tree and paint - painting with a partial CSSOM would risk a flash of unstyled or incorrectly styled content. A plain synchronous script is parser-blocking because a script can modify the DOM as it is being built (e.g. document.write) or read computed styles, so the HTML parser must pause, download, and fully execute the script before continuing - and the script also waits for any pending CSS, because it might query styles. defer tells the browser to download the script in parallel without blocking parsing and to execute it after the DOM is fully parsed, preserving document order, just before DOMContentLoaded - ideal for application scripts. async also downloads in parallel without blocking parsing but executes the script as soon as it is downloaded, without ordering guarantees and possibly interrupting parsing - suitable for independent third-party scripts like analytics where order does not matter.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["render-blocking", "scripts", "critical-rendering-path"],
+      "followUps": ["When is async preferable to defer?", "How do you load non-critical CSS non-blocking?"]
+    },
+    {
+      "id": "q-layout-thrash",
+      "question": "What is forced synchronous layout (layout thrashing) and how do you avoid it?",
+      "answer": "Forced synchronous layout, or layout thrashing, happens when you write to the DOM (changing styles or structure) and then immediately read a layout-dependent property such as offsetWidth, offsetHeight, getBoundingClientRect, scrollTop, or getComputedStyle. The read requires an up-to-date layout, but the preceding write invalidated layout, so the browser must synchronously recompute layout right then to return an accurate value - outside its normal once-per-frame schedule. Doing this once is cheap; doing it in a loop, alternating writes and reads, forces a full reflow on every iteration and turns an O(n) update into O(n squared) layout work, freezing the page. The fix is to batch: perform all reads first (the browser computes layout once to satisfy them), then perform all writes (which the browser coalesces into a single layout pass before the next frame). Helpers like FastDOM and scheduling writes inside requestAnimationFrame formalize this read-then-write discipline.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["reflow", "layout-thrash", "performance"],
+      "followUps": ["Which property reads force layout?", "How does batching collapse the cost?"]
+    },
+    {
+      "id": "q-cwv",
+      "question": "What do LCP, CLS, and INP measure, and what is the pipeline root cause of each?",
+      "answer": "LCP (Largest Contentful Paint) measures the time until the largest visible content element - usually a hero image, video poster, or large text block - is rendered; its root causes live in the critical rendering path: render-blocking CSS and JavaScript, slow server response, and slow-loading or low-priority hero images. CLS (Cumulative Layout Shift) measures unexpected movement of already-visible content, scored by how much area moved and how far; its root cause is reflow displacing painted elements, typically from images or ads without reserved dimensions, dynamically injected content, or late-swapping web fonts. INP (Interaction to Next Paint) measures the latency from a user interaction (tap, click, keypress) to the next frame that visually responds; its root cause is the main thread being busy - long tasks blocking the event loop so the input handler and subsequent paint are delayed. Each maps to a concrete fix: prioritize and shrink the critical path for LCP, reserve space for late content for CLS, and break up long tasks and yield to the event loop for INP.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["core-web-vitals", "lcp", "cls", "inp"],
+      "followUps": ["How do you fix CLS from web fonts?", "Why did INP replace FID?"]
+    },
+    {
+      "id": "q-layers",
+      "question": "What is a compositor layer and how does it enable smooth animation under heavy JavaScript?",
+      "answer": "A compositor layer is a separately painted surface that the browser's compositor can transform and blend independently of the rest of the page. Once an element is on its own layer, animating its transform or opacity does not require layout or paint - the compositor simply re-positions or fades the existing texture, work that often runs on the GPU and on a dedicated compositor thread. Because that thread is separate from the main thread, such an animation keeps running smoothly even when the main thread is saturated with JavaScript, which is exactly why a transform-based animation stays at 60fps under load while a left/top animation stutters (the latter needs the busy main thread to relayout each frame). Elements are promoted to a layer by triggers like will-change: transform, 3D transforms, opacity animations, <video>, and <canvas>. The trade-off is memory and management overhead per layer, so you promote only the few elements you animate, not the whole page.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["compositing", "layers", "gpu", "animation"],
+      "followUps": ["What triggers layer promotion?", "What is the downside of too many layers?"]
+    },
+    {
+      "id": "q-tricky-promise-starve",
+      "question": "Tricky: A developer schedules background work with `function tick(){ doChunk(); Promise.resolve().then(tick); }` to 'avoid blocking'. The page still freezes. Why?",
+      "answer": "Because promise callbacks are microtasks, and the event loop drains the entire microtask queue after each macrotask before it does anything else - including rendering and handling input. Each tick re-queues itself as a microtask, so the queue is never empty: the loop keeps running tick -> tick -> tick without ever yielding to style/layout/paint or to user events, and the page freezes exactly as if it were a synchronous infinite loop. The fix is to schedule the continuation as a macrotask instead, which lets the loop render and process input between chunks: use setTimeout(tick, 0), or the modern scheduler.postTask / scheduler.yield, or MessageChannel for a faster macrotask. The deeper lesson is that microtasks are not a yielding mechanism - they run before rendering, not interleaved with it - so they are the wrong tool for breaking up long-running work; only macrotasks give the browser a chance to paint and respond.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["event-loop", "microtasks", "gotcha"],
+      "followUps": ["What macrotask APIs yield fastest?", "Why does setTimeout(0) allow rendering but a microtask chain does not?"]
+    },
+    {
+      "id": "q-tricky-transform-repaint",
+      "question": "Tricky: You switched an animation from `left` to `transform: translateX` for performance, but it still janks. What might still be wrong?",
+      "answer": "transform is composite-only only if the element is actually on its own compositor layer and nothing else forces layout or paint during the animation. Several things can defeat it. First, the element may not be promoted to a layer, so the browser still paints it each frame; adding will-change: transform (or a 3D transform like translate3d) promotes it. Second, an ancestor or the element itself may be triggering paint or layout for another reason - for example animating box-shadow alongside, or a parent whose size changes, or a layout-affecting property changing in the same frame. Third, over-promotion elsewhere can exhaust GPU memory and cause the compositor itself to thrash. Fourth, very large layers or many layers create heavy compositing/upload cost. Finally, if JavaScript on the main thread is doing forced synchronous layout each frame (a measure-after-mutate), it stalls the whole pipeline regardless of how the visual property is animated. The fix is to confirm in the Performance panel that only Composite work occurs during the animation, promote the animated element, and ensure no concurrent layout/paint or main-thread thrash is happening.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["compositing", "transform", "performance", "gotcha"],
+      "followUps": ["How do you confirm an animation is composite-only?", "Why can will-change everywhere backfire?"]
+    },
+    {
+      "id": "q-tricky-cls-source",
+      "question": "Tricky: Your CLS is bad even though every image has width and height. What other sources could be shifting layout?",
+      "answer": "Reserved image dimensions are only one source of CLS. Others include: web fonts that swap in later and have different metrics than the fallback, reflowing the text (mitigate with font-display: optional or size-adjust/metric-overrides to match the fallback's box); dynamically injected content above existing content - banners, cookie notices, ads, or lazy-loaded sections that push the page down after paint; content inserted in response to async data without a reserved skeleton of the right size; animations that change layout properties (height, top) rather than transform; and elements positioned after an image or iframe whose intrinsic size still arrives late (e.g. an ad iframe with no reserved slot). The unifying cause is the same: something occupies or changes space after surrounding content was already painted, displacing it. The fixes are all variants of reserving the correct space ahead of time (min-height, aspect-ratio, skeletons, fixed ad slots) and preferring transform-based animation, plus inserting late content below the fold or in space that was already allocated.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["core-web-vitals", "cls", "fonts", "gotcha"],
+      "followUps": ["How do font metric overrides reduce CLS?", "Why does animating height cause CLS but transform does not?"]
+    },
+    {
+      "id": "q-long-task",
+      "question": "What is a 'long task' and how does it relate to INP and responsiveness?",
+      "answer": "A long task is any uninterrupted block of main-thread work lasting longer than 50 milliseconds. It matters because the main thread is single-threaded: while a task runs, nothing else can - no event handlers, no rendering, no input processing. If a user taps during a long task, the browser cannot run the click handler or paint the response until the task finishes, so the interaction-to-next-paint latency (INP) includes that wait. A page full of long tasks feels frozen and laggy even if it eventually does the right thing. The remedy is to break long work into chunks under ~50ms and yield to the event loop between them - via setTimeout, scheduler.yield, isInputPending checks, or by moving CPU-bound work to a Web Worker entirely - so that pending input and rendering can be serviced promptly between chunks. Keeping individual tasks short is the foundational technique for a responsive UI and good INP.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["inp", "long-tasks", "event-loop"],
+      "followUps": ["How does scheduler.yield differ from setTimeout?", "When should work go to a Web Worker?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-chunk-long-task",
+      "title": "Break a Long Task Into Yielding Chunks",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "prompt": "You have a function that processes 100,000 records synchronously, blocking the main thread for ~600ms and freezing the UI (taps and scrolls stall). Refactor it to process the records in chunks that yield to the event loop between chunks, so input and rendering stay responsive, while still completing all the work. Provide a reusable chunked-processing helper.",
+      "hints": [
+        "Process a fixed number of items, then yield control before the next batch.",
+        "Yielding via a macrotask (setTimeout/scheduler.yield/MessageChannel) lets the browser render and handle input between chunks; a microtask would not.",
+        "Optionally use isInputPending() or a time budget per chunk so you yield more often when the user is interacting."
+      ],
+      "solutionCode": "// Yield to the event loop as a macrotask so the browser can render\n// and process input between chunks. Prefer scheduler.yield where available.\nfunction yieldToMain() {\n  if ('scheduler' in window && 'yield' in window.scheduler) {\n    return window.scheduler.yield();\n  }\n  return new Promise(resolve => setTimeout(resolve, 0));\n}\n\n/**\n * Process items in time-budgeted chunks, yielding between them so\n * interactions and frames are not blocked.\n */\nasync function processInChunks(items, handle, budgetMs = 16) {\n  let i = 0;\n  while (i < items.length) {\n    const deadline = performance.now() + budgetMs;\n    // Do work until this chunk's time budget is spent (about one frame).\n    while (i < items.length && performance.now() < deadline) {\n      handle(items[i], i);\n      i++;\n    }\n    // Hand control back to the browser before continuing.\n    if (i < items.length) {\n      await yieldToMain();\n    }\n  }\n}\n\n// Usage: the UI stays responsive while 100k records are processed.\nawait processInChunks(records, (record, index) => {\n  // ...expensive per-record work...\n  accumulate(record);\n});",
+      "solutionLanguage": "javascript",
+      "explanation": "The original function ran ~600ms of work in one synchronous block, which is a single enormous long task: during it the main thread cannot run event handlers or paint, so taps and scrolls are stuck until it finishes. The refactor splits the work into time-budgeted chunks - it processes records until roughly one frame's worth of time (16ms) has elapsed, then awaits yieldToMain() to return control to the event loop before continuing. Crucially, the yield must be a macrotask (scheduler.yield or setTimeout(0)), not a microtask: microtasks are drained before rendering and input, so a microtask 'yield' would not actually let the browser paint or respond. By yielding as a macrotask, the event loop can service pending input (so a tap during processing is handled promptly) and render a frame between chunks, keeping the UI smooth and protecting INP, while the loop still resumes and completes all 100,000 records. Using a time budget rather than a fixed item count adapts automatically to how expensive each item is. For purely CPU-bound work with no DOM access, an even better option is to move the whole thing to a Web Worker so the main thread is never touched at all.",
+      "relatedTopic": "event-loop"
+    },
+    {
+      "id": "ch-fix-thrash",
+      "title": "Eliminate Layout Thrash in a Measure-and-Resize Routine",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "prompt": "A function loops over a list of elements and, for each, reads its current width and sets a new width based on it. Profiling shows one 'Layout' event per element - classic layout thrashing. Refactor the routine so the browser performs at most one layout pass, and explain precisely why the original was quadratic.",
+      "hints": [
+        "Reading a layout property (offsetWidth/getBoundingClientRect) after a style write forces a synchronous reflow.",
+        "Separate the routine into a read phase and a write phase.",
+        "Do all measurements first into an array, then apply all the writes."
+      ],
+      "solutionCode": "// BEFORE (thrashing): each iteration writes then reads, forcing a reflow.\nfunction growBad(elements) {\n  for (const el of elements) {\n    const w = el.getBoundingClientRect().width; // read forces layout flush\n    el.style.width = w * 1.1 + 'px';            // write invalidates layout\n  }\n}\n\n// AFTER (batched): all reads, then all writes. One layout pass.\nfunction growGood(elements) {\n  // Phase 1 - READ: gather every measurement first. The browser computes\n  // layout once to answer all of these reads (no writes have dirtied it yet).\n  const widths = elements.map(el => el.getBoundingClientRect().width);\n\n  // Phase 2 - WRITE: apply all mutations. With no interleaved reads, the\n  // browser batches these and recomputes layout a single time before paint.\n  elements.forEach((el, i) => {\n    el.style.width = widths[i] * 1.1 + 'px';\n  });\n}\n\n// For visual work, schedule the writes inside requestAnimationFrame so they\n// coalesce with the next frame's layout pass:\nfunction growScheduled(elements) {\n  const widths = elements.map(el => el.getBoundingClientRect().width);\n  requestAnimationFrame(() => {\n    elements.forEach((el, i) => { el.style.width = widths[i] * 1.1 + 'px'; });\n  });\n}",
+      "solutionLanguage": "javascript",
+      "explanation": "The original routine interleaves a write (setting style.width) and a read (getBoundingClientRect) inside the same loop body. After the first iteration's write, layout is dirty; the next iteration's read needs an accurate, up-to-date width, so the browser is forced to synchronously recompute layout right then to answer it. With N elements you trigger N forced reflows, and because each reflow can be O(N) (it may re-evaluate the whole subtree), the total cost is effectively O(N squared) - which is why the page froze. The fix separates the work into a read phase and a write phase: in the read phase, all measurements are taken while layout is clean, so the browser computes it once to satisfy every read; in the write phase, all mutations are applied with no reads in between, so the browser does not need an up-to-date layout until the next frame and coalesces them into a single layout pass. This collapses N reflows into one. Scheduling the writes inside requestAnimationFrame is an additional refinement that lines the mutations up with the browser's natural once-per-frame rendering, avoiding any off-schedule layout entirely. The core rule to remember: never read a layout property in the same loop where you write styles - measure all, then mutate all.",
+      "relatedTopic": "thrash-example"
+    }
+  ],
+  "references": [
+    {"label": "web.dev - Critical rendering path", "url": "https://web.dev/articles/critical-rendering-path"},
+    {"label": "MDN - The event loop", "url": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Event_loop"},
+    {"label": "web.dev - Core Web Vitals", "url": "https://web.dev/articles/vitals"},
+    {"label": "web.dev - Avoid large, complex layouts and layout thrashing", "url": "https://web.dev/articles/avoid-large-complex-layouts-and-layout-thrashing"},
+    {"label": "web.dev - Optimize Interaction to Next Paint", "url": "https://web.dev/articles/optimize-inp"},
+    {"label": "MDN - Using requestAnimationFrame", "url": "https://developer.mozilla.org/en-US/docs/Web/API/Window/requestAnimationFrame"}
+  ]
+}

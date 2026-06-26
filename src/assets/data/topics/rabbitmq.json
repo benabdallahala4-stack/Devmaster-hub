@@ -1,0 +1,490 @@
+{
+  "id": "rabbitmq",
+  "title": "RabbitMQ",
+  "category": "Messaging",
+  "subcategory": "Brokers",
+  "difficulty": "mid",
+  "tags": ["rabbitmq", "amqp", "messaging", "queues", "dead-letter", "kafka"],
+  "description": "A practical deep dive into RabbitMQ and the AMQP model: exchanges, queues, bindings and routing keys, acks and at-least-once delivery, prefetch/QoS, dead-letter exchanges, durability, publisher confirms, idempotency, and when to choose RabbitMQ vs Kafka.",
+  "estReadMinutes": 29,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "RabbitMQ is a mature message broker implementing AMQP 0-9-1, used to decouple producers from consumers, smooth load spikes, distribute work, and route events. Producers publish messages to exchanges; the broker routes them into queues according to bindings; consumers read from queues. The model's flexibility comes from how exchanges route - by exact key, pattern, broadcast, or headers - and its reliability comes from acknowledgements, durability, and confirms. This topic covers the AMQP model and the operational levers that make a RabbitMQ deployment reliable rather than lossy."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Exchange: receives published messages and routes them to queues by rules; producers never publish directly to a queue.",
+            "Queue: an ordered buffer that holds messages until a consumer acknowledges them.",
+            "Binding: a link from an exchange to a queue, optionally with a routing/binding key or arguments.",
+            "Routing key: a string on each message the exchange uses (with the binding) to decide where it goes.",
+            "Ack: a consumer's confirmation that a message was processed and may be removed from the queue."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "RabbitMQ is a smart-broker / dumb-consumer system: routing logic lives in the broker (exchanges and bindings), and the broker tracks per-message delivery state. This is the opposite of Kafka's dumb-broker / smart-consumer log model, and it drives most of the trade-offs between the two."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Message brokers are where 'it works in dev' meets 'it lost data in prod'. Almost every reliability property in RabbitMQ is a deliberate choice you must make: whether messages survive a broker restart (durability), whether the broker confirms it stored your publish (publisher confirms), whether a consumer crash re-delivers or drops a message (acks), and what happens to messages that repeatedly fail (dead-letter exchanges). Get the defaults wrong and you silently drop or duplicate messages under load."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Data loss: non-durable queues, transient messages, or auto-ack consumers lose messages on crash or restart.",
+            "Poison messages: a message that always fails will redeliver forever, blocking a queue, unless dead-lettered.",
+            "Throughput vs fairness: prefetch (QoS) controls how many unacked messages a consumer holds; wrong values starve or overload workers.",
+            "Duplicates: at-least-once delivery means consumers must be idempotent, or retries corrupt state.",
+            "Backpressure: unbounded queues grow until memory/disk alarms throttle publishers - you must bound and monitor them."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "RabbitMQ's safe-by-default reliability requires THREE things together: durable queues, persistent messages (delivery_mode=2), AND publisher confirms. Setting only one gives a false sense of safety - a durable queue with transient messages still loses everything on restart."
+        }
+      ]
+    },
+    {
+      "id": "amqp-model",
+      "heading": "The AMQP Model: Exchanges, Queues, Bindings",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "In AMQP 0-9-1, a producer never sends a message to a queue directly. It publishes to an exchange with a routing key. The exchange applies its type-specific rules against its bindings to decide which queue(s) receive a copy. A queue is then consumed by one or more consumers. This indirection is the source of RabbitMQ's flexibility: you can change routing topology (add a queue, re-bind) without touching producer code."
+        },
+        {
+          "type": "code",
+          "language": "python",
+          "code": "import pika\n\nconn = pika.BlockingConnection(pika.ConnectionParameters('localhost'))\nch = conn.channel()\n\n# Declare a durable topic exchange and a durable queue, then bind with a pattern.\nch.exchange_declare(exchange='orders', exchange_type='topic', durable=True)\nch.queue_declare(queue='eu_orders', durable=True)\nch.queue_bind(exchange='orders', queue='eu_orders', routing_key='order.eu.*')\n\n# Publish a PERSISTENT message with a routing key.\nch.basic_publish(\n    exchange='orders',\n    routing_key='order.eu.created',\n    body=b'{\"id\": 42}',\n    properties=pika.BasicProperties(delivery_mode=2),  # 2 = persistent\n)"
+        },
+        {
+          "type": "list",
+          "items": [
+            "A binding key 'order.eu.*' matches 'order.eu.created' and 'order.eu.cancelled' but not 'order.us.created'.",
+            "Multiple queues can bind to the same exchange, so one publish can fan out to several queues.",
+            "A queue can have multiple consumers; the broker round-robins messages among them (competing consumers / work queue).",
+            "The default (nameless) exchange is a direct exchange where the routing key equals the queue name - which is why publishing to '' with routing_key='myqueue' 'just works'."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "If a message matches no binding, the default behavior is that it is silently dropped (or returned to the publisher if the mandatory flag is set with a return listener). An 'alternate exchange' can be configured to catch unroutable messages instead of losing them."
+        }
+      ]
+    },
+    {
+      "id": "exchange-types",
+      "heading": "Exchange Types",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The exchange type determines the routing algorithm. There are four standard types, and choosing the right one is the core modeling decision in a RabbitMQ topology."
+        },
+        {
+          "type": "table",
+          "headers": ["Type", "Routing rule", "Typical use"],
+          "rows": [
+            ["direct", "Deliver to queues whose binding key EXACTLY equals the message routing key", "Route by a discrete category (log level, region code)"],
+            ["topic", "Match routing key against binding patterns with * (one word) and # (zero+ words)", "Hierarchical/event routing (order.eu.created)"],
+            ["fanout", "Deliver to ALL bound queues, ignoring the routing key", "Broadcast / pub-sub to every subscriber"],
+            ["headers", "Match on message header arguments (x-match=all|any) instead of routing key", "Routing on multiple attributes, non-string criteria"]
+          ]
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "TOPIC wildcards:\n  *  matches exactly ONE word (between dots)\n  #  matches ZERO or MORE words\n\n binding key        matches routing key\n  order.eu.*    ->   order.eu.created      (yes)\n  order.eu.*    ->   order.eu.line.added   (NO: two words after eu)\n  order.#       ->   order.eu.line.added   (yes: # spans all)\n  order.#       ->   order                 (yes: # matches zero words)\n  *.created     ->   order.created         (yes)\n  *.created     ->   order.eu.created      (NO: * is one word only)"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Topic exchanges are a superset of direct and fanout in practice: a topic binding with no wildcards behaves like direct, and binding key '#' behaves like fanout. Headers exchanges are rarely needed - reach for them only when routing genuinely depends on multiple non-hierarchical attributes."
+        }
+      ]
+    },
+    {
+      "id": "acks-qos",
+      "heading": "Acknowledgements and Prefetch (QoS)",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Acknowledgements are how RabbitMQ achieves at-least-once delivery. With manual acks (the safe mode), the broker delivers a message and keeps it in an 'unacknowledged' state until the consumer calls basic_ack. If the consumer dies or its channel/connection drops before acking, the broker requeues the message and redelivers it (possibly to another consumer). With auto-ack, a message is considered delivered the instant it leaves the broker - so a crash mid-processing loses it. Always use manual acks for work you cannot lose."
+        },
+        {
+          "type": "code",
+          "language": "python",
+          "code": "# Fair dispatch: limit each consumer to a few unacked messages at a time.\nch.basic_qos(prefetch_count=10)   # at most 10 in-flight (unacked) per consumer\n\ndef on_message(ch, method, props, body):\n    try:\n        handle(body)\n        ch.basic_ack(delivery_tag=method.delivery_tag)         # success -> remove\n    except TransientError:\n        # requeue=True puts it back for retry (beware infinite redelivery loops)\n        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)\n    except PoisonError:\n        # requeue=False -> drop or route to a dead-letter exchange if configured\n        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)\n\nch.basic_consume(queue='eu_orders', on_message_callback=on_message)  # auto_ack defaults False"
+        },
+        {
+          "type": "paragraph",
+          "text": "Prefetch (basic.qos prefetch_count) caps how many unacknowledged messages the broker will push to a consumer before waiting for acks. With the default unlimited prefetch, the broker dumps the whole queue onto the first consumer, so a slow message blocks a pile of others and other consumers sit idle - poor fairness and a memory risk. A small prefetch (often 1-50, tuned by message processing time) gives fair, even distribution and bounded consumer memory; too small adds round-trip latency between each message."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "basic_nack with requeue=True on a message that ALWAYS fails creates an infinite redelivery loop that pins a consumer and floods logs. This is the classic 'poison message' incident. Bound retries (e.g. with a retry count header) and dead-letter the message after N attempts instead of requeuing forever."
+        }
+      ]
+    },
+    {
+      "id": "dlx-durability",
+      "heading": "Dead-Letter Exchanges, Durability, and Persistence",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A Dead-Letter Exchange (DLX) is where a queue routes messages that cannot be delivered normally. A message is dead-lettered when: it is rejected/nacked with requeue=false, it exceeds the queue's TTL, or the queue exceeds its max length. You configure a queue with x-dead-letter-exchange (and optionally x-dead-letter-routing-key); dead-lettered messages are republished to that exchange, typically into a 'dead-letter queue' you monitor and inspect. DLX is the foundation of poison-message handling and of delayed-retry patterns."
+        },
+        {
+          "type": "code",
+          "language": "python",
+          "code": "# Main queue dead-letters failures into a DLX, and uses a TTL to build a retry delay.\nch.exchange_declare(exchange='dlx', exchange_type='direct', durable=True)\nch.queue_declare(queue='orders.dlq', durable=True)\nch.queue_bind(exchange='dlx', queue='orders.dlq', routing_key='dead')\n\nch.queue_declare(\n    queue='orders.work',\n    durable=True,\n    arguments={\n        'x-dead-letter-exchange': 'dlx',\n        'x-dead-letter-routing-key': 'dead',\n        'x-message-ttl': 60000,          # optional: messages expire after 60s -> DLX\n        'x-max-length': 100000,          # optional: overflow -> DLX (drop-head)\n    },\n)\n# Retry pattern: a 'wait' queue with a TTL whose DLX points BACK at the work queue\n# gives delayed retries without busy-looping."
+        },
+        {
+          "type": "paragraph",
+          "text": "Durability and persistence are two separate settings that must BOTH be set to survive a broker restart. A durable queue survives restart (its definition is on disk), but a non-persistent message in a durable queue is still lost on restart. A persistent message (delivery_mode=2 / persistent=True) is written to disk, but a persistent message in a non-durable queue is lost because the queue itself disappears. You need a durable queue AND persistent messages together. (Modern RabbitMQ also offers quorum queues - replicated, raft-based queues that are the recommended durable, high-availability option, superseding classic mirrored queues.)"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Persistence is not free and not instantaneous: a 'persistent' message is acked to the publisher when enqueued, but it may sit in an OS buffer briefly before hitting disk. To truly guarantee the broker has the message safely, combine persistence with publisher confirms - the confirm fires only after the message is safely handled (and, for quorum queues, replicated)."
+        }
+      ]
+    },
+    {
+      "id": "confirms-idempotency",
+      "heading": "Publisher Confirms and Idempotency",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Publishing a message does not, by default, tell the producer whether the broker actually accepted and stored it - a network drop or broker crash right after publish loses it silently. Publisher confirms close this gap: the producer puts the channel into confirm mode, and the broker sends an asynchronous basic.ack (with the message's delivery tag) once the message is safely handled - routed to all queues and, if persistent, persisted (and replicated for quorum queues). A basic.nack means the broker could not take responsibility, so the producer must resend. This is the publisher-side half of end-to-end reliability; consumer acks are the other half."
+        },
+        {
+          "type": "code",
+          "language": "python",
+          "code": "ch.confirm_delivery()   # put channel into publisher-confirm mode\n\ntry:\n    ch.basic_publish(\n        exchange='orders', routing_key='order.eu.created',\n        body=body,\n        properties=pika.BasicProperties(delivery_mode=2, message_id='evt-42'),\n        mandatory=True,     # ensures it is routable; unroutable -> returned, not silently dropped\n    )\n    # In pika BlockingConnection, basic_publish raises if the broker NACKs.\nexcept pika.exceptions.UnroutableError:\n    handle_unroutable(body)\nexcept pika.exceptions.NackError:\n    resend_later(body)      # broker could not accept responsibility"
+        },
+        {
+          "type": "paragraph",
+          "text": "Because at-least-once delivery plus publisher resends means a message may be processed more than once, consumers must be idempotent: processing the same message twice has the same effect as once. The standard technique is a stable, producer-assigned message ID (message_id / a business key) and a dedup store - the consumer records processed IDs and skips repeats, or uses an upsert / conditional write keyed by the ID. Idempotency is what turns at-least-once into effectively-exactly-once at the application level; RabbitMQ does not provide exactly-once delivery itself."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Prefer asynchronous publisher confirms (publish a batch, then wait for acks) over publishing one message and blocking for its confirm. Confirm-per-message is correct but slow; batching confirms keeps throughput high while still guaranteeing every message was accepted before you consider it sent."
+        }
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: The Poison Message That Stopped a Queue",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Scenario: an order-processing service consumed from a queue with manual acks. One malformed order (a null field a downstream service rejected) threw on every attempt. The consumer caught the exception and called basic_nack(requeue=True) to 'retry'. The broker immediately redelivered the same message, it failed again, and the loop ran thousands of times per second. The consumer was pinned reprocessing one message, healthy orders piled up unacked, throughput collapsed, and logs filled the disk."
+        },
+        {
+          "type": "code",
+          "language": "python",
+          "code": "# BEFORE: infinite requeue loop on a poison message.\ndef on_message(ch, method, props, body):\n    try:\n        process(body)\n        ch.basic_ack(method.delivery_tag)\n    except Exception:\n        ch.basic_nack(method.delivery_tag, requeue=True)   # <-- poison loop\n\n# AFTER: bounded retries via a death-count header, then dead-letter.\nMAX_RETRIES = 5\n\ndef on_message(ch, method, props, body):\n    try:\n        process(body)\n        ch.basic_ack(method.delivery_tag)\n    except Exception:\n        deaths = count_deaths(props)   # read x-death header set by the DLX cycle\n        if deaths >= MAX_RETRIES:\n            ch.basic_nack(method.delivery_tag, requeue=False)  # -> DLX -> orders.dlq\n        else:\n            ch.basic_nack(method.delivery_tag, requeue=False)  # -> wait queue (TTL) -> back\n"
+        },
+        {
+          "type": "paragraph",
+          "text": "Root cause: requeue=true with no retry bound turns any permanently-failing message into a denial-of-service against its own queue. The fix configured the work queue with a DLX. Failed messages are nacked with requeue=false so they leave the work queue immediately; a retry queue with a TTL whose own DLX points back at the work queue implements delayed retries, and after the x-death count exceeds the limit the message lands in a dead-letter queue (orders.dlq) for human inspection - off the hot path."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "After adding the DLX and a bounded retry count, the poison message was parked in orders.dlq within five attempts, the consumer resumed processing healthy orders, and throughput recovered. The principle: a message must never be allowed to retry forever - bound retries and dead-letter the rest."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes and Production Incidents",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Using auto-ack (no manual ack) for important work: a consumer crash mid-processing loses the message because the broker already removed it.",
+            "Durable queue but transient messages (or vice versa): both must be set; one alone still loses everything on restart.",
+            "No publisher confirms: a broker crash right after publish silently drops the message the producer believes it sent.",
+            "requeue=true on poison messages: infinite redelivery loop that pins a consumer and stalls the queue.",
+            "Unlimited prefetch: the broker dumps the queue onto one consumer, killing fairness and risking consumer OOM.",
+            "Assuming exactly-once delivery: RabbitMQ is at-least-once; without idempotent consumers, retries duplicate side effects.",
+            "Unbounded queues: a stalled consumer lets a queue grow until memory/disk alarms throttle all publishers cluster-wide.",
+            "Opening a channel or connection per message: connections and channels are meant to be long-lived and reused; churning them cripples throughput."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Incident pattern: a deploy switched consumers to auto-ack to 'speed things up'. During the next rolling restart, every in-flight message on a restarting consumer was lost - the broker had already discarded them on delivery. Thousands of orders vanished with no error anywhere. Manual ack would have requeued them."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "For anything you cannot lose, use the full reliability stack: durable queue + persistent messages + publisher confirms + manual consumer acks.",
+            "Set a sensible prefetch_count (start near processing-time-balanced values, e.g. 10-50) for fair dispatch and bounded consumer memory.",
+            "Always configure a dead-letter exchange and bound retries; never requeue a permanently-failing message forever.",
+            "Make consumers idempotent using a producer-assigned message_id and a dedup/upsert strategy, since delivery is at-least-once.",
+            "Bound queues with x-max-length and/or TTLs so a stalled consumer cannot grow a queue until it triggers broker memory/disk alarms.",
+            "Reuse long-lived connections; use one channel per thread/consumer rather than per message.",
+            "Prefer quorum queues for durable, highly-available queues in modern RabbitMQ over the older classic mirrored queues.",
+            "Monitor queue depth, unacked counts, consumer count, and redelivery rate; alert on growing backlogs and DLQ arrivals."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Reliability goal", "Setting", "Without it"],
+          "rows": [
+            ["Survive broker restart", "durable queue + persistent msg", "Queue or messages vanish"],
+            ["Confirm broker stored publish", "publisher confirms", "Silent loss on crash after publish"],
+            ["Survive consumer crash", "manual acks", "In-flight messages lost"],
+            ["Handle permanent failures", "DLX + bounded retries", "Poison-message loop"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "note-vs-kafka",
+      "heading": "RabbitMQ vs Kafka: When to Choose Which",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "RabbitMQ and Kafka solve overlapping but different problems. RabbitMQ is a broker with rich per-message routing (exchanges, bindings), per-message acknowledgement and redelivery, priorities, TTLs, and dead-lettering - ideal for task/work queues, complex routing, RPC, and request/response where you want the broker to manage delivery state and you consume-and-delete. Kafka is a distributed, partitioned, append-only commit log: consumers track their own offset into a retained stream, messages are not deleted on consumption (retention by time/size), and you get very high throughput, replayability, and strict per-partition ordering - ideal for event streaming, event sourcing, log aggregation, and high-volume analytics pipelines."
+        },
+        {
+          "type": "table",
+          "headers": ["Dimension", "RabbitMQ", "Kafka"],
+          "rows": [
+            ["Model", "Smart broker, queues (consume-and-delete)", "Distributed log, offsets (retain & replay)"],
+            ["Routing", "Rich: exchanges, bindings, patterns, headers", "By topic/partition; routing in consumer"],
+            ["Ordering", "Per queue (lost across competing consumers)", "Strict per partition"],
+            ["Replay history", "No (gone once acked)", "Yes (re-read from any offset within retention)"],
+            ["Best for", "Work queues, complex routing, RPC, per-msg ack", "Event streaming, sourcing, high-throughput logs"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Rule of thumb: choose RabbitMQ when you need flexible routing and per-message delivery semantics for tasks/commands; choose Kafka when you need a durable, replayable, ordered event log at high throughput. Many systems use both - RabbitMQ for command/work distribution, Kafka for the event backbone."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "amqp-routing",
+      "title": "AMQP Routing: Producer -> Exchange -> Queues -> Consumers",
+      "type": "mermaid",
+      "content": "flowchart LR\n    P[Producer] -->|publish routing_key=order.eu.created| X{{topic exchange 'orders'}}\n    X -->|binding order.eu.*| Q1[(eu_orders)]\n    X -->|binding order.#| Q2[(all_orders)]\n    X -.no match.-> D[dropped / alternate-exchange]\n    Q1 --> C1[Consumer A]\n    Q1 --> C2[Consumer B]\n    Q2 --> C3[Audit consumer]"
+    },
+    {
+      "id": "dlx-retry",
+      "title": "Dead-Letter Retry Cycle With TTL",
+      "type": "mermaid",
+      "content": "flowchart LR\n    W[(orders.work)] -->|nack requeue=false| DLX{{dlx}}\n    DLX -->|routing 'wait'| WAIT[(orders.wait TTL=30s)]\n    WAIT -->|TTL expiry -> dead-letter back| BACK{{work exchange}}\n    BACK --> W\n    W -->|x-death >= N| FINAL{{dlx routing 'dead'}}\n    FINAL --> DLQ[(orders.dlq human review)]"
+    },
+    {
+      "id": "ack-lifecycle",
+      "title": "Message Acknowledgement Lifecycle",
+      "type": "ascii",
+      "content": "deliver -> [UNACKED] --basic_ack--------> removed (done)\n                 |\n                 |--basic_nack(requeue=true)--> back to queue (retry)\n                 |--basic_nack(requeue=false)-> DLX (or dropped)\n                 |--consumer/channel dies----> requeued & redelivered\n\nauto-ack: message removed at DELIVERY time (crash = lost)\nmanual-ack: removed only on basic_ack (crash = redelivered)"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-rmq-routing",
+      "question": "In AMQP, how does a message get from a producer to a queue?",
+      "answer": "A producer never publishes directly to a queue. It publishes a message - carrying a routing key - to an exchange. The exchange applies its type-specific routing algorithm against its bindings (links from the exchange to queues, each with a binding key or arguments) to decide which queue(s) get a copy. The message is then enqueued and waits there until a consumer reads and acknowledges it. This indirection means routing topology lives in the broker: you can add a queue or change a binding without modifying the producer. The one apparent exception - publishing to the default '' exchange with routing_key equal to a queue name - is just a direct exchange where the binding key equals the queue name, so the rule still holds.",
+      "difficulty": "junior",
+      "category": "Messaging",
+      "tricky": false,
+      "tags": ["amqp", "routing", "exchange"],
+      "followUps": ["What happens if no binding matches?", "Why publish to an exchange instead of a queue?"]
+    },
+    {
+      "id": "q-rmq-exchange-types",
+      "question": "Compare the four exchange types and when you would use each.",
+      "answer": "Direct routes a message to queues whose binding key exactly equals the message's routing key - use it for routing by a discrete value like a log level or region code. Topic matches the routing key against binding patterns using * (exactly one word) and # (zero or more words), ideal for hierarchical event routing such as order.eu.created with subscribers binding order.eu.* or order.#. Fanout ignores the routing key and delivers to every bound queue - a pure broadcast/pub-sub for sending the same event to all subscribers. Headers routes on message header arguments rather than the routing key, with x-match=all (all headers must match) or any (at least one), useful when routing depends on multiple non-string or non-hierarchical attributes. In practice topic is the most general (it can emulate direct with no wildcards and fanout with binding key #), and headers is rarely needed.",
+      "difficulty": "mid",
+      "category": "Messaging",
+      "tricky": false,
+      "tags": ["exchange", "topic", "fanout"],
+      "followUps": ["What does * vs # match in a topic key?", "How can a topic exchange emulate fanout?"]
+    },
+    {
+      "id": "q-rmq-acks",
+      "question": "What is the difference between auto-ack and manual ack, and how does it affect reliability?",
+      "answer": "With auto-ack, a message is considered acknowledged the moment the broker delivers it to a consumer, so the broker immediately removes it from the queue. If the consumer then crashes or fails while processing, the message is gone - this is at-most-once delivery. With manual ack, the broker delivers the message but keeps it in an unacknowledged state until the consumer explicitly calls basic_ack after successfully processing; if the consumer's channel or connection drops before that ack, the broker requeues and redelivers the message (to that or another consumer). Manual ack therefore gives at-least-once delivery and is required for any work you cannot afford to lose. The trade-off is that you must ack promptly and correctly, and because messages can be redelivered, consumers must be idempotent.",
+      "difficulty": "mid",
+      "category": "Messaging",
+      "tricky": false,
+      "tags": ["acks", "reliability", "at-least-once"],
+      "followUps": ["What happens to unacked messages when a consumer dies?", "Why does at-least-once require idempotency?"]
+    },
+    {
+      "id": "q-rmq-prefetch",
+      "question": "What does prefetch (basic.qos) control, and why does the default hurt?",
+      "answer": "prefetch_count caps the number of unacknowledged messages the broker will push to a consumer before it must wait for acks. The historical default is effectively unlimited, which means the broker dispatches as many messages as it can to whichever consumer is ready first. The consequence is poor fairness and risk: one consumer can be handed a huge batch (even the whole queue), so if its messages are slow, that backlog is stuck behind a busy consumer while other consumers sit idle, and the receiving consumer may run out of memory holding all those unacked messages. Setting a modest prefetch (often 10-50, tuned to message processing time) gives fair, balanced dispatch across consumers and bounds each consumer's in-flight memory. Setting it too low (e.g. 1) adds a network round-trip of latency between every message, lowering throughput, so it is a balance.",
+      "difficulty": "mid",
+      "category": "Messaging",
+      "tricky": false,
+      "tags": ["prefetch", "qos", "fairness"],
+      "followUps": ["What does prefetch=1 cost?", "How do you pick a prefetch value?"]
+    },
+    {
+      "id": "q-rmq-dlx",
+      "question": "What is a dead-letter exchange and what conditions trigger dead-lettering?",
+      "answer": "A dead-letter exchange (DLX) is an exchange to which a queue automatically republishes messages that cannot be handled normally, configured via the queue's x-dead-letter-exchange argument (and optionally x-dead-letter-routing-key). A message is dead-lettered when one of three things happens: it is rejected or nacked with requeue=false; it expires due to a per-message or per-queue TTL; or the queue exceeds its x-max-length and the message is dropped to make room. The dead-lettered message is republished to the DLX, typically landing in a dead-letter queue you monitor and inspect. DLX is the backbone of poison-message handling (park permanently-failing messages off the hot path after bounded retries) and of delayed-retry patterns (a TTL'd wait queue whose DLX routes back to the work queue). RabbitMQ also records an x-death header tracking how many times and why a message was dead-lettered, which you use to bound retries.",
+      "difficulty": "mid",
+      "category": "Messaging",
+      "tricky": false,
+      "tags": ["dlx", "dead-letter", "poison-message"],
+      "followUps": ["How do you build delayed retries with a DLX?", "What is in the x-death header?"]
+    },
+    {
+      "id": "q-rmq-durability",
+      "question": "What two settings must both be configured for messages to survive a broker restart?",
+      "answer": "You need a durable queue AND persistent messages - they are separate settings and both are required. A durable queue has its definition written to disk, so the queue still exists after a broker restart; but if its messages were transient (in-memory only), they are lost on restart even though the queue survives. Conversely, a persistent message (delivery_mode=2) is written to disk, but if it sits in a non-durable queue, the queue itself disappears on restart and takes the message with it. Only the combination - declaring the queue durable=true and publishing messages with delivery_mode=2 - guarantees both the queue and its contents persist across a restart. And even then, to be sure the broker actually stored a given publish before the producer moves on, you combine this with publisher confirms.",
+      "difficulty": "mid",
+      "category": "Messaging",
+      "tricky": false,
+      "tags": ["durability", "persistence", "restart"],
+      "followUps": ["Why isn't a durable queue alone enough?", "How do quorum queues change this?"]
+    },
+    {
+      "id": "q-rmq-confirms",
+      "question": "What problem do publisher confirms solve, and how do they work?",
+      "answer": "By default, a successful basic_publish call does not tell the producer whether the broker actually received and stored the message - the call returns locally, but a network failure or broker crash immediately afterward can lose the message silently, while the producer believes it was sent. Publisher confirms solve this: the producer puts the channel into confirm mode (confirm_delivery / Confirm.Select), and the broker then sends an asynchronous basic.ack identifying the message (by delivery tag) once it has taken responsibility - meaning the message was routed to all matching queues and, if persistent, written to disk (and replicated, for quorum queues). If the broker cannot accept responsibility, it sends a basic.nack and the producer must resend. Confirms are the publisher-side guarantee that pairs with consumer acks on the other end; together they give end-to-end at-least-once delivery. For throughput, you typically confirm asynchronously in batches rather than blocking on each message.",
+      "difficulty": "senior",
+      "category": "Messaging",
+      "tricky": false,
+      "tags": ["publisher-confirms", "reliability", "at-least-once"],
+      "followUps": ["When exactly does the broker send the ack?", "Why batch confirms instead of one-at-a-time?"]
+    },
+    {
+      "id": "q-rmq-vs-kafka",
+      "question": "When would you choose RabbitMQ over Kafka, and vice versa?",
+      "answer": "Choose RabbitMQ when you need a smart broker with rich per-message routing and delivery semantics: complex routing via exchanges and bindings, per-message acknowledgement and redelivery, priorities, TTLs, dead-lettering, and a consume-and-delete work-queue model. It excels at task/job queues, command distribution, RPC/request-response, and scenarios where the broker should manage delivery state. Choose Kafka when you need a distributed, partitioned, append-only commit log: very high throughput, messages retained and replayable from any offset within the retention window, strict per-partition ordering, and consumers that track their own position. Kafka excels at event streaming, event sourcing, log aggregation, and feeding analytics pipelines. Key differentiators: RabbitMQ deletes messages once acked (no replay) and loses total ordering across competing consumers, whereas Kafka retains history and guarantees per-partition order. Many architectures use both - RabbitMQ for work/commands, Kafka for the event backbone.",
+      "difficulty": "senior",
+      "category": "Messaging",
+      "tricky": false,
+      "tags": ["kafka", "comparison", "architecture"],
+      "followUps": ["Can RabbitMQ replay consumed messages?", "How does ordering differ between the two?"]
+    },
+    {
+      "id": "q-rmq-tricky-requeue-loop",
+      "question": "Tricky: A consumer catches all exceptions and calls basic_nack with requeue=true so failures 'retry'. Why is this dangerous, and what is the correct pattern?",
+      "answer": "requeue=true puts the message straight back on the queue, and the broker redelivers it immediately - there is no delay and no attempt counter. For a transient error this might recover, but for a permanently-failing 'poison' message (malformed payload, a bug, a downstream that always rejects it), it creates a tight infinite redelivery loop: the same message is reprocessed thousands of times per second, pinning the consumer, blocking healthy messages behind it, and flooding logs/disk - effectively a self-inflicted denial of service on the queue. The correct pattern bounds retries and dead-letters the rest: configure the queue with a dead-letter exchange, nack with requeue=false so the message leaves the work queue, and use a TTL'd 'wait' queue whose DLX routes back to the work queue to implement delayed retries; track attempts via the x-death header (or a custom retry-count header) and, once the count exceeds a limit (say 5), route the message to a dead-letter queue for human inspection instead of retrying. The key insight is that a message must never be allowed to retry unboundedly.",
+      "difficulty": "senior",
+      "category": "Messaging",
+      "tricky": true,
+      "tags": ["poison-message", "requeue", "gotcha"],
+      "followUps": ["How do you add a delay between retries?", "Where do you store the retry count?"]
+    },
+    {
+      "id": "q-rmq-tricky-exactly-once",
+      "question": "Tricky: A teammate says 'we enabled publisher confirms and manual acks, so we now have exactly-once delivery.' Are they right?",
+      "answer": "No. Publisher confirms and manual acks give you at-least-once delivery, not exactly-once. Both mechanisms are designed to ensure nothing is lost, and the way they avoid loss is by resending when an outcome is uncertain: if a producer does not get a confirm (e.g. the ack was lost in the network), it resends, potentially duplicating; if a consumer crashes after processing but before its ack reaches the broker, the broker redelivers, causing reprocessing. So the very features that prevent loss can create duplicates. RabbitMQ does not provide true exactly-once delivery over the wire. You achieve effectively-once at the application level by making consumers idempotent: attach a stable producer-assigned message ID (or business key) and deduplicate - record processed IDs and skip repeats, or use conditional/upsert writes keyed by the ID so reprocessing has no extra effect. Exactly-once is at-least-once plus idempotency, implemented by you, not a delivery guarantee the broker offers.",
+      "difficulty": "senior",
+      "category": "Messaging",
+      "tricky": true,
+      "tags": ["exactly-once", "idempotency", "gotcha"],
+      "followUps": ["How do you implement idempotent consumption?", "Why can confirms cause duplicates?"]
+    },
+    {
+      "id": "q-rmq-tricky-unbounded-queue",
+      "question": "Tricky: One stalled consumer eventually throttled publishers across the ENTIRE cluster, including unrelated queues. How can a single queue cause cluster-wide impact?",
+      "answer": "Because RabbitMQ enforces resource alarms at the node/cluster level, not per queue. If a consumer stalls, its queue grows unbounded; messages (especially if they overflow memory to paging, plus all the per-message metadata) consume node memory and disk. When the node crosses its memory high-watermark or free-disk threshold, RabbitMQ raises a resource alarm that BLOCKS all publishing connections on that node - across every queue, including healthy unrelated ones - to protect the broker from running out of memory or disk. So a single misbehaving consumer's backlog triggers a global publisher block, manifesting as 'everything stopped publishing'. The defenses are to bound queues so they can never grow unboundedly: set x-max-length (or x-max-length-bytes) with an overflow policy (drop-head or reject-publish) and/or message TTLs to cap backlog, dead-letter overflow for later inspection, monitor and alert on queue depth and unacked counts, and ensure consumers fail loudly and are auto-scaled or restarted. The lesson is that queue depth is a shared-resource problem, not a local one.",
+      "difficulty": "senior",
+      "category": "Messaging",
+      "tricky": true,
+      "tags": ["backpressure", "alarms", "gotcha"],
+      "followUps": ["What is the memory high-watermark alarm?", "How does x-max-length overflow behavior work?"]
+    },
+    {
+      "id": "q-rmq-channels",
+      "question": "What is the relationship between connections and channels in RabbitMQ, and how should you use them?",
+      "answer": "A connection is a single TCP connection to the broker; it is relatively expensive to open and is meant to be long-lived. A channel is a lightweight virtual connection multiplexed over a single TCP connection - it is where you do almost all the work (declaring exchanges/queues, publishing, consuming, acking). Channels let many logical streams share one TCP connection, avoiding the overhead of many TCP connections. The guidance: open a small number of long-lived connections and reuse them; create one channel per thread or per consumer (channels are NOT thread-safe, so do not share a channel across threads), and keep them open rather than churning them. A common performance bug is opening a new connection or channel per message, which adds handshake overhead and can exhaust file descriptors. Also note that a channel-level error (e.g. publishing to a nonexistent exchange) closes the channel, not the whole connection, so you handle channel exceptions and recreate the channel.",
+      "difficulty": "mid",
+      "category": "Messaging",
+      "tricky": false,
+      "tags": ["connections", "channels", "performance"],
+      "followUps": ["Why are channels not thread-safe?", "What happens on a channel-level error?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-rmq-idempotent-consumer",
+      "title": "Build an Idempotent Consumer for At-Least-Once Delivery",
+      "difficulty": "mid",
+      "category": "Messaging",
+      "prompt": "RabbitMQ delivers at-least-once, so your consumer may receive the same message twice. Write a consumer callback (pika) that processes an order exactly once in effect, using a producer-assigned message_id and a dedup store, and acks correctly. Assume processed_ids is a set-like store with an atomic add_if_absent(id) -> bool that returns True only the first time.",
+      "hints": [
+        "Read the stable id from props.message_id (the producer must set it).",
+        "Use add_if_absent to atomically claim the id; if it returns False, the message is a duplicate - ack and skip.",
+        "Ack on success and on a confirmed duplicate; nack to a DLX (requeue=false) on a permanent failure."
+      ],
+      "solutionCode": "def make_handler(processed_ids):\n    def on_message(ch, method, props, body):\n        msg_id = props.message_id\n        if not msg_id:\n            # No id: cannot dedup safely. Send to DLX for inspection rather than guess.\n            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)\n            return\n\n        # Atomically claim the id. False => we already processed this message.\n        if not processed_ids.add_if_absent(msg_id):\n            ch.basic_ack(delivery_tag=method.delivery_tag)   # duplicate: ack and drop\n            return\n\n        try:\n            process_order(body)                              # the real side effect\n            ch.basic_ack(delivery_tag=method.delivery_tag)   # success\n        except TransientError:\n            # Roll back our claim so a legitimate retry can reprocess.\n            processed_ids.remove(msg_id)\n            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)  # -> retry via DLX\n        except PermanentError:\n            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)  # -> dead-letter\n    return on_message\n\n# ch.basic_qos(prefetch_count=20)\n# ch.basic_consume(queue='orders.work', on_message_callback=make_handler(store))\n",
+      "solutionLanguage": "python",
+      "explanation": "Because RabbitMQ guarantees at-least-once (publisher resends and consumer redeliveries can both duplicate a message), the consumer - not the broker - is responsible for making reprocessing harmless. The key is a stable identifier the PRODUCER assigns (props.message_id, ideally a business key so it is identical across resends, not a fresh random id per publish). add_if_absent atomically claims that id and returns True only the first time; on a duplicate it returns False, so we simply ack and discard, having done no side effect twice. The subtle correctness point is ordering and rollback: we claim the id, then do the side effect; if a TRANSIENT error occurs we must remove our claim before nacking, otherwise the legitimate retry would see the id as 'already processed' and skip the work that never actually completed. A truly robust version performs the dedup and the business write in one atomic step (e.g. an INSERT ... ON CONFLICT DO NOTHING / conditional update keyed by the id) so there is no window between claiming and writing. Permanent failures are nacked with requeue=false to a dead-letter exchange rather than looping. This is how at-least-once plus idempotency yields effectively-exactly-once at the application level.",
+      "relatedTopic": "confirms-idempotency"
+    },
+    {
+      "id": "ch-rmq-dlx-retry",
+      "title": "Declare a Delayed-Retry Topology With a DLX",
+      "difficulty": "mid",
+      "category": "Messaging",
+      "prompt": "Declare a RabbitMQ topology (pika) that retries failed messages after a 30-second delay without busy-looping, and parks messages that still fail after the wait cycle in a dead-letter queue. Use a work queue, a TTL'd wait queue, and a final dead-letter queue.",
+      "hints": [
+        "The work queue's dead-letter-exchange should point at a 'wait' exchange that routes to a TTL'd wait queue.",
+        "The wait queue has x-message-ttl=30000 and ITS dead-letter-exchange points BACK at the work exchange.",
+        "After enough cycles, route to a final dead-letter queue for human review (track attempts via the x-death header)."
+      ],
+      "solutionCode": "import pika\nconn = pika.BlockingConnection(pika.ConnectionParameters('localhost'))\nch = conn.channel()\n\n# Exchanges\nch.exchange_declare('work.ex',  exchange_type='direct', durable=True)\nch.exchange_declare('wait.ex',  exchange_type='direct', durable=True)\nch.exchange_declare('dead.ex',  exchange_type='direct', durable=True)\n\n# Work queue: on nack(requeue=false) it dead-letters to wait.ex with key 'retry'.\nch.queue_declare('orders.work', durable=True, arguments={\n    'x-dead-letter-exchange': 'wait.ex',\n    'x-dead-letter-routing-key': 'retry',\n})\nch.queue_bind('orders.work', 'work.ex', routing_key='process')\n\n# Wait queue: holds the message for 30s (TTL), then dead-letters BACK to work.ex.\nch.queue_declare('orders.wait', durable=True, arguments={\n    'x-message-ttl': 30000,                       # 30s delay\n    'x-dead-letter-exchange': 'work.ex',\n    'x-dead-letter-routing-key': 'process',       # re-enter the work queue\n})\nch.queue_bind('orders.wait', 'wait.ex', routing_key='retry')\n\n# Final dead-letter queue for messages that exhausted retries (routed by the consumer).\nch.queue_declare('orders.dlq', durable=True)\nch.queue_bind('orders.dlq', 'dead.ex', routing_key='dead')\n\n# Publish into the cycle:\n# ch.basic_publish('work.ex', 'process', body, pika.BasicProperties(delivery_mode=2))\n",
+      "solutionLanguage": "python",
+      "explanation": "This builds the canonical RabbitMQ delayed-retry pattern out of three queues and the dead-letter mechanism, with no polling or busy-looping. A message enters orders.work via work.ex. When the consumer nacks it with requeue=false, the work queue dead-letters it to wait.ex, which routes it into orders.wait. The wait queue does no consuming - it just holds the message for its x-message-ttl (30s); when the TTL expires, RabbitMQ dead-letters the expired message using the wait queue's own x-dead-letter-exchange, which points back at work.ex, re-injecting it into orders.work for another attempt. That back-and-forth gives a fixed 30-second delay between retries entirely via TTL + DLX, the broker doing the timing for you. To avoid infinite retries, the consumer inspects the x-death header RabbitMQ stamps on each dead-lettering (it records the count and reason per queue); once the count exceeds the policy limit, the consumer publishes the message to dead.ex with routing key 'dead' so it lands in orders.dlq for human inspection instead of cycling forever. The design cleanly separates 'retry with delay' (wait queue) from 'give up and park' (DLQ), and every queue is durable so nothing is lost across a broker restart.",
+      "relatedTopic": "dlx-durability"
+    }
+  ],
+  "references": [
+    {"label": "RabbitMQ - AMQP 0-9-1 Model Explained", "url": "https://www.rabbitmq.com/tutorials/amqp-concepts"},
+    {"label": "RabbitMQ - Consumer Acknowledgements and Publisher Confirms", "url": "https://www.rabbitmq.com/docs/confirms"},
+    {"label": "RabbitMQ - Dead Letter Exchanges", "url": "https://www.rabbitmq.com/docs/dlx"},
+    {"label": "RabbitMQ - Consumer Prefetch (QoS)", "url": "https://www.rabbitmq.com/docs/consumer-prefetch"},
+    {"label": "RabbitMQ - Quorum Queues", "url": "https://www.rabbitmq.com/docs/quorum-queues"}
+  ]
+}
