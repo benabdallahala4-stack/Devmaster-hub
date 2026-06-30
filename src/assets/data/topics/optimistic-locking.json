@@ -1,0 +1,684 @@
+{
+  "id": "optimistic-locking",
+  "title": "Optimistic Locking",
+  "category": "Backend",
+  "subcategory": "Concurrency",
+  "difficulty": "senior",
+  "tags": [
+    "optimistic-locking",
+    "concurrency",
+    "version-column",
+    "jpa-hibernate",
+    "compare-and-swap",
+    "etag",
+    "dynamodb",
+    "mvcc"
+  ],
+  "description": "Optimistic locking lets concurrent writers proceed without holding row locks, detecting conflicts at commit time via a version token so only the first writer wins and the rest retry. This guide covers the lost-update problem, version columns, JPA @Version, CAS and ABA, conditional SQL, HTTP ETags, DynamoDB conditional writes, and how it relates to isolation levels and MVCC.",
+  "estReadMinutes": 29,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "What Optimistic Locking Actually Is",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Optimistic locking is a concurrency-control strategy that assumes conflicts are rare. Instead of acquiring an exclusive lock when you read a record and holding it until you write, you read freely, remember a version token, and only verify at write time that nobody else changed the row since you read it. If the token still matches, your update wins and the version is bumped; if it does not, you detected a conflict and must retry, merge, or surface an error to the user."
+        },
+        {
+          "type": "paragraph",
+          "text": "The mechanism is deliberately cheap on the happy path: no locks are held across the user think-time, no database connection is pinned, and no other transaction is blocked. The cost is paid only when a conflict actually occurs, in the form of a failed write that must be redone. This is why optimistic locking shines under low contention and becomes pathological on hot rows that everyone fights over."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Rule of thumb: optimistic locking trades a guaranteed small cost (carrying a version token and occasionally retrying) for the elimination of held locks. Pessimistic locking trades blocking and reduced throughput for never having to retry."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Read the row plus a version token (a number, timestamp, or hash).",
+            "Do arbitrary work, possibly across a long user interaction.",
+            "On write, issue a conditional update that only succeeds if the version is unchanged.",
+            "Zero rows updated means a conflict: retry with fresh data or fail."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why You Need It: The Lost Update Problem",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The canonical motivation is the lost-update problem. Two transactions read the same row, both compute a new value from what they read, and both write back. The second write silently overwrites the first, and the first user's change vanishes without any error. Classic examples: two support agents editing the same ticket, two warehouse processes decrementing the same stock count, or a mobile client and a web client both saving a profile."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- Account starts at 100. Two transfers run concurrently.\n-- T1 reads 100, T2 reads 100.\n-- T1: balance = 100 - 30 = 70   (writes 70)\n-- T2: balance = 100 - 50 = 50   (writes 50, OVERWRITES T1)\n-- Final balance: 50. The 30 withdrawal was LOST.\n-- Correct final balance should be 20."
+        },
+        {
+          "type": "paragraph",
+          "text": "A naive developer assumes the database protects them automatically. It does not, unless you choose a strong isolation level or take explicit locks. Under READ COMMITTED, the default in PostgreSQL, Oracle, and SQL Server, each statement sees committed data but two read-modify-write cycles in separate transactions can still clobber each other. Optimistic locking closes this gap portably, at the application level, without escalating isolation."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Lost updates are invisible in testing because they only manifest under genuine concurrency. They are reported by users as data that mysteriously reverted. A version column turns this silent corruption into a loud, catchable exception."
+        }
+      ]
+    },
+    {
+      "id": "optimistic-vs-pessimistic",
+      "heading": "Optimistic vs Pessimistic Trade-offs",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Pessimistic locking takes a lock the moment you read, using SELECT ... FOR UPDATE or an application-level lock, and holds it until commit. No one else can touch the row, so there is no conflict to detect and no retry. The price is that you serialize access to that row, you hold a database connection and transaction open for the entire critical section, and you risk deadlocks and lock-wait timeouts."
+        },
+        {
+          "type": "table",
+          "headers": ["Dimension", "Optimistic", "Pessimistic"],
+          "rows": [
+            ["Conflict handling", "Detected at write, retry needed", "Prevented, no retry"],
+            ["Lock duration", "None held across think-time", "Held until commit"],
+            ["Throughput under low contention", "Excellent", "Good but lock overhead"],
+            ["Throughput under high contention", "Degrades, retry storms", "Serialized but predictable"],
+            ["Long user edits", "Ideal, no lock held", "Dangerous, locks span think-time"],
+            ["Deadlock risk", "None", "Real, needs ordering discipline"],
+            ["Failure mode", "OptimisticLockException", "Lock timeout or deadlock"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The decisive variable is contention. If two requests rarely hit the same row in the same window, optimistic wins decisively because the conflict cost is paid almost never. If a single hot row, say a global counter or a popular product's inventory, is updated thousands of times per second, optimistic locking turns into a retry storm where most attempts fail and burn CPU, and pessimistic locking, sharding, or atomic in-database increments become the better answer."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Heuristic: prefer optimistic by default. Reach for pessimistic only when you have measured high contention on specific rows, or when the conflict resolution cost (recomputing a complex aggregate) dwarfs the cost of holding a lock."
+        }
+      ]
+    },
+    {
+      "id": "version-columns",
+      "heading": "Version Columns and Row Versioning",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The token that makes optimistic locking work is the version column. Three common implementations exist: a monotonically increasing integer, a last-modified timestamp, and a hash or rowversion of the entire row. The integer is the gold standard because it is unambiguous, cheap to compare, and never suffers from clock skew or timestamp granularity collisions."
+        },
+        {
+          "type": "table",
+          "headers": ["Strategy", "Pros", "Cons"],
+          "rows": [
+            ["Integer version", "Unambiguous, cheap, portable", "Requires a dedicated column"],
+            ["Timestamp", "Doubles as audit field", "Clock skew, low-resolution ties"],
+            ["Row hash / checksum", "No schema change needed", "Expensive, hashes large rows"],
+            ["DB rowversion (SQL Server)", "Auto-maintained binary", "Vendor-specific, opaque"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The integer version starts at zero or one and increments on every successful write. The write itself carries the contract: SET version = version + 1 WHERE id = ? AND version = ?. Because the increment and the predicate are in a single atomic statement, two concurrent writers reading the same version cannot both succeed; the database's row-level write lock during the UPDATE serializes the commit and exactly one of them finds the version already advanced."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Avoid timestamps as version tokens unless you must. Two updates within the same millisecond can carry identical timestamps, and across nodes clock skew can make a newer write appear older. If you use a timestamp, ensure sub-millisecond precision and never compare across machines."
+        }
+      ]
+    },
+    {
+      "id": "jpa-version",
+      "heading": "JPA and Hibernate @Version",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "JPA standardizes optimistic locking with the @Version annotation. You add a numeric or timestamp field, mark it @Version, and the persistence provider takes over: it includes the version in the WHERE clause of every UPDATE and DELETE it generates, and it increments the field on flush. If the row count from the conditional UPDATE is zero, Hibernate throws OptimisticLockException, which Spring translates to ObjectOptimisticLockingFailureException."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "import jakarta.persistence.Entity;\nimport jakarta.persistence.Id;\nimport jakarta.persistence.Version;\n\n@Entity\npublic class Account {\n\n    @Id\n    private Long id;\n\n    private long balanceCents;\n\n    @Version\n    private long version; // managed by JPA, do NOT set manually\n\n    protected Account() { }\n\n    public void withdraw(long amountCents) {\n        if (amountCents > balanceCents) {\n            throw new InsufficientFundsException(id);\n        }\n        this.balanceCents -= amountCents;\n    }\n\n    public long getBalanceCents() { return balanceCents; }\n    public long getVersion() { return version; }\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "When you load an Account in transaction A, mutate it, and a concurrent transaction B has already committed a change, A's flush issues UPDATE account SET balance_cents=?, version=? WHERE id=? AND version=? with the stale version. Zero rows match, Hibernate detects the row count mismatch, and throws. The exception is your signal to refetch and retry."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// The SQL Hibernate emits for a versioned entity:\n// UPDATE account\n//   SET balance_cents = ?, version = ?   -- new version = old + 1\n// WHERE id = ? AND version = ?            -- old version\n//\n// If 0 rows affected -> StaleStateException -> OptimisticLockException"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "You can force a version bump on a parent without modifying it using LockModeType.OPTIMISTIC_FORCE_INCREMENT, useful when a child change must invalidate concurrent reads of the aggregate root. Conversely LockModeType.OPTIMISTIC merely re-checks the version at commit without incrementing."
+        }
+      ]
+    },
+    {
+      "id": "sql-conditional-update",
+      "heading": "The Raw SQL Conditional Update",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Strip away the ORM and the entire mechanism is one statement. You read the current version, do your work, then attempt the conditional update. The affected-row count is the conflict signal: one row means success, zero rows means someone beat you to it."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- Step 1: read\nSELECT id, balance_cents, version\nFROM account\nWHERE id = 42;\n-- suppose version = 7, balance = 10000\n\n-- Step 2: conditional write (after computing new balance)\nUPDATE account\nSET balance_cents = 7000,\n    version = version + 1\nWHERE id = 42\n  AND version = 7;\n\n-- Step 3: inspect affected rows\n-- 1 row  -> success, version is now 8\n-- 0 rows -> CONFLICT, refetch and retry"
+        },
+        {
+          "type": "paragraph",
+          "text": "This pattern is fully portable and works in any RDBMS, in raw JDBC, in jOOQ, in MyBatis, or in a stored procedure. It is the same idea as a compare-and-swap on a CPU: read a value, compute a new one, and swap only if the old value is unchanged. The database's row write lock during the UPDATE guarantees the check-and-set is atomic even though your read happened earlier in a different statement."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "A frequent bug: developers check the affected-row count only in the ORM path and forget it in a hand-rolled JDBC batch. A batched UPDATE that affects zero rows will silently do nothing. Always inspect executeUpdate's return value and treat zero as a conflict, not as success."
+        }
+      ]
+    },
+    {
+      "id": "cas-and-aba",
+      "heading": "Compare-and-Swap and the ABA Problem",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Optimistic locking is compare-and-swap (CAS) at the database layer. CAS reads a memory location, computes a new value, and atomically writes the new value only if the location still holds the previously observed value. The subtle failure of naive CAS is the ABA problem: a value changes from A to B and back to A between your read and your swap. Your CAS succeeds because the value matches, but the world changed underneath you and you missed it."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// Naive CAS on a value is vulnerable to ABA:\nAtomicReference<Node> top = ...;\nNode oldTop = top.get();           // observe A\n// ... another thread pops A, pushes B, pushes A again ...\ntop.compareAndSet(oldTop, oldTop.next); // succeeds! but next is stale\n\n// Fix: pair the value with a monotonically increasing stamp.\nAtomicStampedReference<Node> stampedTop = ...;\nint[] stampHolder = new int[1];\nNode oldTop2 = stampedTop.get(stampHolder);\nint stamp = stampHolder[0];\nstampedTop.compareAndSet(oldTop2, newTop, stamp, stamp + 1);"
+        },
+        {
+          "type": "paragraph",
+          "text": "This is exactly why a version column must be a monotonically increasing counter, not a comparison of the row's data values. If you implemented optimistic locking by checking WHERE balance_cents = 10000 instead of WHERE version = 7, an intervening transaction that set the balance to 5000 and another that set it back to 10000 would let your stale write succeed. The balance is your A-B-A value; the version is the stamp that defeats ABA because it never returns to a previous value."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Never use a business field as your concurrency token. Use a dedicated, always-incrementing version. Business values can cycle back to prior states; a version monotonically advances and is immune to ABA."
+        }
+      ]
+    },
+    {
+      "id": "retry-loops",
+      "heading": "Retry-on-Conflict Loops with Backoff",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A conflict is not an error to surface immediately; it is a signal to retry with fresh data. The correct shape is a bounded loop: refetch the current state, reapply the business logic, and attempt the conditional write again. Bound the attempts to avoid infinite loops, and add jittered exponential backoff so that two racing clients do not synchronize into a livelock where they keep colliding."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "public <T> T withRetry(int maxAttempts, Supplier<T> action) {\n    long baseDelayMs = 10;\n    for (int attempt = 1; ; attempt++) {\n        try {\n            return action.get(); // runs in its own transaction\n        } catch (ObjectOptimisticLockingFailureException ex) {\n            if (attempt >= maxAttempts) {\n                throw new ConflictExhaustedException(attempt, ex);\n            }\n            long jitter = ThreadLocalRandom.current().nextLong(baseDelayMs);\n            long delay = (baseDelayMs << Math.min(attempt, 6)) + jitter;\n            sleepQuietly(delay); // exponential backoff with jitter\n        }\n    }\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Two non-negotiable rules govern the loop. First, each attempt must run in its own fresh transaction and persistence context: retrying inside the same transaction after a StaleStateException reuses poisoned, stale entities and will fail forever. In Spring this means the retried unit must be a separate @Transactional call, not a catch block inside the same one. Second, the action must be idempotent or recompute from scratch on each attempt, because attempt N+1 reads the now-committed state from attempt that beat you."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The number-one production bug with optimistic retries is catching the exception inside the same transaction. By the time OptimisticLockException is thrown, the transaction is already marked rollback-only. You must let it roll back fully and start a new transaction for the next attempt."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Cap attempts (3 to 5 is typical) and convert exhaustion into a 409 Conflict.",
+            "Use exponential backoff with jitter to break livelock between racers.",
+            "Refetch fresh state on every attempt, never reuse stale entities.",
+            "Emit a metric per retry so you can alert when contention spikes."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "http-etag",
+      "heading": "HTTP Optimistic Concurrency with ETag and If-Match",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The same idea moves up to HTTP. A GET returns the resource plus an ETag header, an opaque token representing the current version. When the client later PUTs an update, it echoes that token in an If-Match header. The server compares If-Match against the current ETag; if they match it applies the change and returns a new ETag, and if they do not it returns 412 Precondition Failed, telling the client its copy is stale."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "# 1. Client reads the resource and captures the ETag\ncurl -i https://api.example.com/accounts/42\n# HTTP/1.1 200 OK\n# ETag: \"7\"\n# {\"id\":42,\"balanceCents\":10000}\n\n# 2. Client writes back, asserting it saw version 7\ncurl -i -X PUT https://api.example.com/accounts/42 \\\n  -H 'If-Match: \"7\"' \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"balanceCents\":7000}'\n# If current ETag is still \"7\":  200 OK, ETag: \"8\"\n# If someone else wrote first:   412 Precondition Failed"
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "@Put(':id')\nasync update(\n  @Param('id') id: string,\n  @Headers('if-match') ifMatch: string,\n  @Body() dto: UpdateDto,\n  @Res() res: Response,\n) {\n  if (!ifMatch) {\n    return res.status(428).send('If-Match header required'); // Precondition Required\n  }\n  const current = await this.repo.findVersion(id);\n  if (`\"${current.version}\"` !== ifMatch) {\n    return res.status(412).send('Precondition Failed'); // stale client\n  }\n  const next = await this.repo.conditionalUpdate(id, current.version, dto);\n  if (!next) {\n    return res.status(412).send('Precondition Failed'); // raced between check and write\n  }\n  res.setHeader('ETag', `\"${next.version}\"`);\n  return res.status(200).json(next);\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Crucially, the ETag check at the controller is advisory; the authoritative check is still the conditional UPDATE in the database. The TypeScript above re-checks inside conditionalUpdate and returns 412 if zero rows matched, because two requests can both pass the in-memory comparison and then race at the database. Return 428 Precondition Required when If-Match is absent to force clients to participate in concurrency control rather than blindly overwriting."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "ETags can be strong or weak. Use a strong validator (derived from your version column) for optimistic writes, since weak validators only assert semantic equivalence, not byte-for-byte identity, and are inappropriate for If-Match write preconditions."
+        }
+      ]
+    },
+    {
+      "id": "dynamodb-conditional",
+      "heading": "Conditional Writes in DynamoDB",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "NoSQL stores implement optimistic locking through conditional writes. DynamoDB's PutItem and UpdateItem accept a ConditionExpression that must evaluate true for the write to commit; otherwise the SDK raises ConditionalCheckFailedException. You maintain a version attribute and assert its expected value, achieving the same compare-and-swap semantics without a relational version column."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// AWS SDK v2: increment version only if it has not changed\nUpdateItemRequest req = UpdateItemRequest.builder()\n    .tableName(\"Accounts\")\n    .key(Map.of(\"id\", AttributeValue.fromS(\"42\")))\n    .updateExpression(\"SET balanceCents = :bal, version = version + :one\")\n    .conditionExpression(\"version = :expected\")\n    .expressionAttributeValues(Map.of(\n        \":bal\", AttributeValue.fromN(\"7000\"),\n        \":one\", AttributeValue.fromN(\"1\"),\n        \":expected\", AttributeValue.fromN(\"7\")))\n    .build();\n\ntry {\n    dynamo.updateItem(req);\n} catch (ConditionalCheckFailedException e) {\n    // someone else advanced the version; refetch and retry\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "DynamoDB also supports a first-write-wins guard using attribute_not_exists(id) as the condition, which is how you implement idempotent creates and prevent two consumers from inserting the same key. The DynamoDBMapper and Enhanced Client both have a @DynamoDbVersionAttribute annotation that automates the version increment and condition exactly like JPA's @Version, so you rarely hand-write the expression."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Conditional writes consume the same write capacity whether they succeed or fail, and a failed condition still costs you. Under heavy contention on one item, the retry storm is both a latency and a cost problem, the same hot-row caveat as relational optimistic locking."
+        }
+      ]
+    },
+    {
+      "id": "isolation-mvcc",
+      "heading": "Relation to Isolation Levels and MVCC",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Optimistic locking and transaction isolation are complementary, not interchangeable. Isolation levels govern what a transaction can see; optimistic locking governs whether a write is allowed to land. Under READ COMMITTED, the most common default, lost updates are entirely possible because each transaction reads the latest committed value but nothing prevents two read-modify-write cycles from overwriting. The version column is what restores correctness without paying for stronger isolation."
+        },
+        {
+          "type": "table",
+          "headers": ["Isolation Level", "Prevents Lost Update?", "Note"],
+          "rows": [
+            ["READ COMMITTED", "No", "Default; needs version column or locks"],
+            ["REPEATABLE READ (PostgreSQL/MVCC)", "Yes, via serialization error", "Throws 40001 on conflicting write"],
+            ["SERIALIZABLE", "Yes", "Strongest; may abort more transactions"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "MVCC, multi-version concurrency control, is how PostgreSQL, Oracle, and MySQL InnoDB give readers a consistent snapshot without blocking writers: each row keeps multiple versions and a transaction reads the version valid as of its snapshot. PostgreSQL's REPEATABLE READ is in fact snapshot isolation, and when two transactions update the same row it lets the first commit and aborts the second with a serialization failure (SQLSTATE 40001). That database-driven abort is conceptually identical to an optimistic conflict and similarly requires a retry loop in your application."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "An explicit @Version column gives you portable, predictable optimistic locking independent of isolation level, and it works across multiple statements and even across HTTP requests, which a database serialization check cannot, since the database forgets your read once the transaction ends."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes That Reach Production",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Optimistic locking is simple in theory and full of foot-guns in practice. The following are the failures that actually ship and cause incidents."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Retrying inside the failed transaction instead of starting a fresh one, so every retry reuses poisoned entities and fails forever.",
+            "Using a business field or timestamp as the version token, reintroducing the ABA problem.",
+            "Ignoring the affected-row count on a hand-written UPDATE, so a zero-row conflict is read as success.",
+            "Catching ObjectOptimisticLockingFailureException and swallowing it, turning a conflict into a silent no-op.",
+            "Applying optimistic locking to a hot row updated thousands of times per second, producing a retry storm.",
+            "Returning 409 or 412 to clients with no machine-readable way to refetch, forcing users to lose their edits."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// WRONG: retry inside the same transaction\n@Transactional\npublic void transferWrong(long from, long to, long amt) {\n    for (int i = 0; i < 3; i++) {\n        try {\n            doTransfer(from, to, amt);\n            return;\n        } catch (OptimisticLockException e) {\n            // transaction is already rollback-only here; reusing it FAILS\n        }\n    }\n}\n\n// RIGHT: each attempt is its own transaction\npublic void transferRight(long from, long to, long amt) {\n    retry.execute(() -> txTemplate.execute(s -> { doTransfer(from, to, amt); return null; }));\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "A subtle gotcha: in JPA, merging a detached entity whose fields are unchanged can still bump the version on some providers and configurations, because the dirty-check or cascade logic decides the entity is dirty. A no-op save then spuriously conflicts with a concurrent real change. Verify your provider's behavior and avoid blind entityManager.merge of full graphs."
+        }
+      ]
+    },
+    {
+      "id": "war-story",
+      "heading": "Production War Story: The Inventory Retry Storm",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A flash-sale launch put a single SKU's inventory row behind an @Version column. Thousands of buyers decremented stock per second, all reading version N and all racing to write version N+1. One winner per round meant 99 percent of attempts threw OptimisticLockException, each retrying with backoff, each consuming a connection and a database round trip. The connection pool saturated, p99 latency exploded, and the database CPU pegged on UPDATE attempts that mostly failed."
+        },
+        {
+          "type": "paragraph",
+          "text": "The fix abandoned read-modify-write for an atomic, in-database decrement that needs no version check and no retry: UPDATE inventory SET qty = qty - 1 WHERE sku = ? AND qty >= 1. Zero rows affected means sold out, returned as a clean out-of-stock response. For aggregate counters they additionally sharded the hot row into N sub-rows and summed on read, spreading the contention. The lesson: optimistic locking is wrong for a single ultra-hot row, and an atomic conditional decrement or sharding is the right tool."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- Replace read-modify-write + retry with one atomic statement:\nUPDATE inventory\nSET qty = qty - 1\nWHERE sku = 'FLASH-100'\n  AND qty >= 1;\n-- 1 row -> reserved one unit; 0 rows -> sold out, no retry needed"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "When the conflicting update is a pure arithmetic delta on a numeric column, you almost never need optimistic locking: push the computation into the UPDATE so the database does the compare-and-set in one atomic step with no application-side retry."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices and Decision Guide",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Default to optimistic locking, instrument it, and escalate only when measurements demand it. The following checklist captures the staff-level discipline that keeps it correct and cheap."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Use a dedicated monotonically increasing integer version, never a business field or bare timestamp.",
+            "Make every retry a fresh transaction with refetched state, capped at 3 to 5 attempts.",
+            "Add jittered exponential backoff to prevent livelock between racing clients.",
+            "Surface exhausted conflicts as 409 to APIs and as a 'reload and reapply' prompt to users.",
+            "Expose ETag plus If-Match on resources that humans edit over long sessions.",
+            "For pure arithmetic deltas on hot rows, use atomic conditional UPDATEs, not version checks.",
+            "Emit a conflict-rate metric; a rising rate is your early warning of contention.",
+            "Make the operation idempotent where possible so retries are always safe."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Situation", "Recommended Approach"],
+          "rows": [
+            ["Long human edit session", "Optimistic + ETag/If-Match"],
+            ["Low-contention CRUD", "Optimistic @Version"],
+            ["Single ultra-hot counter", "Atomic UPDATE or shard the row"],
+            ["Must serialize a complex critical section", "Pessimistic SELECT FOR UPDATE"],
+            ["Cross-service idempotent create", "Conditional write on attribute_not_exists"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Done well, optimistic locking is nearly free under normal load, turns silent data loss into a recoverable conflict, and degrades gracefully because you control the retry policy. Pair it with metrics and a sensible escalation path and it scales to the vast majority of write workloads."
+        }
+      ]
+    },
+    {
+      "id": "distributed-idempotency",
+      "heading": "Distributed and Idempotency Considerations",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "In distributed systems, optimistic locking pairs naturally with idempotency keys. A client retrying a write after a network timeout might re-send a request that actually succeeded; an idempotency key plus a conditional insert (attribute_not_exists or INSERT ... ON CONFLICT DO NOTHING) ensures the duplicate is absorbed rather than applied twice. The version token handles concurrent distinct writers; the idempotency key handles the same writer's at-least-once retries."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- Idempotent insert: dedupe by client-supplied key\nINSERT INTO payments (idempotency_key, account_id, amount_cents, version)\nVALUES ('req-9f3a', 42, 5000, 0)\nON CONFLICT (idempotency_key) DO NOTHING\nRETURNING id;\n-- No row returned -> the request was already processed; return the prior result"
+        },
+        {
+          "type": "paragraph",
+          "text": "Across microservices that each own their data, a single global version is impossible, so optimistic concurrency becomes per-aggregate. Event-sourced systems take this further: the expected version is the length of the event stream, and appending fails if the stream advanced, which is optimistic locking applied to an append-only log. The principle is constant: carry a token, assert it atomically at write time, and retry on mismatch."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Combine optimistic versioning with idempotency keys for exactly-once-effect semantics over an at-least-once delivery substrate: the version defeats concurrent conflicting writers, the key defeats duplicate retries from a single writer."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "race-sequence",
+      "title": "Two Transactions Racing on a Version",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n    participant T1 as Transaction 1\n    participant DB as Database\n    participant T2 as Transaction 2\n    T1->>DB: SELECT balance, version=7\n    T2->>DB: SELECT balance, version=7\n    T1->>DB: UPDATE SET version=8 WHERE version=7\n    DB-->>T1: 1 row affected, commit OK\n    T2->>DB: UPDATE SET version=8 WHERE version=7\n    DB-->>T2: 0 rows affected\n    Note over T2: Conflict detected, must retry\n    T2->>DB: SELECT fresh balance, version=8\n    T2->>DB: UPDATE SET version=9 WHERE version=8\n    DB-->>T2: 1 row affected, commit OK"
+    },
+    {
+      "id": "retry-flow",
+      "title": "Retry-on-Conflict Decision Flow",
+      "type": "mermaid",
+      "content": "flowchart TD\n    A[Read row and version] --> B[Apply business logic]\n    B --> C[Conditional UPDATE WHERE version matches]\n    C --> D{Rows affected}\n    D -->|1 row| E[Success and commit]\n    D -->|0 rows| F{Attempts left}\n    F -->|Yes| G[Backoff with jitter]\n    G --> A\n    F -->|No| H[Return 409 Conflict]"
+    },
+    {
+      "id": "etag-flow",
+      "title": "HTTP ETag and If-Match Exchange",
+      "type": "ascii",
+      "content": "Client                         Server\n  |  GET /accounts/42            |\n  |----------------------------->|\n  |  200 OK  ETag: \"7\"           |\n  |<-----------------------------|\n  |                              |\n  |  PUT /accounts/42            |\n  |  If-Match: \"7\"               |\n  |----------------------------->|\n  |        [version still 7?]    |\n  |   yes -> 200 OK ETag: \"8\"    |\n  |<-----------------------------|\n  |   no  -> 412 Precondition    |\n  |          Failed              |\n  |<-----------------------------|"
+    },
+    {
+      "id": "cas-aba",
+      "title": "ABA Problem Defeated by a Version Stamp",
+      "type": "ascii",
+      "content": "Without version (compares value):\n  read balance=100  -> [B sets 50, then back to 100] -> CAS sees 100 -> SUCCEEDS WRONGLY\n\nWith version (compares stamp):\n  read version=7    -> [B sets v8, then v9]           -> CAS expects 7 -> 0 rows, CONFLICT\n\nThe value can return to a prior state; the version never does."
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-what-is-optimistic-locking",
+      "question": "What is optimistic locking and when should you prefer it over pessimistic locking?",
+      "answer": "Optimistic locking assumes conflicts are rare, so it holds no lock during read and think-time and instead detects conflicts at write time by checking a version token. You read a row with its version, do your work, and issue a conditional update that succeeds only if the version is unchanged; a zero-row result signals a conflict that triggers a retry. Prefer it when contention is low, when edits span long user sessions, or when holding a lock across think-time would hurt throughput. Pessimistic locking is better when contention is high on specific rows or when retrying is more expensive than blocking. The decisive variable is how often two writers actually collide on the same row in the same window.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["optimistic-locking", "pessimistic-locking", "trade-offs"],
+      "followUps": ["How does contention change the answer?", "What failure mode does each strategy produce?"]
+    },
+    {
+      "id": "q-lost-update",
+      "question": "Explain the lost-update problem and how a version column prevents it.",
+      "answer": "The lost-update problem occurs when two transactions read the same row, each computes a new value from what it read, and both write back, so the second write silently overwrites the first and that first change is lost with no error. A version column converts the second write into a conditional update of the form WHERE id = ? AND version = ?, with the version incrementing on every successful write. The first writer advances the version, so the second writer's stale version no longer matches and its update affects zero rows. That zero-row result is a detectable conflict the application can retry rather than a silent overwrite. This works without raising the isolation level and is portable across databases.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["lost-update", "version-column", "concurrency"],
+      "followUps": ["Does READ COMMITTED prevent this?", "What does the conditional UPDATE look like in SQL?"]
+    },
+    {
+      "id": "q-lost-update-read-committed",
+      "question": "Under READ COMMITTED isolation, are lost updates prevented automatically?",
+      "answer": "No, and this is a common misconception. READ COMMITTED guarantees each statement sees only committed data and never reads uncommitted (dirty) rows, but it does nothing to prevent two separate read-modify-write cycles from clobbering each other. Both transactions can read the latest committed value, each computes its result, and the later commit overwrites the earlier one. READ COMMITTED is the default in PostgreSQL, Oracle, and SQL Server, so most applications are exposed to lost updates by default. You need either a version column, an explicit SELECT FOR UPDATE, an atomic in-database update, or a stronger isolation level like REPEATABLE READ or SERIALIZABLE to close the gap. Optimistic locking is the portable, low-cost way to do it.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["isolation-levels", "read-committed", "lost-update"],
+      "followUps": ["What does PostgreSQL REPEATABLE READ do differently?", "Why might you avoid SERIALIZABLE?"]
+    },
+    {
+      "id": "q-aba-problem",
+      "question": "What is the ABA problem and how does optimistic locking avoid it?",
+      "answer": "The ABA problem is a flaw in compare-and-swap where a value changes from A to B and back to A between your read and your write, so your CAS succeeds because the value matches even though the state changed underneath you. If you implement optimistic locking by checking a business value, for example WHERE balance = 10000, an intervening pair of updates that leaves the balance back at 10000 lets your stale write succeed and corrupt data. The fix is to compare a dedicated, monotonically increasing version rather than the data, because a version never returns to a previous value. This is the same reason lock-free algorithms use a stamped reference: pair the value with an ever-increasing stamp. Optimistic locking is inherently ABA-safe precisely because the version always advances and is never reused.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["aba", "compare-and-swap", "version-column"],
+      "followUps": ["Why can't a timestamp fully substitute for a counter?", "How does AtomicStampedReference relate?"]
+    },
+    {
+      "id": "q-jpa-version",
+      "question": "How does JPA @Version work and what exception signals a conflict?",
+      "answer": "You annotate a numeric or timestamp field with @Version and the persistence provider manages it automatically. On every UPDATE and DELETE it generates, the provider adds the version to the WHERE clause and sets the version to its next value in the SET clause. When the conditional update affects zero rows, Hibernate detects the row-count mismatch and throws OptimisticLockException, which Spring wraps as ObjectOptimisticLockingFailureException. You never set or increment the version manually; doing so breaks the contract. The exception is your cue to refetch the entity in a fresh transaction and retry the business logic. You can also force a version bump without a field change using LockModeType.OPTIMISTIC_FORCE_INCREMENT.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["jpa", "hibernate", "version"],
+      "followUps": ["What is OPTIMISTIC vs OPTIMISTIC_FORCE_INCREMENT?", "Can the version field be a timestamp?"]
+    },
+    {
+      "id": "q-version-bump-noop-merge",
+      "question": "Why might @Version increment on what looks like a no-op merge, and why is that dangerous?",
+      "answer": "When you call entityManager.merge on a detached entity graph, the provider runs dirty checking and cascade logic that may conclude the entity or one of its associations is dirty even though the meaningful fields are unchanged, for example because a collection was reordered or a field was reset to an equal-but-not-identical value. If it decides the entity is dirty, it issues an UPDATE that increments the version. That spurious bump means a logically no-op save can conflict with a concurrent real change, or it can advance the version and cause another in-flight transaction to fail unexpectedly. The danger is non-deterministic conflicts that are hard to reproduce. The defense is to avoid blind merges of full graphs, load-then-mutate within the same persistence context, and verify your provider's dirty-checking behavior.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["jpa", "merge", "version", "gotcha"],
+      "followUps": ["How does load-then-mutate avoid this?", "What is the difference between merge and persist here?"]
+    },
+    {
+      "id": "q-retry-loop",
+      "question": "How do you implement a correct retry-on-conflict loop?",
+      "answer": "Wrap the operation in a bounded loop that, on each iteration, refetches the current state, reapplies the business logic, and attempts the conditional write again. Cap attempts at roughly three to five so a persistent conflict becomes a 409 rather than an infinite loop. Add jittered exponential backoff so two racing clients do not synchronize into a livelock. The critical rule is that each attempt must run in its own fresh transaction and persistence context, because after OptimisticLockException the transaction is already marked rollback-only and its entities are poisoned. Refetch fresh state every time and never reuse stale entities. Emit a metric per retry so you can detect rising contention before it becomes an incident.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["retry", "backoff", "transactions"],
+      "followUps": ["Why must each retry be a new transaction?", "How does jitter prevent livelock?"]
+    },
+    {
+      "id": "q-etag-vs-version",
+      "question": "What is the difference between an HTTP ETag and a database version column, and how do they relate?",
+      "answer": "A database version column is the server-side source of truth for a row's revision, used inside conditional UPDATE statements. An ETag is an HTTP-level opaque token, typically derived from that version, that the server returns on GET and the client echoes in If-Match on a write. They cooperate: the ETag carries the version across the stateless HTTP boundary so the client can assert what it last saw, and the server still enforces the real check with the version column in the database. The ETag comparison at the controller is advisory because two requests can both pass the in-memory check and then race at the database, so the authoritative decision is the conditional update's affected-row count. A mismatch surfaces as 412 Precondition Failed. Use a strong validator for write preconditions, never a weak one.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["etag", "if-match", "http", "version"],
+      "followUps": ["When do you return 428 instead of 412?", "Why is a weak ETag wrong for If-Match?"]
+    },
+    {
+      "id": "q-sql-conditional",
+      "question": "Write the raw SQL pattern for an optimistic conditional update and explain the affected-row check.",
+      "answer": "The pattern is UPDATE t SET col = ?, version = version + 1 WHERE id = ? AND version = ?, where the second version parameter is the value you read earlier. The increment of the version and the predicate on the old version are in a single atomic statement, so the database's row write lock during the UPDATE serializes concurrent commits and only one writer can match the old version. After executing, you inspect the affected-row count: one row means success and the version advanced, while zero rows means another writer beat you and you have a conflict. Treating zero rows as success is a classic bug, especially in hand-rolled JDBC, so you must always check executeUpdate's return value. This pattern is fully portable across relational databases.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["sql", "conditional-update", "compare-and-swap"],
+      "followUps": ["How is this analogous to CPU compare-and-swap?", "What happens in a batched UPDATE?"]
+    },
+    {
+      "id": "q-hot-row",
+      "question": "Why does optimistic locking perform badly on a single hot row, and what do you use instead?",
+      "answer": "On a single ultra-hot row, thousands of writers read the same version and all race to advance it, so only one wins per round and the rest fail with conflicts and retry. The retries consume connections, round trips, and database CPU on updates that mostly fail, producing a retry storm that saturates the pool and spikes latency. For pure arithmetic changes, the fix is an atomic in-database update such as UPDATE inventory SET qty = qty - 1 WHERE sku = ? AND qty >= 1, which needs no version check and no retry, with zero rows meaning sold out. For aggregate counters you can shard the hot row into N sub-rows and sum on read, spreading contention. Pessimistic locking is another option when the critical section is complex. The general lesson is that optimistic locking is the wrong tool for a single contended row.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["hot-row", "contention", "atomic-update"],
+      "followUps": ["How does row sharding work?", "When is pessimistic locking the better fix?"]
+    },
+    {
+      "id": "q-dynamodb-conditional",
+      "question": "How do you implement optimistic locking in DynamoDB?",
+      "answer": "DynamoDB uses conditional writes: PutItem and UpdateItem accept a ConditionExpression that must evaluate true for the write to commit, otherwise the SDK raises ConditionalCheckFailedException. You keep a version attribute and assert its expected value, for example conditionExpression version = :expected while the update expression sets version = version + 1. The Enhanced Client and the older DynamoDBMapper provide a @DynamoDbVersionAttribute annotation that automates this exactly like JPA @Version. You can also guard creates with attribute_not_exists(id) to implement idempotent first-write-wins inserts. Note that a failed conditional write still consumes write capacity, so on a hot item the retry storm is both a latency and a cost concern, the same caveat as relational optimistic locking.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["dynamodb", "conditional-write", "nosql"],
+      "followUps": ["What does attribute_not_exists enable?", "What is the cost implication of failed conditions?"]
+    },
+    {
+      "id": "q-mvcc-relation",
+      "question": "How does optimistic locking relate to MVCC and PostgreSQL's REPEATABLE READ?",
+      "answer": "MVCC, multi-version concurrency control, keeps multiple versions of each row so readers get a consistent snapshot without blocking writers, which is how PostgreSQL, Oracle, and InnoDB work. PostgreSQL's REPEATABLE READ is actually snapshot isolation: when two transactions update the same row, it lets the first commit and aborts the second with a serialization failure, SQLSTATE 40001. That database-driven abort is conceptually identical to an optimistic conflict and likewise requires an application retry loop. The difference is that the database's check only spans a single transaction and is forgotten once it ends, whereas an explicit version column works across multiple statements and even across separate HTTP requests. So a @Version column gives you portable, predictable optimistic locking independent of the isolation level, which the database's own conflict detection cannot match for long-lived edits.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["mvcc", "isolation-levels", "postgresql"],
+      "followUps": ["What is SQLSTATE 40001?", "Why can't database serialization handle long human edits?"]
+    },
+    {
+      "id": "q-idempotency",
+      "question": "How do version tokens and idempotency keys combine in a distributed system?",
+      "answer": "They solve two different problems and complement each other. A version token defeats concurrent distinct writers by ensuring only one of them can advance the row, while an idempotency key defeats duplicate retries from a single writer caused by at-least-once delivery or network timeouts. You implement the idempotency key as a conditional insert, for example INSERT ... ON CONFLICT (idempotency_key) DO NOTHING or attribute_not_exists in DynamoDB, so a re-sent request that already succeeded is absorbed rather than applied twice. Together they give exactly-once-effect semantics over an at-least-once substrate. In event-sourced systems this extends to using the event stream length as the expected version when appending. The unifying principle is always: carry a token, assert it atomically at write time, and retry on mismatch.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["idempotency", "distributed-systems", "exactly-once"],
+      "followUps": ["How does event sourcing use expected version?", "What is exactly-once-effect?"]
+    },
+    {
+      "id": "q-timestamp-version",
+      "question": "What are the risks of using a timestamp as the version token?",
+      "answer": "Timestamps are tempting because they double as audit fields, but they have two serious flaws as concurrency tokens. First, two updates within the same clock tick can carry identical timestamps, so a conflicting write can match and slip through; this requires at least sub-millisecond and ideally nanosecond precision to mitigate. Second, across multiple nodes or after an NTP adjustment, clock skew can make a newer write appear older or vice versa, breaking the monotonicity the token relies on. Because the value can effectively repeat or move backward, a timestamp reintroduces a form of the ABA risk. A monotonically increasing integer has none of these problems: it is unambiguous, cheap to compare, and strictly increasing. Use an integer version and keep the timestamp purely for auditing.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["timestamp", "version-column", "clock-skew"],
+      "followUps": ["Why is monotonicity essential?", "When is a timestamp acceptable?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-versioned-update-retry",
+      "title": "Implement a Version-Checked Update with Retry",
+      "difficulty": "senior",
+      "category": "Backend",
+      "prompt": "Implement a transfer that decrements one account and credits another using optimistic locking with a manual version column. Each attempt must run in its own transaction, detect conflicts via the affected-row count, and retry up to a fixed bound with exponential backoff and jitter. On exhaustion, throw a domain-specific conflict exception.",
+      "hints": [
+        "Read the current balance and version before computing the new balance.",
+        "Use UPDATE ... SET version = version + 1 WHERE id = ? AND version = ? and check the affected-row count.",
+        "Run each attempt in a fresh transaction; never retry inside a rolled-back transaction.",
+        "Add jittered exponential backoff between attempts and cap the number of attempts."
+      ],
+      "solutionCode": "public class TransferService {\n\n    private final JdbcTemplate jdbc;\n    private final TransactionTemplate tx;\n    private static final int MAX_ATTEMPTS = 5;\n\n    public TransferService(JdbcTemplate jdbc, PlatformTransactionManager txm) {\n        this.jdbc = jdbc;\n        this.tx = new TransactionTemplate(txm);\n        this.tx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);\n    }\n\n    public void transfer(long fromId, long toId, long amountCents) {\n        for (int attempt = 1; ; attempt++) {\n            try {\n                tx.executeWithoutResult(status -> doTransfer(fromId, toId, amountCents));\n                return; // committed, no conflict\n            } catch (OptimisticConflictException ex) {\n                if (attempt >= MAX_ATTEMPTS) {\n                    throw new ConflictExhaustedException(fromId, toId, attempt);\n                }\n                backoff(attempt);\n            }\n        }\n    }\n\n    private void doTransfer(long fromId, long toId, long amountCents) {\n        var from = readAccount(fromId);\n        var to = readAccount(toId);\n        if (from.balanceCents() < amountCents) {\n            throw new InsufficientFundsException(fromId);\n        }\n        applyVersioned(fromId, from.version(), from.balanceCents() - amountCents);\n        applyVersioned(toId, to.version(), to.balanceCents() + amountCents);\n    }\n\n    private void applyVersioned(long id, long expectedVersion, long newBalance) {\n        int rows = jdbc.update(\n            \"UPDATE account SET balance_cents = ?, version = version + 1 \" +\n            \"WHERE id = ? AND version = ?\",\n            newBalance, id, expectedVersion);\n        if (rows == 0) {\n            throw new OptimisticConflictException(id, expectedVersion);\n        }\n    }\n\n    private Account readAccount(long id) {\n        return jdbc.queryForObject(\n            \"SELECT id, balance_cents, version FROM account WHERE id = ?\",\n            (rs, n) -> new Account(rs.getLong(\"id\"), rs.getLong(\"balance_cents\"), rs.getLong(\"version\")),\n            id);\n    }\n\n    private void backoff(int attempt) {\n        long base = 10L << Math.min(attempt, 6);\n        long jitter = ThreadLocalRandom.current().nextLong(base);\n        try { Thread.sleep(base + jitter); }\n        catch (InterruptedException e) { Thread.currentThread().interrupt(); }\n    }\n\n    record Account(long id, long balanceCents, long version) { }\n}",
+      "solutionLanguage": "java",
+      "explanation": "This solution implements optimistic locking entirely by hand so the mechanics are explicit. The retry loop lives outside the transaction boundary, and the TransactionTemplate is configured with PROPAGATION_REQUIRES_NEW so every attempt runs in a fresh transaction with a clean persistence state, which is the single most important correctness property: retrying inside a rolled-back transaction would reuse poisoned state and fail forever. Inside doTransfer we read each account's current balance and version, compute the new balances, and then issue conditional UPDATE statements that increment the version only when the observed version still matches. The applyVersioned helper inspects the affected-row count returned by jdbc.update and throws OptimisticConflictException when zero rows match, turning a silent no-op into a detectable conflict. The outer loop catches that exception, applies jittered exponential backoff to avoid livelock between racing transfers, and retries up to MAX_ATTEMPTS before converting persistent contention into a domain-specific ConflictExhaustedException that an API layer can map to 409. Because each attempt refetches fresh balances, attempt N+1 correctly sees the committed result of whatever writer beat it, so the arithmetic stays consistent. The pattern is portable, holds no lock across the read, and degrades gracefully under the rare conflict.",
+      "relatedTopic": "optimistic-locking"
+    },
+    {
+      "id": "ch-etag-endpoint",
+      "title": "Build an HTTP Endpoint Using ETag and If-Match",
+      "difficulty": "senior",
+      "category": "Backend",
+      "prompt": "Implement an HTTP update endpoint that enforces optimistic concurrency over HTTP. GET must return the resource with a strong ETag derived from a version column. PUT must require an If-Match header, return 428 when it is missing, 412 when it is stale or when the database write loses the race, and 200 with the new ETag on success.",
+      "hints": [
+        "Derive the ETag from the row's integer version, quoted as a strong validator.",
+        "Return 428 Precondition Required when If-Match is absent to force participation.",
+        "Compare If-Match to the current version, but treat the conditional UPDATE as authoritative.",
+        "Set a fresh ETag header on the successful response."
+      ],
+      "solutionCode": "import { Controller, Get, Put, Param, Headers, Body, Res } from '@nestjs/common';\nimport { Response } from 'express';\n\ninterface Account { id: string; balanceCents: number; version: number; }\n\n@Controller('accounts')\nexport class AccountController {\n  constructor(private readonly repo: AccountRepo) {}\n\n  @Get(':id')\n  async read(@Param('id') id: string, @Res() res: Response) {\n    const acct = await this.repo.find(id);\n    if (!acct) return res.status(404).send('Not Found');\n    res.setHeader('ETag', `\"${acct.version}\"`);\n    return res.status(200).json(acct);\n  }\n\n  @Put(':id')\n  async update(\n    @Param('id') id: string,\n    @Headers('if-match') ifMatch: string | undefined,\n    @Body() body: { balanceCents: number },\n    @Res() res: Response,\n  ) {\n    if (!ifMatch) {\n      return res.status(428).send('If-Match header required');\n    }\n    const current = await this.repo.find(id);\n    if (!current) return res.status(404).send('Not Found');\n\n    const expected = `\"${current.version}\"`;\n    if (ifMatch !== expected) {\n      return res.status(412).send('Precondition Failed');\n    }\n\n    // Authoritative compare-and-set at the database layer.\n    const updated = await this.repo.conditionalUpdate(\n      id,\n      current.version,\n      body.balanceCents,\n    );\n    if (!updated) {\n      // Two requests passed the in-memory check and raced; loser gets 412.\n      return res.status(412).send('Precondition Failed');\n    }\n    res.setHeader('ETag', `\"${updated.version}\"`);\n    return res.status(200).json(updated);\n  }\n}\n\nclass AccountRepo {\n  constructor(private readonly db: Db) {}\n\n  find(id: string): Promise<Account | null> {\n    return this.db.queryOne<Account>(\n      'SELECT id, balance_cents AS \"balanceCents\", version FROM account WHERE id = $1',\n      [id],\n    );\n  }\n\n  async conditionalUpdate(\n    id: string,\n    expectedVersion: number,\n    balanceCents: number,\n  ): Promise<Account | null> {\n    const rows = await this.db.query<Account>(\n      `UPDATE account\n          SET balance_cents = $1, version = version + 1\n        WHERE id = $2 AND version = $3\n      RETURNING id, balance_cents AS \"balanceCents\", version`,\n      [balanceCents, id, expectedVersion],\n    );\n    return rows.length === 1 ? rows[0] : null;\n  }\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "This endpoint maps HTTP optimistic concurrency onto a database version column cleanly. The GET handler returns the resource and sets a strong ETag of the form quote version quote, derived directly from the integer version so the validator is byte-stable and appropriate for write preconditions. The PUT handler first enforces participation: a missing If-Match yields 428 Precondition Required rather than allowing a blind overwrite, which is the difference between an API that is safe by construction and one that silently loses updates. It then compares If-Match against the current version, but the in-memory comparison is intentionally treated as advisory because two requests can both read the same version, both pass this check, and then race at the database. The authoritative decision is conditionalUpdate, which issues UPDATE ... SET version = version + 1 WHERE id = ? AND version = ? with a RETURNING clause; if the affected-row set is empty the request lost the race and receives 412. On success it returns 200 with a freshly set ETag reflecting the incremented version, so the client can immediately make a follow-up write without a re-fetch. The result is a stateless, horizontally scalable concurrency protocol where the database remains the single source of truth and clients are forced to prove they saw the latest revision before they may overwrite it.",
+      "relatedTopic": "optimistic-locking"
+    }
+  ],
+  "references": [
+    {
+      "label": "Hibernate ORM User Guide: Optimistic Locking and @Version",
+      "url": "https://docs.jboss.org/hibernate/orm/current/userguide/html_single/Hibernate_User_Guide.html#locking-optimistic"
+    },
+    {
+      "label": "Martin Fowler: Optimistic Offline Lock",
+      "url": "https://martinfowler.com/eaaCatalog/optimisticOfflineLock.html"
+    },
+    {
+      "label": "AWS DynamoDB: Conditional Writes and Optimistic Locking",
+      "url": "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/WorkingWithItems.html#WorkingWithItems.ConditionalUpdate"
+    },
+    {
+      "label": "MDN Web Docs: ETag and If-Match Headers",
+      "url": "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/ETag"
+    },
+    {
+      "label": "PostgreSQL Documentation: Concurrency Control and MVCC",
+      "url": "https://www.postgresql.org/docs/current/mvcc.html"
+    }
+  ]
+}

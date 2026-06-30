@@ -1,0 +1,585 @@
+{
+  "id": "load-balancing",
+  "title": "Load Balancing",
+  "category": "Architecture",
+  "subcategory": "Distributed",
+  "difficulty": "senior",
+  "tags": [
+    "load-balancing",
+    "layer4-vs-layer7",
+    "consistent-hashing",
+    "health-checks",
+    "reverse-proxy",
+    "service-mesh",
+    "high-availability",
+    "zero-downtime"
+  ],
+  "description": "A staff-level treatment of load balancing as the backbone of horizontal scale and availability: Layer 4 vs Layer 7 trade-offs, balancing algorithms from round robin to consistent hashing, health checking, TLS termination, global routing, and the operational realities of retry storms and connection draining during deploys.",
+  "estReadMinutes": 30,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "What a Load Balancer Actually Buys You",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A load balancer (LB) is a traffic director sitting between clients and a pool of backend servers. Its job is to spread incoming requests across many instances so that no single machine becomes a bottleneck, and to route traffic away from instances that are unhealthy. In a senior interview, the LB is rarely the headline topic on its own — it is the connective tissue that makes every other distributed-systems answer work: it is how you scale out instead of up, how you survive the death of any one node, and how you ship code without dropping requests."
+        },
+        {
+          "type": "paragraph",
+          "text": "The three durable reasons to put a load balancer in front of a service are: scale-out (add capacity by adding cheap commodity instances rather than buying a bigger box), availability (route around failed instances and entire failed zones), and elimination of a single point of failure (no one server's death takes the service down). Everything else — sticky sessions, TLS offload, path routing, circuit breaking — is detail layered on top of those three pillars."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Mental model: a load balancer is a stateful (or stateless) reverse proxy that makes N servers look like one virtual server to the client. The hard parts are not 'pick a server' — they are 'pick a server that is alive, fast, and correct for THIS request, while a deploy is rolling and an autoscaler is reshaping the pool underneath you.'"
+        }
+      ]
+    },
+    {
+      "id": "why",
+      "heading": "Why Load Balancing Is a First-Class Architectural Concern",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Vertical scaling hits a ceiling fast: there is a biggest available machine, it is expensive, and it is still one machine that can fail. Horizontal scaling has no such ceiling, but it only works if something distributes work across the fleet. The load balancer is that something. Without it, every client would need to know every backend address and implement its own balancing and failover — which is exactly what client-side load balancing (and service meshes) do, just by pushing the LB into a sidecar or library."
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "Capacity: a single instance saturates CPU, memory, file descriptors, or connection limits; the LB multiplies throughput by fanning out.",
+            "Availability: health checks pull dead instances out of rotation within seconds, so a crash degrades capacity instead of causing an outage.",
+            "Deployability: rolling deploys and blue/green cutovers depend on the LB to drain old instances and introduce new ones without dropping live connections.",
+            "Elasticity: autoscalers add and remove instances constantly; the LB must absorb a fleet that is in perpetual motion.",
+            "Locality and latency: global load balancing steers each user to the nearest healthy region, cutting round-trip time."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "An LB is itself a potential single point of failure. Production setups run LBs in redundant pairs or rely on cloud-managed, horizontally scaled LB fabric (AWS ALB/NLB, GCP, Anycast VIPs). 'We have a load balancer' is not the same as 'we are highly available' until the LB tier is itself redundant."
+        }
+      ]
+    },
+    {
+      "id": "l4-vs-l7",
+      "heading": "Layer 4 vs Layer 7: Where the Decision Is Made",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The OSI layer at which an LB operates defines what it can see and therefore what it can do. A Layer 4 (transport) load balancer works at the TCP/UDP level. It sees IP addresses and ports, makes a forwarding decision when a connection is established, and then shuttles bytes back and forth without understanding the payload. A Layer 7 (application) load balancer terminates the connection, parses the HTTP request, and routes based on application data: the URL path, Host header, cookies, method, or even the request body."
+        },
+        {
+          "type": "paragraph",
+          "text": "The trade-off is throughput and transparency versus intelligence. L4 is cheaper per request, lower latency, and protocol-agnostic — it can balance anything that runs over TCP/UDP, including databases and gRPC streams, and it can preserve the client's source IP more easily. L7 is more expensive because it must terminate TLS and parse HTTP, but it unlocks path-based routing, header-based routing, request retries, response caching, content rewriting, and per-request observability. Modern stacks often combine them: an L4 LB (or Anycast network LB) accepts traffic at the edge and fans out to a fleet of L7 proxies that do the smart routing."
+        },
+        {
+          "type": "table",
+          "headers": ["Dimension", "Layer 4 (Transport)", "Layer 7 (Application)"],
+          "rows": [
+            ["Operates on", "IP + port, TCP/UDP segments", "HTTP/gRPC: path, headers, cookies, method"],
+            ["Visibility", "Opaque payload (can pass through TLS)", "Must terminate TLS to read request"],
+            ["Routing power", "Per-connection, by 4-tuple / hash", "Per-request: path routing, header routing, A/B"],
+            ["Latency / cost", "Lowest; near wire speed", "Higher; parses and buffers each request"],
+            ["Retries / circuit breaking", "No (connection-level only)", "Yes (request-level retries, outlier ejection)"],
+            ["Sticky sessions", "By source IP / 4-tuple hash", "By cookie (precise, survives NAT)"],
+            ["Source IP preservation", "Easy (DSR / passthrough)", "Needs X-Forwarded-For / PROXY protocol"],
+            ["Typical products", "AWS NLB, IPVS, HAProxy TCP mode", "AWS ALB, nginx, Envoy, HAProxy HTTP mode"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Rule of thumb: if you need to route on the URL path or a cookie, you need L7 — an L4 LB literally cannot see them because they live inside the (often encrypted) payload. If you need raw throughput, source-IP preservation, or to balance non-HTTP traffic, prefer L4."
+        }
+      ]
+    },
+    {
+      "id": "algorithms",
+      "heading": "Balancing Algorithms and When to Use Them",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The algorithm decides which backend gets the next request. Round robin cycles through servers in order — simple and fair only when every request costs roughly the same and every server is identical. Weighted round robin assigns each server a weight proportional to its capacity, useful for heterogeneous hardware or canary instances that should receive a trickle of traffic. Least connections sends the next request to the server with the fewest active connections, which adapts automatically to slow requests and uneven backends. Least response time (often implemented with an EWMA — exponentially weighted moving average — of latency) goes further, favoring servers that are both lightly loaded and fast to respond."
+        },
+        {
+          "type": "paragraph",
+          "text": "Hash-based algorithms map a request key (source IP, or a URL/header value) deterministically to a server, giving you affinity: the same key always lands on the same backend. Plain modulo hashing (server = hash(key) % N) is catastrophic when N changes, because almost every key remaps. Consistent hashing solves this: keys and servers are placed on a hash ring, each key goes to the next server clockwise, and adding or removing a server only remaps keys in that server's arc — roughly K/N keys move instead of nearly all of them. Virtual nodes (placing each physical server at many points on the ring) smooth out the otherwise lumpy key distribution."
+        },
+        {
+          "type": "table",
+          "headers": ["Algorithm", "How it picks", "Best when", "Watch out for"],
+          "rows": [
+            ["Round robin", "Next server in rotation", "Uniform requests, identical servers", "Long/uneven requests pile up on unlucky nodes"],
+            ["Weighted round robin", "Rotation biased by weight", "Heterogeneous capacity, canaries", "Static weights drift from real capacity"],
+            ["Least connections", "Fewest active connections", "Variable request duration", "Connection count != actual work for streams"],
+            ["Least response time / EWMA", "Lowest latency + low load", "Latency-sensitive, mixed backends", "Needs good metrics; can over-react to noise"],
+            ["IP / URL hash", "Deterministic by key", "Cheap stickiness without cookies", "Hot keys overload one node; rebalancing on scale"],
+            ["Consistent hashing (+ vnodes)", "Ring lookup by key", "Cache/shard affinity, scale-out churn", "Implementation complexity; key skew without vnodes"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Default to least connections (or least response time) for general HTTP services — it self-corrects for slow requests far better than round robin. Reach for consistent hashing specifically when downstream affinity matters: in-memory caches, sharded stores, or stateful sessions you cannot afford to scatter."
+        }
+      ]
+    },
+    {
+      "id": "health-checks",
+      "heading": "Health Checks and Outlier Detection",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "An LB is only as good as its picture of which backends are alive. Active health checks proactively probe each backend on an interval — an HTTP GET /healthz, a TCP connect, or a gRPC health RPC — and mark a server unhealthy after a threshold of consecutive failures, then healthy again after consecutive successes (hysteresis prevents flapping). Passive health checks (also called outlier detection) observe real traffic: if a backend returns a burst of 5xx responses or times out, the LB ejects it temporarily without needing a dedicated probe."
+        },
+        {
+          "type": "paragraph",
+          "text": "The two are complementary. Active checks catch a server that is down even when no traffic is flowing to it, but a shallow /healthz that returns 200 as long as the process is up can lie — the process is alive but its database pool is exhausted. A deep health check that exercises real dependencies is more honest but risks cascading failure: if the shared database hiccups, every backend fails its health check simultaneously and the LB ejects the entire fleet. The mature compromise is a shallow liveness check for 'is the process up' and a separate readiness signal plus passive outlier detection for 'is it actually serving correctly.'"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Deep health checks tied to a shared dependency can turn a partial outage into a total one: a brief DB blip fails every backend's check, the LB pulls them all, and now you have a 100% outage from a 5% problem. Guard against this with 'fail open' / panic-mode behavior — if too many backends are unhealthy, the LB ignores health status and load-balances across everything rather than serving zero traffic."
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "Active: scheduled probes, detect silent death, configurable interval / timeout / unhealthy-threshold.",
+            "Passive (outlier detection): eject backends based on observed 5xx / timeouts from live traffic, with a base ejection time that grows on repeat offenses.",
+            "Hysteresis: require N consecutive failures to eject and M consecutive successes to restore, preventing flapping.",
+            "Panic / fail-open threshold: if the healthy fraction drops below a floor, balance across all hosts instead of none."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "stickiness-tls",
+      "heading": "Session Stickiness and TLS Termination",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Session stickiness (affinity) pins a given client to the same backend for the duration of a session, usually via a cookie the LB injects or by hashing the source IP. It exists because some applications keep per-session state in local memory, so subsequent requests must reach the same server. The deep tension is that stickiness fights statelessness: a stateless backend can be load-balanced freely, scaled in and out, and replaced at will, while a sticky backend creates hot spots, complicates autoscaling (you cannot freely drain a node holding live sessions), and means a single instance failure logs out every user pinned to it. The preferred direction is to externalize session state (Redis, a signed cookie, a JWT) so the backend stays stateless and stickiness becomes a performance optimization rather than a correctness requirement."
+        },
+        {
+          "type": "paragraph",
+          "text": "TLS termination is where the LB decrypts client TLS. Terminating at the LB centralizes certificate management and offloads expensive crypto from backends, and it is required for any L7 routing because the LB must read the plaintext HTTP. The question then becomes what happens on the LB-to-backend hop. TLS passthrough forwards encrypted bytes untouched (L4 only, no L7 features). TLS termination then re-encryption (also called TLS bridging) decrypts at the LB, applies L7 logic, then opens a fresh TLS connection to the backend — this is mandatory in zero-trust networks and is the basis of mutual TLS (mTLS) in a service mesh, where the sidecar, not the central LB, is the TLS endpoint."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Where TLS terminates determines who can enforce mTLS and client-certificate identity. If a central L7 LB terminates TLS and forwards plaintext, the backend has no cryptographic proof of the caller — fine inside a trusted VPC, unacceptable in zero-trust. Service meshes push termination to per-pod sidecars precisely so identity is verified at the last hop."
+        }
+      ]
+    },
+    {
+      "id": "config-example",
+      "heading": "Example: nginx / HAProxy Upstream with Health Checks and least_conn",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Here is an nginx upstream block using least_conn balancing, per-server weights, passive health marking via max_fails / fail_timeout, and a backup instance. The proxy block adds connection reuse (keepalive), request retries on failure, and forwards the real client IP and protocol so the backend can reconstruct the original request."
+        },
+        {
+          "type": "code",
+          "language": "nginx",
+          "code": "upstream api_pool {\n    least_conn;\n\n    # weight reflects relative capacity; backup only used if all primaries fail\n    server 10.0.1.11:8443 weight=3 max_fails=3 fail_timeout=10s;\n    server 10.0.1.12:8443 weight=3 max_fails=3 fail_timeout=10s;\n    server 10.0.1.13:8443 weight=1 max_fails=3 fail_timeout=10s;  # canary\n    server 10.0.1.20:8443 backup;\n\n    keepalive 64;            # reuse upstream connections, cut TLS handshakes\n}\n\nserver {\n    listen 443 ssl http2;\n    server_name api.example.com;\n\n    ssl_certificate     /etc/nginx/tls/api.crt;   # TLS terminates here (L7)\n    ssl_certificate_key /etc/nginx/tls/api.key;\n\n    location / {\n        proxy_pass https://api_pool;             # re-encrypt to backend\n        proxy_http_version 1.1;\n        proxy_set_header Connection \"\";\n\n        # forward true client identity (lost once TLS is terminated)\n        proxy_set_header Host              $host;\n        proxy_set_header X-Real-IP         $remote_addr;\n        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;\n        proxy_set_header X-Forwarded-Proto $scheme;\n\n        # request-level retry on a dead/erroring backend (L7 superpower)\n        proxy_next_upstream error timeout http_502 http_503 http_504;\n        proxy_next_upstream_tries 2;\n        proxy_connect_timeout 2s;\n        proxy_read_timeout    30s;\n    }\n\n    location = /healthz { access_log off; return 200 \"ok\\n\"; }\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "The equivalent in HAProxy is more explicit about active health checks. The 'check' keyword enables active probing, 'rise'/'fall' set the hysteresis thresholds, and a dedicated httpchk verifies a real endpoint rather than just TCP connectivity."
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "backend api_pool\n    balance leastconn\n    option httpchk GET /healthz HTTP/1.1\\r\\nHost:\\ api.example.com\n    http-check expect status 200\n    default-server inter 2s fall 3 rise 2 maxconn 200\n\n    server api1 10.0.1.11:8443 weight 3 check ssl verify required ca-file /etc/ssl/ca.pem\n    server api2 10.0.1.12:8443 weight 3 check ssl verify required ca-file /etc/ssl/ca.pem\n    server api3 10.0.1.13:8443 weight 1 check ssl verify required ca-file /etc/ssl/ca.pem\n    server apib 10.0.1.20:8443 backup check"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Note 'inter 2s fall 3 rise 2': probe every 2 seconds, eject after 3 consecutive failures (~6s to detect death), restore after 2 consecutive successes. Tightening 'inter' detects failures faster but increases probe load; loosening it tolerates transient blips at the cost of slower failover."
+        }
+      ]
+    },
+    {
+      "id": "consistent-hashing-impl",
+      "heading": "Consistent Hashing with Virtual Nodes",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "When you need stable affinity across a fleet that grows and shrinks — cache nodes, shards, or sticky sessions — consistent hashing is the right tool. Each physical server is hashed onto many points (virtual nodes) on a 2^32 ring; a key is routed to the first virtual node clockwise from its hash. Adding a server only steals keys from its immediate neighbors; removing one spills its keys to the next clockwise node. Below is a compact Go implementation. The sorted ring of hashes plus a binary search makes lookups O(log V) where V is the total number of virtual nodes."
+        },
+        {
+          "type": "code",
+          "language": "go",
+          "code": "package hashring\n\nimport (\n\t\"hash/crc32\"\n\t\"sort\"\n\t\"strconv\"\n\t\"sync\"\n)\n\ntype Ring struct {\n\tmu       sync.RWMutex\n\treplicas int            // virtual nodes per physical node\n\tkeys     []uint32       // sorted ring positions\n\thashMap  map[uint32]string\n}\n\nfunc New(replicas int) *Ring {\n\treturn &Ring{replicas: replicas, hashMap: make(map[uint32]string)}\n}\n\nfunc (r *Ring) hash(s string) uint32 {\n\treturn crc32.ChecksumIEEE([]byte(s))\n}\n\n// Add places `node` at `replicas` points on the ring.\nfunc (r *Ring) Add(node string) {\n\tr.mu.Lock()\n\tdefer r.mu.Unlock()\n\tfor i := 0; i < r.replicas; i++ {\n\t\th := r.hash(node + \"#\" + strconv.Itoa(i))\n\t\tr.keys = append(r.keys, h)\n\t\tr.hashMap[h] = node\n\t}\n\tsort.Slice(r.keys, func(i, j int) bool { return r.keys[i] < r.keys[j] })\n}\n\n// Remove deletes all virtual nodes for `node`.\nfunc (r *Ring) Remove(node string) {\n\tr.mu.Lock()\n\tdefer r.mu.Unlock()\n\tkept := r.keys[:0]\n\tfor _, h := range r.keys {\n\t\tif r.hashMap[h] == node {\n\t\t\tdelete(r.hashMap, h)\n\t\t\tcontinue\n\t\t}\n\t\tkept = append(kept, h)\n\t}\n\tr.keys = kept\n}\n\n// Get returns the node owning `key` (first vnode clockwise).\nfunc (r *Ring) Get(key string) string {\n\tr.mu.RLock()\n\tdefer r.mu.RUnlock()\n\tif len(r.keys) == 0 {\n\t\treturn \"\"\n\t}\n\th := r.hash(key)\n\ti := sort.Search(len(r.keys), func(i int) bool { return r.keys[i] >= h })\n\tif i == len(r.keys) {\n\t\ti = 0 // wrap around the ring\n\t}\n\treturn r.hashMap[r.keys[i]]\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The replicas (virtual node) count is the key tuning knob. Too few and the key distribution is lumpy — one node may own 2x the keys of another. 100-200 vnodes per physical node typically keeps load within a few percent of uniform. This is why real systems (Cassandra, Dynamo, many CDNs) use hundreds of vnodes per host."
+        }
+      ]
+    },
+    {
+      "id": "global-lb",
+      "heading": "Global vs Regional Load Balancing",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Regional load balancing distributes traffic within a data center or availability zone. Global load balancing steers a user to the right region in the first place, and there are two main mechanisms. DNS-based global LB (GeoDNS) returns different IP addresses depending on the resolver's geographic location or measured latency, so a user in Europe resolves to the EU endpoint. It is simple and works everywhere, but it inherits DNS's weaknesses: caching and TTLs mean failover is slow (clients keep using a stale IP until the TTL expires), and the granularity is the resolver, not the user."
+        },
+        {
+          "type": "paragraph",
+          "text": "Anycast routes a single IP address that is announced from many locations via BGP; the network itself delivers each packet to the topologically nearest site. Failover is near-instant because if a site withdraws its route, BGP reconverges and traffic flows to the next-nearest site without any DNS change. The trade-off is that a mid-session BGP path change can move a TCP connection to a different site and break it, so Anycast is ideal for stateless or short-lived connections (DNS, CDNs, DDoS scrubbing) and is usually paired with regional L7 LBs behind each Anycast entry point."
+        },
+        {
+          "type": "table",
+          "headers": ["Approach", "Mechanism", "Failover speed", "Best for"],
+          "rows": [
+            ["GeoDNS", "DNS returns region-specific IPs", "Slow (TTL-bound)", "Coarse geo-steering, simple setups"],
+            ["Anycast", "Same IP via BGP, nearest site wins", "Fast (BGP reconverge)", "CDN/edge, DDoS absorption, DNS"],
+            ["Regional L7 LB", "ALB/nginx/Envoy in each region", "Seconds (health checks)", "Smart per-request routing in-region"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The common production topology stacks all three: Anycast or GeoDNS gets the user to the nearest region, a regional L4 entry LB absorbs the connection, and a fleet of L7 proxies (Envoy/nginx) does path routing, retries, and outlier detection before reaching the backend pool."
+        }
+      ]
+    },
+    {
+      "id": "mesh-autoscale",
+      "heading": "Service Mesh, Autoscaling, and L7 Features",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "In a service mesh (Istio, Linkerd, Consul), load balancing moves from a central appliance to a sidecar proxy (typically Envoy) deployed next to every service instance. Each caller's sidecar holds the full membership of the callee pool and balances client-side — there is no central choke point, balancing decisions use fresh local health data, and mTLS terminates at each pod for zero-trust identity. The mesh control plane pushes endpoint and policy updates to all sidecars. This is just load balancing distributed to the edge of every call, with the same algorithms (least request, EWMA, ring hash) applied per-caller."
+        },
+        {
+          "type": "paragraph",
+          "text": "Autoscaling and load balancing are deeply coupled. The LB's health and connection metrics are often the signal the autoscaler scales on (requests per target, active connections, p99 latency). When the autoscaler adds instances, the LB must register and warm them; when it removes instances, the LB must drain them first. L7 features close the loop on reliability: request retries paper over transient single-instance failures, circuit breaking stops sending traffic to a failing dependency before it drags the caller down, and outlier detection ejects bad instances automatically. These features make the difference between a fleet that degrades gracefully and one that fails in cascades."
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "Path / header routing: send /api/v2/* or 'X-Canary: true' to a specific pool (L7 only).",
+            "Retries with budgets: retry idempotent requests, but cap retry rate to avoid amplifying load.",
+            "Circuit breaking: trip open when error rate or pending requests exceed a threshold; fail fast instead of queueing.",
+            "Outlier detection: auto-eject hosts emitting 5xx/timeouts, restore after a cooldown.",
+            "Rate limiting & load shedding: drop excess traffic at the edge to protect backends during overload."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "thundering-herd",
+      "heading": "Mistake: Ignoring Retry Storms and Thundering Herds",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The most damaging LB-adjacent failure mode is the retry storm. A backend slows down, requests start timing out, and every layer — client, LB, sidecar — retries. Each retry multiplies the offered load on an already-struggling backend, which slows further, which triggers more retries. The system collapses under load it created itself. A naive 'retry on failure' policy with no budget is how a small latency blip becomes a full outage."
+        },
+        {
+          "type": "paragraph",
+          "text": "The related thundering herd happens when many clients act in lockstep: a cache entry expires and a thousand requests stampede the origin simultaneously, or every client reconnects at the same instant after an LB restarts. The fixes are the same family of techniques: exponential backoff with jitter so retries spread out in time, retry budgets that cap retries to a small fraction of total requests (e.g. 10%), circuit breakers that fail fast instead of queueing, and request coalescing / single-flight so only one request refreshes a hot cache key while others wait on its result."
+        },
+        {
+          "type": "code",
+          "language": "go",
+          "code": "// Retry with capped exponential backoff + full jitter (avoids synchronized retries)\nfunc backoff(attempt int) time.Duration {\n\tconst base, max = 50 * time.Millisecond, 2 * time.Second\n\td := base << attempt          // 50ms, 100ms, 200ms, ...\n\tif d > max {\n\t\td = max\n\t}\n\treturn time.Duration(rand.Int63n(int64(d))) // FULL jitter: pick in [0, d)\n}\n\n// Retry budget: only retry if recent retry ratio is under the cap.\n// budget.Allow() returns false once retries exceed e.g. 10% of requests,\n// turning a retry storm back into a single failed request.\nif err := call(); err != nil && idempotent && budget.Allow() {\n\ttime.Sleep(backoff(attempt))\n\terr = call()\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Retries without a budget and jitter are a foot-gun, not a reliability feature. The classic incident: latency rises slightly, retries triple the load, the backend tips over, and the retries keep it down. Always pair retries with backoff+jitter, a retry budget, and circuit breaking."
+        }
+      ]
+    },
+    {
+      "id": "draining-bestpractice",
+      "heading": "Best Practice: Connection Draining for Zero-Downtime Deploys",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Zero-downtime deploys hinge on connection draining (graceful shutdown). When an instance is about to be removed — for a deploy, a scale-in, or a node replacement — you must stop sending it new requests while letting its in-flight requests finish. The sequence that works: (1) the instance is told to shut down; (2) it immediately flips its readiness/health endpoint to 'unhealthy' (or is deregistered from the LB) so the LB stops routing new requests to it; (3) it keeps serving and completing the requests already in flight; (4) after a drain timeout (longer than your slowest request, plus a margin) the process exits. Skipping step 2-3 and just killing the process drops every live request that instance was serving."
+        },
+        {
+          "type": "code",
+          "language": "go",
+          "code": "// Graceful shutdown: fail readiness first, drain in-flight, then exit.\nfunc main() {\n\tsrv := &http.Server{Addr: \":8443\", Handler: mux}\n\tready := atomic.Bool{}\n\tready.Store(true)\n\n\t// /readyz returns 503 the instant we begin shutdown -> LB stops new traffic\n\tmux.HandleFunc(\"/readyz\", func(w http.ResponseWriter, _ *http.Request) {\n\t\tif !ready.Load() {\n\t\t\tw.WriteHeader(http.StatusServiceUnavailable)\n\t\t\treturn\n\t\t}\n\t\tw.WriteHeader(http.StatusOK)\n\t})\n\n\tgo srv.ListenAndServeTLS(crt, key)\n\n\tstop := make(chan os.Signal, 1)\n\tsignal.Notify(stop, syscall.SIGTERM)\n\t<-stop\n\n\tready.Store(false)                 // 1. mark unready; LB drains us out\n\ttime.Sleep(5 * time.Second)        // 2. let LB notice (health interval)\n\n\tctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)\n\tdefer cancel()\n\tsrv.Shutdown(ctx)                  // 3. finish in-flight, refuse new, then exit\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The drain timeout must exceed your slowest legitimate request, and the SIGTERM-to-SIGKILL grace period (e.g. Kubernetes terminationGracePeriodSeconds) must be longer than the drain. If the platform SIGKILLs the pod before draining completes, you drop requests anyway. Also flip readiness BEFORE you stop accepting connections, with a sleep to let the LB's health interval observe the change."
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "Fail readiness first, then sleep at least one health-check interval before exiting.",
+            "Set the LB deregistration / drain timeout > slowest request (ALB 'deregistration delay', nginx graceful reload).",
+            "Make platform grace period (terminationGracePeriodSeconds) > app drain timeout.",
+            "Combine with rolling deploys: never remove more instances than your spare capacity allows.",
+            "For long-lived connections (WebSocket/gRPC streams), send a GOAWAY / close frame so clients reconnect to healthy instances."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "note-observability",
+      "heading": "Note: Observability at the Load Balancer",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The LB is the single best vantage point for service health because every request passes through it. Treat its telemetry as first-class: per-backend request rate, error rate (split by 4xx vs 5xx), latency percentiles (p50/p90/p99), active connections, and health-check transitions. These signals drive autoscaling, alerting, and capacity planning, and they let you spot a single bad instance (one host's p99 spiking) before users do."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Distinguish LB-observed errors from backend-observed errors. A spike in 502/504 at the LB with no corresponding 5xx in the backend logs usually means the backend died or timed out before responding — the LB saw the failure the backend never logged. That gap is a diagnostic signal, not noise."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "global-to-backend-flow",
+      "title": "Client to Global LB to Regional L7 LB to Backend Pool",
+      "type": "mermaid",
+      "content": "flowchart TD\n    C[Client] --> DNS[Global LB / GeoDNS or Anycast]\n    DNS --> R1[Regional L7 LB - US East]\n    DNS --> R2[Regional L7 LB - EU West]\n    R1 -->|health check| B1[Backend 1]\n    R1 -->|health check| B2[Backend 2]\n    R1 -->|health check| B3[Backend 3]\n    R2 -->|health check| B4[Backend 4]\n    R2 -->|health check| B5[Backend 5]\n    B3 -.->|fails healthz| R1\n    R1 -.->|eject unhealthy| B3"
+    },
+    {
+      "id": "consistent-hash-ring",
+      "title": "Consistent Hashing Ring with Virtual Nodes",
+      "type": "ascii",
+      "content": "                 0 / 2^32\n                   |\n          A2 ......*...... B1\n         /                 \\\n       C1                    A1\n       |       keys route     |\n       *      clockwise -->    *\n       B2                    C2\n         \\                 /\n          A3 ......*...... B3\n                   |\n                 2^31\n\n  A1,A2,A3 = virtual nodes of server A\n  B1,B2,B3 = virtual nodes of server B\n  C1,C2    = virtual nodes of server C\n  key K -> hash(K) -> first vnode clockwise owns it.\n  Remove B: only B's arcs spill to next clockwise vnode;\n  every other key stays put (minimal remapping)."
+    },
+    {
+      "id": "drain-sequence",
+      "title": "Connection Draining Sequence on Deploy",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n    participant D as Deployer\n    participant I as Instance\n    participant LB as Load Balancer\n    participant U as User\n    D->>I: SIGTERM (begin shutdown)\n    I->>I: readyz returns 503\n    LB->>I: health check fails\n    LB-->>I: stop new requests\n    U->>LB: new request\n    LB->>I: (skipped, routed elsewhere)\n    Note over I: finish in-flight requests\n    I->>D: exit after drain timeout"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q1",
+      "question": "What are the three core reasons to put a load balancer in front of a service?",
+      "answer": "Scale-out, availability, and elimination of a single point of failure. Scale-out means you add capacity by adding commodity instances rather than buying a bigger machine, so throughput grows horizontally without a hard ceiling. Availability means health checks route traffic away from failed instances within seconds, so a crash degrades capacity instead of causing an outage. Eliminating a single point of failure means no individual server's death takes the whole service down. Everything else an LB does — TLS offload, path routing, sticky sessions, retries — is layered on top of these three pillars. Note that the LB itself must be made redundant, or it simply becomes the new single point of failure.",
+      "difficulty": "easy",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["fundamentals", "availability"],
+      "followUps": ["How do you make the LB tier itself highly available?", "When would you choose client-side load balancing instead?"]
+    },
+    {
+      "id": "q2",
+      "question": "Explain the difference between Layer 4 and Layer 7 load balancing and the trade-offs.",
+      "answer": "A Layer 4 LB operates at the transport layer, seeing only IP addresses and TCP/UDP ports; it makes a forwarding decision per connection and shuttles bytes without understanding the payload. A Layer 7 LB terminates the connection, parses the HTTP request, and routes on application data like path, Host header, cookies, or method. L4 is faster, cheaper, protocol-agnostic, and preserves source IP easily, but it cannot do anything that requires reading the payload. L7 is more expensive because it must terminate TLS and parse HTTP, but it unlocks path routing, header routing, request retries, circuit breaking, caching, and per-request observability. Many production stacks combine them: an L4 edge LB absorbs connections and fans out to a fleet of L7 proxies that do the smart routing.",
+      "difficulty": "medium",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["layer4-vs-layer7", "trade-offs"],
+      "followUps": ["Why does L7 require TLS termination?", "Can an L4 LB do path-based routing?"]
+    },
+    {
+      "id": "q3",
+      "question": "Why does plain round robin fail when requests are long-lived or have uneven cost?",
+      "answer": "Round robin assumes every request costs roughly the same and every server is identical, so it just hands out the next server in rotation regardless of current load. When request durations vary widely, an unlucky server can receive several heavy or long-lived requests in a row and become overloaded while its peers sit nearly idle, because round robin has no feedback about how busy each server already is. With long-lived connections (WebSockets, streaming, gRPC streams), the imbalance compounds over time since the connections do not churn back into the pool. Least connections or least response time fix this by routing to the least-busy server, automatically draining work away from a node that is bogged down. This is why round robin is rarely the right default for real HTTP services with variable workloads; it is fine only when load is genuinely uniform.",
+      "difficulty": "medium",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["algorithms", "round-robin"],
+      "followUps": ["When is least connections itself misleading?", "How does EWMA-based least response time improve on least connections?"]
+    },
+    {
+      "id": "q4",
+      "question": "Why is consistent hashing preferred over modulo hashing when the server count changes?",
+      "answer": "With modulo hashing, the server is chosen as hash(key) % N, so when N changes — adding or removing one server — the modulus changes and almost every key maps to a different server. For a cache or shard this is catastrophic: nearly the entire dataset must be re-fetched or re-shuffled at once, often causing a thundering herd on the origin. Consistent hashing places both keys and servers on a hash ring and routes each key to the next server clockwise, so adding or removing a server only remaps the keys in that server's immediate arc — roughly K/N keys move instead of nearly all of them. This minimal remapping is what makes consistent hashing the standard for distributed caches, sharded stores, and any affinity scheme that must survive a fleet that scales in and out. Virtual nodes are added to smooth the otherwise uneven key distribution across servers.",
+      "difficulty": "hard",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["consistent-hashing", "scaling"],
+      "followUps": ["What problem do virtual nodes solve?", "How many virtual nodes per server is reasonable?"]
+    },
+    {
+      "id": "q5",
+      "question": "How do sticky sessions conflict with autoscaling and statelessness?",
+      "answer": "Sticky sessions pin a client to one backend because that backend holds per-session state in local memory, which means subsequent requests must reach the same server. This fights statelessness, which is the property that lets you load-balance freely, scale in and out, and replace any instance at will. With stickiness, scaling in is dangerous because removing a node logs out or breaks every session pinned to it, and scaling out helps less because existing sessions stay glued to their old (possibly overloaded) servers. A single instance failure also takes down every session it held. The mature fix is to externalize session state into a shared store (Redis), a signed cookie, or a JWT, so the backend becomes stateless and any stickiness left is a performance optimization rather than a correctness requirement. Then the autoscaler and LB can reshape the fleet without breaking users.",
+      "difficulty": "hard",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["stickiness", "autoscaling", "statelessness"],
+      "followUps": ["How would you migrate a sticky app to stateless?", "When is cookie-based stickiness still acceptable?"]
+    },
+    {
+      "id": "q6",
+      "question": "Why can't a Layer 4 load balancer do path-based routing?",
+      "answer": "Path-based routing requires reading the URL path, which lives inside the HTTP request — and the HTTP request is part of the TCP payload. A Layer 4 LB operates at the transport layer and only sees the connection's 4-tuple (source IP/port, destination IP/port); it treats the payload as an opaque stream of bytes and forwards them without parsing. Worse, if the connection is TLS-encrypted, the path is not even readable without terminating TLS, which an L4 LB does not do. To route on path, header, or cookie you must operate at Layer 7, where the LB terminates the connection, decrypts TLS, and parses the HTTP request. This is the fundamental reason path routing, host routing, and cookie stickiness are all L7-only features. An L4 LB can only balance by hashing or counting connections, never by request content.",
+      "difficulty": "medium",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["layer4-vs-layer7", "routing"],
+      "followUps": ["How do some L4 LBs still do SNI-based routing?", "What is the cost of moving to L7 for this?"]
+    },
+    {
+      "id": "q7",
+      "question": "How does where TLS terminates affect mutual TLS and client identity?",
+      "answer": "Where TLS terminates determines who can cryptographically verify the caller's identity. If a central L7 LB terminates TLS and forwards plaintext (or a fresh server-only TLS connection) to the backend, the backend has no cryptographic proof of which client made the call — it must trust whatever the LB tells it via headers. That is acceptable inside a trusted VPC but unacceptable in a zero-trust network. Mutual TLS requires both sides to present certificates, so for the backend to verify the original client, TLS (and mTLS) must terminate at or near the backend. This is exactly why service meshes push TLS termination down to a per-pod sidecar: the sidecar becomes the mTLS endpoint, verifies the caller's identity at the last hop, and no central appliance can spoof it. So the choice between terminate-at-edge versus terminate-at-sidecar is really a choice about your trust model.",
+      "difficulty": "hard",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["tls", "mtls", "service-mesh"],
+      "followUps": ["What is TLS bridging (terminate then re-encrypt)?", "Where does identity verification happen in a service mesh?"]
+    },
+    {
+      "id": "q8",
+      "question": "What is the difference between active and passive health checks, and when does each matter?",
+      "answer": "Active health checks proactively probe each backend on an interval — an HTTP GET to /healthz, a TCP connect, or a gRPC health RPC — and mark a server unhealthy after a threshold of consecutive failures. They catch a server that is silently dead even when no real traffic is flowing to it. Passive health checks, also called outlier detection, observe real responses: if a backend emits a burst of 5xx or timeouts, the LB ejects it without a dedicated probe. The two are complementary: active checks give baseline liveness coverage, while passive detection reacts to problems that only manifest under real load and catches them faster than the next scheduled probe would. Both use hysteresis (require N consecutive failures to eject, M successes to restore) to avoid flapping. A robust setup runs active liveness plus passive outlier detection together.",
+      "difficulty": "medium",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["health-checks", "outlier-detection"],
+      "followUps": ["Why can a deep health check cause a total outage?", "What is panic mode / fail-open?"]
+    },
+    {
+      "id": "q9",
+      "question": "What is a retry storm and how do you prevent it?",
+      "answer": "A retry storm is a self-inflicted cascading failure: a backend slows down, requests start timing out, and every layer — client, LB, sidecar — retries those requests. Each retry adds load to an already-struggling backend, which slows it further and triggers even more retries, until the system collapses under load it generated itself. A small latency blip becomes a full outage. You prevent it with several layered techniques: exponential backoff with jitter so retries spread out in time instead of synchronizing, retry budgets that cap retries to a small fraction (e.g. 10%) of total requests, circuit breakers that fail fast instead of queueing once an error threshold is crossed, and limiting retries to idempotent requests only. The key insight is that retries are a reliability tool only when bounded; unbounded retries are an amplifier that turns minor incidents into major ones.",
+      "difficulty": "hard",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["retry-storm", "reliability", "circuit-breaking"],
+      "followUps": ["Why is full jitter better than fixed backoff?", "How does a retry budget interact with a circuit breaker?"]
+    },
+    {
+      "id": "q10",
+      "question": "Walk through a zero-downtime rolling deploy with connection draining.",
+      "answer": "The instance to be replaced is sent a shutdown signal (SIGTERM). It immediately flips its readiness endpoint to unhealthy (or is deregistered from the LB) so the LB stops routing new requests to it, but it keeps serving and completing the requests already in flight. After a drain timeout that exceeds the slowest legitimate request, the process exits cleanly. The deployer brings up a new instance, waits for it to pass health checks, and only then removes the next old instance — never removing more than spare capacity allows. Crucial details: flip readiness before you stop accepting connections, and sleep at least one health-check interval so the LB actually observes the change before you exit; set the platform grace period (e.g. Kubernetes terminationGracePeriodSeconds) longer than the app's drain timeout, or the pod gets SIGKILLed mid-drain and you drop requests. For long-lived connections, send a GOAWAY so clients reconnect elsewhere.",
+      "difficulty": "hard",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["zero-downtime", "draining", "deploys"],
+      "followUps": ["What goes wrong if you exit before the LB notices?", "How do you drain WebSocket connections?"]
+    },
+    {
+      "id": "q11",
+      "question": "Compare GeoDNS and Anycast for global load balancing.",
+      "answer": "Both steer users to the nearest region, but by different mechanisms. GeoDNS returns different IP addresses based on the resolver's geographic location or measured latency, so a European user resolves to the EU endpoint. It is simple and works everywhere, but it inherits DNS's weaknesses: caching and TTLs make failover slow because clients keep using a stale IP until the TTL expires, and the granularity is the resolver rather than the actual user. Anycast announces a single IP from many sites via BGP, and the network itself delivers each packet to the topologically nearest site; failover is near-instant because when a site withdraws its route, BGP reconverges and traffic flows to the next-nearest site with no DNS change. The downside is that a mid-session BGP path change can move a TCP connection to a different site and break it, so Anycast suits stateless or short-lived traffic (DNS, CDN, DDoS scrubbing). Production systems often combine both with regional L7 LBs behind each entry point.",
+      "difficulty": "medium",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["global-load-balancing", "anycast", "geodns"],
+      "followUps": ["Why does Anycast risk breaking long-lived connections?", "How do you do precise geo-routing despite DNS caching?"]
+    },
+    {
+      "id": "q12",
+      "question": "What changes about load balancing in a service mesh?",
+      "answer": "In a service mesh like Istio or Linkerd, load balancing moves from a central appliance to a sidecar proxy (typically Envoy) deployed next to every service instance. Each caller's sidecar holds the full membership of the callee pool and balances client-side, so there is no central choke point and decisions use fresh local health data instead of a central LB's possibly-stale view. The mesh control plane pushes endpoint and policy updates to all sidecars. mTLS terminates at each pod, giving zero-trust identity verification at the last hop. The same algorithms apply (least request, EWMA, ring hash for affinity), and the same L7 features — retries, circuit breaking, outlier detection — are enforced per-caller. Conceptually it is the same load balancing, just distributed to the edge of every call, which removes the single chokepoint and improves locality of health information at the cost of more moving parts.",
+      "difficulty": "hard",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["service-mesh", "envoy", "client-side-lb"],
+      "followUps": ["What is the downside of so many sidecars?", "How does the control plane keep sidecars in sync?"]
+    },
+    {
+      "id": "q13",
+      "question": "What do virtual nodes solve in consistent hashing, and how many should you use?",
+      "answer": "Without virtual nodes, each physical server occupies exactly one point on the hash ring, and the random placement means the arcs between servers vary wildly in size — one server can end up owning twice as many keys as another, producing badly skewed load. Virtual nodes fix this by placing each physical server at many points on the ring (say 100-200), so the law of large numbers smooths each server's total share of the keyspace toward uniform. They also make add/remove gentler: when a server joins or leaves, its many small arcs are spread across the ring, so the keys that move come from many neighbors in small chunks rather than one big arc. The right count is a tuning knob: too few and the distribution is lumpy, while a few hundred per host typically keeps load within a few percent of uniform. Real systems like Cassandra and Dynamo-style stores use hundreds of vnodes per host for exactly this reason.",
+      "difficulty": "hard",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["consistent-hashing", "virtual-nodes"],
+      "followUps": ["What is the memory/lookup cost of more vnodes?", "How does weighting work with virtual nodes?"]
+    },
+    {
+      "id": "q14",
+      "question": "When is least connections itself a misleading balancing signal?",
+      "answer": "Least connections assumes that the number of active connections is a good proxy for how busy a server is, which holds when each connection carries comparable, short-lived work. It breaks down for protocols where one connection does very unequal amounts of work — for example HTTP/2 and gRPC multiplex many concurrent streams over a single TCP connection, so a server with one connection might be handling a hundred in-flight requests while another with three connections handles three. Counting connections there undercounts the real load on the multiplexed server. Long-lived idle connections (an open WebSocket doing nothing) similarly inflate the count without representing work. In these cases you want a request-level or load-level signal instead, such as least request (outstanding requests, not connections) or an EWMA of latency, which Envoy and similar proxies provide. So least connections is a good default for plain HTTP/1.1 but a poor fit for multiplexed transports.",
+      "difficulty": "hard",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["algorithms", "least-connections", "http2"],
+      "followUps": ["What is the 'least request' algorithm?", "Why does HTTP/2 break connection-based balancing?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch1",
+      "title": "Implement a Consistent-Hashing Ring with Virtual Nodes",
+      "difficulty": "hard",
+      "category": "Architecture",
+      "prompt": "Implement a consistent-hashing ring that supports Add(node), Remove(node), and Get(key). Use virtual nodes so the keyspace is distributed evenly, and lookups should be O(log V) via binary search over a sorted ring. Then demonstrate the key property: after removing one node from a 3-node ring of 1000 keys, only roughly K/N (about one third) of the keys should change ownership, not nearly all of them as plain modulo hashing would cause.",
+      "hints": [
+        "Hash each physical node at `replicas` distinct points (e.g. hash(node + '#' + i)) and keep all ring positions in one sorted slice.",
+        "For Get, hash the key and binary-search for the first ring position >= the key's hash, wrapping to index 0 if you fall off the end.",
+        "To prove minimal remapping, snapshot key->node before removal, remove a node, then count how many keys changed owner; it should be close to 1/N of the total."
+      ],
+      "solutionCode": "package hashring\n\nimport (\n\t\"hash/crc32\"\n\t\"sort\"\n\t\"strconv\"\n)\n\ntype Ring struct {\n\treplicas int\n\tkeys     []uint32          // sorted ring positions\n\thashMap  map[uint32]string // ring position -> node\n}\n\nfunc New(replicas int) *Ring {\n\treturn &Ring{replicas: replicas, hashMap: make(map[uint32]string)}\n}\n\nfunc hash(s string) uint32 { return crc32.ChecksumIEEE([]byte(s)) }\n\nfunc (r *Ring) Add(node string) {\n\tfor i := 0; i < r.replicas; i++ {\n\t\th := hash(node + \"#\" + strconv.Itoa(i))\n\t\tr.keys = append(r.keys, h)\n\t\tr.hashMap[h] = node\n\t}\n\tsort.Slice(r.keys, func(i, j int) bool { return r.keys[i] < r.keys[j] })\n}\n\nfunc (r *Ring) Remove(node string) {\n\tkept := r.keys[:0]\n\tfor _, h := range r.keys {\n\t\tif r.hashMap[h] == node {\n\t\t\tdelete(r.hashMap, h)\n\t\t\tcontinue\n\t\t}\n\t\tkept = append(kept, h)\n\t}\n\tr.keys = kept\n}\n\nfunc (r *Ring) Get(key string) string {\n\tif len(r.keys) == 0 {\n\t\treturn \"\"\n\t}\n\th := hash(key)\n\ti := sort.Search(len(r.keys), func(i int) bool { return r.keys[i] >= h })\n\tif i == len(r.keys) {\n\t\ti = 0 // wrap around\n\t}\n\treturn r.hashMap[r.keys[i]]\n}\n\n// Demonstration of minimal remapping.\nfunc Demo() (moved, total int) {\n\tr := New(150)\n\tr.Add(\"A\")\n\tr.Add(\"B\")\n\tr.Add(\"C\")\n\n\tbefore := make(map[string]string)\n\tfor k := 0; k < 1000; k++ {\n\t\tkey := \"key-\" + strconv.Itoa(k)\n\t\tbefore[key] = r.Get(key)\n\t}\n\n\tr.Remove(\"B\") // remove one of three nodes\n\n\tfor key, oldNode := range before {\n\t\tif r.Get(key) != oldNode {\n\t\t\tmoved++\n\t\t}\n\t\ttotal++\n\t}\n\t// moved should be ~ 1/3 of total (the keys that were on B),\n\t// NOT ~all of them as `hash % N` would produce.\n\treturn moved, total\n}",
+      "solutionLanguage": "go",
+      "explanation": "The ring stores every virtual node's position in a single sorted slice, so a lookup is a binary search (sort.Search) for the first position greater than or equal to the key's hash, wrapping to index 0 when the key falls past the last position. Each physical node is hashed at `replicas` distinct points (150 here), which spreads each node's ownership across many small arcs and keeps the per-node share of the keyspace close to uniform; without virtual nodes the random single placement would leave some nodes owning far more keys than others. The Demo function proves the headline property: it records which node owns each of 1000 keys, removes node B, and counts how many keys changed owner. Because only B's arcs are reassigned to their clockwise neighbors, the moved count comes out near one third of the keys — the share that lived on B — while every key on A and C stays put. Plain modulo hashing (hash(key) % N) would instead remap almost every key when N drops from 3 to 2, since the modulus itself changes. This minimal-remapping behavior is exactly why consistent hashing underpins distributed caches and sharded datastores that must survive nodes joining and leaving without a full reshuffle. The lookup cost is O(log V) in the number of virtual nodes, and memory grows linearly with replicas, which is the tuning trade-off.",
+      "relatedTopic": "load-balancing"
+    },
+    {
+      "id": "ch2",
+      "title": "Design an nginx Config for a Zero-Downtime Rolling Deploy",
+      "difficulty": "medium",
+      "category": "Architecture",
+      "prompt": "Write an nginx upstream and server configuration for a backend pool of three instances that supports a zero-downtime rolling deploy. It must use least_conn balancing, perform passive failure detection so a dead instance is pulled from rotation, retry idempotent requests against another backend on failure, terminate TLS at the proxy and re-encrypt to the backends, and forward the real client IP and protocol. Explain how an instance is drained during a deploy so no in-flight request is dropped.",
+      "hints": [
+        "Use `least_conn` plus `max_fails` / `fail_timeout` per server for passive ejection, and `keepalive` to reuse upstream connections.",
+        "Use `proxy_next_upstream` to retry on connection errors, timeouts, and 502/503/504 against a different backend.",
+        "Draining is operational, not just config: deregister or fail the backend's health endpoint first, wait one health interval, then `nginx -s reload` or remove the server so in-flight requests finish."
+      ],
+      "solutionCode": "upstream api_pool {\n    least_conn;\n\n    server 10.0.1.11:8443 max_fails=3 fail_timeout=10s;\n    server 10.0.1.12:8443 max_fails=3 fail_timeout=10s;\n    server 10.0.1.13:8443 max_fails=3 fail_timeout=10s;\n\n    keepalive 64;  # reuse upstream conns, avoid per-request TLS handshakes\n}\n\nserver {\n    listen 443 ssl http2;\n    server_name api.example.com;\n\n    # TLS terminates here so we can do L7 routing + retries\n    ssl_certificate     /etc/nginx/tls/api.crt;\n    ssl_certificate_key /etc/nginx/tls/api.key;\n\n    location / {\n        proxy_pass https://api_pool;   # re-encrypt on the upstream hop\n        proxy_http_version 1.1;\n        proxy_set_header Connection \"\";\n\n        # preserve original client identity past TLS termination\n        proxy_set_header Host              $host;\n        proxy_set_header X-Real-IP         $remote_addr;\n        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;\n        proxy_set_header X-Forwarded-Proto $scheme;\n\n        # retry an idempotent request on a different backend if one fails\n        proxy_next_upstream         error timeout http_502 http_503 http_504;\n        proxy_next_upstream_tries   2;\n        proxy_next_upstream_timeout 5s;\n        proxy_connect_timeout       2s;\n        proxy_read_timeout          30s;\n    }\n\n    # shallow liveness for the LB / orchestrator\n    location = /healthz {\n        access_log off;\n        return 200 \"ok\\n\";\n    }\n}\n\n# --- Drain sequence during a rolling deploy (per instance) ---\n# 1. Tell instance 10.0.1.13 to begin shutdown; it flips /healthz to 503\n#    (or you comment its `server` line and `nginx -s reload`).\n# 2. nginx stops sending NEW requests to it (passive/manual removal),\n#    but existing in-flight requests on kept-alive conns finish.\n# 3. Wait > slowest request (drain timeout) before the process exits.\n# 4. Bring up the new instance, confirm /healthz=200, then move to the\n#    next instance. Never remove more than spare capacity allows.",
+      "solutionLanguage": "nginx",
+      "explanation": "The upstream uses least_conn so traffic flows to the least-busy instance, which matters during a deploy when one instance is draining and should not receive new load. Each server has max_fails and fail_timeout, giving passive ejection: after three failures within the window nginx stops routing to that instance for fail_timeout seconds, so a crashed backend is pulled automatically. keepalive reuses upstream connections to avoid a fresh TLS handshake per request, which is significant because we re-encrypt on the proxy-to-backend hop. TLS terminates at the proxy so we can apply L7 logic and retries, and because termination hides the real client we re-add X-Real-IP, X-Forwarded-For, and X-Forwarded-Proto so the backend can reconstruct the original request. proxy_next_upstream provides request-level retries: if a backend returns a connection error, timeout, or 502/503/504, nginx transparently retries the request against a different backend (bounded by proxy_next_upstream_tries to avoid amplifying load). The drain sequence is the operational core of zero-downtime deploys: the instance first fails its health endpoint (or is removed from the upstream and nginx is reloaded), which stops new requests while in-flight requests on existing connections complete; only after a drain timeout longer than the slowest request does the process exit, and you advance to the next instance only once the replacement passes health checks, never removing more instances than your spare capacity tolerates.",
+      "relatedTopic": "load-balancing"
+    }
+  ],
+  "references": [
+    {
+      "label": "NGINX: HTTP Load Balancing Guide",
+      "url": "https://docs.nginx.com/nginx/admin-guide/load-balancer/http-load-balancer/"
+    },
+    {
+      "label": "HAProxy Configuration Manual",
+      "url": "https://docs.haproxy.org/2.9/configuration.html"
+    },
+    {
+      "label": "Envoy: Load Balancing Overview",
+      "url": "https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/load_balancing/load_balancing"
+    },
+    {
+      "label": "Cloudflare: How Anycast Works",
+      "url": "https://www.cloudflare.com/learning/cdn/glossary/anycast-network/"
+    },
+    {
+      "label": "AWS: Elastic Load Balancing (ALB/NLB) Documentation",
+      "url": "https://docs.aws.amazon.com/elasticloadbalancing/latest/userguide/what-is-load-balancing.html"
+    },
+    {
+      "label": "Google SRE Book: Handling Overload (retry storms, load shedding)",
+      "url": "https://sre.google/sre-book/handling-overload/"
+    }
+  ]
+}
