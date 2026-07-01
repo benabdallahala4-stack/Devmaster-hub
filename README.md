@@ -90,6 +90,18 @@ scrape or embed content from gated platforms. Re-run the command to refresh; edi
 `ALLOWLIST` in [`scripts/import-exercises.mjs`](scripts/import-exercises.mjs) to change
 which exercises are pulled.
 
+## Quality & CI
+
+```bash
+npm run test:ci               # headless unit tests (services)
+npm run content:verify-runner # run every imported exercise's exemplar through the runner
+```
+
+GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on every push
+/ PR to `main`: content validation, the exercise-runner verification, sync checks
+(`index.json` and the generated `runner-core.ts` must match their sources), a production
+build, and the headless unit-test suite.
+
 ## Project structure
 
 ```
@@ -100,8 +112,9 @@ src/app/
   shared/      reusable UI (logo, icon set, code-block, diagram, question-card,
                progress-ring, content-blocks, challenge-view, …)
   features/    dashboard · topics (list + generic detail) · interview · challenges
-               (list + detail) · progress · settings  (all lazy-loaded)
-src/assets/data/   index.json · topics/*.json · challenges.json
+               (list + detail + in-browser code runner) · review · progress · settings
+               (all lazy-loaded)
+src/assets/data/   index.json · topics/*.json · challenges.json · challenges.imported.json
 ```
 
 ## License

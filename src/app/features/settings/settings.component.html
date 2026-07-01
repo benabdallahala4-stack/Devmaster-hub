@@ -44,6 +44,19 @@
     </div>
     <div class="st__row">
       <div class="st__label">
+        <h3>Back up progress</h3>
+        <p class="muted">Export your completion, review flags and solved challenges to a file — or restore them on another device.</p>
+      </div>
+      <div class="st__backup">
+        <button class="btn" (click)="exportProgress()"><app-icon name="external" [size]="16" /> Export</button>
+        <label class="btn st__import">
+          <app-icon name="arrow-right" [size]="16" /> Import
+          <input type="file" accept="application/json,.json" (change)="importProgress($event)" hidden />
+        </label>
+      </div>
+    </div>
+    <div class="st__row">
+      <div class="st__label">
         <h3>Reset progress</h3>
         <p class="muted">Remove all completed topics, solved challenges and interview history.</p>
       </div>

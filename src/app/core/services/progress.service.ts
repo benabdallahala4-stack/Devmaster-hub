@@ -108,6 +108,34 @@ export class ProgressService {
     this._questions.set(new Map());
   }
 
+  /** Serialize all progress to a portable JSON string (for backup / device transfer). */
+  exportData(): string {
+    return JSON.stringify({
+      app: 'devmaster-hub',
+      version: 2,
+      exportedAt: new Date().toISOString(),
+      completedTopics: [...this._completed()],
+      solvedChallenges: [...this._solved()],
+      questionStatus: [...this._questions().entries()],
+    }, null, 2);
+  }
+
+  /** Replace current progress from a previously exported JSON string. Returns false on bad input. */
+  importData(json: string): boolean {
+    try {
+      const d = JSON.parse(json) as Partial<ProgressStateV2>;
+      if (!Array.isArray(d.completedTopics) && !Array.isArray(d.solvedChallenges) && !Array.isArray(d.questionStatus)) {
+        return false;
+      }
+      this._completed.set(new Set(d.completedTopics ?? []));
+      this._solved.set(new Set(d.solvedChallenges ?? []));
+      this._questions.set(new Map(d.questionStatus ?? []));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private restore(): void {
     try {
       const raw = localStorage.getItem(KEY);
