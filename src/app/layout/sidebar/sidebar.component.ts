@@ -33,6 +33,7 @@ export class SidebarComponent {
     { path: '/topics', label: 'Topics', icon: 'topics' },
     { path: '/interview', label: 'Interview Mode', icon: 'interview' },
     { path: '/challenges', label: 'Challenges', icon: 'challenges' },
+    { path: '/review', label: 'Review', icon: 'refresh' },
     { path: '/progress', label: 'Progress', icon: 'progress' },
   ];
 

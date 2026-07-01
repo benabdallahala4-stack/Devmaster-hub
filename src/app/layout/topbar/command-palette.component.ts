@@ -77,6 +77,7 @@ export class CommandPaletteComponent {
     { label: 'Browse all topics', icon: 'topics', path: '/topics' },
     { label: 'Start Interview Mode', icon: 'brain', path: '/interview' },
     { label: 'Challenges', icon: 'challenges', path: '/challenges' },
+    { label: 'Review queue', icon: 'refresh', path: '/review' },
     { label: 'Your progress', icon: 'progress', path: '/progress' },
     { label: 'Settings', icon: 'settings', path: '/settings' },
   ];
