@@ -1,0 +1,700 @@
+{
+  "id": "angular-directives",
+  "title": "Angular Directives",
+  "category": "Frontend",
+  "subcategory": "Directives",
+  "difficulty": "senior",
+  "tags": [
+    "angular",
+    "directives",
+    "structural-directives",
+    "attribute-directives",
+    "host-binding",
+    "template-ref",
+    "host-directives",
+    "control-flow"
+  ],
+  "description": "A staff-level tour of Angular directives: attribute vs structural vs component directives, HostBinding/HostListener, Renderer2, TemplateRef/ViewContainerRef desugaring, the hostDirectives composition API, and how the new @if/@for control flow reshapes structural-directive usage.",
+  "estReadMinutes": 29,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "What a Directive Actually Is",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "In Angular, a directive is a class annotated with @Directive that attaches behavior to elements in a template. The framework has exactly three kinds of directives, and understanding that a component is simply a directive with a template is the mental unlock that makes the rest of the model coherent. @Component extends @Directive; everything a component can do to a host element (host bindings, host listeners, dependency injection, lifecycle hooks) a directive can do too, minus the template and view encapsulation."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Components: directives with a template. Their selector usually matches an element (my-widget).",
+            "Attribute directives: change the appearance or behavior of an existing element, component, or another directive (e.g. [appHighlight], [ngClass]).",
+            "Structural directives: add, remove, or manipulate DOM by reshaping layout via an embedded view (e.g. *ngIf legacy, *appUnless custom)."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Since Angular 17 the recommended default for control flow is the built-in @if/@for/@switch block syntax. Structural directives are NOT deprecated; you still write custom ones for cross-cutting DOM behavior (permissions, feature flags, virtualization). Only the built-in *ngIf/*ngFor/*ngSwitch have a superior block-syntax replacement."
+        },
+        {
+          "type": "paragraph",
+          "text": "This topic focuses on senior concerns: how the * shorthand desugars, why Renderer2 exists, how @HostBinding and @HostListener differ from manual DOM access, the directive composition API for behavior reuse, and the interview traps that separate people who have shipped custom directives from those who have only consumed them."
+        }
+      ]
+    },
+    {
+      "id": "why-directives",
+      "heading": "Why Directives Matter",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Directives are Angular's answer to behavior reuse without inheritance and without wrapping elements in extra components. When you want a tooltip, a click-outside detector, an autofocus, a drag handle, or a permission gate, you do not want to introduce a new host element or restructure the DOM. A directive attaches the behavior in place, keeps the template semantic, and composes with whatever element it lands on."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Reuse: one [appTooltip] works on a button, an icon, or a span without duplicating logic.",
+            "Separation of concerns: DOM side effects (focus, scroll, aria attributes) live in a directive instead of leaking into component logic.",
+            "Composition: hostDirectives lets you assemble behavior from small directives rather than deep class hierarchies.",
+            "Testability: a directive is a plain class with injected dependencies, unit-testable in isolation via a host test component."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The staff-level heuristic: if a piece of behavior does not need its own template and could apply to many different elements, it is a directive, not a component. Reaching for a wrapper component when a directive would do bloats the DOM and breaks CSS layout assumptions."
+        },
+        {
+          "type": "paragraph",
+          "text": "Structural directives specifically matter because they are the only sanctioned way to conditionally instantiate or repeat views while keeping change detection correct. A permission directive that removes an element from the DOM (not merely hides it with CSS) is a security and performance win: the element is never rendered, its bindings never run, and its children are never instantiated."
+        }
+      ]
+    },
+    {
+      "id": "three-kinds",
+      "heading": "The Three Kinds Compared",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Every directive is defined by its selector and what it does to the element it matches. The table below is the canonical comparison senior candidates are expected to reproduce."
+        },
+        {
+          "type": "table",
+          "columns": ["Aspect", "Attribute directive", "Structural directive", "Component"],
+          "rows": [
+            ["Decorator", "@Directive", "@Directive", "@Component (extends @Directive)"],
+            ["Has a template", "No", "No (uses TemplateRef of host)", "Yes"],
+            ["Typical selector", "[appHighlight] attribute", "[appUnless] via * shorthand", "app-widget element"],
+            ["DOM effect", "Mutates existing host element", "Adds/removes embedded views", "Renders its own view tree"],
+            ["Key injectables", "ElementRef, Renderer2", "TemplateRef, ViewContainerRef", "ElementRef, ChangeDetectorRef"],
+            ["Per element limit", "Many allowed", "Only ONE per element", "One element = one component"],
+            ["Example", "[ngClass], [appTooltip]", "*ngIf, *appHasRole", "MatButton, app-card"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The single most tested constraint: you may apply only ONE structural directive per element, because each one claims the element's TemplateRef and the * desugaring produces a single wrapping <ng-template>. Two would fight over the same host template. The fix is to nest, use <ng-container>, or in modern Angular use @if/@for blocks which do not have this limitation."
+        },
+        {
+          "type": "paragraph",
+          "text": "Attribute and structural directives share the @Directive decorator; the difference is entirely in what they inject and do. An attribute directive injects ElementRef/Renderer2 and mutates the host. A structural directive injects TemplateRef (a handle to the content it wraps) and ViewContainerRef (a place to stamp that content) and controls whether/how many times the content renders."
+        }
+      ]
+    },
+    {
+      "id": "attribute-highlight",
+      "heading": "Attribute Directive: Highlight with HostBinding and HostListener",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The classic attribute directive. It takes an @Input color, binds a background via @HostBinding, and toggles it on mouse enter/leave via @HostListener. Note there is zero manual DOM access here: @HostBinding declaratively binds a host property and Angular handles the write during change detection, keeping the directive SSR-safe and testable."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Directive, HostBinding, HostListener, Input, signal } from '@angular/core';\n\n@Directive({\n  selector: '[appHighlight]',\n  standalone: true,\n})\nexport class HighlightDirective {\n  // The selector doubles as the primary input alias, so\n  // <p [appHighlight]=\"'gold'\"> sets highlightColor directly.\n  @Input('appHighlight') highlightColor = 'yellow';\n  @Input() defaultColor = 'transparent';\n\n  private readonly hovered = signal(false);\n\n  @HostBinding('style.backgroundColor')\n  get background(): string {\n    return this.hovered() ? this.highlightColor : this.defaultColor;\n  }\n\n  @HostBinding('style.transition') readonly transition = 'background-color 120ms ease';\n\n  @HostListener('mouseenter') onEnter(): void {\n    this.hovered.set(true);\n  }\n\n  @HostListener('mouseleave') onLeave(): void {\n    this.hovered.set(false);\n  }\n}"
+        },
+        {
+          "type": "code",
+          "language": "html",
+          "code": "<p [appHighlight]=\"'#fff3cd'\" defaultColor=\"#f8f9fa\">\n  Hover me to highlight.\n</p>\n\n<!-- Because the input is aliased to the selector, the shorthand\n     [appHighlight] carries the value; other inputs are separate attributes. -->"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Aliasing an @Input to the directive selector name (here @Input('appHighlight')) is the idiom that lets [appHighlight]=\"value\" both activate the directive and pass its main argument. This is exactly how [ngClass] and [routerLink] read their primary value."
+        },
+        {
+          "type": "paragraph",
+          "text": "You can also declare host bindings and listeners in the decorator's host metadata object instead of the property decorators. Both compile to the same thing; teams pick one style for consistency. The decorator form (@HostBinding/@HostListener) keeps the binding next to the member it uses, which many find more readable for stateful directives."
+        }
+      ]
+    },
+    {
+      "id": "renderer2",
+      "heading": "ElementRef, Renderer2, and Why Not nativeElement",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "When declarative host bindings are not enough (you need to add child nodes, toggle classes imperatively, set attributes on the fly), you inject ElementRef for the host and Renderer2 to mutate it. The senior question is always: why not just touch el.nativeElement directly?"
+        },
+        {
+          "type": "list",
+          "style": "ordered",
+          "items": [
+            "Platform independence: Renderer2 works with the active RendererFactory, so the same code runs under server-side rendering (no DOM), web workers, or non-browser renderers. Direct nativeElement access assumes a browser DOM and throws or corrupts state under SSR.",
+            "Security & sanitization: going through the renderer keeps you within Angular's abstraction and avoids bypassing framework guarantees; ad-hoc innerHTML writes are an XSS foot-gun.",
+            "Encapsulation: Renderer2.addClass/setStyle respect view-encapsulation attribute scoping, so styles you add still match emulated-encapsulation selectors correctly.",
+            "Testability: the renderer can be mocked; nativeElement calls couple your directive to a real DOM in tests."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Directive, ElementRef, Renderer2, OnInit, inject } from '@angular/core';\n\n@Directive({ selector: '[appElevate]', standalone: true })\nexport class ElevateDirective implements OnInit {\n  private readonly el = inject<ElementRef<HTMLElement>>(ElementRef);\n  private readonly renderer = inject(Renderer2);\n\n  ngOnInit(): void {\n    // Preferred: renderer methods instead of el.nativeElement.style.* / classList.*\n    this.renderer.addClass(this.el.nativeElement, 'app-elevated');\n    this.renderer.setStyle(this.el.nativeElement, 'box-shadow', '0 2px 8px rgba(0,0,0,.15)');\n    this.renderer.setAttribute(this.el.nativeElement, 'data-elevated', 'true');\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Reading from the DOM (measuring width, reading scrollTop) via nativeElement is acceptable because there is no renderer read API. Writing to the DOM should go through Renderer2. Mixing writes through nativeElement.style breaks SSR and can desync Angular's understanding of the host."
+        }
+      ]
+    },
+    {
+      "id": "click-outside",
+      "heading": "Attribute Directive with an Output: Click-Outside",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A production favorite: detect clicks outside the host element and emit an event so a dropdown or menu can close. It listens on the document target via @HostListener('document:click', ['$event.target']) and compares against the host using contains(). Emitting an @Output keeps the directive dumb and reusable."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Directive, ElementRef, EventEmitter, HostListener, Output, inject } from '@angular/core';\n\n@Directive({\n  selector: '[appClickOutside]',\n  standalone: true,\n})\nexport class ClickOutsideDirective {\n  @Output('appClickOutside') readonly clickOutside = new EventEmitter<PointerEvent>();\n\n  private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);\n\n  @HostListener('document:pointerdown', ['$event'])\n  onDocumentClick(event: PointerEvent): void {\n    const target = event.target as Node | null;\n    if (target && !this.host.nativeElement.contains(target)) {\n      this.clickOutside.emit(event);\n    }\n  }\n}"
+        },
+        {
+          "type": "code",
+          "language": "html",
+          "code": "<div class=\"menu\" *ngIf=\"open\" (appClickOutside)=\"open = false\">\n  <button>Profile</button>\n  <button>Sign out</button>\n</div>"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Use pointerdown (or mousedown) rather than click for close-on-outside behavior: it fires before focus shifts and before the click that may open another menu, avoiding the flicker where the menu re-opens then immediately closes. Listening on document via the HostListener 'document:' target is the clean way to bind global events without manual addEventListener/removeEventListener bookkeeping."
+        }
+      ]
+    },
+    {
+      "id": "desugar",
+      "heading": "How the * Shorthand Desugars",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The asterisk is pure syntactic sugar. When Angular's compiler sees *appUnless=\"cond\" on an element, it lifts that element into an <ng-template> and moves the directive plus its microsyntax onto the template. The directive then receives a TemplateRef for that captured content and a ViewContainerRef anchored where the template sits."
+        },
+        {
+          "type": "code",
+          "language": "html",
+          "code": "<!-- What you write -->\n<div *appUnless=\"isLoggedIn\">Please sign in</div>\n\n<!-- What Angular compiles it to -->\n<ng-template [appUnless]=\"isLoggedIn\">\n  <div>Please sign in</div>\n</ng-template>"
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "The host element and its content become the ng-template's content -> that is the TemplateRef the directive injects.",
+            "The property in the shorthand (appUnless) becomes an input binding [appUnless] on the template.",
+            "The ng-template is a comment node placeholder in the DOM; nothing renders until the directive calls createEmbeddedView.",
+            "This is why exactly ONE structural directive fits per element: there is only one host element to lift into one ng-template."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Microsyntax is the mini-grammar inside the quotes, e.g. *ngFor=\"let item of items; let i = index; trackBy: trackFn\". The compiler parses it into bindings (ngForOf, ngForTrackBy) and local template variables. Custom structural directives can define their own microsyntax by naming inputs with the directive prefix (e.g. appRepeatFrom)."
+        }
+      ]
+    },
+    {
+      "id": "custom-structural",
+      "heading": "Building a Custom Structural Directive: *appUnless",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The canonical custom structural directive. *appUnless renders its content only when the condition is falsy (the inverse of *ngIf). It injects TemplateRef (the captured content) and ViewContainerRef (where to stamp it), then creates or clears the embedded view based on the input."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Directive, Input, TemplateRef, ViewContainerRef, inject } from '@angular/core';\n\n@Directive({\n  selector: '[appUnless]',\n  standalone: true,\n})\nexport class UnlessDirective {\n  private readonly templateRef = inject<TemplateRef<unknown>>(TemplateRef);\n  private readonly vcr = inject(ViewContainerRef);\n  private hasView = false;\n\n  @Input()\n  set appUnless(condition: boolean) {\n    if (!condition && !this.hasView) {\n      // Condition is falsy and nothing is rendered -> stamp the template.\n      this.vcr.createEmbeddedView(this.templateRef);\n      this.hasView = true;\n    } else if (condition && this.hasView) {\n      // Condition became truthy -> tear the view down.\n      this.vcr.clear();\n      this.hasView = false;\n    }\n  }\n}"
+        },
+        {
+          "type": "code",
+          "language": "html",
+          "code": "<p *appUnless=\"hasPermission\">You do not have access to this resource.</p>\n\n<!-- Repeat directive with microsyntax and a context ($implicit + index) -->\n<div *appRepeat=\"5; let i = index\">Row {{ i }}</div>"
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Directive, Input, TemplateRef, ViewContainerRef, inject } from '@angular/core';\n\ninterface RepeatContext {\n  $implicit: number;\n  index: number;\n}\n\n@Directive({ selector: '[appRepeat]', standalone: true })\nexport class RepeatDirective {\n  private readonly templateRef = inject<TemplateRef<RepeatContext>>(TemplateRef);\n  private readonly vcr = inject(ViewContainerRef);\n\n  @Input()\n  set appRepeat(count: number) {\n    this.vcr.clear();\n    for (let i = 0; i < count; i++) {\n      // Context object exposes $implicit (default 'let x') and named vars.\n      this.vcr.createEmbeddedView(this.templateRef, { $implicit: i, index: i });\n    }\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The context object's $implicit property maps to the default let binding: *appRepeat=\"5; let n\" binds n to $implicit. Named properties (index, even, first) map to let x = index. Providing a static ngTemplateContextGuard also gives you type checking inside the template."
+        }
+      ]
+    },
+    {
+      "id": "has-role",
+      "heading": "Production Structural Directive: *appHasRole (Permissions)",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A permission gate is where structural directives earn their keep: content the user cannot access is never instantiated, so its bindings never run and no data leaks into the DOM. This is strictly stronger than [hidden] or *ngIf on a template boolean, because the whole subtree is absent."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Directive, Input, TemplateRef, ViewContainerRef, inject, effect } from '@angular/core';\nimport { AuthService } from './auth.service';\n\n@Directive({\n  selector: '[appHasRole]',\n  standalone: true,\n})\nexport class HasRoleDirective {\n  private readonly tpl = inject<TemplateRef<unknown>>(TemplateRef);\n  private readonly vcr = inject(ViewContainerRef);\n  private readonly auth = inject(AuthService);\n  private required: string[] = [];\n\n  constructor() {\n    // React to role changes (auth.roles is a signal) and re-evaluate.\n    effect(() => {\n      const roles = this.auth.roles();\n      this.render(this.required.some((r) => roles.includes(r)));\n    });\n  }\n\n  @Input()\n  set appHasRole(roles: string | string[]) {\n    this.required = Array.isArray(roles) ? roles : [roles];\n  }\n\n  private render(allowed: boolean): void {\n    this.vcr.clear();\n    if (allowed) {\n      this.vcr.createEmbeddedView(this.tpl);\n    }\n  }\n}"
+        },
+        {
+          "type": "code",
+          "language": "html",
+          "code": "<button *appHasRole=\"'admin'\" (click)=\"deleteUser()\">Delete user</button>\n<section *appHasRole=\"['editor', 'admin']\">Content management tools</section>"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "A client-side permission directive is a UX affordance, NOT a security boundary. Any determined user can call the API directly. Always enforce authorization on the server. The directive prevents accidental exposure and cleans up the UI; it does not protect the resource."
+        }
+      ]
+    },
+    {
+      "id": "control-flow",
+      "heading": "Built-in Control Flow vs Structural Directives",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Angular 17 introduced @if/@for/@switch as compiler-level block syntax. They replace *ngIf/*ngFor/*ngSwitch for control flow but are NOT directives at all: there is no TemplateRef claim, no ng-template desugaring you write, and thus no one-structural-directive-per-element restriction. They are faster (no directive instantiation, better change-detection tracking) and ergonomic (mandatory @for track, built-in @empty and @else)."
+        },
+        {
+          "type": "code",
+          "language": "html",
+          "code": "<!-- Modern block control flow -->\n@if (user(); as u) {\n  <app-profile [user]=\"u\" />\n} @else {\n  <app-login />\n}\n\n@for (item of items(); track item.id) {\n  <li>{{ item.name }}</li>\n} @empty {\n  <li>No items</li>\n}\n\n@switch (status()) {\n  @case ('loading') { <app-spinner /> }\n  @case ('error')   { <app-error /> }\n  @default          { <app-content /> }\n}"
+        },
+        {
+          "type": "table",
+          "columns": ["Concern", "*ngIf / *ngFor (directive)", "@if / @for (control flow)"],
+          "rows": [
+            ["Nature", "Structural directive", "Compiler block, not a directive"],
+            ["One-per-element rule", "Applies (must nest)", "Does not apply"],
+            ["track in loops", "Optional trackBy", "Mandatory track expression"],
+            ["else / empty", "ng-template + else", "Built-in @else / @empty"],
+            ["Bundle/imports", "Needs CommonModule", "No import needed"],
+            ["Performance", "Directive overhead", "Lower overhead, better diffing"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The nuance interviewers want: control flow replaces the BUILT-IN structural directives, but you still write CUSTOM structural directives (permissions, virtual scroll, feature flags) because @if/@for cannot inject services and drive DOM instantiation based on arbitrary logic. Custom structural directives remain first-class."
+        }
+      ]
+    },
+    {
+      "id": "host-directives",
+      "heading": "Directive Composition API (hostDirectives)",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Introduced in Angular 15, hostDirectives lets a component or directive apply other directives to its own host element without the template author adding them. This is composition over inheritance: assemble behavior from small directives. You can also selectively expose the applied directives' inputs and outputs via aliasing."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Directive, Component } from '@angular/core';\nimport { HighlightDirective } from './highlight.directive';\nimport { ClickOutsideDirective } from './click-outside.directive';\n\n// A menu component that automatically gains highlight + click-outside behavior.\n@Component({\n  selector: 'app-menu',\n  standalone: true,\n  template: '<ng-content />',\n  hostDirectives: [\n    {\n      directive: HighlightDirective,\n      inputs: ['appHighlight: menuHighlight'], // re-expose under a new name\n    },\n    {\n      directive: ClickOutsideDirective,\n      outputs: ['appClickOutside: dismissed'], // re-expose output\n    },\n  ],\n})\nexport class MenuComponent {}"
+        },
+        {
+          "type": "code",
+          "language": "html",
+          "code": "<!-- Consumer sees only the exposed aliases, not the underlying directives. -->\n<app-menu [menuHighlight]=\"'#eef'\" (dismissed)=\"close()\">\n  <button>Item</button>\n</app-menu>"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Execution order matters: host directives run their constructors and lifecycle hooks BEFORE the host component/directive that declares them, and in array order. This means a host directive can be injected by the host in its constructor. If you rely on ordering, document it; reordering the hostDirectives array changes initialization sequence."
+        },
+        {
+          "type": "paragraph",
+          "text": "Inputs and outputs of host directives are NOT exposed to templates by default. You must list them (optionally with an alias) in the inputs/outputs arrays. This keeps the public API of your component intentional rather than leaking every internal directive's surface."
+        }
+      ]
+    },
+    {
+      "id": "exportas-di",
+      "heading": "exportAs, Template References, and DI",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "exportAs gives a directive a name that a template reference variable can bind to, letting a template call the directive's public API. NgForm and NgModel do this (#f=\"ngForm\"). Your own directives can expose methods and state the same way."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Directive, signal } from '@angular/core';\n\n@Directive({\n  selector: '[appToggle]',\n  standalone: true,\n  exportAs: 'appToggle',\n})\nexport class ToggleDirective {\n  readonly open = signal(false);\n  toggle(): void { this.open.update((v) => !v); }\n}"
+        },
+        {
+          "type": "code",
+          "language": "html",
+          "code": "<div appToggle #t=\"appToggle\">\n  <button (click)=\"t.toggle()\">Toggle</button>\n  @if (t.open()) { <p>Panel content</p> }\n</div>"
+        },
+        {
+          "type": "paragraph",
+          "text": "Dependency injection in directives works exactly as in components: use inject() or constructor params. A directive can inject the host component (or another directive on the same element) to coordinate, can inject a parent directive via the DI hierarchy, and can provide its own services scoped to the element. This is how, for example, a form-control directive reaches its parent form group."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Injecting another directive from the same element (e.g. @Optional() to a sibling directive, or @Self()/@Host() modifiers) is a powerful coordination pattern. A validation directive can inject the NgControl on the same element; a drag directive can inject a drop-container directive from an ancestor via @Host()."
+        }
+      ]
+    },
+    {
+      "id": "mistakes",
+      "heading": "Common Mistakes",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Applying two structural directives to one element (*ngIf and *ngFor together). It does not compile. Nest them or use @if/@for.",
+            "Writing to the DOM via el.nativeElement.style/classList instead of Renderer2, breaking SSR and encapsulation.",
+            "Forgetting to call vcr.clear() in a custom structural directive before re-rendering, leaking duplicate views.",
+            "Using innerHTML or nativeElement.setAttribute for user data, opening XSS holes instead of going through the renderer/sanitizer.",
+            "Treating a permission structural directive as real security instead of a UX layer over server-enforced authorization.",
+            "Expecting host directive inputs/outputs to be usable in templates without listing them in the inputs/outputs arrays."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Do not manually add and remove global event listeners with addEventListener in a directive without cleaning up in ngOnDestroy. Prefer @HostListener('document:...') or Renderer2.listen (which returns an unlisten function). Leaked global listeners are a classic memory-leak source in long-lived apps."
+        },
+        {
+          "type": "paragraph",
+          "text": "Another subtle trap: relying on @HostBinding getters that read from state not tracked by change detection. If the bound value depends on a plain field mutated outside Angular's zone, the binding will not update. Use signals or trigger change detection, or the host style will silently go stale."
+        }
+      ]
+    },
+    {
+      "id": "bestpractices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "style": "ordered",
+          "items": [
+            "Prefer @HostBinding/@HostListener over manual DOM for host mutations and event handling; drop to Renderer2 only for imperative multi-node work.",
+            "Never write to the DOM through nativeElement; use Renderer2 so code survives SSR and respects encapsulation.",
+            "Give custom structural directives a clear microsyntax and, where possible, an ngTemplateContextGuard for typed template variables.",
+            "Reach for @if/@for/@switch for control flow; reserve custom structural directives for behavior that needs services or DOM logic.",
+            "Use hostDirectives to compose reusable behavior instead of copy-pasting @HostListener blocks across components.",
+            "Expose directive APIs deliberately via exportAs; expose host-directive inputs/outputs explicitly to keep public surfaces intentional.",
+            "Always tear down: use Renderer2.listen's unlisten return, takeUntilDestroyed, or ngOnDestroy for any manual subscription or listener."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Ship small, single-purpose directives. A directive that does one thing (autofocus, click-outside, tooltip) composes with others and is trivial to test. When behavior grows, split it and compose via hostDirectives rather than growing one mega-directive."
+        }
+      ]
+    },
+    {
+      "id": "note-testing",
+      "heading": "Note: Testing Directives",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Directives are tested through a host test component. You declare a tiny component whose template uses the directive, mount it with TestBed, then assert on the host element's classes, styles, attributes, or emitted outputs. For structural directives, assert on whether the embedded content is present in the DOM after change detection."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Component } from '@angular/core';\nimport { TestBed } from '@angular/core/testing';\nimport { UnlessDirective } from './unless.directive';\n\n@Component({\n  standalone: true,\n  imports: [UnlessDirective],\n  template: '<p *appUnless=\"blocked\">visible</p>',\n})\nclass HostCmp { blocked = false; }\n\nit('renders when condition is falsy', () => {\n  const fixture = TestBed.createComponent(HostCmp);\n  fixture.detectChanges();\n  expect(fixture.nativeElement.textContent).toContain('visible');\n\n  fixture.componentInstance.blocked = true;\n  fixture.detectChanges();\n  expect(fixture.nativeElement.textContent).not.toContain('visible');\n});"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "For attribute directives, dispatch real events (element.dispatchEvent(new MouseEvent('mouseenter'))) to exercise @HostListener handlers, then run detectChanges() and assert on the resulting host style/class. This tests the full binding path, not just the class method."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "desugar-flow",
+      "title": "How *directive Desugars to ng-template + ViewContainerRef",
+      "type": "mermaid",
+      "content": "flowchart TD\n  A[Template with star directive] --> B[Compiler lifts host element]\n  B --> C[Wraps element in ng-template]\n  C --> D[Directive injects TemplateRef]\n  C --> E[Directive injects ViewContainerRef]\n  D --> F[createEmbeddedView on condition]\n  E --> F\n  F --> G[Embedded view stamped into DOM]"
+    },
+    {
+      "id": "host-directives-flow",
+      "title": "hostDirectives Applying Behavior to a Host",
+      "type": "mermaid",
+      "content": "flowchart TD\n  A[Host component declares hostDirectives] --> B[Host directive 1 constructed first]\n  B --> C[Host directive 2 constructed next]\n  C --> D[Host component constructed]\n  D --> E[Host component can inject host directives]\n  B --> F[Exposed inputs and outputs aliased]\n  C --> F\n  F --> G[Consumer template uses aliases only]"
+    },
+    {
+      "id": "kind-decision",
+      "title": "Choosing the Directive Kind",
+      "type": "ascii",
+      "content": "Need a template?\n  yes -> Component\n  no  -> Change existing element only?\n           yes -> Attribute directive (ElementRef/Renderer2, HostBinding)\n           no  -> Add/remove/repeat DOM?\n                    yes -> Structural directive (TemplateRef/ViewContainerRef)\n                            (built-in control flow? prefer @if/@for/@switch)"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-three-kinds",
+      "question": "What are the three kinds of directives in Angular, and how are they related?",
+      "answer": "Angular has components, attribute directives, and structural directives. A component is technically a directive with a template: @Component extends @Directive, so components inherit host bindings, host listeners, DI, and lifecycle hooks. Attribute directives change the appearance or behavior of an existing element, component, or another directive without adding or removing DOM. Structural directives reshape the DOM by adding, removing, or repeating embedded views using a TemplateRef and a ViewContainerRef. The unifying idea is that all three are @Directive-based; the differences are whether they have a template and what they do to the host.",
+      "difficulty": "easy",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["basics", "components", "structural"],
+      "followUps": ["Why is a component considered a directive?", "Which injectables distinguish an attribute directive from a structural one?"]
+    },
+    {
+      "id": "q-star-desugar",
+      "question": "What does the * shorthand on a structural directive desugar to?",
+      "answer": "The asterisk is pure syntactic sugar. When Angular's compiler sees something like *appUnless=\"cond\" on an element, it lifts that element and its content into an <ng-template>, and moves the directive plus its microsyntax onto that template as bindings (for example [appUnless]=\"cond\"). The directive then injects a TemplateRef pointing to the captured content and a ViewContainerRef anchored where the template sits, and it decides whether and how many times to stamp the content via createEmbeddedView. Nothing renders until that call. Because there is exactly one host element to lift into exactly one ng-template, only one structural directive can occupy an element.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["structural", "desugaring", "ng-template"],
+      "followUps": ["Show the compiled ng-template form for *ngIf.", "How does microsyntax map to inputs and local variables?"]
+    },
+    {
+      "id": "q-one-structural",
+      "question": "Why can you apply only one structural directive per element?",
+      "answer": "Each structural directive claims the element's content by turning it into an <ng-template>, and the * desugaring produces a single wrapping template around the host element. Two structural directives on the same element would both try to lift the same element into a template and both inject the same TemplateRef, which is ambiguous and unsupported, so it does not compile. The standard fixes are to nest the directives, wrap one in an <ng-container> (which adds no DOM), or in modern Angular use @if/@for blocks, which are compiler control flow rather than directives and therefore are not subject to this rule.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["structural", "constraints", "ng-container"],
+      "followUps": ["How does ng-container help here?", "Do @if and @for have the same limitation?"]
+    },
+    {
+      "id": "q-hostbinding-vs-renderer",
+      "question": "When would you use @HostBinding versus Renderer2?",
+      "answer": "@HostBinding is a declarative binding of a host element property, attribute, class, or style to a class member; Angular writes it during change detection, so it is SSR-safe, encapsulation-aware, and reactive to the bound value. Use it for simple, single-property host state such as a class toggle or a style value. Renderer2 is imperative and is used when you must do things a single binding cannot express: adding or removing multiple classes conditionally, creating child nodes, or performing DOM work in a lifecycle hook. Both avoid direct nativeElement writes, but @HostBinding is preferred whenever the behavior can be expressed as a bound property because it is more declarative and change-detection friendly.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["host-binding", "renderer2", "dom"],
+      "followUps": ["Can @HostBinding go stale? When?", "How do you bind a class conditionally with @HostBinding?"]
+    },
+    {
+      "id": "q-renderer-not-nativeelement",
+      "question": "Why use Renderer2 instead of writing to nativeElement directly?",
+      "answer": "Renderer2 abstracts DOM mutation so the same code runs under the active renderer, which may be server-side rendering, a web worker, or a non-browser platform where there is no DOM. Direct nativeElement writes assume a browser and break or corrupt state under SSR. Renderer2 also respects Angular's view-encapsulation attribute scoping, so classes and styles you add still match emulated-encapsulation selectors, and it keeps you inside the framework's abstraction rather than bypassing sanitization. It is also more testable because the renderer can be mocked. Reading from nativeElement (measuring layout) is fine since there is no renderer read API, but writes should go through Renderer2.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["renderer2", "ssr", "security"],
+      "followUps": ["Is it ever acceptable to read nativeElement directly?", "How does Renderer2.listen help with cleanup?"]
+    },
+    {
+      "id": "q-if-vs-structural",
+      "question": "What is the difference between @if and a structural directive like *ngIf?",
+      "answer": "@if is built-in control flow implemented at the compiler level; it is not a directive at all. There is no TemplateRef claim, no ng-template you author, and therefore no one-structural-directive-per-element restriction, plus it needs no CommonModule import. *ngIf is a structural directive: it desugars to an ng-template, instantiates a directive that injects TemplateRef and ViewContainerRef, and carries directive overhead. @if is faster and more ergonomic (built-in @else, and @for adds mandatory track and @empty). Crucially, @if/@for replace the built-in control-flow directives but do not replace custom structural directives, which remain the right tool when instantiation must depend on injected services or arbitrary logic.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["control-flow", "structural", "angular17"],
+      "followUps": ["Does @if instantiate a directive?", "When do you still write a custom structural directive?"]
+    },
+    {
+      "id": "q-host-directive-order",
+      "question": "In what order do host directives execute relative to the host component?",
+      "answer": "Host directives are constructed and have their lifecycle hooks run BEFORE the host component or directive that declares them, and they run in the order they appear in the hostDirectives array. This ordering guarantee is what allows the host component to inject one of its host directives in its own constructor: the dependency is already created. If you rely on a specific sequence, document it, because reordering the hostDirectives array changes the initialization order. This is analogous to how a base class initializes before a derived class, but achieved through composition rather than inheritance.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["host-directives", "composition", "lifecycle"],
+      "followUps": ["Can the host inject a host directive?", "How do you re-expose a host directive's input?"]
+    },
+    {
+      "id": "q-microsyntax",
+      "question": "What is microsyntax and how does it map to inputs and template variables?",
+      "answer": "Microsyntax is the mini-grammar written inside a structural directive's quotes, such as \"let item of items; let i = index; trackBy: trackFn\". The compiler parses it into input bindings on the desugared template and into local template variables. Keys formed by the directive prefix plus a word become inputs (of maps to ngForOf, trackBy maps to ngForTrackBy). The let clauses bind template variables: a bare let x binds to the context's $implicit property, and let x = index binds to a named context property. Custom structural directives define their own microsyntax by naming inputs with the directive prefix and by populating a context object when creating embedded views.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["microsyntax", "structural", "context"],
+      "followUps": ["What does $implicit map to?", "How do you type template context variables?"]
+    },
+    {
+      "id": "q-templateref-vcr",
+      "question": "What are TemplateRef and ViewContainerRef, and how does a structural directive use them?",
+      "answer": "TemplateRef is a handle to a block of template content (the content the * shorthand captured into an ng-template); it represents what to render. ViewContainerRef is an anchor in the DOM where views can be created and destroyed; it represents where to render. A structural directive injects both, then calls viewContainerRef.createEmbeddedView(templateRef, context) to stamp the content, optionally passing a context object for template variables. To remove content it calls clear() or removes a specific view. Managing a hasView flag or clearing before re-rendering avoids duplicate embedded views.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["templateref", "viewcontainerref", "structural"],
+      "followUps": ["Why clear the view container before re-rendering?", "How do you pass data into the embedded view?"]
+    },
+    {
+      "id": "q-input-alias-selector",
+      "question": "How do you let [appHighlight]=\"value\" both activate a directive and pass its main input?",
+      "answer": "You alias an @Input to the directive's selector name, for example @Input('appHighlight') highlightColor = 'yellow'. The selector [appHighlight] matches the element and activates the directive, and because the input is aliased to that same attribute name, the bound expression value flows straight into the aliased property. This is exactly how [ngClass], [routerLink], and [style.x] read their primary value. Additional inputs use their own attribute names as separate bindings. It keeps the template concise and reads like a single meaningful attribute.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["input", "selector", "aliasing"],
+      "followUps": ["How does [ngClass] use this pattern?", "Can multiple inputs be aliased?"]
+    },
+    {
+      "id": "q-exportas",
+      "question": "What does exportAs do and when is it useful?",
+      "answer": "exportAs assigns a name to a directive so a template reference variable can bind to the directive instance, letting the template call its public API. For example #f=\"ngForm\" binds f to the NgForm directive so you can read f.valid. On your own directives you set exportAs on the decorator and then bind #t=\"appToggle\", after which the template can call t.toggle() or read t.open(). It is useful whenever a directive exposes state or methods that the surrounding template needs to drive UI, avoiding a wrapper component or a shared service for what is really local coordination.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["exportas", "template-reference", "api"],
+      "followUps": ["How does NgForm use exportAs?", "Can a template call a directive method through the reference?"]
+    },
+    {
+      "id": "q-di-in-directives",
+      "question": "How does dependency injection work inside directives, and how can directives coordinate?",
+      "answer": "DI in directives works like in components: use inject() or constructor parameters. A directive can inject services, the host component, or another directive on the same element, using modifiers like @Self, @Host, @Optional, and @SkipSelf to control where in the element/injector hierarchy the dependency is resolved. A validation directive can inject the NgControl on its own element; a drag directive can inject a drop-container directive from an ancestor with @Host. Directives can also provide their own services scoped to the element via the providers array. This makes DI the primary coordination mechanism between directives on the same or nested elements.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["dependency-injection", "coordination", "modifiers"],
+      "followUps": ["What does @Host() resolution mean?", "How would a form control directive reach its parent form?"]
+    },
+    {
+      "id": "q-click-outside-event",
+      "question": "How would you build a click-outside directive, and why use pointerdown over click?",
+      "answer": "You inject the host ElementRef and listen on the document with @HostListener('document:pointerdown', ['$event']). In the handler you check whether the event target is contained within the host element using nativeElement.contains(target); if not, you emit an @Output so the parent can, for example, close a menu. Using the HostListener document target avoids manual addEventListener/removeEventListener bookkeeping and automatic cleanup happens with the directive. Prefer pointerdown or mousedown over click because it fires before focus shifts and before a subsequent click that might reopen another menu, preventing the flicker where the menu closes and immediately reopens.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["click-outside", "host-listener", "output"],
+      "followUps": ["Why does HostListener('document:...') simplify cleanup?", "How do you test this directive?"]
+    },
+    {
+      "id": "q-permission-security",
+      "question": "Is a *hasRole structural directive a security boundary?",
+      "answer": "No. A client-side permission directive is a UX affordance, not a security control. It prevents content the user should not see from being instantiated in the DOM, which avoids accidental exposure of markup and stops bindings and child components from running, but any determined user can call the backend API directly or manipulate client state. Authorization must always be enforced on the server for every request. The directive's value is cleaner UI and defense against accidental leakage; it must never be relied on to protect a resource. This distinction is exactly what interviewers probe when they ask whether hiding a delete button is sufficient.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["permissions", "security", "structural"],
+      "followUps": ["What is the advantage over [hidden] for permission gating?", "Where must authorization actually be enforced?"]
+    },
+    {
+      "id": "q-host-directive-inputs",
+      "question": "Are host directive inputs and outputs automatically available on the host's template API?",
+      "answer": "No. By default the inputs and outputs of directives applied via hostDirectives are internal and not exposed to the template that uses the host. To make them usable you must explicitly list them in the inputs and outputs arrays of the hostDirectives entry, optionally with an alias to rename them. This is a deliberate design so that composing behavior does not accidentally leak every internal directive's binding surface into the host's public API; the host author curates exactly which inputs and outputs are exposed. Forgetting to list them is a common reason a binding silently does nothing.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["host-directives", "inputs", "outputs"],
+      "followUps": ["How do you alias a host directive input?", "Why is the default non-exposed?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-unless",
+      "title": "Build a *appUnless Structural Directive",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "prompt": "Create a standalone structural directive appUnless that renders its template content only when the bound condition is falsy (the inverse of *ngIf). It must inject TemplateRef and ViewContainerRef, create the embedded view when the condition is falsy, and clear it when the condition becomes truthy, without stamping duplicate views.",
+      "hints": [
+        "Inject TemplateRef<unknown> and ViewContainerRef via inject().",
+        "Use a boolean setter on the @Input named exactly appUnless (matching the selector).",
+        "Track a hasView flag so you only createEmbeddedView once and clear() once."
+      ],
+      "solutionCode": "import { Directive, Input, TemplateRef, ViewContainerRef, inject } from '@angular/core';\n\n@Directive({\n  selector: '[appUnless]',\n  standalone: true,\n})\nexport class UnlessDirective {\n  private readonly templateRef = inject<TemplateRef<unknown>>(TemplateRef);\n  private readonly vcr = inject(ViewContainerRef);\n  private hasView = false;\n\n  @Input()\n  set appUnless(condition: boolean) {\n    if (!condition && !this.hasView) {\n      this.vcr.createEmbeddedView(this.templateRef);\n      this.hasView = true;\n    } else if (condition && this.hasView) {\n      this.vcr.clear();\n      this.hasView = false;\n    }\n  }\n}\n\n// Usage:\n// <p *appUnless=\"isLoggedIn\">Please sign in</p>",
+      "solutionLanguage": "typescript",
+      "explanation": "The directive selector [appUnless] combined with the * shorthand causes the compiler to lift the host element into an ng-template, giving the directive a TemplateRef for the captured content and a ViewContainerRef anchored where the template sits. The @Input setter is named appUnless so the shorthand value flows straight into it. When the condition is falsy and no view exists, createEmbeddedView stamps the content and sets hasView; when the condition turns truthy and a view exists, clear() removes it and resets the flag. The hasView guard is essential: without it, repeated falsy values would stamp duplicate views and repeated clears would be wasted work. This mirrors how the built-in NgIf works internally, and it demonstrates the core structural-directive contract of TemplateRef plus ViewContainerRef. In modern Angular you would often prefer @if for simple negation, but a custom directive remains the right tool when the render decision needs injected services or non-trivial logic.",
+      "relatedTopic": "angular-directives"
+    },
+    {
+      "id": "ch-click-outside",
+      "title": "Click-Outside Attribute Directive with an Output",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "prompt": "Build a standalone attribute directive appClickOutside that emits an output whenever a pointerdown occurs outside the host element. It should not require manual addEventListener cleanup and should use the host ElementRef to determine containment.",
+      "hints": [
+        "Use @HostListener('document:pointerdown', ['$event']) so cleanup is automatic.",
+        "Inject ElementRef<HTMLElement> and use nativeElement.contains(target).",
+        "Alias the @Output to the selector so (appClickOutside)=\"...\" works."
+      ],
+      "solutionCode": "import { Directive, ElementRef, EventEmitter, HostListener, Output, inject } from '@angular/core';\n\n@Directive({\n  selector: '[appClickOutside]',\n  standalone: true,\n})\nexport class ClickOutsideDirective {\n  @Output('appClickOutside') readonly clickOutside = new EventEmitter<PointerEvent>();\n\n  private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);\n\n  @HostListener('document:pointerdown', ['$event'])\n  onDocumentPointerDown(event: PointerEvent): void {\n    const target = event.target as Node | null;\n    if (target && !this.host.nativeElement.contains(target)) {\n      this.clickOutside.emit(event);\n    }\n  }\n}\n\n// Usage:\n// <div class=\"menu\" (appClickOutside)=\"open = false\">...</div>",
+      "solutionLanguage": "typescript",
+      "explanation": "The directive listens on the document via the HostListener 'document:' target syntax, which registers and automatically deregisters the listener with the directive lifecycle, so there is no manual addEventListener or ngOnDestroy cleanup to leak. On each pointerdown it reads the event target and asks the host element whether it contains that node; if not, the interaction happened outside and it emits the aliased output. Aliasing the @Output to the selector name lets consumers bind (appClickOutside)=\"...\" as if the directive were a native event, which reads cleanly. Choosing pointerdown over click matters: it fires before focus changes and before a following click that could reopen another menu, avoiding the classic close-then-reopen flicker. The directive stays presentation-agnostic by emitting an event rather than closing anything itself, so it composes with any consumer. To test it you would dispatch a pointerdown from a node outside the host and assert the output fired.",
+      "relatedTopic": "angular-directives"
+    },
+    {
+      "id": "ch-tooltip",
+      "title": "Tooltip Directive with HostListener and Renderer2",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "prompt": "Create a standalone attribute directive appTooltip that takes tooltip text as its input and shows a positioned tooltip element on mouseenter, removing it on mouseleave. Use Renderer2 to create and attach the tooltip node (not innerHTML) and clean up on destroy.",
+      "hints": [
+        "Alias @Input('appTooltip') to carry the text.",
+        "Use Renderer2.createElement, createText, appendChild, and setStyle to build the node.",
+        "Implement OnDestroy and remove the node to avoid leaks."
+      ],
+      "solutionCode": "import { Directive, ElementRef, Input, OnDestroy, Renderer2, HostListener, inject } from '@angular/core';\n\n@Directive({\n  selector: '[appTooltip]',\n  standalone: true,\n})\nexport class TooltipDirective implements OnDestroy {\n  @Input('appTooltip') text = '';\n\n  private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);\n  private readonly renderer = inject(Renderer2);\n  private tooltip: HTMLElement | null = null;\n\n  @HostListener('mouseenter')\n  show(): void {\n    if (this.tooltip || !this.text) return;\n    const tip = this.renderer.createElement('span');\n    this.renderer.appendChild(tip, this.renderer.createText(this.text));\n    this.renderer.addClass(tip, 'app-tooltip');\n    this.renderer.setStyle(tip, 'position', 'absolute');\n\n    const rect = this.host.nativeElement.getBoundingClientRect();\n    this.renderer.setStyle(tip, 'top', rect.bottom + window.scrollY + 4 + 'px');\n    this.renderer.setStyle(tip, 'left', rect.left + window.scrollX + 'px');\n\n    this.renderer.appendChild(document.body, tip);\n    this.tooltip = tip;\n  }\n\n  @HostListener('mouseleave')\n  hide(): void {\n    if (this.tooltip) {\n      this.renderer.removeChild(document.body, this.tooltip);\n      this.tooltip = null;\n    }\n  }\n\n  ngOnDestroy(): void {\n    this.hide();\n  }\n}\n\n// Usage:\n// <button [appTooltip]=\"'Save changes'\">Save</button>",
+      "solutionLanguage": "typescript",
+      "explanation": "The directive aliases its input to the selector so [appTooltip]=\"text\" both activates it and supplies the label. On mouseenter it builds the tooltip node entirely through Renderer2 (createElement, createText, appendChild, addClass, setStyle) rather than innerHTML, which keeps the code SSR-safe, encapsulation-aware, and free of XSS risk since text is inserted as a text node, never parsed as HTML. It positions the tooltip by reading the host's bounding rectangle (a read, which is legitimately done via nativeElement because there is no renderer read API) and offsetting for scroll. Appending to document.body avoids clipping by overflow:hidden ancestors, a common tooltip pitfall. Cleanup is critical: hide removes the node on mouseleave, and ngOnDestroy calls hide so a tooltip is never orphaned if the host is destroyed while hovered, preventing DOM leaks. A production version would add debounce, aria-describedby wiring for accessibility, and edge-of-viewport flipping, but this captures the HostListener plus Renderer2 pattern the challenge targets.",
+      "relatedTopic": "angular-directives"
+    },
+    {
+      "id": "ch-host-directives",
+      "title": "Compose Behavior with hostDirectives",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "prompt": "Create a standalone app-menu component that automatically gains highlight-on-hover behavior and click-outside dismissal by composing existing HighlightDirective and ClickOutsideDirective through the hostDirectives API, exposing only a renamed highlight input and a renamed dismissed output to consumers.",
+      "hints": [
+        "Add a hostDirectives array to @Component metadata.",
+        "Use the inputs array with 'appHighlight: menuHighlight' to alias the input.",
+        "Use the outputs array with 'appClickOutside: dismissed' to alias the output."
+      ],
+      "solutionCode": "import { Component } from '@angular/core';\nimport { HighlightDirective } from './highlight.directive';\nimport { ClickOutsideDirective } from './click-outside.directive';\n\n@Component({\n  selector: 'app-menu',\n  standalone: true,\n  template: '<ng-content />',\n  hostDirectives: [\n    {\n      directive: HighlightDirective,\n      inputs: ['appHighlight: menuHighlight'],\n    },\n    {\n      directive: ClickOutsideDirective,\n      outputs: ['appClickOutside: dismissed'],\n    },\n  ],\n})\nexport class MenuComponent {}\n\n// Usage:\n// <app-menu [menuHighlight]=\"'#eef'\" (dismissed)=\"close()\">\n//   <button>Item</button>\n// </app-menu>",
+      "solutionLanguage": "typescript",
+      "explanation": "The hostDirectives array applies HighlightDirective and ClickOutsideDirective to the app-menu host element without the consumer's template ever referencing them, which is composition over inheritance: the menu assembles behavior from small, independently testable directives. By default those directives' inputs and outputs are internal, so the component explicitly re-exposes them: the inputs entry 'appHighlight: menuHighlight' surfaces the highlight color under the friendlier name menuHighlight, and the outputs entry 'appClickOutside: dismissed' surfaces the outside-click event as dismissed. This curated exposure keeps the component's public API intentional instead of leaking every internal binding. Execution order is guaranteed: the host directives are constructed and initialized in array order before MenuComponent itself, so the component could inject either directive in its own constructor if it needed to coordinate. The result is a menu that highlights on hover and emits dismissed when the user clicks outside, all without duplicating a single HostListener, and the behavior can be reused on any other component by adding the same hostDirectives entries.",
+      "relatedTopic": "angular-directives"
+    }
+  ],
+  "references": [
+    { "label": "Angular Docs: Attribute Directives", "url": "https://angular.dev/guide/directives/attribute-directives" },
+    { "label": "Angular Docs: Structural Directives", "url": "https://angular.dev/guide/directives/structural-directives" },
+    { "label": "Angular Docs: Directive Composition API", "url": "https://angular.dev/guide/directives/directive-composition-api" },
+    { "label": "Angular Docs: Built-in Control Flow", "url": "https://angular.dev/guide/templates/control-flow" },
+    { "label": "Angular Docs: Directives Overview", "url": "https://angular.dev/guide/directives" }
+  ]
+}
