@@ -1,0 +1,546 @@
+[
+  {
+    "id": "ex-acronym",
+    "title": "Acronym",
+    "difficulty": "junior",
+    "category": "Computer Science",
+    "prompt": "Convert a phrase to its acronym.\n\nTechies love their TLA (Three Letter Acronyms)!\n\nHelp generate some jargon by writing a program that converts a long name like Portable Network Graphics to its acronym (PNG).\n\nPunctuation is handled as follows: hyphens are word separators (like whitespace); all other punctuation can be removed from the input.\n\nFor example:\n\n| Input                     | Output |\n| ------------------------- | ------ |\n| As Soon As Possible       | ASAP   |\n| Liquid-crystal display    | LCD    |\n| Thank George It's Friday! | TGIF   |",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "export const parse = (phrase) =>\n  phrase\n    .replace(\"'\", '')\n    .match(/^[A-Z]|(?<=[^A-Z])[A-Z]|\\b[a-z]/g)\n    .join('')\n    .toUpperCase();",
+    "solutionLanguage": "javascript",
+    "explanation": "This is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Acronym\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/acronym",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-anagram",
+    "title": "Anagram",
+    "difficulty": "junior",
+    "category": "Computer Science",
+    "prompt": "Given a target word and one or more candidate words, your task is to find the candidates that are anagrams of the target.\n\nAn anagram is a rearrangement of letters to form a new word: for example \"owns\" is an anagram of \"snow\".\nA word is _not_ its own anagram: for example, \"stop\" is not an anagram of \"stop\".\n\nThe target word and candidate words are made up of one or more ASCII alphabetic characters (A-Z and a-z).\nLowercase and uppercase characters are equivalent: for example, \"PoTS\" is an anagram of \"sTOp\", but \"StoP\" is not an anagram of \"sTOp\".\nThe words you need to find should be taken from the candidate words, using the same letter case.\n\nGiven the target \"stone\" and the candidate words \"stone\", \"tones\", \"banana\", \"tons\", \"notes\", and \"Seton\", the anagram words you need to find are \"tones\", \"notes\", and \"Seton\".",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "const normalize = (str) => str.toLowerCase().split('').sort().join();\nconst sameWord = (word, candidate) =>\n  word.toLowerCase() === candidate.toLowerCase();\nconst isAnagram = (word, candidate) => normalize(word) === normalize(candidate);\n\nexport const findAnagrams = (subject, candidates) => {\n  const wordsCopy = Array.isArray(candidates) ? candidates : [...candidates];\n  return wordsCopy.filter(\n    (candidate) =>\n      !sameWord(subject, candidate) && isAnagram(subject, candidate),\n  );\n};",
+    "solutionLanguage": "javascript",
+    "explanation": "Introduction\n\nAt a garage sale, you find a lovely vintage typewriter at a bargain price!\nExcitedly, you rush home, insert a sheet of paper, and start typing away.\nHowever, your excitement wanes when you examine the output: all words are garbled!\nFor example, it prints \"stop\" instead of \"post\" and \"least\" instead of \"stale.\"\nCarefully, you try again, but now it prints \"spot\" and \"slate.\"\nAfter some experimentation, you find there is a random delay before each letter is printed, which messes up the order.\nYou now understand why they sold it for so little money!\n\nYou realize this quirk allows you to generate anagrams, which are words formed by rearranging the letters of another word.\nPleased with your finding, you spend the rest of the day generating hundreds of anagrams.\n\nThis is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Anagram\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/anagram",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-collatz-conjecture",
+    "title": "Collatz Conjecture",
+    "difficulty": "junior",
+    "category": "Computer Science",
+    "prompt": "Given a positive integer, return the number of steps it takes to reach 1 according to the rules of the Collatz Conjecture.",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "export const steps = (n) => {\n  if (n <= 0) {\n    throw new Error('Only positive integers are allowed');\n  }\n\n  const iterate = (number, step) => {\n    if (number === 1) {\n      return step;\n    }\n\n    return number % 2 === 0\n      ? iterate(number / 2, step + 1)\n      : iterate(3 * number + 1, step + 1);\n  };\n  return iterate(n, 0);\n};",
+    "solutionLanguage": "javascript",
+    "explanation": "Introduction\n\nOne evening, you stumbled upon an old notebook filled with cryptic scribbles, as though someone had been obsessively chasing an idea.\nOn one page, a single question stood out: Can every number find its way to 1?\nIt was tied to something called the Collatz Conjecture, a puzzle that has baffled thinkers for decades.\n\nThe rules were deceptively simple.\nPick any positive integer.\n\n- If it's even, divide it by 2.\n- If it's odd, multiply it by 3 and add 1.\n\nThen, repeat these steps with the result, continuing indefinitely.\n\nCurious, you picked number 12 to test and began the journey:\n\n12 ➜ 6 ➜ 3 ➜ 10 ➜ 5 ➜ 16 ➜ 8 ➜ 4 ➜ 2 ➜ 1\n\nCounting from the second number (6), it took 9 steps to reach 1, and each time the rules repeated, the number kept changing.\nAt first, the sequence seemed unpredictable — jumping up, down, and all over.\nYet, the conjecture claims that no matter the starting number, we'll always end at 1.\n\nIt was fascinating, but also puzzling.\nWhy does this always seem to work?\nCould there be a number where the process breaks down, looping forever or escaping into infinity?\nThe notebook suggested solving this could reveal something profound — and with it, fame, [fortune][collatz-prize], and a place in history awaits whoever could unlock its secrets.\n\n[collatz-prize]: https://mathprize.net/posts/collatz-conjecture/\n\nThis is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Collatz Conjecture\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/collatz-conjecture",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-darts",
+    "title": "Darts",
+    "difficulty": "junior",
+    "category": "Computer Science",
+    "prompt": "Calculate the points scored in a single toss of a Darts game.\n\n[Darts][darts] is a game where players throw darts at a [target][darts-target].\n\nIn our particular instance of the game, the target rewards 4 different amounts of points, depending on where the dart lands:\n\n!Our dart scoreboard with values from a complete miss to a bullseye\n\n- If the dart lands outside the target, player earns no points (0 points).\n- If the dart lands in the outer circle of the target, player earns 1 point.\n- If the dart lands in the middle circle of the target, player earns 5 points.\n- If the dart lands in the inner circle of the target, player earns 10 points.\n\nThe outer circle has a radius of 10 units (this is equivalent to the total radius for the entire target), the middle circle a radius of 5 units, and the inner circle a radius of 1.\nOf course, they are all centered at the same point — that is, the circles are [concentric][] defined by the coordinates (0, 0).\n\nGiven a point in the target (defined by its [Cartesian coordinates][cartesian-coordinates] x and y, where x and y are [real][real-numbers]), calculate the correct score earned by a dart landing at that point.\n\nCredit\n\nThe scoreboard image was created by [habere-et-dispertire][habere-et-dispertire] using [Inkscape][inkscape].\n\n[darts]: https://en.wikipedia.org/wiki/Darts\n[darts-target]: https://en.wikipedia.org/wiki/Darts#/media/File:Darts_in_a_dartboard.jpg\n[concentric]: https://mathworld.wolfram.com/ConcentricCircles.html\n[cartesian-coordinates]: https://www.mathsisfun.com/data/cartesian-coordinates.html\n[real-numbers]: https://www.mathsisfun.com/numbers/real-numbers.html\n[habere-et-dispertire]: https://exercism.org/profiles/habere-et-dispertire\n[inkscape]: https://en.wikipedia.org/wiki/Inkscape",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "export const score = (x, y) => {\n  // Check for NaN\n  if (Number.isNaN(Number(x)) || Number.isNaN(Number(y))) return null;\n\n  // Use euclidean distance\n  const distanceToDart = Math.sqrt(x * x + y * y);\n\n  // Define points for each section of the target\n  if (distanceToDart > 10) return 0;\n  if (distanceToDart > 5) return 1;\n  if (distanceToDart > 1) return 5;\n  return 10;\n};",
+    "solutionLanguage": "javascript",
+    "explanation": "This is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Darts\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/darts",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-difference-of-squares",
+    "title": "Difference of Squares",
+    "difficulty": "junior",
+    "category": "Computer Science",
+    "prompt": "Find the difference between the square of the sum and the sum of the squares of the first N natural numbers.\n\nThe square of the sum of the first ten natural numbers is\n(1 + 2 + ... + 10)² = 55² = 3025.\n\nThe sum of the squares of the first ten natural numbers is\n1² + 2² + ... + 10² = 385.\n\nHence the difference between the square of the sum of the first ten natural numbers and the sum of the squares of the first ten natural numbers is 3025 - 385 = 2640.\n\nYou are not expected to discover an efficient solution to this yourself from first principles; research is allowed, indeed, encouraged.\nFinding the best algorithm for the problem is a key skill in software engineering.",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "export class Squares {\n  constructor(max) {\n    this.max = max;\n  }\n\n  get squareOfSum() {\n    let sum = 0;\n    for (let x = 1; x <= this.max; x += 1) {\n      sum += x;\n    }\n    return sum * sum;\n  }\n\n  get sumOfSquares() {\n    let sum = 0;\n    for (let x = 1; x <= this.max; x += 1) {\n      sum += x * x;\n    }\n    return sum;\n  }\n\n  get difference() {\n    return this.squareOfSum - this.sumOfSquares;\n  }\n}",
+    "solutionLanguage": "javascript",
+    "explanation": "This is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Difference of Squares\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/difference-of-squares",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-high-scores",
+    "title": "High Scores",
+    "difficulty": "junior",
+    "category": "Computer Science",
+    "prompt": "Manage a game player's High Score list.\n\nYour task is to build a high-score component of the classic Frogger game, one of the highest selling and most addictive games of all time, and a classic of the arcade era.\nYour task is to write methods that return the highest score from the list, the last added score and the three highest scores.",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "export class HighScores {\n  constructor(scores) {\n    this.scores = scores;\n  }\n\n  get latest() {\n    return this.scores[this.scores.length - 1];\n  }\n\n  get personalBest() {\n    return Math.max(...this.scores);\n  }\n\n  get personalTopThree() {\n    return [...this.scores]\n      .sort((a, b) => a - b)\n      .reverse()\n      .slice(0, 3);\n  }\n}",
+    "solutionLanguage": "javascript",
+    "explanation": "This is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"High Scores\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/high-scores",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-isogram",
+    "title": "Isogram",
+    "difficulty": "junior",
+    "category": "Computer Science",
+    "prompt": "Determine if a word or phrase is an isogram.\n\nAn isogram (also known as a \"non-pattern word\") is a word or phrase without a repeating letter, however spaces and hyphens are allowed to appear multiple times.\n\nExamples of isograms:\n\n- lumberjacks\n- background\n- downstream\n- six-year-old\n\nThe word _isograms_, however, is not an isogram, because the s repeats.",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "export const isIsogram = (string) => {\n  const stringNoSpaceOrHyphen = string.replace(/ |-/g, '');\n  const uniqueLetters = stringNoSpaceOrHyphen\n    .toLowerCase()\n    .split('')\n    .filter((element, index, self) => self.indexOf(element) === index);\n  return uniqueLetters.length === stringNoSpaceOrHyphen.length;\n};",
+    "solutionLanguage": "javascript",
+    "explanation": "This is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Isogram\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/isogram",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-leap",
+    "title": "Leap",
+    "difficulty": "junior",
+    "category": "Computer Science",
+    "prompt": "Your task is to determine whether a given year is a leap year.",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "/**\n * @param  {number} year\n * Numeric year.\n *\n * @return {boolean}\n * Whether given year is a leap year.\n */\nexport const isLeap = (year) =>\n  year % 400 === 0 || (year % 4 === 0 && year % 100 !== 0);",
+    "solutionLanguage": "javascript",
+    "explanation": "Introduction\n\nA leap year (in the Gregorian calendar) occurs:\n\n- In every year that is evenly divisible by 4.\n- Unless the year is evenly divisible by 100, in which case it's only a leap year if the year is also evenly divisible by 400.\n\nSome examples:\n\n- 1997 was not a leap year as it's not divisible by 4.\n- 1900 was not a leap year as it's not divisible by 400.\n- 2000 was a leap year!\n\n~~~~exercism/note\nFor a delightful, four-minute explanation of the whole phenomenon of leap years, check out this YouTube video.\n~~~~\n\nThis is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Leap\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/leap",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-matching-brackets",
+    "title": "Matching Brackets",
+    "difficulty": "junior",
+    "category": "Computer Science",
+    "prompt": "Given a string containing brackets [], braces {}, parentheses (), or any combination thereof, verify that any and all pairs are matched and nested correctly.\nAny other characters should be ignored.\nFor example, \"{what is (42)}?\" is balanced and \"[text}\" is not.",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "export const isPaired = (input) => {\n  const brackets = input.replace(/[^{(\\[\\])}]/g, ''); //eslint-disable-line\n  const bracketsAreMatching = (leftBracket, rightBracket) =>\n    (leftBracket === '(' && rightBracket === ')') ||\n    (leftBracket === '[' && rightBracket === ']') ||\n    (leftBracket === '{' && rightBracket === '}');\n\n  let arr = [];\n  for (let letter of brackets) {\n    if (arr.length >= 1) {\n      const lastBracket = arr[arr.length - 1];\n      if (bracketsAreMatching(lastBracket, letter)) {\n        arr.pop();\n      } else {\n        arr.push(letter);\n      }\n    } else {\n      arr.push(letter);\n    }\n  }\n  return arr.length === 0;\n};",
+    "solutionLanguage": "javascript",
+    "explanation": "Introduction\n\nYou're given the opportunity to write software for the Bracketeer™, an ancient but powerful mainframe.\nThe software that runs on it is written in a proprietary language.\nMuch of its syntax is familiar, but you notice _lots_ of brackets, braces and parentheses.\nDespite the Bracketeer™ being powerful, it lacks flexibility.\nIf the source code has any unbalanced brackets, braces or parentheses, the Bracketeer™ crashes and must be rebooted.\nTo avoid such a scenario, you start writing code that can verify that brackets, braces, and parentheses are balanced before attempting to run it on the Bracketeer™.\n\nThis is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Matching Brackets\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/matching-brackets",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-pangram",
+    "title": "Pangram",
+    "difficulty": "junior",
+    "category": "Computer Science",
+    "prompt": "Your task is to figure out if a sentence is a pangram.\n\nA pangram is a sentence using every letter of the alphabet at least once.\nIt is case insensitive, so it doesn't matter if a letter is lower-case (e.g. k) or upper-case (e.g. K).\n\nFor this exercise, a sentence is a pangram if it contains each of the 26 letters in the English alphabet.",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "const notAlpha = /[^a-z]+/gi;\nconst alphaLength = 26;\n\nexport const isPangram = (candidate) => {\n  const cleaned = candidate.replace(notAlpha, '').toLowerCase();\n  const sortedSet = new Set([...cleaned].sort());\n  return sortedSet.size === alphaLength;\n};",
+    "solutionLanguage": "javascript",
+    "explanation": "Introduction\n\nYou work for a company that sells fonts through their website.\nThey'd like to show a different sentence each time someone views a font on their website.\nTo give a comprehensive sense of the font, the random sentences should use all the letters in the English alphabet.\n\nThey're running a competition to get suggestions for sentences that they can use.\nYou're in charge of checking the submissions to see if they are valid.\n\n~~~~exercism/note\nPangram comes from Greek, παν γράμμα, pan gramma, which means \"every letter\".\n\nThe best known English pangram is:\n\n> The quick brown fox jumps over the lazy dog.\n~~~~\n\nThis is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Pangram\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/pangram",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-perfect-numbers",
+    "title": "Perfect Numbers",
+    "difficulty": "junior",
+    "category": "Computer Science",
+    "prompt": "Determine if a number is perfect, abundant, or deficient based on Nicomachus' (60 - 120 CE) classification scheme for positive integers.\n\nThe Greek mathematician [Nicomachus][nicomachus] devised a classification scheme for positive integers, identifying each as belonging uniquely to the categories of perfect, abundant, or deficient based on their [aliquot sum][aliquot-sum].\nThe _aliquot sum_ is defined as the sum of the factors of a number not including the number itself.\nFor example, the aliquot sum of 15 is 1 + 3 + 5 = 9.\n\nPerfect\n\nA number is perfect when it equals its aliquot sum.\nFor example:\n\n- 6 is a perfect number because 1 + 2 + 3 = 6\n- 28 is a perfect number because 1 + 2 + 4 + 7 + 14 = 28\n\nAbundant\n\nA number is abundant when it is less than its aliquot sum.\nFor example:\n\n- 12 is an abundant number because 1 + 2 + 3 + 4 + 6 = 16\n- 24 is an abundant number because 1 + 2 + 3 + 4 + 6 + 8 + 12 = 36\n\nDeficient\n\nA number is deficient when it is greater than its aliquot sum.\nFor example:\n\n- 8 is a deficient number because 1 + 2 + 4 = 7\n- Prime numbers are deficient\n\nTask\n\nImplement a way to determine whether a given number is perfect.\nDepending on your language track, you may also need to implement a way to determine whether a given number is abundant or deficient.\n\n[nicomachus]: https://en.wikipedia.org/wiki/Nicomachus\n[aliquot-sum]: https://en.wikipedia.org/wiki/Aliquot_sum",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "/**\n * Calculate all the divisors for a given number.\n * @param {number} number - natural number.\n * @returns {array} that contains the divisors for a given number excluding the number itself.\n */\nfunction getDivisors(number) {\n  const divs = [];\n\n  // Accepts only natural numbers greater than 1.\n  if (number <= 1) {\n    return divs;\n  }\n\n  // 1 always divides everyone!\n  divs.push(1);\n\n  // Calculate the divisors up the the half of the number + 1\n  for (let i = 2; i <= number / 2; i += 1) {\n    if (number % i === 0) {\n      divs.push(i);\n    }\n  }\n\n  return divs;\n}\n\n/**\n * Classify a given number as perfect, abundant or deficient.\n * @param {number} - number to be classified. Note: if the number is equal or smaller than 0,\n * then returns an error: Classification is only possible for natural numbers.\n * @returns {string} - string that contains the classification (perfect, abundant or deficient).\n */\nexport const classify = (number) => {\n  // Check if the input is valid\n  if (number <= 0) {\n    throw new Error('Classification is only possible for natural numbers.');\n  }\n\n  // Factorize the current number.\n  const divsArray = getDivisors(number);\n\n  // Sum the factors.\n  const sum = divsArray.reduce((partialSum, div) => partialSum + div, 0);\n\n  // Check if the number is perfect/abundant/deficient\n  if (sum === number) return 'perfect';\n  if (sum > number) return 'abundant';\n  return 'deficient';\n};",
+    "solutionLanguage": "javascript",
+    "explanation": "This is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Perfect Numbers\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/perfect-numbers",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-phone-number",
+    "title": "Phone Number",
+    "difficulty": "junior",
+    "category": "Computer Science",
+    "prompt": "Clean up phone numbers so that they can be sent SMS messages.\n\nThe North American Numbering Plan (NANP) is a telephone numbering system used by many countries in North America like the United States, Canada or Bermuda.\nAll NANP-countries share the same international country code: 1.\n\nNANP numbers are ten-digit numbers consisting of a three-digit Numbering Plan Area code, commonly known as _area code_, followed by a seven-digit local number.\nThe first three digits of the local number represent the _exchange code_, followed by the unique four-digit number which is the _subscriber number_.\n\nThe format is usually represented as\n\n    NXX NXX-XXXX\n\nwhere N is any digit from 2 through 9 and X is any digit from 0 through 9.\n\nSometimes they also have the country code (represented as 1 or +1) prefixed.\n\nYour task is to clean up differently formatted telephone numbers by removing punctuation and the country code if present.\n\nFor example, the inputs\n\n- +1 (613)-995-0253\n- 613-995-0253\n- 1 613 995 0253\n- 613.995.0253\n\nshould all produce the output\n\n6139950253\n\nNote: As this exercise only deals with telephone numbers used in NANP-countries, only 1 is considered a valid country code.",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "export const clean = (number) => {\n  if (/[a-zA-Z]/.test(number)) {\n    throw new Error('Letters not permitted');\n  } else if (/[@:!]/.test(number)) {\n    throw new Error('Punctuations not permitted');\n  }\n\n  let strippedNumber = number.replace(/\\D/g, '');\n  const numberLength = strippedNumber.length;\n\n  if (numberLength === 11) {\n    if (strippedNumber.substring(0, 1) !== '1') {\n      throw new Error('11 digits must start with 1');\n    } else {\n      strippedNumber = strippedNumber.substring(1);\n    }\n  }\n\n  if (numberLength < 10) {\n    throw new Error('Must not be fewer than 10 digits');\n  }\n\n  if (numberLength > 11) {\n    throw new Error('Must not be greater than 11 digits');\n  }\n\n  if (strippedNumber.substring(0, 1) === '0') {\n    throw new Error('Area code cannot start with zero');\n  } else if (strippedNumber.substring(0, 1) === '1') {\n    throw new Error('Area code cannot start with one');\n  }\n\n  if (strippedNumber.substring(3, 4) === '0') {\n    throw new Error('Exchange code cannot start with zero');\n  } else if (strippedNumber.substring(3, 4) === '1') {\n    throw new Error('Exchange code cannot start with one');\n  }\n\n  return strippedNumber;\n};",
+    "solutionLanguage": "javascript",
+    "explanation": "Introduction\n\nYou've joined LinkLine, a leading communications company working to ensure reliable connections for everyone.\nThe team faces a big challenge: users submit phone numbers in all sorts of formats — dashes, spaces, dots, parentheses, and even prefixes.\nSome numbers are valid, while others are impossible to use.\n\nYour mission is to turn this chaos into order.\nYou'll clean up valid numbers, formatting them appropriately for use in the system.\nAt the same time, you'll identify and filter out any invalid entries.\n\nThe success of LinkLine's operations depends on your ability to separate the useful from the unusable.\nAre you ready to take on the challenge and keep the connections running smoothly?\n\nThis is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Phone Number\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/phone-number",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-rail-fence-cipher",
+    "title": "Rail Fence Cipher",
+    "difficulty": "junior",
+    "category": "Computer Science",
+    "prompt": "Implement encoding and decoding for the rail fence cipher.\n\nThe Rail Fence cipher is a form of transposition cipher that gets its name from the way in which it's encoded.\nIt was already used by the ancient Greeks.\n\nIn the Rail Fence cipher, the message is written downwards on successive \"rails\" of an imaginary fence, then moving up when we get to the bottom (like a zig-zag).\nFinally the message is then read off in rows.\n\nFor example, using three \"rails\" and the message \"WE ARE DISCOVERED FLEE AT ONCE\", the cipherer writes out:\n\n    W . . . E . . . C . . . R . . . L . . . T . . . E\n    . E . R . D . S . O . E . E . F . E . A . O . C .\n    . . A . . . I . . . V . . . D . . . E . . . N . .\n\nThen reads off:\n\n    WECRLTEERDSOEEFEAOCAIVDEN\n\nTo decrypt a message you take the zig-zag shape and fill the ciphertext along the rows.\n\n    ? . . . ? . . . ? . . . ? . . . ? . . . ? . . . ?\n    . ? . ? . ? . ? . ? . ? . ? . ? . ? . ? . ? . ? .\n    . . ? . . . ? . . . ? . . . ? . . . ? . . . ? . .\n\nThe first row has seven spots that can be filled with \"WECRLTE\".\n\n    W . . . E . . . C . . . R . . . L . . . T . . . E\n    . ? . ? . ? . ? . ? . ? . ? . ? . ? . ? . ? . ? .\n    . . ? . . . ? . . . ? . . . ? . . . ? . . . ? . .\n\nNow the 2nd row takes \"ERDSOEEFEAOC\".\n\n    W . . . E . . . C . . . R . . . L . . . T . . . E\n    . E . R . D . S . O . E . E . F . E . A . O . C .\n    . . ? . . . ? . . . ? . . . ? . . . ? . . . ? . .\n\nLeaving \"AIVDEN\" for the last row.\n\n    W . . . E . . . C . . . R . . . L . . . T . . . E\n    . E . R . D . S . O . E . E . F . E . A . O . C .\n    . . A . . . I . . . V . . . D . . . E . . . N . .\n\nIf you now read along the zig-zag shape you can read the original message.",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "export const encode = (msg, rails) => {\n  let stringRails = Array(rails).fill('');\n  cycleRails(msg, rails).forEach((cycle, index) => {\n    stringRails[cycle] += msg[index];\n  });\n  return stringRails.join('');\n};\n\nexport const decode = (msg, rails) => {\n  const cycles = cycleRails(msg, rails);\n  let stringRails = Array(rails).fill('');\n  cycleRails(msg, rails).forEach((cycle) => {\n    for (let j = 0; j < rails; j++) {\n      stringRails[j] += cycle === j ? '?' : '.';\n    }\n  });\n  let msgIndex = 0;\n  stringRails.forEach((rail, index) => {\n    let newRail = '';\n    rail.split('').forEach((char) => {\n      if (char === '?') {\n        newRail += msg[msgIndex];\n        msgIndex++;\n      } else {\n        newRail += '.';\n      }\n    });\n    stringRails[index] = newRail;\n  });\n  return cycles.reduce(\n    (str, cycle, index) => str + stringRails[cycle][index],\n    '',\n  );\n};\n\nconst cycleRails = (msg, rails) => {\n  let currentRail = 0;\n  let isIncreasing = true;\n  let cycles = [];\n  for (let i = 0; i < msg.length; i++) {\n    cycles.push(currentRail);\n    currentRail = isIncreasing ? currentRail + 1 : currentRail - 1;\n    if (currentRail < 0) {\n      currentRail = 1;\n      isIncreasing = true;\n    } else if (currentRail === rails) {\n      currentRail = rails - 2;\n      isIncreasing = false;\n    }\n  }\n  return cycles;\n};",
+    "solutionLanguage": "javascript",
+    "explanation": "This is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Rail Fence Cipher\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/rail-fence-cipher",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-raindrops",
+    "title": "Raindrops",
+    "difficulty": "junior",
+    "category": "Computer Science",
+    "prompt": "Your task is to convert a number into its corresponding raindrop sounds.\n\nIf a given number:\n\n- is divisible by 3, add \"Pling\" to the result.\n- is divisible by 5, add \"Plang\" to the result.\n- is divisible by 7, add \"Plong\" to the result.\n- is not divisible by 3, 5, or 7, the result should be the number as a string.\n\nExamples\n\n- 28 is divisible by 7, but not 3 or 5, so the result would be \"Plong\".\n- 30 is divisible by 3 and 5, but not 7, so the result would be \"PlingPlang\".\n- 34 is not divisible by 3, 5, or 7, so the result would be \"34\".\n\n~~~~exercism/note\nA common way to test if one number is evenly divisible by another is to compare the [remainder][remainder] or [modulus][modulo] to zero.\nMost languages provide operators or functions for one (or both) of these.\n\n[remainder]: https://exercism.org/docs/programming/operators/remainder\n[modulo]: https://en.wikipedia.org/wiki/Modulo_operation\n~~~~",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "export const convert = (n) => {\n  let result = '';\n  if (n % 3 === 0) {\n    result += 'Pling';\n  }\n  if (n % 5 === 0) {\n    result += 'Plang';\n  }\n  if (n % 7 === 0) {\n    result += 'Plong';\n  }\n  return result === '' ? n.toString() : result;\n};",
+    "solutionLanguage": "javascript",
+    "explanation": "Introduction\n\nRaindrops is a slightly more complex version of the FizzBuzz challenge, a classic interview question.\n\nThis is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Raindrops\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/raindrops",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-reverse-string",
+    "title": "Reverse String",
+    "difficulty": "junior",
+    "category": "Computer Science",
+    "prompt": "Your task is to reverse a given string.\n\nSome examples:\n\n- Turn \"stressed\" into \"desserts\".\n- Turn \"strops\" into \"sports\".\n- Turn \"racecar\" into \"racecar\".",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "export const reverseString = (string) => {\n  let revString = '';\n  let characters = Array.from(\n    new Intl.Segmenter().segment(String(string)),\n    (x) => x.segment,\n  );\n  for (let i = characters.length - 1; i >= 0; i--) {\n    revString += characters[i];\n  }\n  return revString;\n};",
+    "solutionLanguage": "javascript",
+    "explanation": "Introduction\n\nReversing strings (reading them from right to left, rather than from left to right) is a surprisingly common task in programming.\n\nFor example, in bioinformatics, reversing the sequence of DNA or RNA strings is often important for various analyses, such as finding complementary strands or identifying palindromic sequences that have biological significance.\n\nThis is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Reverse String\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/reverse-string",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-rna-transcription",
+    "title": "RNA Transcription",
+    "difficulty": "junior",
+    "category": "Computer Science",
+    "prompt": "Your task is to determine the RNA complement of a given DNA sequence.\n\nBoth DNA and RNA strands are a sequence of nucleotides.\n\nThe four nucleotides found in DNA are adenine (A), cytosine (C), guanine (G), and thymine (T).\n\nThe four nucleotides found in RNA are adenine (A), cytosine (C), guanine (G), and uracil (U).\n\nGiven a DNA strand, its transcribed RNA strand is formed by replacing each nucleotide with its complement:\n\n- G -> C\n- C -> G\n- T -> A\n- A -> U\n\n~~~~exercism/note\nIf you want to look at how the inputs and outputs are structured, take a look at the examples in the test suite.\n~~~~",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "const DNA_TO_RNA = {\n  G: 'C',\n  C: 'G',\n  T: 'A',\n  A: 'U',\n};\n\nexport const toRna = (dna) =>\n  dna.replace(/./g, (nucleotide) => DNA_TO_RNA[nucleotide]);",
+    "solutionLanguage": "javascript",
+    "explanation": "Introduction\n\nYou work for a bioengineering company that specializes in developing therapeutic solutions.\n\nYour team has just been given a new project to develop a targeted therapy for a rare type of cancer.\n\n~~~~exercism/note\nIt's all very complicated, but the basic idea is that sometimes people's bodies produce too much of a given protein.\nThat can cause all sorts of havoc.\n\nBut if you can create a very specific molecule (called a micro-RNA), it can prevent the protein from being produced.\n\nThis technique is called [RNA Interference][rnai].\n\n[rnai]: https://admin.acceleratingscience.com/ask-a-scientist/what-is-rnai/\n~~~~\n\nThis is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"RNA Transcription\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/rna-transcription",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-roman-numerals",
+    "title": "Roman Numerals",
+    "difficulty": "junior",
+    "category": "Computer Science",
+    "prompt": "Introduction\n\nYour task is to convert a number from Arabic numerals to Roman numerals.\n\nFor this exercise, we are only concerned about traditional Roman numerals, in which the largest number is MMMCMXCIX (or 3,999).\n\n~~~~exercism/note\nThere are lots of different ways to convert between Arabic and Roman numerals.\nWe recommend taking a naive approach first to familiarise yourself with the concept of Roman numerals and then search for more efficient methods.\n\nMake sure to check out our Deep Dive video at the end to explore the different approaches you can take!\n~~~~",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "export function toRoman(number) {\n  let result = '';\n  let remainingNumber = number;\n  const mappings = [\n    { arabic: 1000, roman: 'M' },\n    { arabic: 900, roman: 'CM' },\n    { arabic: 500, roman: 'D' },\n    { arabic: 400, roman: 'CD' },\n    { arabic: 100, roman: 'C' },\n    { arabic: 90, roman: 'XC' },\n    { arabic: 50, roman: 'L' },\n    { arabic: 40, roman: 'XL' },\n    { arabic: 10, roman: 'X' },\n    { arabic: 9, roman: 'IX' },\n    { arabic: 5, roman: 'V' },\n    { arabic: 4, roman: 'IV' },\n    { arabic: 1, roman: 'I' },\n  ];\n\n  mappings.forEach((mapping) => {\n    while (remainingNumber >= mapping.arabic) {\n      result += mapping.roman;\n      remainingNumber -= mapping.arabic;\n    }\n  });\n\n  return result;\n}",
+    "solutionLanguage": "javascript",
+    "explanation": "Description\n\nToday, most people in the world use Arabic numerals (0–9).\nBut if you travelled back two thousand years, you'd find that most Europeans were using Roman numerals instead.\n\nTo write a Roman numeral we use the following Latin letters, each of which has a value:\n\n| M    | D   | C   | L   | X   | V   | I   |\n| ---- | --- | --- | --- | --- | --- | --- |\n| 1000 | 500 | 100 | 50  | 10  | 5   | 1   |\n\nA Roman numeral is a sequence of these letters, and its value is the sum of the letters' values.\nFor example, XVIII has the value 18 (10 + 5 + 1 + 1 + 1 = 18).\n\nThere's one rule that makes things trickier though, and that's that the same letter cannot be used more than three times in succession.\nThat means that we can't express numbers such as 4 with the seemingly natural IIII.\nInstead, for those numbers, we use a subtraction method between two letters.\nSo we think of 4 not as 1 + 1 + 1 + 1 but instead as 5 - 1.\nAnd slightly confusingly to our modern thinking, we write the smaller number first.\nThis applies only in the following cases: 4 (IV), 9 (IX), 40 (XL), 90 (XC), 400 (CD) and 900 (CM).\n\nOrder matters in Roman numerals!\nLetters (and the special compounds above) must be ordered by decreasing value from left to right.\n\nHere are some examples:\n\n     105 => CV\n    ---- => --\n     100 => C\n    +  5 =>  V\n\n     106 => CVI\n    ---- => --\n     100 => C\n    +  5 =>  V\n    +  1 =>   I\n\n     104 => CIV\n    ---- => ---\n     100 => C\n    +  4 =>  IV\n\nAnd a final more complex example:\n\n     1996 => MCMXCVI\n    ----- => -------\n     1000 => M\n    + 900 =>  CM\n    +  90 =>    XC\n    +   5 =>      V\n    +   1 =>       I\n\nThis is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Roman Numerals\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/roman-numerals",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-run-length-encoding",
+    "title": "Run-Length Encoding",
+    "difficulty": "junior",
+    "category": "Computer Science",
+    "prompt": "Implement run-length encoding and decoding.\n\nRun-length encoding (RLE) is a simple form of data compression, where runs (consecutive data elements) are replaced by just one data value and count.\n\nFor example we can represent the original 53 characters with only 13.\n\n    \"WWWWWWWWWWWWBWWWWWWWWWWWWBBBWWWWWWWWWWWWWWWWWWWWWWWWB\"  ->  \"12WB12W3B24WB\"\n\nRLE allows the original data to be perfectly reconstructed from the compressed data, which makes it a lossless data compression.\n\n    \"AABCCCDEEEE\"  ->  \"2AB3CD4E\"  ->  \"AABCCCDEEEE\"\n\nFor simplicity, you can assume that the unencoded string will only contain the letters A through Z (either lower or upper case) and whitespace.\nThis way data to be encoded will never contain any numbers and numbers inside data to be decoded always represent the count for the following character.",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "export const encode = (plainText) => {\n  const consecutiveChars = /([\\w\\s])\\1*/g;\n  return plainText.replace(consecutiveChars, (match) =>\n    match.length > 1 ? match.length + match[0] : match[0],\n  );\n};\n\nexport const decode = (encodedText) => {\n  const countAndChar = /(\\d+)(\\w|\\s)/g;\n  return encodedText.replace(countAndChar, (match, repeats, char) =>\n    new Array(Number(repeats) + 1).join(char),\n  );\n};",
+    "solutionLanguage": "javascript",
+    "explanation": "This is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Run-Length Encoding\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/run-length-encoding",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-series",
+    "title": "Series",
+    "difficulty": "junior",
+    "category": "Computer Science",
+    "prompt": "Given a string of digits, output all the contiguous substrings of length n in that string in the order that they appear.\n\nFor example, the string \"49142\" has the following 3-digit series:\n\n- \"491\"\n- \"914\"\n- \"142\"\n\nAnd the following 4-digit series:\n\n- \"4914\"\n- \"9142\"\n\nAnd if you ask for a 6-digit series from a 5-digit string, you deserve whatever you get.\n\nNote that these series are only required to occupy _adjacent positions_ in the input;\nthe digits need not be _numerically consecutive_.",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "export class Series {\n  constructor(numberString) {\n    if (!numberString) {\n      throw new Error('series cannot be empty');\n    }\n\n    this.numberString = numberString;\n    this.digits = this.getDigits();\n  }\n\n  getDigits() {\n    return [...this.numberString].map((digit) => parseInt(digit, 10));\n  }\n\n  slices(sliceSize) {\n    const result = [];\n    let slice = [];\n\n    if (sliceSize < 0) {\n      throw new Error('slice length cannot be negative');\n    }\n\n    if (sliceSize === 0) {\n      throw new Error('slice length cannot be zero');\n    }\n\n    if (sliceSize > this.digits.length) {\n      throw new Error('slice length cannot be greater than series length');\n    }\n\n    for (let i = 0; i < this.digits.length - sliceSize + 1; i += 1) {\n      for (let j = 0; j < sliceSize; j += 1) {\n        slice.push(this.digits[i + j]);\n      }\n      result.push(slice);\n      slice = [];\n    }\n\n    return result;\n  }\n}",
+    "solutionLanguage": "javascript",
+    "explanation": "This is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Series\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/series",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-transpose",
+    "title": "Transpose",
+    "difficulty": "junior",
+    "category": "Computer Science",
+    "prompt": "Given an input text output it transposed.\n\nRoughly explained, the transpose of a matrix:\n\n    ABC\n    DEF\n\nis given by:\n\n    AD\n    BE\n    CF\n\nRows become columns and columns become rows.\nSee [transpose][].\n\nIf the input has rows of different lengths, this is to be solved as follows:\n\n- Pad to the left with spaces.\n- Don't pad to the right.\n\nTherefore, transposing this matrix:\n\n    ABC\n    DE\n\nresults in:\n\n    AD\n    BE\n    C\n\nAnd transposing:\n\n    AB\n    DEF\n\nresults in:\n\n    AD\n    BE\n     F\n\nIn general, all characters from the input should also be present in the transposed output.\nThat means that if a column in the input text contains only spaces on its bottom-most row(s), the corresponding output row should contain the spaces in its right-most column(s).\n\n[transpose]: https://en.wikipedia.org/wiki/Transpose",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "function trimTrailingUndefined(array) {\n  const trailingUndefinedCount = [...array]\n    .reverse()\n    .findIndex((x) => x !== undefined);\n  return array.slice(0, array.length - trailingUndefinedCount);\n}\n\nexport function transpose(input) {\n  const maxCol = Math.max(0, ...input.map((row) => row.length));\n  return [...Array(maxCol).keys()].map((col) =>\n    trimTrailingUndefined(input.map((_v, row) => input[row][col]))\n      .map((charOrUndefined) => charOrUndefined || ' ')\n      .join(''),\n  );\n}",
+    "solutionLanguage": "javascript",
+    "explanation": "This is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Transpose\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/transpose",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-two-fer",
+    "title": "Two Fer",
+    "difficulty": "junior",
+    "category": "Computer Science",
+    "prompt": "Your task is to determine what you will say as you give away the extra cookie.\n\nIf you know the person's name (e.g. if they're named Do-yun), then you will say:\n\n    One for Do-yun, one for me.\n\nIf you don't know the person's name, you will say _you_ instead.\n\n    One for you, one for me.\n\nHere are some examples:\n\n| Name   | Dialogue                    |\n| :----- | :-------------------------- |\n| Alice  | One for Alice, one for me.  |\n| Bohdan | One for Bohdan, one for me. |\n|        | One for you, one for me.    |\n| Zaphod | One for Zaphod, one for me. |",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "export const twoFer = (name = 'you') => {\n  return `One for ${name}, one for me.`;\n};",
+    "solutionLanguage": "javascript",
+    "explanation": "Introduction\n\nIn some English accents, when you say \"two for\" quickly, it sounds like \"two fer\".\nTwo-for-one is a way of saying that if you buy one, you also get one for free.\nSo the phrase \"two-fer\" often implies a two-for-one offer.\n\nImagine a bakery that has a holiday offer where you can buy two cookies for the price of one (\"two-fer one!\").\nYou take the offer and (very generously) decide to give the extra cookie to someone else in the queue.\n\nThis is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Two Fer\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/two-fer",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-all-your-base",
+    "title": "All Your Base",
+    "difficulty": "mid",
+    "category": "Computer Science",
+    "prompt": "Convert a sequence of digits in one base, representing a number, into a sequence of digits in another base, representing the same number.\n\n~~~~exercism/note\nTry to implement the conversion yourself.\nDo not use something else to perform the conversion for you.\n~~~~\n\nAbout [Positional Notation][positional-notation]\n\nIn positional notation, a number in base b can be understood as a linear combination of powers of b.\n\nThe number 42, _in base 10_, means:\n\n(4 × 10¹) + (2 × 10⁰)\n\nThe number 101010, _in base 2_, means:\n\n(1 × 2⁵) + (0 × 2⁴) + (1 × 2³) + (0 × 2²) + (1 × 2¹) + (0 × 2⁰)\n\nThe number 1120, _in base 3_, means:\n\n(1 × 3³) + (1 × 3²) + (2 × 3¹) + (0 × 3⁰)\n\n_Yes. Those three numbers above are exactly the same. Congratulations!_\n\n[positional-notation]: https://en.wikipedia.org/wiki/Positional_notation",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "const isValidBase = (base) => !base || base < 2 || Math.floor(base) !== base;\n\nconst isInputValid = (array, base) => {\n  if (!array || !array.length) {\n    return false;\n  }\n  const val = base - 1;\n  for (let i = 0, n = array.length; i < n; i += 1) {\n    const tmp = array[i];\n    if (tmp > val || tmp < 0) {\n      return false;\n    }\n  }\n  return true;\n};\n\nconst convertFromDecimalToBase = (num, outputBase) => {\n  let tmp = num;\n  const result = [];\n  while (tmp) {\n    result.unshift(tmp % outputBase);\n    tmp = Math.floor(tmp / outputBase);\n  }\n  return result;\n};\n\nexport const convert = (array, inputBase, outputBase) => {\n  if (isValidBase(inputBase)) {\n    throw new Error('Wrong input base');\n  }\n  if (isValidBase(outputBase)) {\n    throw new Error('Wrong output base');\n  }\n  const regexp = new RegExp('^0.', 'g');\n  const str = array.join('');\n  if (str.match(regexp) || !isInputValid(array, inputBase)) {\n    throw new Error('Input has wrong format');\n  }\n  if (str === '0') {\n    return [0];\n  }\n  if (str === '1') {\n    return [1];\n  }\n  const decimalValue = array.reduce(\n    (accumulator, value) => accumulator * inputBase + value,\n    0,\n  );\n  return convertFromDecimalToBase(decimalValue, outputBase);\n};",
+    "solutionLanguage": "javascript",
+    "explanation": "Introduction\n\nYou've just been hired as professor of mathematics.\nYour first week went well, but something is off in your second week.\nThe problem is that every answer given by your students is wrong!\nLuckily, your math skills have allowed you to identify the problem: the student answers _are_ correct, but they're all in base 2 (binary)!\nAmazingly, it turns out that each week, the students use a different base.\nTo help you quickly verify the student answers, you'll be building a tool to translate between bases.\n\nThis is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"All Your Base\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/all-your-base",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-allergies",
+    "title": "Allergies",
+    "difficulty": "mid",
+    "category": "Computer Science",
+    "prompt": "Given a person's allergy score, determine whether or not they're allergic to a given item, and their full list of allergies.\n\nAn allergy test produces a single numeric score which contains the information about all the allergies the person has (that they were tested for).\n\nThe list of items (and their value) that were tested are:\n\n- eggs (1)\n- peanuts (2)\n- shellfish (4)\n- strawberries (8)\n- tomatoes (16)\n- chocolate (32)\n- pollen (64)\n- cats (128)\n\nSo if Tom is allergic to peanuts and chocolate, he gets a score of 34.\n\nNow, given just that score of 34, your program should be able to say:\n\n- Whether Tom is allergic to any one of those allergens listed above.\n- All the allergens Tom is allergic to.\n\nNote: a given score may include allergens not listed above (i.e. allergens that score 256, 512, 1024, etc.).\nYour program should ignore those components of the score.\nFor example, if the allergy score is 257, your program should only report the eggs (1) allergy.",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "const possibleAllergies = [\n  'eggs',\n  'peanuts',\n  'shellfish',\n  'strawberries',\n  'tomatoes',\n  'chocolate',\n  'pollen',\n  'cats',\n];\n\nexport class Allergies {\n  constructor(allergenIndex) {\n    this.allergenIndex = allergenIndex;\n  }\n\n  list() {\n    return possibleAllergies.filter(\n      (_allergy, i) => this.allergenIndex & Math.pow(2, i),\n    );\n  }\n\n  allergicTo(food) {\n    return this.list().some((allergy) => allergy === food);\n  }\n}",
+    "solutionLanguage": "javascript",
+    "explanation": "This is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Allergies\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/allergies",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-luhn",
+    "title": "Luhn",
+    "difficulty": "mid",
+    "category": "Computer Science",
+    "prompt": "Determine whether a number is valid according to the [Luhn formula][luhn].\n\nThe number will be provided as a string.\n\nValidating a number\n\nStrings of length 1 or less are not valid.\nSpaces are allowed in the input, but they should be stripped before checking.\nAll other non-digit characters are disallowed.\n\nExamples\n\nValid credit card number\n\nThe number to be checked is 4539 3195 0343 6467.\n\nThe first step of the Luhn algorithm is to start at the end of the number and double every second digit, beginning with the second digit from the right and moving left.\n\n    4539 3195 0343 6467\n    ↑ ↑  ↑ ↑  ↑ ↑  ↑ ↑  (double these)\n\nIf the result of doubling a digit is greater than 9, we subtract 9 from that result.\nWe end up with:\n\n    8569 6195 0383 3437\n\nFinally, we sum all digits.\nIf the sum is evenly divisible by 10, the original number is valid.\n\n    8 + 5 + 6 + 9 + 6 + 1 + 9 + 5 + 0 + 3 + 8 + 3 + 3 + 4 + 3 + 7 = 80\n\n80 is evenly divisible by 10, so number 4539 3195 0343 6467 is valid!\n\nInvalid Canadian SIN\n\nThe number to be checked is 066 123 478.\n\nWe start at the end of the number and double every second digit, beginning with the second digit from the right and moving left.\n\n    066 123 478\n     ↑  ↑ ↑  ↑  (double these)\n\nIf the result of doubling a digit is greater than 9, we subtract 9 from that result.\nWe end up with:\n\n    036 226 458\n\nWe sum the digits:\n\n    0 + 3 + 6 + 2 + 2 + 6 + 4 + 5 + 8 = 36\n\n36 is not evenly divisible by 10, so number 066 123 478 is not valid!\n\n[luhn]: https://en.wikipedia.org/wiki/Luhn_algorithm",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "export const valid = (number) => {\n  const trimmed = number.replace(/\\s/g, '');\n  const digits = [...trimmed];\n\n  const sum = digits\n    // convert to integers\n    .map((d) => parseInt(d, 10))\n    // double the second digits, starting from right\n    .map((d, i) => {\n      if ((i + digits.length) % 2 === 0) {\n        return d * 2;\n      }\n      return d;\n    })\n    // limit to digits less than 10\n    .map((d) => {\n      if (d > 9) {\n        return d - 9;\n      }\n      return d;\n    })\n    // sum all digits\n    .reduce((acc, d) => acc + d, 0);\n\n  return digits.length > 1 && sum % 10 === 0;\n};",
+    "solutionLanguage": "javascript",
+    "explanation": "Introduction\n\nAt the Global Verification Authority, you've just been entrusted with a critical assignment.\nAcross the city, from online purchases to secure logins, countless operations rely on the accuracy of numerical identifiers like credit card numbers, bank account numbers, transaction codes, and tracking IDs.\nThe Luhn algorithm is a simple checksum formula used to help identify mistyped numbers.\n\nA batch of identifiers has just arrived on your desk.\nAll of them must pass the Luhn test to ensure they're legitimate.\nIf any fail, they'll be flagged as invalid, preventing mistakes such as incorrect transactions or failed account verifications.\n\nCan you ensure this is done right? The integrity of many services depends on you.\n\nThis is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Luhn\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/luhn",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-nucleotide-count",
+    "title": "Nucleotide Count",
+    "difficulty": "mid",
+    "category": "Computer Science",
+    "prompt": "Each of us inherits from our biological parents a set of chemical instructions known as DNA that influence how our bodies are constructed.\nAll known life depends on DNA!\n\n> Note: You do not need to understand anything about nucleotides or DNA to complete this exercise.\n\nDNA is a long chain of other chemicals and the most important are the four nucleotides, adenine, cytosine, guanine and thymine.\nA single DNA chain can contain billions of these four nucleotides and the order in which they occur is important!\nWe call the order of these nucleotides in a bit of DNA a \"DNA sequence\".\n\nWe represent a DNA sequence as an ordered collection of these four nucleotides and a common way to do that is with a string of characters such as \"ATTACG\" for a DNA sequence of 6 nucleotides.\n'A' for adenine, 'C' for cytosine, 'G' for guanine, and 'T' for thymine.\n\nGiven a string representing a DNA sequence, count how many of each nucleotide is present.\nIf the string contains characters that aren't A, C, G, or T then it is invalid and you should signal an error.\n\nFor example:\n\n    \"GATTACA\" -> 'A': 3, 'C': 1, 'G': 1, 'T': 2\n    \"INVALID\" -> error",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "const count = (str, nuc) =>\n  [...str].filter((nucleotide) => nucleotide === nuc).length;\n\nexport function countNucleotides(strand) {\n  if (strand.replace(/A|C|G|T/g, '').length) {\n    throw new Error('Invalid nucleotide in strand');\n  }\n\n  return `${count(strand, 'A')} ${count(strand, 'C')} ${count(\n    strand,\n    'G',\n  )} ${count(strand, 'T')}`;\n}",
+    "solutionLanguage": "javascript",
+    "explanation": "This is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Nucleotide Count\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/nucleotide-count",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-pig-latin",
+    "title": "Pig Latin",
+    "difficulty": "mid",
+    "category": "Computer Science",
+    "prompt": "Your task is to translate text from English to Pig Latin.\nThe translation is defined using four rules, which look at the pattern of vowels and consonants at the beginning of a word.\nThese rules look at each word's use of vowels and consonants:\n\n- vowels: the letters a, e, i, o, and u\n- consonants: the other 21 letters of the English alphabet\n\nRule 1\n\nIf a word begins with a vowel, or starts with \"xr\" or \"yt\", add an \"ay\" sound to the end of the word.\n\nFor example:\n\n- \"apple\" -> \"appleay\" (starts with vowel)\n- \"xray\" -> \"xrayay\" (starts with \"xr\")\n- \"yttria\" -> \"yttriaay\" (starts with \"yt\")\n\nRule 2\n\nIf a word begins with one or more consonants, first move those consonants to the end of the word and then add an \"ay\" sound to the end of the word.\n\nFor example:\n\n- \"pig\" -> \"igp\" -> \"igpay\" (starts with single consonant)\n- \"chair\" -> \"airch\" -> \"airchay\" (starts with multiple consonants)\n- \"thrush\" -> \"ushthr\" -> \"ushthray\" (starts with multiple consonants)\n\nRule 3\n\nIf a word starts with zero or more consonants followed by \"qu\", first move those consonants (if any) and the \"qu\" part to the end of the word, and then add an \"ay\" sound to the end of the word.\n\nFor example:\n\n- \"quick\" -> \"ickqu\" -> \"ickquay\" (starts with \"qu\", no preceding consonants)\n- \"square\" -> \"aresqu\" -> \"aresquay\" (starts with one consonant followed by \"qu\")\n\nRule 4\n\nIf a word starts with one or more consonants followed by \"y\", first move the consonants preceding the \"y\"to the end of the word, and then add an \"ay\" sound to the end of the word.\n\nSome examples:\n\n- \"my\" -> \"ym\" -> \"ymay\" (starts with single consonant followed by \"y\")\n- \"rhythm\" -> \"ythmrh\" -> \"ythmrhay\" (starts with multiple consonants followed by \"y\")",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "const VOWEL_SOUND_REGEXP = /^([aeiou]|xr|yt)/;\nconst CONSONANT_SOUND_REGEXP =\n  /^([^aeiou]+(?=y)|[^aeiou]?qu|[^aeiou]+)([a-z]+)/;\n\nfunction translateWord(word) {\n  if (VOWEL_SOUND_REGEXP.test(word)) {\n    return `${word}ay`;\n  }\n\n  const newWord = word.replace(CONSONANT_SOUND_REGEXP, '$2$1');\n  return `${newWord}ay`;\n}\n\nexport const translate = (english) => {\n  return english.split(' ').map(translateWord).join(' ');\n};",
+    "solutionLanguage": "javascript",
+    "explanation": "Introduction\n\nYour parents have challenged you and your sibling to a game of two-on-two basketball.\nConfident they'll win, they let you score the first couple of points, but then start taking over the game.\nNeeding a little boost, you start speaking in [Pig Latin][pig-latin], which is a made-up children's language that's difficult for non-children to understand.\nThis will give you the edge to prevail over your parents!\n\n[pig-latin]: https://en.wikipedia.org/wiki/Pig_latin\n\nThis is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Pig Latin\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/pig-latin",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-queen-attack",
+    "title": "Queen Attack",
+    "difficulty": "mid",
+    "category": "Computer Science",
+    "prompt": "Given the position of two queens on a chess board, indicate whether or not they are positioned so that they can attack each other.\n\nIn the game of chess, a queen can attack pieces which are on the same row, column, or diagonal.\n\nA chessboard can be represented by an 8 by 8 array.\n\nSo if you are told the white queen is at c5 (zero-indexed at column 2, row 3) and the black queen at f2 (zero-indexed at column 5, row 6), then you know that the set-up is like so:\n\n!A chess board with two queens. Arrows emanating from the queen at c5 indicate possible directions of capture along file, rank and diagonal.\n\nYou are also able to answer whether the queens can attack each other.\nIn this case, that answer would be yes, they can, because both pieces share a diagonal.\n\nCredit\n\nThe chessboard image was made by [habere-et-dispertire][habere-et-dispertire] using LaTeX and the [chessboard package][chessboard-package] by Ulrike Fischer.\n\n[habere-et-dispertire]: https://exercism.org/profiles/habere-et-dispertire\n[chessboard-package]: https://github.com/u-fischer/chessboard",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "const W = 8;\nconst H = 8;\nconst STARTING = { black: [0, 3], white: [7, 3] };\n\nfunction invalidPosition({ white, black }) {\n  if (white[0] < 0 || white[0] >= H || white[1] < 0 || white[1] >= W) {\n    return true;\n  }\n\n  if (black[0] < 0 || black[0] >= H || black[1] < 0 || black[1] >= W) {\n    return true;\n  }\n\n  return false;\n}\n\nfunction samePosition({ white, black }) {\n  return white[0] === black[0] && white[1] === black[1];\n}\n\nfunction constructBoard() {\n  return new Array(W * H).fill('_');\n}\n\nfunction placePieces(self) {\n  const board = self.board;\n  const [blackRow, blackColumn] = self.black;\n  const [whiteRow, whiteColumn] = self.white;\n\n  board[blackRow * W + blackColumn] = 'B';\n  board[whiteRow * W + whiteColumn] = 'W';\n}\n\nexport class QueenAttack {\n  constructor(params = {}) {\n    params = { ...STARTING, ...params };\n    if (invalidPosition(params)) {\n      throw new Error('Queen must be placed on the board');\n    }\n\n    if (samePosition(params)) {\n      throw new Error('Queens cannot share the same space');\n    }\n\n    this.black = params.black;\n    this.white = params.white;\n    this.board = constructBoard();\n\n    placePieces(this);\n\n    return this;\n  }\n\n  get canAttack() {\n    // Same row or column\n    if (this.black[0] === this.white[0] || this.black[1] === this.white[1]) {\n      return true;\n    }\n\n    // Diagonally\n    return (\n      Math.abs(this.black[0] - this.white[0]) ===\n      Math.abs(this.black[1] - this.white[1])\n    );\n  }\n\n  toString() {\n    return Array.from({ length: H }, (_, row) =>\n      this.board.slice(row * H, row * H + W).join(' '),\n    ).join('\\n');\n  }\n}",
+    "solutionLanguage": "javascript",
+    "explanation": "This is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Queen Attack\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/queen-attack",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-saddle-points",
+    "title": "Saddle Points",
+    "difficulty": "mid",
+    "category": "Computer Science",
+    "prompt": "Your task is to find the potential trees where you could build your tree house.\n\nThe data company provides the data as grids that show the heights of the trees.\nThe rows of the grid represent the east-west direction, and the columns represent the north-south direction.\n\nAn acceptable tree will be the largest in its row, while being the smallest in its column.\n\nA grid might not have any good trees at all.\nOr it might have one, or even several.\n\nHere is a grid that has exactly one candidate tree.\n\n          ↓\n          1  2  3  4\n        |-----------\n      1 | 9  8  7  8\n    → 2 |[5] 3  2  4\n      3 | 6  6  7  1\n\n- Row 2 has values 5, 3, 2, and 4. The largest value is 5.\n- Column 1 has values 9, 5, and 6. The smallest value is 5.\n\nSo the point at [2, 1] (row: 2, column: 1) is a great spot for a tree house.",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "export const saddlePoints = (matrix) => {\n  const maximumRowValues = [];\n  const minimumColumnValues = [];\n\n  for (let i = 0; i <= matrix.length - 1; i++) {\n    const maximumRowValue = Math.max(...matrix[i]);\n    maximumRowValues.push(maximumRowValue);\n  }\n\n  for (let i = 0; i <= matrix[0].length - 1; i++) {\n    let minimumColumnValue = Number.MAX_VALUE;\n    for (let j = 0; j <= matrix.length - 1; j++) {\n      minimumColumnValue = Math.min(minimumColumnValue, matrix[j][i]);\n    }\n    minimumColumnValues.push(minimumColumnValue);\n  }\n\n  const resultPoints = [];\n  for (let i = 0; i < maximumRowValues.length; i++) {\n    for (let j = 0; j < minimumColumnValues.length; j++) {\n      if (maximumRowValues[i] === minimumColumnValues[j]) {\n        resultPoints.push({ row: i + 1, column: j + 1 });\n      }\n    }\n  }\n\n  return resultPoints;\n};",
+    "solutionLanguage": "javascript",
+    "explanation": "Introduction\n\nYou plan to build a tree house in the woods near your house so that you can watch the sun rise and set.\n\nYou've obtained data from a local survey company that show the height of every tree in each rectangular section of the map.\nYou need to analyze each grid on the map to find good trees for your tree house.\n\nA good tree is both:\n\n- taller than every tree to the east and west, so that you have the best possible view of the sunrises and sunsets.\n- shorter than every tree to the north and south, to minimize the amount of tree climbing.\n\nThis is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Saddle Points\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/saddle-points",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-scrabble-score",
+    "title": "Scrabble Score",
+    "difficulty": "mid",
+    "category": "Computer Science",
+    "prompt": "Your task is to compute a word's Scrabble score by summing the values of its letters.\n\nThe letters are valued as follows:\n\n| Letter                       | Value |\n| ---------------------------- | ----- |\n| A, E, I, O, U, L, N, R, S, T | 1     |\n| D, G                         | 2     |\n| B, C, M, P                   | 3     |\n| F, H, V, W, Y                | 4     |\n| K                            | 5     |\n| J, X                         | 8     |\n| Q, Z                         | 10    |\n\nFor example, the word \"cabbage\" is worth 14 points:\n\n- 3 points for C\n- 1 point for A\n- 3 points for B\n- 3 points for B\n- 1 point for A\n- 2 points for G\n- 1 point for E",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "const letterScores = {\n  a: 1,\n  e: 1,\n  i: 1,\n  o: 1,\n  u: 1,\n  l: 1,\n  n: 1,\n  r: 1,\n  s: 1,\n  t: 1,\n  d: 2,\n  g: 2,\n  b: 3,\n  c: 3,\n  m: 3,\n  p: 3,\n  f: 4,\n  h: 4,\n  v: 4,\n  w: 4,\n  y: 4,\n  k: 5,\n  j: 8,\n  x: 8,\n  q: 10,\n  z: 10,\n};\n\nconst letterScore = (letter) => letterScores[letter] || 0;\n\nexport const score = (word) =>\n  [...word.toLowerCase()].reduce(\n    (sum, currChar) => sum + letterScore(currChar),\n    0,\n  );",
+    "solutionLanguage": "javascript",
+    "explanation": "Introduction\n\n[Scrabble][wikipedia] is a word game where players place letter tiles on a board to form words.\nEach letter has a value.\nA word's score is the sum of its letters' values.\n\n[wikipedia]: https://en.wikipedia.org/wiki/Scrabble\n\nThis is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Scrabble Score\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/scrabble-score",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-spiral-matrix",
+    "title": "Spiral Matrix",
+    "difficulty": "mid",
+    "category": "Computer Science",
+    "prompt": "Your task is to return a square matrix of a given size.\n\nThe matrix should be filled with natural numbers, starting from 1 in the top-left corner, increasing in an inward, clockwise spiral order, like these examples:\n\nExamples\n\nSpiral matrix of size 3\n\n    1 2 3\n    8 9 4\n    7 6 5\n\nSpiral matrix of size 4\n\n     1  2  3 4\n    12 13 14 5\n    11 16 15 6\n    10  9  8 7",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "export const spiralMatrix = (size) => {\n  const spiral = Array(size)\n    .fill()\n    .map(() => Array(0));\n\n  const totalNumbers = size ** 2;\n  let currentNumber = 1;\n  let topLeft = 0;\n  let bottomRight = size - 1;\n\n  while (currentNumber <= totalNumbers) {\n    for (let x = topLeft; x <= bottomRight; x += 1) {\n      spiral[topLeft][x] = currentNumber;\n      currentNumber += 1;\n    }\n\n    for (let y = topLeft + 1; y <= bottomRight; y += 1) {\n      spiral[y][bottomRight] = currentNumber;\n      currentNumber += 1;\n    }\n\n    for (let x = bottomRight - 1; x >= topLeft; x -= 1) {\n      spiral[bottomRight][x] = currentNumber;\n      currentNumber += 1;\n    }\n\n    for (let y = bottomRight - 1; y >= topLeft + 1; y -= 1) {\n      spiral[y][topLeft] = currentNumber;\n      currentNumber += 1;\n    }\n\n    topLeft += 1;\n    bottomRight -= 1;\n  }\n\n  return spiral;\n};",
+    "solutionLanguage": "javascript",
+    "explanation": "Introduction\n\nIn a small village near an ancient forest, there was a legend of a hidden treasure buried deep within the woods.\nDespite numerous attempts, no one had ever succeeded in finding it.\nThis was about to change, however, thanks to a young explorer named Elara.\nShe had discovered an old document containing instructions on how to locate the treasure.\nUsing these instructions, Elara was able to draw a map that revealed the path to the treasure.\n\nTo her surprise, the path followed a peculiar clockwise spiral.\nIt was no wonder no one had been able to find the treasure before!\nWith the map in hand, Elara embarks on her journey to uncover the hidden treasure.\n\nThis is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Spiral Matrix\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/spiral-matrix",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-sum-of-multiples",
+    "title": "Sum of Multiples",
+    "difficulty": "mid",
+    "category": "Computer Science",
+    "prompt": "Your task is to write the code that calculates the energy points that get awarded to players when they complete a level.\n\nThe points awarded depend on two things:\n\n- The level (a number) that the player completed.\n- The base value of each magical item collected by the player during that level.\n\nThe energy points are awarded according to the following rules:\n\n1. For each magical item, take the base value and find all the multiples of that value that are less than the level number.\n2. Combine the sets of numbers.\n3. Remove any duplicates.\n4. Calculate the sum of all the numbers that are left.\n\nLet's look at an example:\n\nThe player completed level 20 and found two magical items with base values of 3 and 5.\n\nTo calculate the energy points earned by the player, we need to find all the unique multiples of these base values that are less than level 20.\n\n- Multiples of 3 less than 20: {3, 6, 9, 12, 15, 18}\n- Multiples of 5 less than 20: {5, 10, 15}\n- Combine the sets and remove duplicates: {3, 5, 6, 9, 10, 12, 15, 18}\n- Sum the unique multiples: 3 + 5 + 6 + 9 + 10 + 12 + 15 + 18 = 78\n- Therefore, the player earns 78 energy points for completing level 20 and finding the two magical items with base values of 3 and 5.",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "export const sum = (multiples, limit) => {\n  let result = 0;\n  for (let i = 1; i < limit; i++) {\n    if (multiples.some((multiple) => i % multiple === 0)) {\n      result += i;\n    }\n  }\n  return result;\n};",
+    "solutionLanguage": "javascript",
+    "explanation": "Introduction\n\nYou work for a company that makes an online, fantasy-survival game.\n\nWhen a player finishes a level, they are awarded energy points.\nThe amount of energy awarded depends on which magical items the player found while exploring that level.\n\nThis is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Sum of Multiples\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/sum-of-multiples",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-atbash-cipher",
+    "title": "Atbash Cipher",
+    "difficulty": "senior",
+    "category": "Computer Science",
+    "prompt": "Create an implementation of the Atbash cipher, an ancient encryption system created in the Middle East.\n\nThe Atbash cipher is a simple substitution cipher that relies on transposing all the letters in the alphabet such that the resulting alphabet is backwards.\nThe first letter is replaced with the last letter, the second with the second-last, and so on.\n\nAn Atbash cipher for the Latin alphabet would be as follows:\n\n    Plain:  abcdefghijklmnopqrstuvwxyz\n    Cipher: zyxwvutsrqponmlkjihgfedcba\n\nIt is a very weak cipher because it only has one possible key, and it is a simple mono-alphabetic substitution cipher.\nHowever, this may not have been an issue in the cipher's time.\n\nCiphertext is written out in groups of fixed length, the traditional group size being 5 letters, leaving numbers unchanged, and punctuation is excluded.\nThis is to make it harder to guess things based on word boundaries.\nAll text will be encoded as lowercase letters.\n\nExamples\n\n- Encoding test gives gvhg\n- Encoding x123 yes gives c123b vh\n- Decoding gvhg gives test\n- Decoding gsvjf rxpyi ldmul cqfnk hlevi gsvoz abwlt gives thequickbrownfoxjumpsoverthelazydog",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "const ALPHABET = 'abcdefghijklmnopqrstuvwxyz';\n\nexport const encode = (message) => {\n  const encodedMessage = [...message.toLowerCase().replace(/[ .,]/g, '')]\n    .map((char) => {\n      if (ALPHABET.includes(char)) {\n        return ALPHABET[ALPHABET.length - 1 - ALPHABET.indexOf(char)];\n      }\n      return char;\n    })\n    .join('');\n  return encodedMessage.match(/.{1,5}/g).join(' ');\n};\n\nexport const decode = (message) => {\n  return encode(message).replace(/ /g, '');\n};",
+    "solutionLanguage": "javascript",
+    "explanation": "This is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Atbash Cipher\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/atbash-cipher",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-binary-search",
+    "title": "Binary Search",
+    "difficulty": "senior",
+    "category": "Computer Science",
+    "prompt": "Your task is to implement a binary search algorithm.\n\nA binary search algorithm finds an item in a list by repeatedly splitting it in half, only keeping the half which contains the item we're looking for.\nIt allows us to quickly narrow down the possible locations of our item until we find it, or until we've eliminated all possible locations.\n\n~~~~exercism/caution\nBinary search only works when a list has been sorted.\n~~~~\n\nThe algorithm looks like this:\n\n- Find the middle element of a _sorted_ list and compare it with the item we're looking for.\n- If the middle element is our item, then we're done!\n- If the middle element is greater than our item, we can eliminate that element and all the elements after it.\n- If the middle element is less than our item, we can eliminate that element and all the elements before it.\n- If every element of the list has been eliminated then the item is not in the list.\n- Otherwise, repeat the process on the part of the list that has not been eliminated.\n\nHere's an example:\n\nLet's say we're looking for the number 23 in the following sorted list: [4, 8, 12, 16, 23, 28, 32].\n\n- We start by comparing 23 with the middle element, 16.\n- Since 23 is greater than 16, we can eliminate the left half of the list, leaving us with [23, 28, 32].\n- We then compare 23 with the new middle element, 28.\n- Since 23 is less than 28, we can eliminate the right half of the list: [23].\n- We've found our item.",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "export const find = (array, element) => {\n  let start = 0;\n  let end = array.length - 1;\n  let middle;\n  while (start <= end) {\n    middle = Math.floor((start + end) / 2);\n    if (element === array[middle]) {\n      return middle;\n    } else if (element < array[middle]) {\n      end = middle - 1;\n    } else if (element > array[middle]) {\n      start = middle + 1;\n    }\n  }\n  throw new Error('Value not in array');\n};",
+    "solutionLanguage": "javascript",
+    "explanation": "Introduction\n\nYou have stumbled upon a group of mathematicians who are also singer-songwriters.\nThey have written a song for each of their favorite numbers, and, as you can imagine, they have a lot of favorite numbers (like [0][zero] or [73][seventy-three] or [6174][kaprekars-constant]).\n\nYou are curious to hear the song for your favorite number, but with so many songs to wade through, finding the right song could take a while.\nFortunately, they have organized their songs in a playlist sorted by the title — which is simply the number that the song is about.\n\nYou realize that you can use a binary search algorithm to quickly find a song given the title.\n\n[zero]: https://en.wikipedia.org/wiki/0\n[seventy-three]: https://en.wikipedia.org/wiki/73_(number)\n[kaprekars-constant]: https://en.wikipedia.org/wiki/6174_(number)\n\nThis is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Binary Search\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/binary-search",
+    "relatedTopic": "js-algorithms"
+  },
+  {
+    "id": "ex-minesweeper",
+    "title": "Minesweeper",
+    "difficulty": "senior",
+    "category": "Computer Science",
+    "prompt": "Your task is to add the mine counts to empty squares in a completed Minesweeper board.\nThe board itself is a rectangle composed of squares that are either empty (' ') or a mine ('*').\n\nFor each empty square, count the number of mines adjacent to it (horizontally, vertically, diagonally).\nIf the empty square has no adjacent mines, leave it empty.\nOtherwise replace it with the adjacent mines count.\n\nFor example, you may receive a 5 x 4 board like this (empty spaces are represented here with the '·' character for display on screen):\n\n    ·*·*·\n    ··*··\n    ··*··\n    ·····\n\nWhich your code should transform into this:\n\n    1*3*1\n    13*31\n    ·2*2·\n    ·111·",
+    "hints": [
+      "Read the examples in the prompt carefully — they are the specification.",
+      "Start with the simplest brute-force version that passes, then refactor.",
+      "Handle the edge cases (empty input, boundaries) before optimizing."
+    ],
+    "solutionCode": "const MINE = '*';\n\nconst DELTAS = [\n  [-1, -1],\n  [-1, 0],\n  [-1, 1],\n  [1, 1],\n  [1, 0],\n  [1, -1],\n  [0, 1],\n  [0, -1],\n];\n\nfunction adjacentSquareIsOnBoard(board, x, d) {\n  return board[x + d[0]];\n}\n\nfunction adjacentSquareHasMine(board, x, y, d) {\n  return board[x + d[0]][y + d[1]] === MINE;\n}\n\nfunction countAdjacentMines(board, x, y) {\n  return DELTAS.filter((d) => adjacentSquareIsOnBoard(board, x, d)).filter(\n    (d) => adjacentSquareHasMine(board, x, y, d),\n  ).length;\n}\n\nfunction cellToMineOrCount(cell, inputBoard, x, y) {\n  if (cell === MINE) {\n    return MINE;\n  }\n\n  return countAdjacentMines(inputBoard, x, y) || ' ';\n}\n\nfunction stringify(board) {\n  return board.map((row) => row.join(''));\n}\n\nfunction noDataPresent(rows) {\n  return rows.length === 0 || rows[0].length === 0;\n}\n\nexport function annotate(rows) {\n  if (noDataPresent(rows)) {\n    return rows;\n  }\n\n  const inputBoard = rows.map((row) => [...row]);\n\n  return stringify(\n    inputBoard.map((row, x) =>\n      [...row].map((cell, y) => cellToMineOrCount(cell, inputBoard, x, y)),\n    ),\n  );\n}",
+    "solutionLanguage": "javascript",
+    "explanation": "Introduction\n\n[Minesweeper][wikipedia] is a popular game where the user has to find the mines using numeric hints that indicate how many mines are directly adjacent (horizontally, vertically, diagonally) to a square.\n\n[wikipedia]: https://en.wikipedia.org/wiki/Minesweeper_(video_game)\n\nThis is the reference (exemplar) solution from the Exercism JavaScript track; it passes the exercise's official automated test suite. Exercism exercises are test-driven: the examples in the prompt define the expected behavior, and the idiomatic solution above is one clean way to satisfy them. Try solving it yourself first, then compare.\n\nSource: Exercism JavaScript track — exercise \"Minesweeper\" (MIT License). https://github.com/exercism/javascript/tree/main/exercises/practice/minesweeper",
+    "relatedTopic": "js-algorithms"
+  }
+]
