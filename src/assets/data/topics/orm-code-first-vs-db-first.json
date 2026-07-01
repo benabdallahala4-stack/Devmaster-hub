@@ -1,0 +1,683 @@
+{
+  "id": "orm-code-first-vs-db-first",
+  "title": "ORMs: Code-First vs Database-First",
+  "category": "Backend",
+  "subcategory": "Data",
+  "difficulty": "senior",
+  "tags": [
+    "orm",
+    "code-first",
+    "database-first",
+    "migrations",
+    "n-plus-one",
+    "schema-drift",
+    "ef-core",
+    "prisma"
+  ],
+  "description": "A staff-level treatment of how object-relational mappers bridge the impedance mismatch, contrasting code-first, database-first, and model-first workflows across EF Core, Hibernate/JPA, and Prisma. Covers migrations, schema drift, the N+1 problem, loading strategies, change tracking, and the escape hatches you reach for when the ORM gets in the way.",
+  "estReadMinutes": 29,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "What an ORM Actually Buys You",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "An Object-Relational Mapper exists to reconcile two data models that were never designed to fit together: the graph of objects your application manipulates in memory, and the flat, set-oriented tables of a relational database. This gap is the object-relational impedance mismatch. Objects have identity, inheritance, bidirectional references, and encapsulated behavior; relational tables have primary keys, foreign keys, joins, and a declarative query language. The ORM is the translation layer that lets you write `order.Customer.Name` instead of hand-authoring a JOIN and materializing a result set into a domain object."
+        },
+        {
+          "type": "paragraph",
+          "text": "At a senior level the interesting questions are not 'how do I map a table' but 'who owns the schema', 'how does schema change flow from dev to prod safely', and 'why is this endpoint firing 201 queries when it should fire 2'. The direction of the mapping — whether your C#, Java, or TypeScript classes drive the schema (code-first) or an existing database drives your classes (database-first) — determines your migration story, your team's division of labor, and how much friction you hit when the DB and the model drift apart."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Code-first: entities and models are the source of truth; the schema is generated and versioned via migrations.",
+            "Database-first: the database is the source of truth; the model is scaffolded (reverse-engineered) from it.",
+            "Model-first: a visual designer is the source of truth and generates both the schema and the code (largely legacy today).",
+            "Regardless of direction, the ORM introduces a runtime cost — change tracking, lazy loading, materialization — that you must be able to profile and control."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "This topic spans three mainstream stacks: EF Core (.NET), Hibernate/JPA (Java), and Prisma (TypeScript). The vocabulary differs — Include vs JOIN FETCH vs include — but the failure modes are identical."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why This Distinction Matters in Production",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The code-first versus database-first choice looks like a tooling preference in a tutorial, but in a real organization it is an ownership and process decision. It determines whether a schema change is a pull request reviewed by engineers or a change ticket executed by a DBA. It determines whether your schema is reproducible from source control on a fresh machine, or whether it lives only in the memory of the production database. Getting this wrong produces two chronic pathologies: schema drift (the DB and the code disagree and nobody is sure which is right) and un-reviewed migrations that lock a hot table at peak traffic."
+        },
+        {
+          "type": "paragraph",
+          "text": "The second reason this matters is performance. ORMs make it trivial to write code that is correct but catastrophically slow. The canonical example is the N+1 problem: a loop over 200 orders that lazily touches `order.Customer` issues 1 query for the orders and then 200 more for the customers — 201 queries where 1 or 2 would do. This is invisible in code review and invisible with 5 rows of test data; it only surfaces under production load. Recognizing it, and knowing the three or four fixes, is a core senior competency."
+        },
+        {
+          "type": "table",
+          "columns": ["Concern", "Code-First strength", "Database-First strength"],
+          "rows": [
+            ["Source of truth", "Application code / entities", "The live database schema"],
+            ["Reproducibility", "Schema rebuilt from migrations in git", "Depends on DB backups / DDL scripts"],
+            ["Ownership", "App engineers own schema evolution", "DBAs own schema, app consumes it"],
+            ["Best for", "Greenfield, small-to-mid teams, DDD", "Legacy DBs, DBA-governed shops, shared DBs"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The single most expensive mistake in this space is treating the production database as something you can hand-edit. Once someone runs an ALTER TABLE by hand in prod, your migration history is a lie and every future deploy is a gamble."
+        }
+      ]
+    },
+    {
+      "id": "concept-code-first",
+      "heading": "Code-First: Entities Drive the Schema",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "In code-first, you define your domain as classes and annotations/configuration, and the ORM generates DDL from that model. The schema is never authored directly; instead each change to the model produces a migration — a versioned, ordered script that transforms the database from one known state to the next. Migrations live in source control alongside the code that requires them, so a checkout of any commit contains both the model and the exact schema it expects."
+        },
+        {
+          "type": "paragraph",
+          "text": "Below is a minimal EF Core entity with a fluent configuration and the migration EF generates for it. Note that the migration has an Up (apply) and a Down (revert) method — the Down is what enables local rollback, though in production you almost always roll forward with a new migration instead."
+        },
+        {
+          "type": "code",
+          "language": "csharp",
+          "code": "// Domain entities (the source of truth)\npublic class Customer\n{\n    public int Id { get; set; }\n    public string Name { get; set; } = default!;\n    public List<Order> Orders { get; set; } = new();\n}\n\npublic class Order\n{\n    public int Id { get; set; }\n    public DateTime PlacedAt { get; set; }\n    public decimal Total { get; set; }\n    public int CustomerId { get; set; }\n    public Customer Customer { get; set; } = default!;\n}\n\npublic class ShopContext : DbContext\n{\n    public DbSet<Customer> Customers => Set<Customer>();\n    public DbSet<Order> Orders => Set<Order>();\n\n    protected override void OnModelCreating(ModelBuilder b)\n    {\n        b.Entity<Order>().Property(o => o.Total).HasPrecision(18, 2);\n        b.Entity<Order>()\n            .HasOne(o => o.Customer)\n            .WithMany(c => c.Orders)\n            .HasForeignKey(o => o.CustomerId)\n            .OnDelete(DeleteBehavior.Restrict);\n    }\n}\n\n// dotnet ef migrations add InitialCreate  -->  generates the class below"
+        },
+        {
+          "type": "code",
+          "language": "csharp",
+          "code": "public partial class InitialCreate : Migration\n{\n    protected override void Up(MigrationBuilder mb)\n    {\n        mb.CreateTable(\n            name: \"Customers\",\n            columns: t => new\n            {\n                Id = t.Column<int>(nullable: false).Annotation(\"SqlServer:Identity\", \"1, 1\"),\n                Name = t.Column<string>(nullable: false)\n            },\n            constraints: t => t.PrimaryKey(\"PK_Customers\", x => x.Id));\n\n        mb.CreateTable(\n            name: \"Orders\",\n            columns: t => new\n            {\n                Id = t.Column<int>(nullable: false).Annotation(\"SqlServer:Identity\", \"1, 1\"),\n                PlacedAt = t.Column<DateTime>(nullable: false),\n                Total = t.Column<decimal>(type: \"decimal(18,2)\", nullable: false),\n                CustomerId = t.Column<int>(nullable: false)\n            },\n            constraints: t =>\n            {\n                t.PrimaryKey(\"PK_Orders\", x => x.Id);\n                t.ForeignKey(\"FK_Orders_Customers_CustomerId\", x => x.CustomerId,\n                    \"Customers\", \"Id\", onDelete: ReferentialAction.Restrict);\n            });\n    }\n\n    protected override void Down(MigrationBuilder mb)\n    {\n        mb.DropTable(\"Orders\");\n        mb.DropTable(\"Customers\");\n    }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Always read the generated migration before committing. EF, Hibernate, and Prisma occasionally emit destructive operations (a column rename can surface as DROP + ADD, silently losing data). The migration is code you own, not magic."
+        }
+      ]
+    },
+    {
+      "id": "concept-db-first",
+      "heading": "Database-First and Model-First",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "In database-first, the database already exists — often a decades-old system with stored procedures, triggers, and naming conventions no ORM would generate — and you scaffold (reverse-engineer) your model from it. In EF Core this is `dotnet ef dbcontext scaffold`; in Hibernate the JPA metamodel or tools like the reverse-engineering plugin; in Prisma it is `prisma db pull`, which introspects the DB and writes `schema.prisma` for you. The generated classes are typically regenerated on schema changes rather than hand-edited, so the DB stays authoritative."
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "# EF Core: scaffold a model from an existing SQL Server database\ndotnet ef dbcontext scaffold \\\n  \"Server=.;Database=LegacyErp;Trusted_Connection=True;\" \\\n  Microsoft.EntityFrameworkCore.SqlServer \\\n  --output-dir Models --context ErpContext --no-onconfiguring\n\n# Prisma: introspect an existing database into schema.prisma\nnpx prisma db pull      # updates schema.prisma from the live DB\nnpx prisma generate     # regenerates the typed client"
+        },
+        {
+          "type": "paragraph",
+          "text": "Model-first is the historical third option: you draw entities in a visual designer (the old EF EDMX designer being the classic example) and the tool generates both the SQL schema and the code. It never gained traction outside the .NET Framework era because the designer became the bottleneck — merge conflicts on an XML diagram are miserable, and the round-trip between diagram, code, and DB was fragile. Modern teams effectively choose between code-first and database-first."
+        },
+        {
+          "type": "table",
+          "columns": ["Approach", "Driver / source of truth", "Best for", "Migration story"],
+          "rows": [
+            ["Code-first", "Entity classes in code", "Greenfield, engineer-owned schema", "Generated, versioned migrations in git"],
+            ["Database-first", "Existing DB schema", "Legacy / DBA-governed / shared DBs", "DBA authors DDL; model re-scaffolded"],
+            ["Model-first", "Visual designer (EDMX)", "Rare / legacy .NET Framework apps", "Designer generates both; hard to merge"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A legacy database that a DBA team owns and that other systems also write to is the textbook case for database-first. Trying to impose code-first migrations on a shared production DB you do not exclusively control is how you clobber another team's tables."
+        }
+      ]
+    },
+    {
+      "id": "concept-migrations",
+      "heading": "Migrations: Generate, Review, Apply, Roll Forward",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A migration captures a delta between two schema states as an ordered, named, checked-in artifact. The ORM records which migrations have run (EF uses a `__EFMigrationsHistory` table; Flyway uses `flyway_schema_history`) so it can apply only the pending ones. Ordering matters: migrations are applied in sequence, and when two developers each add a migration on separate branches, merging them can produce two 'latest' migrations that both claim to follow the same parent. EF detects this as a model-snapshot conflict; the resolution is to regenerate one migration on top of the other, not to hand-merge the snapshot file."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Generate: `dotnet ef migrations add AddDiscountColumn` / `npx prisma migrate dev --name add_discount` / Hibernate: author the DDL (or use a tool).",
+            "Review: open the generated SQL/DDL and confirm it is non-destructive and index-aware before merging.",
+            "Apply: `dotnet ef database update` / `prisma migrate deploy` / `flyway migrate` in a controlled deploy step, not silently on app boot in prod.",
+            "Roll forward: in production you fix a bad migration with a new corrective migration; you do not run Down against live data."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Seeding — inserting reference data (countries, roles, feature flags) — belongs in migrations or a dedicated idempotent seed step so every environment converges to the same baseline. Keep transactional/test fixture data out of migrations; migrations are for schema and stable reference data only."
+        },
+        {
+          "type": "paragraph",
+          "text": "Two philosophies compete for the migration runner. Built-in migrations (EF, Prisma Migrate) tie schema changes to the ORM's model and are convenient for code-first teams. Dedicated tools — Flyway and Liquibase — treat migrations as plain, hand-authored SQL (or XML/YAML for Liquibase) that is ORM-agnostic, which suits polyglot shops, DBA review workflows, and databases touched by multiple services. Many mature systems use EF/Hibernate for mapping but Flyway for the actual schema evolution to keep DBAs in control."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Treat production migrations as forward-only. A `Down` that drops a column will destroy data written since the deploy. Prefer expand-then-contract: add the new column, backfill, switch reads, and only drop the old column in a much later release once nothing references it."
+        }
+      ]
+    },
+    {
+      "id": "concept-schema-drift",
+      "heading": "Schema Drift and How to Detect It",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Schema drift is the state where the live database no longer matches what your model and migration history say it should be. It happens when someone runs a hotfix ALTER TABLE directly against prod, when a migration fails halfway and is not cleanly rolled back, or when two environments were provisioned by different means. Drift is dangerous because the ORM assumes the schema it expects; a missing column or changed type surfaces as a runtime exception on a specific code path that may only run at month-end."
+        },
+        {
+          "type": "paragraph",
+          "text": "Detect drift with a diff, never by eyeballing. EF's `dotnet ef migrations has-pending-model-changes` and generating a no-op migration reveal whether the model and the last migration agree. Prisma's `prisma migrate diff` compares any two schema sources (schema file, migrations, live DB) and `prisma migrate status` reports whether the DB matches the migration history. Liquibase has `diff` and `diffChangeLog`; Flyway has `check`/drift detection in its paid tiers. Wire one of these into CI so a drifted environment fails the pipeline instead of failing a customer."
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "# EF Core: does the current model differ from the last migration?\ndotnet ef migrations has-pending-model-changes   # non-zero exit => drift/pending\n\n# Prisma: is the DB in sync with the migration history?\nnpx prisma migrate status\n# Compare live DB against the migrations folder:\nnpx prisma migrate diff \\\n  --from-migrations ./prisma/migrations \\\n  --to-schema-datasource ./prisma/schema.prisma \\\n  --exit-code            # exit 2 means there IS a difference (drift)"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Never hand-edit the production database schema. If you must apply an emergency change, write it as a migration, test it, and let the pipeline apply it so the history stays truthful. A manual ALTER is a time bomb for the next deploy."
+        }
+      ]
+    },
+    {
+      "id": "concept-n-plus-one",
+      "heading": "The N+1 Problem: 201 Queries for 200 Rows",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "N+1 is the defining ORM performance bug. You issue one query to load N parent rows, then — because you touch a related property inside a loop — the ORM lazily issues one additional query per parent to fetch its children. Two hundred orders whose customer you access become 1 + 200 = 201 round trips to the database. Each round trip carries network latency and query-planning cost, so a page that should take single-digit milliseconds takes seconds under load. The tell in a query log is a burst of near-identical queries differing only by a bound id parameter."
+        },
+        {
+          "type": "paragraph",
+          "text": "The JPA example below shows the trap and the fix. The lazy `@OneToMany` looks innocent, but iterating and calling `getOrders()` triggers a query per customer. A JOIN FETCH (or an entity graph) collapses that into a single query. The equivalent in EF Core is `.Include(c => c.Orders)`; in Prisma it is `include: { orders: true }`."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "@Entity\npublic class Customer {\n    @Id @GeneratedValue\n    private Long id;\n    private String name;\n\n    // LAZY by default for collections\n    @OneToMany(mappedBy = \"customer\", fetch = FetchType.LAZY)\n    private List<Order> orders = new ArrayList<>();\n    // getters/setters omitted\n}\n\n// ---- N+1 TRAP ----\nList<Customer> customers = em.createQuery(\n        \"select c from Customer c\", Customer.class).getResultList();  // 1 query\nfor (Customer c : customers) {\n    total += c.getOrders().size();   // fires 1 query PER customer => N more\n}\n// 200 customers => 201 queries\n\n// ---- FIX: JOIN FETCH pulls parents + children in ONE query ----\nList<Customer> customers = em.createQuery(\n        \"select distinct c from Customer c join fetch c.orders\",\n        Customer.class).getResultList();  // 1 query total\nfor (Customer c : customers) {\n    total += c.getOrders().size();   // no extra queries; already loaded\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "JOIN FETCH is not the only fix, and sometimes not the best one. If you only need aggregate data, project directly into a DTO so the ORM never materializes entities at all. If you need many collections (fetching two collections with a single JOIN FETCH causes a Cartesian product), use a batch strategy — Hibernate's `@BatchSize` or `hibernate.default_batch_fetch_size` turns N queries into N/batch queries using `WHERE id IN (...)`. EF Core offers split queries (`AsSplitQuery`) to avoid the Cartesian blow-up while still eager loading."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Rule of thumb: if the number of queries scales with the number of rows returned, you have an N+1. A healthy endpoint issues a constant, small number of queries regardless of result-set size."
+        }
+      ]
+    },
+    {
+      "id": "concept-loading-strategies",
+      "heading": "Lazy vs Eager vs Explicit Loading",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "There are three ways to load related data, and choosing correctly per query is what separates a fast data layer from a slow one. Lazy loading defers the child query until you touch the navigation property — convenient, but the source of most N+1 bugs and hidden queries. Eager loading pulls the related data up front in the same round trip (Include / JOIN FETCH / include) — predictable, but over-fetching if you do not need the children. Explicit loading fires a deliberate, separate query on demand — the most controlled, and useful when you only sometimes need the relation."
+        },
+        {
+          "type": "table",
+          "columns": ["Strategy", "When the child query fires", "Best for", "Main risk"],
+          "rows": [
+            ["Lazy", "On first access of the navigation prop", "Rarely-used relations, small graphs", "Hidden N+1; queries outside the unit of work / session-closed errors"],
+            ["Eager", "Up front, with the parent query", "Relations you always need for this view", "Over-fetching; Cartesian products across multiple collections"],
+            ["Explicit", "When you call Load/fetch manually", "Conditional loading; fine control", "More verbose code; easy to forget"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "A subtle trap with lazy loading is that the query fires only while the ORM session/context is open. In Hibernate, touching a lazy field after the session closes throws LazyInitializationException; in EF Core, lazy loading requires proxies and a live context, and touching a navigation after disposal throws. Serializing an entity graph (e.g., to JSON in a web response) is a common accidental trigger — the serializer walks every navigation, lazily loading the entire object graph one query at a time."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Many senior teams disable lazy loading entirely and require explicit Include/fetch. This trades a little verbosity for the elimination of an entire class of surprise N+1 and post-session-close bugs."
+        }
+      ]
+    },
+    {
+      "id": "concept-change-tracking",
+      "heading": "Change Tracking, AsNoTracking, and Projections",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "ORMs give you a unit of work: they snapshot every entity they materialize so that on SaveChanges/commit they can compute which properties changed and emit minimal UPDATEs. That change tracking is essential for writes but pure overhead for reads. For a read-only endpoint returning thousands of rows, tracking allocates snapshots you never use and slows materialization measurably. EF Core's `AsNoTracking()` and JPA read-only hints/detached queries skip that cost."
+        },
+        {
+          "type": "paragraph",
+          "text": "Even better than no-tracking full entities is projecting to a DTO or anonymous type. A projection tells the ORM to SELECT only the columns you need, avoids materializing entities entirely, and sidesteps lazy loading and tracking in one move. It also makes the SQL obvious and index-friendly."
+        },
+        {
+          "type": "code",
+          "language": "csharp",
+          "code": "// Read-only list: skip change tracking\nvar customers = await db.Customers\n    .AsNoTracking()\n    .Where(c => c.Orders.Any())\n    .ToListAsync();\n\n// Better for a read view: project straight to a DTO (SELECT only needed columns)\nvar summaries = await db.Customers\n    .Where(c => c.Orders.Any())\n    .Select(c => new CustomerSummary(\n        c.Id,\n        c.Name,\n        c.Orders.Count(),                 // translated to a correlated COUNT\n        c.Orders.Sum(o => o.Total)))       // one SQL query, no entity materialized\n    .ToListAsync();\n\npublic record CustomerSummary(int Id, string Name, int OrderCount, decimal Revenue);"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Default reads to AsNoTracking (EF Core even supports AsNoTrackingWithIdentityResolution and a context-wide QueryTrackingBehavior.NoTracking). Only track entities you intend to modify and save."
+        }
+      ]
+    },
+    {
+      "id": "example-prisma",
+      "heading": "Prisma Specifics: schema.prisma, migrate vs db push",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Prisma is schema-first in a specific sense: a single `schema.prisma` declaratively defines your models, and `prisma generate` produces a fully typed client from it. Relations are declared explicitly, and the generated client makes N+1 hard to write accidentally because you opt into relations with `include` or `select`."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// schema.prisma\n// datasource db { provider = \"postgresql\"; url = env(\"DATABASE_URL\") }\n// generator client { provider = \"prisma-client-js\" }\n\nmodel Customer {\n  id     Int     @id @default(autoincrement())\n  name   String\n  orders Order[]\n}\n\nmodel Order {\n  id         Int      @id @default(autoincrement())\n  placedAt   DateTime @default(now())\n  total      Decimal  @db.Decimal(18, 2)\n  customer   Customer @relation(fields: [customerId], references: [id])\n  customerId Int\n}"
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// One query with the relation eagerly loaded (no N+1)\nconst customers = await prisma.customer.findMany({\n  where: { orders: { some: {} } },\n  include: { orders: true },          // JOIN-like load in a single logical fetch\n});\n\n// Projection: select only the columns you need\nconst summaries = await prisma.customer.findMany({\n  select: {\n    id: true,\n    name: true,\n    _count: { select: { orders: true } },\n  },\n});"
+        },
+        {
+          "type": "paragraph",
+          "text": "The critical operational distinction in Prisma is `migrate` versus `db push`. `prisma migrate dev` (locally) and `prisma migrate deploy` (in CI/prod) create and apply versioned, checked-in SQL migration files — this is the production-safe, auditable path. `prisma db push` shoves the schema state straight into the database with no migration file. It is a fast prototyping tool for a throwaway dev database; using it against a shared or production database means you have no migration history, no review artifact, and a wide-open door to data loss."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "prisma db push in production is the Prisma equivalent of a manual ALTER: no history, no review, potential silent data loss. Use prisma migrate deploy in every non-throwaway environment."
+        }
+      ]
+    },
+    {
+      "id": "example-raw-sql",
+      "heading": "Escape Hatches: Raw SQL and Stored Procedures",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "No ORM expresses every query well. Window functions, recursive CTEs, bulk set-based updates, vendor-specific hints, and hand-tuned reporting queries are all cases where dropping to raw SQL is the right call, not a failure. Every mature ORM provides a typed, parameterized escape hatch so you keep protection from SQL injection while bypassing the query translator."
+        },
+        {
+          "type": "code",
+          "language": "csharp",
+          "code": "// EF Core: parameterized raw SQL mapped back to an entity or a keyless DTO\nvar hot = await db.Orders\n    .FromSqlInterpolated($@\"\n        SELECT * FROM Orders\n        WHERE Total > {threshold}\n          AND PlacedAt >= {since}\")\n    .AsNoTracking()\n    .ToListAsync();\n\n// Raw scalar / non-query (e.g., a set-based bulk update the ORM can't express well)\nawait db.Database.ExecuteSqlInterpolatedAsync($@\"\n    UPDATE Orders SET Total = Total * {factor} WHERE PlacedAt < {cutoff}\");"
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// JPA: native query + calling a stored procedure\nList<Order> hot = em.createNativeQuery(\n        \"SELECT * FROM orders WHERE total > :t\", Order.class)\n    .setParameter(\"t\", threshold)\n    .getResultList();\n\nStoredProcedureQuery proc = em.createStoredProcedureQuery(\"rebuild_summary\")\n    .registerStoredProcedureParameter(\"day\", LocalDate.class, ParameterMode.IN)\n    .setParameter(\"day\", day);\nproc.execute();"
+        },
+        {
+          "type": "paragraph",
+          "text": "The ORM-versus-raw-SQL trade-off is not all-or-nothing. Use the ORM for the 90% of CRUD and navigation where its productivity and safety shine; reach for raw SQL for the 10% of hot, complex, or set-based queries where you need control over the exact plan. The anti-pattern is stringing together an entire application in raw SQL (losing type safety, change tracking, and portability) or, conversely, contorting LINQ/HQL into unreadable knots to avoid ever writing SQL."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Always parameterize. FromSqlInterpolated, setParameter, and Prisma's $queryRaw tagged templates parameterize automatically — never concatenate user input into a query string."
+        }
+      ]
+    },
+    {
+      "id": "mistake-hbm2ddl",
+      "heading": "Common Mistake: hbm2ddl.auto and Auto-Migrate in Production",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Hibernate's `hibernate.hbm2ddl.auto` setting controls whether Hibernate mutates the schema at startup based on your entities. In development, `update` or `create-drop` feels magical: change an entity, restart, schema follows. In production it is a loaded gun. `create` and `create-drop` drop and recreate tables — instant, total data loss. `update` is subtler and worse: it only ever adds; it never drops or narrows, it silently ignores renames, and it makes schema changes based on whatever entity version happens to boot first, with no review, no ordering guarantee, and no migration record."
+        },
+        {
+          "type": "table",
+          "columns": ["hbm2ddl.auto value", "What it does", "Safe in prod?"],
+          "rows": [
+            ["validate", "Checks entities match schema; no changes", "Yes (recommended)"],
+            ["none", "Does nothing", "Yes"],
+            ["update", "Adds missing columns/tables; never drops", "No — un-reviewed, unordered, drift-prone"],
+            ["create", "Drops and recreates schema on boot", "No — data loss"],
+            ["create-drop", "Creates on boot, drops on shutdown", "No — data loss"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The correct production posture is `hibernate.hbm2ddl.auto=validate` (or none) combined with a real migration tool — Flyway or Liquibase — that applies reviewed, ordered, versioned scripts as an explicit deploy step. `validate` gives you a fast fail on boot if the schema and entities disagree, catching drift immediately without letting Hibernate touch the schema. The exact same principle applies to EF (do not call `context.Database.EnsureCreated()` or run `Migrate()` blindly on app start for multi-instance production) and Prisma (never `db push` in prod)."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "hbm2ddl.auto=update in production is a top cause of untracked schema drift, and create / create-drop are a top cause of catastrophic data loss. Set it to validate and migrate with Flyway/Liquibase."
+        }
+      ]
+    },
+    {
+      "id": "example-incident",
+      "heading": "Production Incident: The 201-Query Dashboard",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A real-shape incident: an internal orders dashboard was fine in staging and fell over the morning a large customer onboarded. The p95 for GET /dashboard jumped from 40ms to 6 seconds, and the database CPU pinned at 95%. APM traces showed a single request issuing 201 database queries: one `SELECT * FROM orders` and then 200 nearly identical `SELECT * FROM customers WHERE id = ?` queries, one per order."
+        },
+        {
+          "type": "paragraph",
+          "text": "Root cause: the view model looped over orders and read `order.getCustomer().getName()`. The `@ManyToOne` was lazily proxied, so each `getCustomer()` triggered a fresh query. With 5 orders in staging nobody noticed; with 200 orders in the new tenant it was a textbook N+1. The database was healthy — the application was simply asking it 201 questions per page load."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// BEFORE (N+1): 1 query for orders + 1 per order for its customer = 201\nList<Order> orders = orderRepo.findAllByStatus(Status.OPEN);\nfor (Order o : orders) {\n    rows.add(new Row(o.getId(), o.getCustomer().getName())); // lazy hit each time\n}\n\n// AFTER (fix 1): eager fetch the customer in ONE query via JOIN FETCH\n@Query(\"select o from Order o join fetch o.customer where o.status = :s\")\nList<Order> findOpenWithCustomer(@Param(\"s\") Status s);\n\n// AFTER (fix 2, even leaner): project directly to the DTO the view needs\n@Query(\"select new com.shop.RowDto(o.id, o.customer.name) \" +\n       \"from Order o where o.status = :s\")\nList<RowDto> findRows(@Param(\"s\") Status s);   // 1 query, only 2 columns\n"
+        },
+        {
+          "type": "paragraph",
+          "text": "The fix shipped as the JOIN FETCH query first (a one-line change that dropped 201 queries to 1 and p95 back to 40ms), and the projection followed as a hardening step so the endpoint never materializes full entities it does not need. Follow-ups: a guardrail was added that logs a warning when a single request exceeds a query-count threshold, and integration tests now assert query counts for hot endpoints (Hibernate statistics / EF Core interceptors) so an N+1 regression fails CI rather than paging someone."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Two durable lessons: (1) test hot paths with production-scale row counts, not five fixture rows; (2) assert query counts in tests so N+1 regressions are caught mechanically, not during an incident."
+        }
+      ]
+    },
+    {
+      "id": "bestpractice",
+      "heading": "Best Practices Checklist",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Pick direction by ownership: code-first for greenfield, engineer-owned schemas; database-first for legacy or DBA-governed shared databases.",
+            "Always read generated migrations before merging; watch for DROP/ADD that silently loses data on renames.",
+            "Treat production migrations as forward-only; use expand-then-contract for breaking changes.",
+            "Never hand-edit prod schema; every change is a reviewed, versioned migration applied by the pipeline.",
+            "Detect drift in CI (ef migrations diff, prisma migrate status/diff, liquibase diff) so drifted envs fail the build.",
+            "Set Hibernate hbm2ddl.auto=validate in prod and migrate with Flyway/Liquibase; never update/create/create-drop.",
+            "Default reads to AsNoTracking / projections; only track entities you will modify.",
+            "Prefer explicit eager loading (Include / JOIN FETCH / include) over lazy loading; consider disabling lazy loading entirely.",
+            "Profile ORM-generated SQL (EF logging, Hibernate show_sql/statistics, Prisma query events, DB APM) and assert query counts on hot paths.",
+            "Reach for raw SQL / stored procs for complex or set-based queries, but keep it parameterized."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The senior mindset: the ORM is a productivity tool over SQL, not a replacement for understanding SQL. You must be able to see, read, and reason about the SQL it emits."
+        }
+      ]
+    },
+    {
+      "id": "note-profiling",
+      "heading": "Note: Profiling ORM-Generated SQL",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "You cannot fix what you cannot see. Turn on SQL logging early and keep it available in every environment. EF Core logs parameterized SQL through the standard logging pipeline (and warns on client-side evaluation and Cartesian explosions). Hibernate exposes `hibernate.show_sql`, `format_sql`, and — more usefully — `hibernate.generate_statistics`, which reports query counts, cache hits, and time. Prisma emits `query` events you can subscribe to. Above the ORM, database-side tooling (pg_stat_statements, the SQL Server Query Store, APM traces) shows the aggregate picture under real load."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Do not leave verbose SQL logging with parameter values enabled in production — it is a performance drain and can leak sensitive data into logs. Log the shape and counts, sample where possible, and gate value logging behind a debug flag."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "code-first-flow",
+      "title": "Code-First Migration Flow",
+      "type": "mermaid",
+      "content": "flowchart LR\n  A[Edit entity classes] --> B[Generate migration]\n  B --> C[Review generated SQL]\n  C --> D{Safe and non-destructive?}\n  D -- No --> A\n  D -- Yes --> E[Commit migration to git]\n  E --> F[CI applies migration]\n  F --> G[(Database schema updated)]"
+    },
+    {
+      "id": "n-plus-one-explosion",
+      "title": "N+1 Explosion vs Single JOIN",
+      "type": "mermaid",
+      "content": "flowchart TB\n  subgraph NPlusOne[N+1: 201 queries]\n    Q0[SELECT orders] --> L1[loop over 200 rows]\n    L1 --> Q1[SELECT customer id 1]\n    L1 --> Q2[SELECT customer id 2]\n    L1 --> Q3[... 198 more ...]\n  end\n  subgraph Joined[Fixed: 1 query]\n    J0[SELECT orders JOIN FETCH customer]\n  end\n  NPlusOne -.refactor.-> Joined"
+    },
+    {
+      "id": "loading-strategy-decision",
+      "title": "Loading Strategy Decision",
+      "type": "ascii",
+      "content": "Need related data for THIS query?\n            |\n     +------+------+\n     |             |\n    NO            YES\n     |             |\n  Do not      Always needed for the view?\n  load           |\n           +-----+-----+\n           |           |\n          YES         NO / sometimes\n           |           |\n     Eager load    Explicit load\n  (Include /       (Load / fetch\n   JOIN FETCH)      on demand)\n\n  Avoid: relying on LAZY inside loops => N+1"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-impedance-mismatch",
+      "question": "What is the object-relational impedance mismatch, and what specifically does an ORM do to bridge it?",
+      "answer": "The impedance mismatch is the structural gap between the object model (identity, inheritance, encapsulation, bidirectional references, in-memory graphs) and the relational model (tables, rows, foreign keys, joins, set-based SQL). The two were designed independently and do not map one-to-one: inheritance has no native table representation, object identity differs from primary-key identity, and navigating a reference is a pointer dereference in objects but a join in SQL. An ORM bridges this by mapping classes to tables and properties to columns, translating navigations into joins or lazy queries, materializing result sets into object graphs, and tracking changes so it can emit UPDATEs. It also manages identity (the same DB row maps to one object instance within a unit of work). The trade-off is a runtime abstraction that can hide expensive queries, which is why senior engineers still profile the generated SQL.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["orm", "impedance-mismatch", "fundamentals"],
+      "followUps": ["Where does inheritance mapping get tricky (TPH vs TPT)?", "How does identity map differ from a cache?"]
+    },
+    {
+      "id": "q-code-vs-db-first",
+      "question": "Explain code-first, database-first, and model-first, and when you would choose each.",
+      "answer": "Code-first makes your entity classes the source of truth: the ORM generates the schema from the model and you evolve it through versioned migrations checked into git. It suits greenfield projects and engineer-owned schemas. Database-first makes an existing database the source of truth: you scaffold (reverse-engineer) the model from it and regenerate when the DB changes; it suits legacy systems and shops where DBAs own and govern the schema or where multiple systems share the database. Model-first uses a visual designer that generates both schema and code; it is largely legacy (the old EF EDMX designer) because diagrams merge poorly and the round-trip is fragile. Choose by ownership and starting conditions: greenfield with app-team ownership leans code-first; an established DBA-governed or shared database leans database-first; model-first is rarely the right choice today.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["code-first", "database-first", "model-first"],
+      "followUps": ["Can you mix approaches on one project?", "How does team structure influence the choice?"]
+    },
+    {
+      "id": "q-legacy-db-choice",
+      "question": "You are building a new service on top of a 15-year-old database owned by a DBA team and written to by three other systems. Code-first or database-first?",
+      "answer": "Database-first, without much hesitation. You do not exclusively own the schema, so you cannot safely let your entity classes drive it via migrations — a code-first migration could conflict with the DBA team's DDL or clobber tables the other systems depend on. Scaffold the model from the existing schema (dbcontext scaffold / prisma db pull / reverse-engineering) so the DB stays authoritative, and consume it read-appropriately. The tricky part is that people reflexively reach for code-first because it is the tutorial default and feels modern; here it is actively dangerous. Schema changes should flow through the DBA team's process (often Flyway/Liquibase scripts they review), and your service re-scaffolds when the schema changes. The senior signal is recognizing that ownership, not tooling familiarity, drives the decision.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["database-first", "legacy", "ownership"],
+      "followUps": ["How do you keep the scaffolded model in sync as the DB evolves?", "What if you need a column the DBAs won't add?"]
+    },
+    {
+      "id": "q-spot-n-plus-one",
+      "question": "During review you see a loop building a report that reads order.Customer.Name for each of 200 orders. What is wrong and how do you prove it?",
+      "answer": "This is a classic N+1. Because the Customer navigation is lazily loaded, the initial query fetches the 200 orders and then each order.Customer.Name access fires a separate SELECT for that customer — 1 + 200 = 201 queries. It is invisible in review and with tiny test data, so you prove it by turning on SQL logging (EF Core logging, Hibernate show_sql/statistics, Prisma query events) and observing a burst of near-identical queries differing only by a bound id, or by asserting the query count in a test with realistic row counts. The tell is that query count scales with result-set size. The fix is to eager-load the relation with Include / JOIN FETCH / include, or better, project only the columns the report needs into a DTO so no entities are materialized at all. Add a query-count assertion so the regression cannot come back.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["n-plus-one", "profiling", "performance"],
+      "followUps": ["Why can two JOIN FETCHes make things worse?", "How do batch fetch / IN queries help?"]
+    },
+    {
+      "id": "q-fix-n-plus-one",
+      "question": "What are the main ways to fix an N+1, and how do you pick between them?",
+      "answer": "Four common fixes. (1) Eager load with Include / JOIN FETCH / include to pull parents and children in one query — best when you always need that single relation. (2) Project into a DTO with a Select/constructor expression so the ORM emits one query selecting only needed columns and materializes no entities — best for read views and aggregates. (3) Batch fetching (Hibernate @BatchSize / default_batch_fetch_size, or a manual WHERE id IN (...)) to turn N child queries into a handful using IN — best when you need full child collections but a single JOIN would be too wide. (4) Split queries (EF Core AsSplitQuery) to eager-load multiple collections without a Cartesian product. You pick by what you actually need: a single relation you always use favors JOIN FETCH; a read-only aggregate favors projection; multiple large collections favor batching or split queries to avoid Cartesian blow-up.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["n-plus-one", "eager-loading", "projection"],
+      "followUps": ["When does JOIN FETCH cause a Cartesian product?", "Why can projections be faster than Include even without N+1?"]
+    },
+    {
+      "id": "q-hbm2ddl-danger",
+      "question": "Why is hibernate.hbm2ddl.auto=update dangerous in production, and what should you use instead?",
+      "answer": "update mutates the schema at application startup based on the booting entity classes, with no review, no ordering guarantee, and no migration record. It only ever adds — it never drops or narrows columns and silently ignores renames — so it produces exactly the kind of untracked drift where the DB and your intent quietly diverge and no artifact explains why. In a multi-instance deploy, whichever instance boots first defines the change, which is non-deterministic. The sibling values create and create-drop are worse: they drop and recreate tables, causing immediate total data loss. The correct production setting is validate (or none), which fails fast if entities and schema disagree but never touches the schema, combined with a real migration tool — Flyway or Liquibase — that applies reviewed, ordered, versioned scripts as an explicit deploy step. The tricky part is that update is so convenient in dev that teams forget to disable it before production.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["hibernate", "hbm2ddl", "migrations"],
+      "followUps": ["What does validate actually check?", "Is EnsureCreated / Migrate on boot the same class of risk in EF?"]
+    },
+    {
+      "id": "q-schema-drift-detect",
+      "question": "How do you detect schema drift, and why is hand-editing the prod DB the root cause you must prevent?",
+      "answer": "Schema drift is when the live database no longer matches the model and migration history. You detect it with a diff, never by inspection: EF's migrations has-pending-model-changes and diff, Prisma's migrate status and migrate diff, Liquibase diff, and Flyway's drift check compare the expected schema (migrations/model) against the actual DB and report differences. Wiring one into CI turns a drifted environment into a failed build instead of a runtime exception on a rare code path. The root cause you must prevent is anyone applying a manual ALTER against production, because once the schema changes outside the migration history, that history is a lie: the next migration may assume a state that no longer exists and fail or corrupt data. The senior discipline is that every schema change — even an emergency hotfix — is written as a migration, tested, and applied by the pipeline so the history stays truthful.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["schema-drift", "migrations", "ci"],
+      "followUps": ["How do you recover once drift has already happened?", "How would you baseline an existing untracked DB into Flyway?"]
+    },
+    {
+      "id": "q-lazy-hidden-queries",
+      "question": "How can lazy loading cause bugs beyond N+1, such as errors far from where the query was written?",
+      "answer": "Lazy loading fires the child query only while the ORM session/context that owns the entity is still open. If you return an entity from a service method (closing the session) and then touch a lazy navigation in the controller or during JSON serialization, Hibernate throws LazyInitializationException and EF Core throws because the context is disposed — an error that appears far from the query and often only on certain code paths. Serialization is an especially nasty trigger: a JSON serializer walks every navigation property, lazily loading the entire object graph one query at a time (a hidden N+1 that also risks reference cycles). These bugs are invisible in unit tests that keep the session open and only bite in the real request lifecycle. The fixes are to eager-load exactly what the response needs, project to DTOs so there are no lazy navigations to trip over, or disable lazy loading entirely so the compiler/API forces explicit loading.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["lazy-loading", "session", "serialization"],
+      "followUps": ["Why do DTOs eliminate this class of bug?", "What is open-session-in-view and why is it controversial?"]
+    },
+    {
+      "id": "q-when-raw-sql",
+      "question": "When should you drop out of the ORM and write raw SQL or call a stored procedure?",
+      "answer": "When the query is something the ORM expresses poorly or not at all, or where you need exact control of the plan: window functions, recursive CTEs, bulk set-based updates/deletes that shouldn't materialize entities, vendor-specific hints, and hand-tuned reporting queries. Dropping to raw SQL here is engineering judgment, not defeat — you keep the ORM for the 90% of CRUD and navigation where it is productive and safe, and use raw SQL for the 10% that is hot or complex. The key discipline is to use the ORM's parameterized raw-SQL API (FromSqlInterpolated, native queries with setParameter, Prisma's $queryRaw tagged templates) so you retain SQL-injection protection. The tricky judgment is avoiding both extremes: contorting LINQ/HQL into unreadable knots just to avoid SQL, and abandoning the ORM entirely and losing type safety, change tracking, and portability across the whole app.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["raw-sql", "stored-procedures", "escape-hatch"],
+      "followUps": ["How do you keep raw SQL testable and portable?", "How do you map a raw result to a keyless/DTO type?"]
+    },
+    {
+      "id": "q-change-tracking-cost",
+      "question": "What is change tracking, when is it pure overhead, and how do you avoid the cost?",
+      "answer": "Change tracking is the ORM's unit-of-work mechanism: when it materializes an entity it snapshots its state so that on SaveChanges/commit it can compute which properties changed and emit minimal UPDATEs. That is essential for writes but pure overhead for reads, because it allocates snapshots you never use and slows materialization — noticeable when returning thousands of rows on a read endpoint. You avoid it with EF Core's AsNoTracking() (or a context-wide QueryTrackingBehavior.NoTracking), and JPA read-only/detached queries. Even better, project to a DTO so the ORM selects only needed columns and materializes no trackable entities at all. The rule is to track only entities you intend to modify and save, and default everything else to no-tracking or projections.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["change-tracking", "asnotracking", "projection"],
+      "followUps": ["What is identity resolution and when do you need AsNoTrackingWithIdentityResolution?", "Does no-tracking affect lazy loading?"]
+    },
+    {
+      "id": "q-migration-merge-conflict",
+      "question": "Two developers each added a migration on separate branches; both branches merge. What breaks and how do you resolve it?",
+      "answer": "Migrations are ordered and each is generated against a model snapshot representing the prior state. When both branches branch from the same parent and each adds a migration, after merge you have two migrations that both claim to follow the same parent, and the model snapshot file (EF's ModelSnapshot) has conflicting edits — the sequence is ambiguous. The wrong fix is hand-merging the snapshot, which almost always produces an inconsistent model. The right fix is to keep one migration, delete/regenerate the other so it is created on top of the first (re-run the add against the now-current model), and let the tool regenerate a correct, single-lineage snapshot. Prevention includes serializing migration creation through a shared branch, keeping migrations small, and detecting pending-model-changes in CI so a bad merge fails the build rather than production.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["migrations", "merge-conflict", "ordering"],
+      "followUps": ["How does Flyway's versioned naming reduce this risk?", "Why not hand-edit the snapshot?"]
+    },
+    {
+      "id": "q-prisma-migrate-vs-push",
+      "question": "In Prisma, what is the difference between prisma migrate and prisma db push, and which belongs in production?",
+      "answer": "prisma migrate (migrate dev locally, migrate deploy in CI/prod) creates versioned SQL migration files that are checked into source control, reviewed, and applied in order — an auditable, production-safe history. prisma db push takes the current schema.prisma and pushes that state directly into the database with no migration file, no history, and no review artifact; it can also drop columns/tables to reach the target state, risking silent data loss. db push exists for fast iteration against a throwaway development database where you do not care about history. migrate deploy belongs in every non-throwaway environment, especially production. Using db push against a shared or production database is the Prisma equivalent of a manual ALTER or hbm2ddl.auto=update: convenient, unreviewed, and drift-prone.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["prisma", "migrations", "db-push"],
+      "followUps": ["How does Prisma record applied migrations?", "How do you introspect an existing DB into schema.prisma?"]
+    },
+    {
+      "id": "q-forward-only",
+      "question": "Why are production migrations effectively forward-only, and how do you make a breaking schema change safely?",
+      "answer": "A Down migration that drops or narrows a column will destroy any data written since the change was deployed, and rolling a schema back while newer app code and data assume the new shape is a recipe for corruption. So in production you fix a bad migration by rolling forward with a new corrective migration, not by running Down against live data. To make a breaking change safely, use expand-then-contract (a.k.a. parallel change): first expand — add the new column/table in a backward-compatible migration; backfill data; deploy app code that writes both and can read either; then switch reads to the new shape; and only in a much later release, once nothing references the old shape, contract by dropping it. This decouples schema change from code deploy, keeps every intermediate state runnable by both old and new instances (important for rolling deploys), and avoids the need to ever roll a schema backward.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["migrations", "forward-only", "expand-contract"],
+      "followUps": ["Why does rolling deploy require backward-compatible schema?", "How do you backfill a huge table without locking it?"]
+    },
+    {
+      "id": "q-flyway-vs-builtin",
+      "question": "When would you use Flyway or Liquibase instead of the ORM's built-in migrations?",
+      "answer": "Use a dedicated tool when the schema is not owned solely by one ORM or one service. Flyway (plain versioned SQL) and Liquibase (SQL or XML/YAML changelogs with rollback and preconditions) are ORM-agnostic, so they fit polyglot shops, databases written to by multiple services, and organizations where DBAs review and control every DDL change. They keep migrations as first-class, hand-authored SQL artifacts independent of your entity model, which is exactly what a database-first / DBA-governed environment wants. Built-in migrations (EF, Prisma Migrate) are more convenient for a single code-first service because they derive the delta from the model automatically. Many mature systems combine them: use the ORM for mapping and Hibernate/EF set to validate, but let Flyway apply the schema so the DBAs stay in control and the migration history is tool- and language-neutral.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["flyway", "liquibase", "migrations"],
+      "followUps": ["How does Liquibase's rollback differ from EF Down?", "How do you baseline an existing DB into Flyway?"]
+    },
+    {
+      "id": "q-orm-vs-raw-tradeoff",
+      "question": "Summarize the ORM-versus-raw-SQL trade-off at a system level.",
+      "answer": "The ORM buys productivity, type safety, change tracking, an identity map, migrations, and portability, at the cost of a translation layer that can hide expensive queries and occasionally cannot express a query well. Raw SQL buys full control of the exact statement and plan and access to every database feature, at the cost of losing type safety, tracking, portability, and injection protection unless you re-add parameterization. The senior stance is that this is not binary: use the ORM for the large majority of CRUD, navigation, and simple queries where its safety and speed dominate, and drop to parameterized raw SQL or stored procedures for the minority of hot, complex, or set-based queries. Anti-patterns at both extremes: writing an entire app in raw SQL and losing everything the ORM provides, or twisting LINQ/HQL into unreadable knots purely to avoid ever writing SQL. Either way you must be able to read and profile the SQL that runs.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["orm", "raw-sql", "tradeoffs"],
+      "followUps": ["Where do compiled queries help ORM performance?", "How do you benchmark ORM vs raw for a hot path?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "challenge-fix-n-plus-one",
+      "title": "Refactor an N+1 Dashboard Query",
+      "difficulty": "senior",
+      "category": "Backend",
+      "prompt": "The code below powers a dashboard and issues 201 database queries when there are 200 open orders: one to load the orders and one per order to load its customer's name (a lazy @ManyToOne). Refactor it so the endpoint issues a constant, small number of queries regardless of how many orders exist, and state exactly how the query count changes. Provide at least the JOIN FETCH fix; a projection variant earns bonus credit.\n\n// BEFORE\nList<Order> orders = orderRepo.findAllByStatus(Status.OPEN);\nList<Row> rows = new ArrayList<>();\nfor (Order o : orders) {\n    rows.add(new Row(o.getId(), o.getCustomer().getName()));\n}",
+      "hints": [
+        "The extra queries come from lazily touching o.getCustomer() inside the loop; load the relation up front instead.",
+        "A JPQL 'join fetch' pulls the parent and the associated customer in a single query; use 'select distinct' to avoid duplicate parents.",
+        "If the view only needs the id and the customer name, project straight into a DTO with a constructor expression so no entities are materialized."
+      ],
+      "solutionCode": "// FIX 1: eager-fetch the customer in ONE query via JOIN FETCH\npublic interface OrderRepository extends JpaRepository<Order, Long> {\n\n    @Query(\"select distinct o from Order o \" +\n           \"join fetch o.customer \" +\n           \"where o.status = :status\")\n    List<Order> findOpenWithCustomer(@Param(\"status\") Status status);\n}\n\n// caller: no lazy hits, customer already loaded\nList<Order> orders = orderRepo.findOpenWithCustomer(Status.OPEN);\nList<Row> rows = new ArrayList<>();\nfor (Order o : orders) {\n    rows.add(new Row(o.getId(), o.getCustomer().getName()));\n}\n\n// FIX 2 (leaner): project directly to the DTO the view needs\npublic record RowDto(Long id, String customerName) {}\n\npublic interface OrderRepository2 extends JpaRepository<Order, Long> {\n\n    @Query(\"select new com.shop.RowDto(o.id, o.customer.name) \" +\n           \"from Order o \" +\n           \"where o.status = :status\")\n    List<RowDto> findRows(@Param(\"status\") Status status);\n}\n\n// caller: one query, only two columns selected, nothing tracked\nList<RowDto> rows = orderRepo2.findRows(Status.OPEN);",
+      "solutionLanguage": "java",
+      "explanation": "The original code is a textbook N+1: findAllByStatus runs one query for the 200 orders, and then each o.getCustomer().getName() call triggers a separate SELECT because the @ManyToOne is lazily proxied, giving 1 + 200 = 201 queries. FIX 1 changes the fetch plan, not the caller: 'join fetch o.customer' instructs Hibernate to load each order together with its customer in a single SQL query, so the loop touches an already-initialized association and fires zero additional queries — 201 collapses to 1. The 'select distinct' guards against duplicate parent rows that a fetch join can produce. FIX 2 goes further by projecting into a RowDto with a JPQL constructor expression: Hibernate selects only o.id and o.customer.name in one query, materializes no entities at all, and therefore also skips change tracking and any risk of lazy access after the session closes. Choose FIX 1 when you still need full Order entities elsewhere, and FIX 2 for a pure read view where less materialization means less memory and less GC. The durable follow-up is to assert the query count in an integration test (via Hibernate statistics) so the endpoint is proven to be O(1) in queries and an N+1 regression fails CI rather than surfacing as a production latency spike.",
+      "relatedTopic": "orm-code-first-vs-db-first"
+    },
+    {
+      "id": "challenge-codefirst-entity-migration",
+      "title": "Add a Column Code-First and Deploy It Safely",
+      "difficulty": "senior",
+      "category": "Backend",
+      "prompt": "Using EF Core code-first, add a non-nullable DiscountPercent column (default 0) to the Order entity, generate the migration, and describe the safe production deploy flow. The Orders table is large and hot, and the service runs multiple instances behind a rolling deploy. Your answer must include the entity change, the migration, and the deploy sequence that keeps every intermediate state runnable by both old and new instances.",
+      "hints": [
+        "A non-nullable column added to existing rows needs a default so the ALTER does not fail; set defaultValue: 0m in the migration.",
+        "Review the generated migration before committing — confirm it is an AddColumn (additive), not a destructive DROP/ADD.",
+        "For a rolling deploy, apply the migration before or independently of the code that requires it, and keep the change backward-compatible so old instances still work."
+      ],
+      "solutionCode": "// 1) Entity change\npublic class Order\n{\n    public int Id { get; set; }\n    public DateTime PlacedAt { get; set; }\n    public decimal Total { get; set; }\n    public int CustomerId { get; set; }\n    public Customer Customer { get; set; } = default!;\n\n    // new column, non-nullable with a default\n    public decimal DiscountPercent { get; set; }\n}\n\n// OnModelCreating (optional explicit config)\nb.Entity<Order>()\n    .Property(o => o.DiscountPercent)\n    .HasPrecision(5, 2)\n    .HasDefaultValue(0m);\n\n// 2) dotnet ef migrations add AddOrderDiscountPercent  =>\npublic partial class AddOrderDiscountPercent : Migration\n{\n    protected override void Up(MigrationBuilder mb)\n    {\n        mb.AddColumn<decimal>(\n            name: \"DiscountPercent\",\n            table: \"Orders\",\n            type: \"decimal(5,2)\",\n            nullable: false,\n            defaultValue: 0m);   // backfills existing rows, ALTER succeeds\n    }\n\n    protected override void Down(MigrationBuilder mb)\n    {\n        mb.DropColumn(name: \"DiscountPercent\", table: \"Orders\");\n    }\n}\n\n// 3) Apply in the deploy pipeline (NOT on app boot for multi-instance):\n//    dotnet ef database update            (or a scripted migration bundle)\n// or generate SQL for DBA review:\n//    dotnet ef migrations script --idempotent --output migrate.sql",
+      "solutionLanguage": "csharp",
+      "explanation": "Adding a non-nullable column to a populated table fails unless existing rows get a value, so the migration specifies defaultValue: 0m, which makes the AddColumn additive and backward-compatible: the column simply appears with 0 for every current row and the ALTER completes without a table rewrite of data values. Before committing, you review the generated migration to confirm EF emitted an AddColumn rather than anything destructive — a rename, for instance, can surface as DROP+ADD and silently lose data. For a multi-instance rolling deploy the ordering matters: because the change is purely additive, old instances that know nothing about DiscountPercent keep working after the migration runs (they ignore the new column), so you can apply the migration first and then roll out the new code that reads and writes it, and every intermediate state — old code plus new schema — is runnable. You apply the migration through the pipeline as an explicit step (dotnet ef database update or an idempotent SQL script for DBA review) rather than calling Migrate() on app startup, which in a multi-instance world races between instances and couples schema change to boot order. This is expand-then-contract in its simplest form: expand-only here, with no contract needed because nothing is being removed. If you later needed to drop or narrow the column, you would sequence a separate, much-later contract migration once no running code references the old shape.",
+      "relatedTopic": "orm-code-first-vs-db-first"
+    }
+  ],
+  "references": [
+    {
+      "label": "EF Core Migrations Overview (Microsoft Docs)",
+      "url": "https://learn.microsoft.com/en-us/ef/core/managing-schemas/migrations/"
+    },
+    {
+      "label": "Hibernate ORM User Guide: Fetching and JOIN FETCH / N+1",
+      "url": "https://docs.jboss.org/hibernate/orm/current/userguide/html_single/Hibernate_User_Guide.html#fetching"
+    },
+    {
+      "label": "Prisma Migrate Documentation",
+      "url": "https://www.prisma.io/docs/orm/prisma-migrate"
+    },
+    {
+      "label": "EF Core: Choosing Code-First vs Database-First (Microsoft Docs)",
+      "url": "https://learn.microsoft.com/en-us/ef/core/managing-schemas/"
+    },
+    {
+      "label": "Flyway Documentation",
+      "url": "https://documentation.red-gate.com/flyway"
+    },
+    {
+      "label": "Liquibase Documentation",
+      "url": "https://docs.liquibase.com/"
+    }
+  ]
+}

@@ -1,0 +1,916 @@
+{
+  "id": "cloud-fundamentals",
+  "title": "Cloud Fundamentals",
+  "category": "Cloud",
+  "subcategory": "Fundamentals",
+  "difficulty": "mid",
+  "tags": [
+    "cloud",
+    "iaas-paas-saas",
+    "shared-responsibility",
+    "high-availability",
+    "well-architected",
+    "cost-optimization",
+    "cloud-native",
+    "multi-cloud"
+  ],
+  "description": "A provider-neutral, staff-level treatment of cloud computing concepts: service and deployment models, the shared responsibility model, the physical topology of regions and availability zones, designing for high availability and disaster recovery, elasticity, the Well-Architected pillars, cost models, and the trade-off between managed-service leverage and vendor lock-in. AWS, Azure, and GCP are used as concrete anchors without duplicating service-specific detail.",
+  "estReadMinutes": 30,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "What 'The Cloud' Actually Is",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The cloud is not someone else's computer, though the joke is a useful corrective. It is the delivery of on-demand, self-service, metered computing resources over a network, pooled across many tenants and elastic enough to grow or shrink in minutes. The NIST definition captures five essential characteristics: on-demand self-service, broad network access, resource pooling, rapid elasticity, and measured (pay-per-use) service. When people argue about whether something is 'really cloud', those five properties are the test, not the branding."
+        },
+        {
+          "type": "paragraph",
+          "text": "This topic is deliberately provider-agnostic. Your interview and your job will require you to reason about compute, storage, networking, identity, availability, and cost as portable concepts, then map them onto whichever provider you are on. AWS, Azure, and GCP diverge in naming and defaults but converge on the same primitives: a virtual network you carve into subnets, virtual machines and containers and functions, object/block/file storage tiers, managed databases, an IAM system, and a global backbone of regions and zones."
+        },
+        {
+          "type": "list",
+          "items": [
+            "On-demand self-service: you provision a database or a load balancer via an API or console, without filing a ticket with a human.",
+            "Resource pooling and multi-tenancy: your VM shares a physical host with strangers, isolated by the hypervisor; this is why 'noisy neighbor' and side-channel concerns exist.",
+            "Rapid elasticity: capacity appears to be effectively unlimited from your seat, and you pay for what you use rather than what you provisioned at peak.",
+            "Measured service: everything is metered, which is a superpower for cost attribution and a footgun for surprise bills."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The cloud trades capital expenditure (buy servers up front, depreciate over years) for operational expenditure (rent by the second). That shift is financial as much as technical, and it is why FinOps exists as a discipline. Elasticity only saves money if you actually scale down."
+        }
+      ]
+    },
+    {
+      "id": "why-cloud",
+      "heading": "Why Teams Move to the Cloud (and When They Regret It)",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The honest reasons to adopt cloud are speed and leverage, not raw cost. A three-person team can stand up a globally replicated database, a CDN, a managed Kubernetes cluster, and a queue in an afternoon, with no data-center lease, no hardware lead times, and no on-call rotation for failed disks. You rent the operational excellence of a provider that runs these services at planetary scale. Elasticity lets you match spend to demand instead of provisioning for Black Friday all year. And global reach lets a startup serve users on three continents from day one."
+        },
+        {
+          "type": "paragraph",
+          "text": "The regret usually arrives from three directions. First, cost: pay-per-use plus data egress fees plus always-on redundancy can exceed a well-utilized on-prem fleet, especially for steady, predictable workloads. Second, lock-in: the more managed services you consume, the harder it is to leave, and providers price accordingly. Third, complexity: the cloud does not remove operational burden, it relocates it into IAM policies, network design, and a sprawling bill you must actively govern."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Good fit: spiky or unpredictable load, greenfield products, global distribution, teams that value shipping speed over infrastructure control.",
+            "Questionable fit: steady 24/7 high-utilization compute (a rented VM running flat-out all year is often cheaper on owned hardware), or regulatory regimes that mandate on-prem.",
+            "The mature answer is rarely all-or-nothing: hybrid and repatriation of specific heavy workloads are legitimate architectural choices, not failures."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Dropbox famously moved a large fraction of its storage off a public cloud and onto its own hardware, reportedly saving tens of millions of dollars over two years. The lesson is not 'cloud is a scam' but 'at scale, for a predictable, storage-heavy core workload, owning can win.' Match the model to the workload."
+        }
+      ]
+    },
+    {
+      "id": "service-models",
+      "heading": "Service Models: IaaS, PaaS, SaaS, and FaaS",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Service models describe how much of the stack the provider operates versus how much you operate. The classic layers are Infrastructure as a Service (IaaS), Platform as a Service (PaaS), and Software as a Service (SaaS), with Function as a Service (FaaS, the serverless compute style) sitting near the PaaS end. As you move up the stack you trade control for convenience: you write less operational code but you also lose the ability to tune the layers below you."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Layer",
+            "You manage",
+            "Provider manages",
+            "Example"
+          ],
+          "rows": [
+            [
+              "IaaS",
+              "OS, runtime, app, data, scaling logic",
+              "Virtualization, servers, storage, network, physical",
+              "EC2 / Azure VM / GCE virtual machines"
+            ],
+            [
+              "PaaS",
+              "App code and data",
+              "OS, runtime, patching, scaling, infra",
+              "App Service / App Engine / Elastic Beanstalk"
+            ],
+            [
+              "FaaS (serverless)",
+              "Function code and event wiring",
+              "Everything else, including per-request scaling",
+              "Lambda / Azure Functions / Cloud Functions"
+            ],
+            [
+              "SaaS",
+              "Configuration and your data only",
+              "The entire application and stack",
+              "Gmail / Salesforce / Microsoft 365"
+            ]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The key intuition: with IaaS you get a blank virtual machine and are responsible for everything above the hypervisor, including OS patching and autoscaling. With PaaS you push code and the platform runs it. With FaaS you push a function and the platform scales it to zero when idle and to thousands of concurrent executions under load, billing per invocation and per gigabyte-second. With SaaS you consume finished software and manage only settings and your data."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A useful mental model: pizza-as-a-service. IaaS is buying the ingredients and using the provider's oven; PaaS is take-and-bake; FaaS is pizza delivered slice by slice only when someone is hungry; SaaS is eating out. In every case you manage less as you move up, and pay a margin for it."
+        }
+      ]
+    },
+    {
+      "id": "deployment-models",
+      "heading": "Deployment Models: Public, Private, Hybrid, Multi-Cloud",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Where the service model asks 'how much do you operate', the deployment model asks 'whose infrastructure and how many providers'. Public cloud runs on a provider's shared, multi-tenant infrastructure. Private cloud is cloud-style self-service and elasticity on infrastructure dedicated to one organization, whether on-prem or hosted. Hybrid connects private and public so workloads and data can move or burst between them. Multi-cloud spreads workloads across more than one public provider."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Public: maximum elasticity and managed-service breadth, minimum capital cost, least control over the underlying hardware and residency.",
+            "Private: control and data residency for regulated or ultra-sensitive workloads, at the cost of capex and losing much of the provider's managed-service leverage.",
+            "Hybrid: a legitimate long-term architecture (keep the mainframe or the compliance-bound database on-prem, run the web tier and analytics in public cloud) connected by VPN or dedicated interconnect.",
+            "Multi-cloud: pursued for resilience, negotiating leverage, or best-of-breed services, but it multiplies operational surface area and rarely delivers true portability without discipline."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Multi-cloud is often sold as 'avoid lock-in' insurance. In practice, true active-active multi-cloud is expensive: you pay egress to move data between providers, you staff expertise in two ecosystems, and you tend to design to the lowest common denominator, forfeiting the very managed services that made cloud worthwhile. Choose it for a concrete reason, not as a reflex."
+        }
+      ]
+    },
+    {
+      "id": "shared-responsibility",
+      "heading": "The Shared Responsibility Model",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Security and operations in the cloud are a partnership, and the shared responsibility model draws the line. The provider is responsible for security OF the cloud: physical facilities, hardware, the hypervisor, and the managed-service internals. You are responsible for security IN the cloud: your data, your access management, your network configuration, OS patching (for IaaS), and application logic. The exact line shifts with the service model, which is precisely where people get burned."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Responsibility",
+            "IaaS (VM)",
+            "PaaS",
+            "SaaS"
+          ],
+          "rows": [
+            [
+              "Physical / hypervisor",
+              "Provider",
+              "Provider",
+              "Provider"
+            ],
+            [
+              "OS patching",
+              "You",
+              "Provider",
+              "Provider"
+            ],
+            [
+              "Runtime / middleware",
+              "You",
+              "Provider",
+              "Provider"
+            ],
+            [
+              "App code & config",
+              "You",
+              "You",
+              "Provider"
+            ],
+            [
+              "Data & data classification",
+              "You",
+              "You",
+              "You"
+            ],
+            [
+              "IAM / access & keys",
+              "You",
+              "You",
+              "You (users/roles)"
+            ]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Notice the invariant across every row: data and identity are always yours. The provider will never decide who may read your bucket or how you rotate keys. The overwhelming majority of headline cloud breaches are not the provider being hacked; they are customer misconfigurations, most classically a storage bucket left public or an over-permissive IAM role. The infrastructure was secure; the configuration was not."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The most dangerous shared-responsibility misconception is 'it's in the cloud, so it's backed up and secure by default.' It is not. A managed database still needs you to enable and test backups, enforce least privilege, and encrypt sensitive fields. The provider secures the floor you stand on; everything you build on it is yours to defend."
+        }
+      ]
+    },
+    {
+      "id": "building-blocks",
+      "heading": "Core Building Blocks Across Providers",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Underneath the branding, every major provider offers the same categories of primitive. If you understand these six, you can move between clouds with a translation table rather than a re-education. The categories are compute, storage, networking, managed databases, identity, and the edge/CDN layer."
+        },
+        {
+          "type": "heading",
+          "text": "Storage comes in three shapes"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Object storage: flat namespace of immutable blobs addressed by key, accessed over HTTP, effectively infinite and cheap, eventually to strongly consistent depending on provider. Ideal for backups, media, static assets, data lakes. (S3 / Blob Storage / Cloud Storage.)",
+            "Block storage: raw virtual disks attached to a single VM, formatted with a filesystem, low latency, good for databases and boot volumes. Typically bound to one AZ. (EBS / Managed Disks / Persistent Disk.)",
+            "File storage: shared network filesystems speaking NFS/SMB, mountable by many hosts at once, for legacy apps and shared workspaces. (EFS / Azure Files / Filestore.)"
+          ]
+        },
+        {
+          "type": "heading",
+          "text": "Networking is a software-defined virtual network"
+        },
+        {
+          "type": "paragraph",
+          "text": "You get a logically isolated virtual network (VPC on AWS/GCP, VNet on Azure) and carve it into subnets, usually one set of subnets per availability zone. Public subnets route to an internet gateway; private subnets reach the internet only through a NAT and are unreachable from outside. Security groups and network ACLs act as stateful and stateless firewalls. This design is the backbone of the multi-AZ architectures discussed later: you place redundant subnets in different zones so a zone failure does not take out your whole network path."
+        },
+        {
+          "type": "code",
+          "language": "hcl",
+          "text": "# Terraform sketch: a VPC with one public subnet per AZ for HA\nresource \"aws_vpc\" \"main\" {\n  cidr_block           = \"10.0.0.0/16\"\n  enable_dns_hostnames = true\n}\n\nvariable \"azs\" {\n  default = [\"us-east-1a\", \"us-east-1b\", \"us-east-1c\"]\n}\n\nresource \"aws_subnet\" \"public\" {\n  for_each          = toset(var.azs)\n  vpc_id            = aws_vpc.main.id\n  availability_zone = each.value\n  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, index(var.azs, each.value))\n  map_public_ip_on_launch = true\n  tags = { Name = \"public-${each.value}\" }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Managed databases (RDS/Aurora, Azure SQL/Cosmos DB, Cloud SQL/Spanner) and identity systems (IAM/Entra ID/Cloud IAM) round out the primitives. The pattern to internalize: prefer the managed version unless you have a concrete reason to self-host, because you are buying the provider's patching, failover, and backup automation."
+        }
+      ]
+    },
+    {
+      "id": "regions-az-edge",
+      "heading": "Regions, Availability Zones, and Edge Locations",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The physical topology of the cloud is a three-tier hierarchy, and confusing the tiers is one of the most common interview stumbles. A region is a geographic area (for example us-east-1 or europe-west1) containing multiple availability zones. An availability zone (AZ) is one or more discrete data centers within a region with independent power, cooling, and networking, close enough for low-latency synchronous replication (single-digit milliseconds) but far enough that a single flood, fire, or power event should not take out more than one. Edge locations (points of presence) are a much larger, geographically dispersed fleet used by the CDN and DNS to terminate connections close to users."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Tier",
+            "What it is",
+            "Distance / latency",
+            "Fails independently of"
+          ],
+          "rows": [
+            [
+              "Region",
+              "Geographic area of many AZs",
+              "Cross-region: tens to hundreds of ms",
+              "Other regions"
+            ],
+            [
+              "Availability Zone",
+              "Isolated data center(s) in a region",
+              "Intra-region: ~1-2 ms between AZs",
+              "Other AZs in the same region"
+            ],
+            [
+              "Edge / PoP",
+              "CDN & DNS presence near users",
+              "Sub-region, close to the user",
+              "Origin and other edges"
+            ]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The design consequence is a ladder of resilience. Deploying across multiple AZs in one region protects you from a data-center-level failure while keeping replication synchronous and latency low, which is the default HA posture for most systems. Deploying across multiple regions protects you from a whole-region outage or a regional disaster, but forces asynchronous replication (and therefore data-loss windows), higher latency, and materially higher cost and complexity. Edge locations do not provide compute redundancy; they reduce latency and absorb load for cacheable content."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Interview trap: 'we're in three availability zones, so we survive a region outage.' No. Multiple AZs survive an AZ outage; they are all in the same region and share regional control planes. Surviving a region outage requires a second region. Conflating AZ redundancy with region redundancy is the classic tell of shallow cloud knowledge."
+        }
+      ]
+    },
+    {
+      "id": "ha-dr",
+      "heading": "Designing for High Availability and Disaster Recovery",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "High availability (HA) means the system keeps serving through the failure of an individual component or zone; disaster recovery (DR) means you can restore service after a large, region-scale event. They are quantified by two numbers you must be able to define on demand. Recovery Time Objective (RTO) is the maximum acceptable time to restore service. Recovery Point Objective (RPO) is the maximum acceptable amount of data loss, measured in time. RTO answers 'how long can we be down'; RPO answers 'how much data can we lose'."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Backup & restore: cheapest, highest RTO/RPO (hours). Restore from snapshots into a fresh environment after disaster.",
+            "Pilot light: a minimal core (e.g., a replicated database) always running in a second region; scale up the rest on failover. Lower RTO, modest cost.",
+            "Warm standby: a scaled-down but fully functional copy running in a second region; scale it up on failover. Lower RTO/RPO, higher cost.",
+            "Active-active (multi-region): full capacity live in multiple regions behind global routing; near-zero RTO. Highest cost and hardest consistency problems."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The engineering discipline is to derive the strategy from business-stated RTO/RPO rather than gold-plating. A back-office reporting tool might tolerate a four-hour RTO and an hour of RPO, making backup-and-restore perfectly adequate. A payments ledger might demand seconds of RTO and zero RPO, forcing synchronous replication and active-active design. Spending active-active money on a system with a four-hour RTO is as much a failure as under-designing the payments path."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "A backup you have never restored is a hypothesis, not a backup. Untested DR plans routinely fail on the day they matter: expired credentials, missing IAM roles in the DR region, DNS TTLs too long to fail over quickly, or a runbook nobody has rehearsed. Schedule game-days and actually fail over."
+        }
+      ]
+    },
+    {
+      "id": "elasticity",
+      "heading": "Elasticity and Autoscaling",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Elasticity is the ability to add and remove capacity automatically in response to demand, and it is the feature that makes cloud economics work. Scaling out (horizontal) adds more instances; scaling up (vertical) makes an instance bigger. Cloud strongly favors scaling out because it is what enables both elasticity and HA: many small stateless instances behind a load balancer can be replaced, added, and spread across AZs freely. Autoscaling policies react to a metric, target-tracking (keep average CPU at 50%), step scaling, or scheduled scaling for known patterns."
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "text": "# Illustrative autoscaling target-tracking policy (pseudo-config)\nautoscaling:\n  min_instances: 3          # never below one per AZ for HA\n  max_instances: 30\n  target_tracking:\n    metric: average_cpu_utilization\n    target: 55                # add capacity when avg CPU exceeds 55%\n  cooldown_seconds: 120       # avoid thrashing on brief spikes\n  scale_in_protection: false"
+        },
+        {
+          "type": "paragraph",
+          "text": "Two disciplines make autoscaling actually work. First, statelessness: if an instance holds session state or local files that matter, you cannot freely add and kill instances. Push state to a shared store (managed database, cache, object storage) so any instance can serve any request. Second, warm-up awareness: scaling reacts after load arrives and instances take time to boot and warm caches, so pair reactive scaling with a minimum floor and, for predictable spikes, scheduled scaling ahead of the event."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Serverless (FaaS) takes elasticity to its limit: it scales to zero when idle and to thousands of concurrent executions on demand, with no capacity to manage. The cost is cold starts, execution-time limits, and per-invocation pricing that becomes expensive at very high steady throughput. Elasticity is a spectrum from fixed VMs to fully serverless."
+        }
+      ]
+    },
+    {
+      "id": "well-architected",
+      "heading": "The Well-Architected Pillars",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Every major provider publishes a Well-Architected Framework, and they converge on the same pillars. They are a checklist for reviewing any design and a shared vocabulary in senior interviews. AWS defines six: operational excellence, security, reliability, performance efficiency, cost optimization, and sustainability. Azure and GCP use near-identical sets. Treat them not as a bureaucratic gate but as the set of lenses you rotate through when evaluating a system."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Operational Excellence: run and monitor systems, automate change, learn from incidents, treat operations as code (IaC, runbooks, observability).",
+            "Security: apply least privilege, defense in depth, encryption in transit and at rest, and traceability; own your side of the shared responsibility model.",
+            "Reliability: design for failure with redundancy across AZs, health checks, graceful degradation, and tested recovery to meet RTO/RPO.",
+            "Performance Efficiency: pick the right resource types, scale elastically, use caching and CDNs, and re-evaluate as new services appear.",
+            "Cost Optimization: match spend to value with right-sizing, the correct purchasing model, and continuous FinOps review; turn off what you do not use.",
+            "Sustainability: minimize energy and resource footprint, choose efficient regions and instance types, and shape demand to reduce waste."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The pillars trade off against each other, and naming the trade-off is the mark of seniority. More reliability (multi-region active-active) costs more (cost optimization) and adds operational load (operational excellence). A good answer states which pillar you optimized, which you deliberately sacrificed, and why the business context justified it."
+        }
+      ]
+    },
+    {
+      "id": "cost-models",
+      "heading": "Cloud Cost Models and FinOps",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Compute is bought in three broad pricing modes, and choosing the wrong one is one of the most common and most expensive cloud mistakes. On-demand is pay-per-second with no commitment, flexible and expensive, right for spiky or unknown workloads. Reserved capacity (Reserved Instances or Savings Plans; Azure Reservations; GCP Committed Use Discounts) trades a one- or three-year commitment for large discounts, right for steady baseline load. Spot (or Preemptible) instances sell spare capacity at up to ~90% off, but the provider can reclaim them with a short warning, so they suit fault-tolerant, interruptible work only."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Model",
+            "Discount vs on-demand",
+            "Commitment",
+            "Interruptible?",
+            "Best for"
+          ],
+          "rows": [
+            [
+              "On-demand",
+              "0% (baseline)",
+              "None",
+              "No",
+              "Spiky, short-lived, unpredictable workloads"
+            ],
+            [
+              "Reserved / Savings Plan",
+              "~30-72%",
+              "1 or 3 years",
+              "No",
+              "Steady, predictable baseline capacity"
+            ],
+            [
+              "Spot / Preemptible",
+              "Up to ~90%",
+              "None",
+              "Yes (short reclaim notice)",
+              "Batch, CI, big-data, stateless fault-tolerant fleets"
+            ]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Beyond compute, the sleeper cost is data transfer. Ingress (data into the cloud) is typically free; egress (data out to the internet, and often across regions or even across AZs) is metered and adds up fast. A chatty cross-AZ or cross-region architecture, or a media service serving large files directly from origin instead of a CDN, can produce an egress bill that dwarfs compute. FinOps, the practice of bringing financial accountability to variable cloud spend, is the antidote: tag everything for attribution, set budgets and alerts, right-size continuously, and give engineers visibility into the cost of their choices."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Egress war story: a team moved analytics data from their cloud storage to a third-party warehouse in another cloud, nightly, terabytes at a time. Compute was trivial; the cross-cloud egress fees became the single largest line item on the bill. The fix was to co-locate the warehouse in the same provider and region and compress before transfer. Always model data-movement cost, not just compute."
+        }
+      ]
+    },
+    {
+      "id": "cloud-native",
+      "heading": "Cloud-Native Principles",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Lifting a legacy app onto a VM ('lift and shift') runs it in the cloud but does not make it cloud-native. Cloud-native means designing to exploit what the cloud is good at: managed services, horizontal elasticity, automation, and resilience to constant partial failure. The Twelve-Factor App and the CNCF ecosystem codify the patterns, but the core principles are few."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Prefer managed services: let the provider run your database, queue, and cache so your team spends its scarce attention on product, not on patching Postgres at 3am.",
+            "Statelessness: keep application instances stateless and externalize state, so instances are cattle (replaceable) not pets (irreplaceable).",
+            "Infrastructure as Code: define infrastructure in Terraform, CloudFormation, Bicep, or Pulumi so environments are reproducible, reviewable, and versioned rather than hand-clicked.",
+            "Observability: emit logs, metrics, and traces by default, because in a distributed elastic system you cannot debug by SSHing into 'the server', there is no the server.",
+            "Design for failure: assume any instance, AZ, or dependency can vanish, and build health checks, retries with backoff, timeouts, and circuit breakers."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "text": "# Infrastructure as Code makes environments reproducible and reviewable\nterraform plan   -out=tfplan       # preview the change, review in PR\nterraform apply  tfplan            # apply the exact reviewed plan\n\n# The same definition builds dev, staging, and prod from one source of truth\nterraform workspace select staging && terraform apply\nterraform workspace select prod    && terraform apply"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The strongest signal of cloud-native maturity is that no human ever configures production by hand. If disaster struck and every environment were deleted, you should be able to recreate it from version control plus your backups. If you cannot, you have pets, not infrastructure as code."
+        }
+      ]
+    },
+    {
+      "id": "cap-latency",
+      "heading": "CAP and Latency Trade-offs in the Cloud",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The physics of the cloud makes distributed-systems theory concrete. Because your data is replicated across AZs and possibly regions, the CAP theorem and its everyday cousin PACELC show up in product decisions. During a network partition you must choose between consistency and availability; even with no partition, stronger consistency costs latency because a write must wait for acknowledgements from remote replicas. This is why managed databases expose a consistency knob and why 'just make it strongly consistent everywhere' is naive."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Synchronous multi-AZ replication gives strong consistency and zero RPO, at the cost of a few milliseconds per write; acceptable within a region.",
+            "Synchronous multi-region replication is usually a mistake: cross-region round-trips of tens to hundreds of milliseconds per write cripple throughput.",
+            "Multi-region systems therefore lean on asynchronous replication (accepting an RPO window) or globally distributed databases (Spanner, Cosmos DB, DynamoDB global tables) that make explicit consistency-versus-latency trade-offs for you."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "A subtle cloud cost of consistency: forcing all writes through a single-region primary to keep strong consistency means users on other continents pay a full cross-region round-trip on every write. Sometimes the right answer is regional data partitioning (EU users' data lives and is served in the EU) rather than one global consistent store. Latency, consistency, and residency are entangled."
+        }
+      ]
+    },
+    {
+      "id": "lock-in",
+      "heading": "Vendor Lock-in vs Managed-Service Leverage",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Every managed service you adopt is simultaneously leverage (someone else runs it) and lock-in (leaving means rewriting). The mature position is not to fear lock-in absolutely, but to price it. Lock-in on a commodity, portable layer (a Postgres-compatible managed database, S3-compatible object storage, Kubernetes) is cheap to unwind. Lock-in on a deeply proprietary, high-value service (a serverless event platform, a proprietary analytics warehouse) is expensive to unwind but often worth it because the productivity gain is enormous."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Reduce lock-in where it is cheap: use open standards and portable interfaces (SQL, S3 API, OCI containers, Kubernetes) for foundational layers.",
+            "Accept lock-in where the leverage is large and the switching cost is understood: proprietary managed services often deliver 10x team productivity.",
+            "Abstracting everything behind a lowest-common-denominator layer to stay portable usually costs more in engineering than any migration you will actually perform. Portability has a price; pay it deliberately."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Lock-in war story: a team built a heavy abstraction layer over their message queue 'in case we switch providers.' Three years later they had never switched, the abstraction had rotted and leaked, and it had slowed every feature that touched messaging. The counterfactual migration they insured against would have taken two weeks. They paid three years of tax to avoid a two-week event that never came."
+        }
+      ]
+    },
+    {
+      "id": "naming-map",
+      "heading": "AWS vs Azure vs GCP: A Naming Map",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The concepts are portable; the names are not. Keep a translation table so a question phrased in one provider's vocabulary does not throw you. This is not exhaustive, but it covers the primitives you will reference constantly."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Concept",
+            "AWS",
+            "Azure",
+            "GCP"
+          ],
+          "rows": [
+            [
+              "Virtual machines",
+              "EC2",
+              "Virtual Machines",
+              "Compute Engine"
+            ],
+            [
+              "Serverless functions",
+              "Lambda",
+              "Azure Functions",
+              "Cloud Functions"
+            ],
+            [
+              "Object storage",
+              "S3",
+              "Blob Storage",
+              "Cloud Storage"
+            ],
+            [
+              "Block storage",
+              "EBS",
+              "Managed Disks",
+              "Persistent Disk"
+            ],
+            [
+              "Virtual network",
+              "VPC",
+              "Virtual Network (VNet)",
+              "VPC"
+            ],
+            [
+              "Managed relational DB",
+              "RDS / Aurora",
+              "Azure SQL Database",
+              "Cloud SQL / Spanner"
+            ],
+            [
+              "Managed Kubernetes",
+              "EKS",
+              "AKS",
+              "GKE"
+            ],
+            [
+              "Identity & access",
+              "IAM",
+              "Entra ID + RBAC",
+              "Cloud IAM"
+            ],
+            [
+              "CDN / edge",
+              "CloudFront",
+              "Azure CDN / Front Door",
+              "Cloud CDN"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "One naming subtlety worth knowing: AWS availability zone names are per-account randomized (your us-east-1a may be a different physical zone than someone else's), while Azure and GCP zone identifiers behave differently. When you compare across accounts or providers, compare capabilities and topology, not literal zone labels."
+        }
+      ]
+    },
+    {
+      "id": "example-multiaz",
+      "heading": "Production Example: A Resilient Multi-AZ Web App",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Let us design a standard three-tier web application that survives the loss of an entire availability zone with no data loss and minimal downtime, staying within a single region for cost and latency. This is the default HA architecture that a mid-to-senior engineer should be able to sketch from memory."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Edge: DNS (Route 53 / Azure DNS / Cloud DNS) plus a CDN in front for static assets, terminating TLS close to users.",
+            "Web/app tier: a regional load balancer spreading traffic across an autoscaling group of stateless instances (or containers) deployed into private subnets in at least two, ideally three, AZs. Minimum size is one healthy instance per AZ so any single AZ can fail.",
+            "Data tier: a managed relational database in a multi-AZ configuration, primary in one AZ with a synchronous standby in another, automatic failover on primary loss (zero RPO). A managed cache (Redis) with a replica in a second AZ.",
+            "State: sessions and uploads live in a shared cache and object storage, never on local instance disks, so instances stay disposable.",
+            "Networking: NAT gateways per AZ so private subnets can reach the internet even if one AZ's NAT fails; security groups restricting the database to the app tier only."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "text": "# Logical topology of the multi-AZ web app (illustrative)\nregion: us-east-1\nedge:\n  dns: route53\n  cdn: cloudfront            # caches static assets at edge PoPs\napp_tier:\n  load_balancer: application-lb   # spans all AZs, health-checks targets\n  autoscaling_group:\n    subnets: [private-1a, private-1b, private-1c]\n    min: 3                  # one per AZ minimum -> survives an AZ loss\n    max: 30\n    stateless: true         # sessions in cache, files in object storage\ndata_tier:\n  database:\n    engine: managed-postgres\n    multi_az: true          # sync standby in a second AZ, auto-failover\n    backups: { retention_days: 14, pitr: true }\n  cache:\n    engine: redis\n    replica_az: us-east-1b"
+        },
+        {
+          "type": "paragraph",
+          "text": "Walk the failure modes to justify the design. An instance dies: the load balancer health check stops routing to it and autoscaling replaces it. An entire AZ fails: the load balancer routes only to the surviving AZs, autoscaling launches replacements there, and the database fails over to its standby in another AZ. Total user impact is a brief blip on failover, not an outage. What this design deliberately does NOT protect against is a full-region outage, which would require a second region and the async-replication, higher-cost DR discussed earlier. That omission is a conscious trade-off keyed to a realistic RTO/RPO, not an oversight."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "This architecture is the sweet spot for most production systems: it survives the failure of a whole data center, keeps latency low with synchronous in-region replication, and costs a fraction of active-active multi-region. Reach for multi-region only when the business RTO/RPO or a compliance requirement genuinely demands it."
+        }
+      ]
+    },
+    {
+      "id": "mistakes",
+      "heading": "Common Cloud Mistakes and Misconceptions",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Most cloud pain is self-inflicted and repetitive. These are the failure patterns that recur across teams and show up in interview post-mortems."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Confusing AZ redundancy with region redundancy, and believing multi-AZ survives a region outage.",
+            "Assuming the provider backs up your data automatically; not enabling, or never testing, backups and failover.",
+            "Leaving storage buckets or roles over-permissive because 'the cloud is secure' misreads the shared responsibility model.",
+            "Running everything on-demand and never buying reserved capacity for steady baseline load, overpaying 30-70%.",
+            "Using spot instances for stateful, non-interruptible workloads and being surprised when they are reclaimed mid-transaction.",
+            "Ignoring egress and cross-AZ data-transfer costs until the bill arrives.",
+            "Reaching for serverless for a high-throughput, latency-sensitive, always-on workload where a reserved fleet is cheaper and faster, or for multi-region active-active when a single-region multi-AZ design would meet the RTO."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The meta-mistake behind all of these is treating the cloud as a magic box that handles resilience, security, and cost for you. It handles the floor. Everything above the floor, data, identity, redundancy topology, and spend, is engineering you must do deliberately. The cloud gives you powerful primitives and an itemized bill for using them badly."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "multi-az-architecture",
+      "title": "Multi-AZ High-Availability Web App",
+      "type": "mermaid",
+      "content": "flowchart TB\n  U[Users] --> DNS[DNS + CDN]\n  DNS --> LB[Regional Load Balancer]\n  subgraph Region us-east-1\n    subgraph AZ_A[Availability Zone A]\n      A1[App Instance]\n      DBP[(DB Primary)]\n    end\n    subgraph AZ_B[Availability Zone B]\n      B1[App Instance]\n      DBS[(DB Standby)]\n    end\n    subgraph AZ_C[Availability Zone C]\n      C1[App Instance]\n    end\n    LB --> A1\n    LB --> B1\n    LB --> C1\n    A1 --> DBP\n    B1 --> DBP\n    C1 --> DBP\n    DBP -. sync replication .-> DBS\n  end"
+    },
+    {
+      "id": "shared-responsibility-split",
+      "title": "Shared Responsibility Split by Service Model",
+      "type": "mermaid",
+      "content": "flowchart LR\n  subgraph Customer[You Manage]\n    D[Data]\n    ID[Identity and Access]\n    APP[App and Config]\n    OS[OS Patching - IaaS only]\n  end\n  subgraph Provider[Provider Manages]\n    HYP[Hypervisor]\n    NET[Physical Network]\n    HW[Hardware]\n    FAC[Facilities]\n  end\n  D --> Provider\n  ID --> Provider\n  APP --> Provider"
+    },
+    {
+      "id": "region-topology",
+      "title": "Region / AZ / Edge Topology",
+      "type": "ascii",
+      "content": "Global Cloud Backbone\n |\n +-- Region: us-east-1 -----------------+\n |    +-- AZ 1a (data center)           |\n |    +-- AZ 1b (data center)  <-sync-> |\n |    +-- AZ 1c (data center)           |\n +--------------------------------------+\n |\n +-- Region: eu-west-1 (async replica)\n |\n +-- Edge PoPs (CDN/DNS, many, near users)\n      London  Paris  Tokyo  Sao Paulo ..."
+    },
+    {
+      "id": "dr-spectrum",
+      "title": "DR Strategy Spectrum (cost vs RTO)",
+      "type": "ascii",
+      "content": "Cheaper / higher RTO ------------------> Costlier / lower RTO\n\n Backup+Restore   Pilot Light   Warm Standby   Active-Active\n   (hours)          (10s min)     (minutes)      (seconds)\n   RPO: high        RPO: low      RPO: low       RPO: ~0\n   cost: $          cost: $$      cost: $$$      cost: $$$$"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-iaas-paas-saas",
+      "question": "Explain the difference between IaaS, PaaS, and SaaS, and where FaaS/serverless fits.",
+      "answer": "The distinction is how much of the stack the provider operates versus you. With IaaS you rent virtual infrastructure (a VM, disks, a network) and manage everything above the hypervisor, including OS patching, runtime, app, and scaling. With PaaS you deploy application code and the platform manages the OS, runtime, patching, and scaling for you. With SaaS you consume finished software and manage only your configuration and data. FaaS (serverless functions) sits near the PaaS end but is even more managed: you deploy a single function, the platform scales it from zero to thousands of concurrent executions and bills per invocation. The trade-off across the spectrum is control for convenience: moving up the stack you write less operational code but lose the ability to tune the layers below.",
+      "difficulty": "junior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["iaas", "paas", "saas", "faas"],
+      "followUps": ["When would you choose IaaS over PaaS despite the extra operational work?", "What are the hidden costs of SaaS?"]
+    },
+    {
+      "id": "q-region-vs-az-vs-edge",
+      "question": "What is the difference between a region, an availability zone, and an edge location?",
+      "answer": "A region is a geographic area (like us-east-1) that contains multiple availability zones. An availability zone is one or more discrete data centers within that region with independent power, cooling, and networking, placed close enough for low-latency synchronous replication (roughly 1-2 ms between AZs) but far enough apart that one physical disaster should not take out more than one. Edge locations (points of presence) are a much larger, dispersed fleet used by the CDN and DNS to terminate connections close to users; they provide latency reduction and caching, not compute redundancy. The critical design consequence is the resilience ladder: multiple AZs protect against a data-center failure with cheap synchronous replication, while surviving a whole-region disaster requires deploying to a second region with asynchronous replication and higher cost. Edge locations do not make your application redundant; they make it faster.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["regions", "availability-zones", "edge", "topology"],
+      "followUps": ["Why is cross-region replication usually asynchronous?", "Do all AZs in a region share any single point of failure?"]
+    },
+    {
+      "id": "q-shared-responsibility",
+      "question": "Describe the shared responsibility model and the single most common way teams misunderstand it.",
+      "answer": "The shared responsibility model splits security between provider and customer. The provider is responsible for security OF the cloud, the physical facilities, hardware, hypervisor, and managed-service internals, while the customer is responsible for security IN the cloud, their data, identity and access management, network configuration, and (for IaaS) OS patching. The exact boundary shifts with the service model: with SaaS the provider handles almost everything, with IaaS you own the OS and up. The invariant is that data and identity are always the customer's responsibility regardless of model. The most common misconception is assuming that because something runs in the cloud it is automatically secure and backed up. It is not: the vast majority of headline cloud breaches are customer misconfigurations, most classically a public storage bucket or an over-permissive IAM role, not the provider being compromised.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["shared-responsibility", "security", "iam"],
+      "followUps": ["Whose responsibility is patching a managed database?", "How does the boundary shift between IaaS and SaaS?"]
+    },
+    {
+      "id": "q-multiaz-vs-multiregion",
+      "question": "When would you choose multi-AZ over multi-region, and what does each protect against?",
+      "answer": "Multi-AZ deployment (redundant resources spread across availability zones within one region) protects against the failure of an individual data center while keeping replication synchronous, latency low (a couple of milliseconds), and cost moderate. This is the default HA posture for most production systems. Multi-region deployment protects against a whole-region outage or regional disaster, but it forces asynchronous replication (introducing a data-loss window, a non-zero RPO), adds tens to hundreds of milliseconds of cross-region latency, and roughly multiplies cost and operational complexity. You choose multi-AZ for the common case because it survives the failure most likely to hurt you (a data-center event) at a fraction of the price. You escalate to multi-region only when the business-stated RTO/RPO or a compliance/residency requirement genuinely demands surviving the loss of an entire region. Spending multi-region money on a system with a four-hour RTO is as much an error as under-designing a payments path.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["high-availability", "multi-region", "disaster-recovery"],
+      "followUps": ["What breaks if you try synchronous replication across regions?", "How do global databases change this calculus?"]
+    },
+    {
+      "id": "q-rto-rpo",
+      "question": "Define RTO and RPO and how they drive DR strategy selection.",
+      "answer": "RTO (Recovery Time Objective) is the maximum acceptable time to restore service after a disaster, answering 'how long can we be down'. RPO (Recovery Point Objective) is the maximum acceptable amount of data loss measured in time, answering 'how much data can we lose'. Both are business decisions, not technical ones, and the DR strategy is derived from them. A high RTO/RPO (hours) justifies cheap backup-and-restore. Lower targets step up through pilot light (a minimal core always running in a second region), warm standby (a scaled-down full copy), to active-active (full live capacity in multiple regions for near-zero RTO). The engineering discipline is to match the strategy to the stated objectives rather than gold-plating: a reporting tool tolerating a four-hour RTO does not need active-active, while a payments ledger demanding zero RPO forces synchronous replication. Crucially, any DR plan is only real if you have actually tested the restore and failover.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["rto", "rpo", "disaster-recovery"],
+      "followUps": ["What is the difference between pilot light and warm standby?", "Why do untested DR plans commonly fail on the day they matter?"]
+    },
+    {
+      "id": "q-spot-risks",
+      "question": "What are spot/preemptible instances, and what workloads are they wrong for?",
+      "answer": "Spot instances (Preemptible VMs on GCP) sell a provider's spare capacity at steep discounts, often up to around 90% off on-demand pricing. The catch is that the provider can reclaim them with only a short warning (typically a couple of minutes) whenever it needs the capacity back. This makes them excellent for fault-tolerant, interruptible, stateless work: batch processing, CI pipelines, big-data jobs, rendering, and stateless worker fleets that can lose a node and simply retry elsewhere. They are wrong for stateful or latency-critical, non-interruptible workloads, a primary database, a stateful session server, or anything mid-transaction that cannot be safely killed and restarted, because reclamation will cause data loss or user-facing failures. The mature pattern is a mix: reserved or savings-plan capacity for the steady baseline, on-demand for the flexible middle, and spot only for the interruptible surge. Diversifying spot across instance types and AZs also reduces the chance of a mass simultaneous reclaim.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["spot-instances", "cost-optimization", "compute"],
+      "followUps": ["How do you make a fleet resilient to spot reclamation?", "How would you blend spot, reserved, and on-demand for one service?"]
+    },
+    {
+      "id": "q-egress-costs",
+      "question": "Why do egress costs surprise teams, and how do you control them?",
+      "answer": "Cloud providers typically let data flow in (ingress) for free but charge for data flowing out (egress), to the internet, across regions, and often even across availability zones. Teams are surprised because compute and storage dominate their mental model of cost, while data transfer is invisible until the bill arrives. Chatty cross-AZ microservice communication, cross-region replication, serving large media directly from origin instead of a CDN, and moving data to another cloud all generate egress that can dwarf compute spend. To control it: put a CDN in front of static and cacheable content so most bytes leave from the edge cheaply; co-locate services and data in the same region and AZ where practical to avoid cross-zone charges; compress and batch transfers; and keep analytics pipelines within one provider and region rather than shuttling terabytes across clouds. The discipline is to model data-movement cost during design, not to discover it in production. FinOps tagging makes egress attributable to the team that generates it.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["egress", "cost-optimization", "finops", "cdn"],
+      "followUps": ["How does a CDN reduce egress cost specifically?", "Why can cross-AZ traffic still incur charges?"]
+    },
+    {
+      "id": "q-when-serverless-wrong",
+      "question": "When is serverless (FaaS) the wrong choice?",
+      "answer": "Serverless is excellent for spiky, event-driven, or bursty workloads because it scales to zero when idle and to high concurrency on demand with no capacity to manage, and you pay only per invocation. It becomes the wrong choice in several cases. For high, steady throughput, per-invocation pricing eventually costs more than a reserved always-on fleet running near full utilization. For latency-sensitive request paths, cold starts (the delay when a new function instance spins up) can violate tight tail-latency budgets. For long-running or heavy compute, execution-time and memory limits get in the way. For workloads needing persistent connections, large in-memory state, or specialized hardware, the stateless per-request model fights you. And heavy fan-out to downstream databases can overwhelm them because functions scale far faster than a connection-pool-bound database can absorb. The senior instinct is to reach for serverless for glue, events, and unpredictable spikes, but to prefer containers or reserved VMs for hot, steady, latency-critical paths.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["serverless", "faas", "cost-optimization", "latency"],
+      "followUps": ["How do cold starts affect tail latency?", "What is the database-connection problem with massively scaled functions?"]
+    },
+    {
+      "id": "q-elasticity",
+      "question": "What is elasticity, and why does statelessness matter for autoscaling?",
+      "answer": "Elasticity is the ability to add and remove capacity automatically in response to demand, and it is what makes cloud economics work by matching spend to actual load instead of provisioning for peak all the time. Cloud favors horizontal scaling (adding more instances) over vertical scaling (bigger instances) because horizontal scaling also delivers high availability, many small instances behind a load balancer spread across AZs can be added, killed, and replaced freely. Statelessness is the enabling precondition: if an instance holds session state, uploaded files, or in-memory data that matters, you cannot freely destroy and recreate it, because doing so loses user state. By externalizing state to a shared cache, managed database, or object storage, every instance can serve any request, making instances disposable 'cattle' that autoscaling can manage. Autoscaling also needs warm-up awareness, since instances take time to boot, so teams pair reactive policies with a minimum floor and scheduled scaling for predictable spikes.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["elasticity", "autoscaling", "statelessness"],
+      "followUps": ["Why prefer horizontal over vertical scaling?", "How do you scale ahead of a known traffic spike?"]
+    },
+    {
+      "id": "q-well-architected",
+      "question": "Name the Well-Architected pillars and explain why they trade off against each other.",
+      "answer": "The Well-Architected pillars are a shared checklist for reviewing any cloud design. AWS defines six: operational excellence, security, reliability, performance efficiency, cost optimization, and sustainability, and Azure and GCP use near-identical sets. Operational excellence is about running, monitoring, and automating change. Security is least privilege and defense in depth. Reliability is designing for failure to meet RTO/RPO. Performance efficiency is picking the right resources and scaling well. Cost optimization is matching spend to value. Sustainability is minimizing resource footprint. They trade off against one another, and naming the trade-off is the mark of seniority: pushing reliability to active-active multi-region raises cost and operational load; aggressive cost optimization can undercut reliability or performance. A strong design answer states which pillar you optimized, which you deliberately sacrificed, and why the business context justified that choice, rather than pretending you maximized all of them at once.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["well-architected", "reliability", "cost-optimization"],
+      "followUps": ["Give an example where reliability and cost optimization conflict.", "How does the sustainability pillar influence region and instance choice?"]
+    },
+    {
+      "id": "q-lock-in",
+      "question": "How should a senior engineer reason about vendor lock-in versus managed-service leverage?",
+      "answer": "Every managed service is simultaneously leverage (the provider runs it, freeing your team) and lock-in (leaving means a rewrite). The mature stance is not to fear lock-in absolutely but to price it. Lock-in on a portable, commodity layer, a Postgres-compatible database, S3-compatible object storage, OCI containers, Kubernetes, is cheap to unwind, so accept it freely. Lock-in on a deeply proprietary, high-value service, a serverless event platform or a proprietary warehouse, is expensive to unwind but often worth it because the productivity gain is large and the migration you are insuring against may never happen. The common anti-pattern is abstracting everything behind a lowest-common-denominator layer to stay portable, which typically costs more in ongoing engineering than any real migration would, while forfeiting the very managed services that made the cloud valuable. The right move is deliberate: use open standards where switching is cheap, and consciously accept proprietary lock-in where the leverage clearly justifies the switching cost.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["vendor-lock-in", "managed-services", "multi-cloud"],
+      "followUps": ["When is a portability abstraction worth building?", "Does multi-cloud actually reduce lock-in?"]
+    },
+    {
+      "id": "q-cost-models",
+      "question": "Compare on-demand, reserved, and spot pricing and how you would mix them.",
+      "answer": "On-demand pricing is pay-per-second with no commitment, the most flexible and most expensive, right for spiky or unpredictable workloads. Reserved capacity (Reserved Instances or Savings Plans on AWS, Reservations on Azure, Committed Use Discounts on GCP) trades a one- or three-year commitment for discounts of roughly 30-70%, right for the steady baseline load you know you will run. Spot/preemptible instances sell spare capacity at up to about 90% off but can be reclaimed on short notice, right only for fault-tolerant, interruptible work. The senior answer is to mix them by workload shape: buy reserved or savings-plan capacity to cover the predictable always-on baseline, use on-demand for the flexible middle and unpredictable bursts, and layer spot on top for interruptible surge or batch work. This blend commonly cuts compute cost substantially versus running everything on-demand while retaining resilience, because the interruptible portion is deliberately designed to tolerate reclamation.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["cost-optimization", "reserved-instances", "spot-instances"],
+      "followUps": ["How do you decide the size of your reserved baseline?", "What is the risk of over-committing to reservations?"]
+    },
+    {
+      "id": "q-cloud-native",
+      "question": "What distinguishes a cloud-native application from a lift-and-shift?",
+      "answer": "Lift-and-shift moves an existing application onto cloud VMs largely unchanged: it now runs in the cloud but does not exploit what the cloud is good at. Cloud-native means designing to leverage managed services, horizontal elasticity, automation, and resilience to constant partial failure. The core principles are: prefer managed services so the team spends attention on product rather than patching databases; keep application instances stateless and externalize state so instances are disposable; define all infrastructure as code so environments are reproducible, reviewable, and recreatable from version control; instrument logs, metrics, and traces by default because you cannot debug a distributed elastic system by logging into 'the server'; and design for failure with health checks, retries with backoff, timeouts, and circuit breakers. The strongest maturity signal is that no human configures production by hand, if every environment were deleted, you could rebuild it from source control plus backups. Lift-and-shift is a valid transitional step, but it captures little of the cloud's real value.",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["cloud-native", "infrastructure-as-code", "observability"],
+      "followUps": ["Why is infrastructure as code central to cloud-native?", "How does statelessness enable both scaling and resilience?"]
+    },
+    {
+      "id": "q-cap-cloud",
+      "question": "How do CAP and latency trade-offs show up in cloud database design?",
+      "answer": "Because cloud data is replicated across AZs and possibly regions, distributed-systems theory becomes a concrete product decision. CAP says that during a network partition you must choose between consistency and availability. PACELC adds that even with no partition, stronger consistency costs latency, because a write must wait for acknowledgements from remote replicas. In practice, synchronous multi-AZ replication gives strong consistency and zero data loss at only a few milliseconds per write, which is acceptable within a region and is the default. Synchronous multi-region replication is usually a mistake because cross-region round-trips of tens to hundreds of milliseconds per write cripple throughput. So multi-region systems either accept asynchronous replication with an RPO window, or adopt globally distributed databases (Spanner, Cosmos DB, DynamoDB global tables) that make explicit consistency-versus-latency choices for you. A subtler consequence is that forcing all writes through a single global primary makes distant users pay a full cross-region round-trip, sometimes making regional data partitioning by residency the better design.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["cap-theorem", "consistency", "latency", "databases"],
+      "followUps": ["Why is synchronous cross-region replication usually avoided?", "How does data residency interact with consistency?"]
+    },
+    {
+      "id": "q-multi-cloud",
+      "question": "Does multi-cloud actually reduce risk, and what does it cost?",
+      "answer": "Multi-cloud is often adopted to avoid lock-in or reduce provider risk, but the reality is more nuanced. True active-active multi-cloud does buy resilience against a single provider's global failure and gives negotiating leverage, but it is expensive on several axes. You pay egress fees to move data between providers, you must staff deep expertise in two or more ecosystems, and you tend to design to the lowest common denominator, forfeiting the differentiated managed services that made cloud valuable in the first place. Because of that last point, aggressive portability often costs more in ongoing engineering than any migration you would realistically perform. Many teams get most of the benefit more cheaply with a single primary provider plus a concrete, tested DR posture, or by using a second provider only for a specific best-of-breed service rather than mirroring the whole stack. The senior conclusion: choose multi-cloud for a specific, articulated reason, resilience, leverage, or a unique service, not as a reflexive hedge against lock-in.",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "tricky": true,
+      "tags": ["multi-cloud", "vendor-lock-in", "resilience"],
+      "followUps": ["What is the difference between multi-cloud and hybrid cloud?", "When is a single-provider DR posture sufficient?"]
+    },
+    {
+      "id": "q-object-block-file",
+      "question": "Compare object, block, and file storage and when to use each.",
+      "answer": "The three storage shapes differ in how data is addressed and shared. Object storage exposes a flat namespace of blobs addressed by key over HTTP, is effectively unlimited and cheap, and suits backups, media, static assets, and data lakes, but it is not a filesystem and is not ideal for random in-place updates (S3, Blob Storage, Cloud Storage). Block storage presents a raw virtual disk attached to a single VM, which you format with a filesystem; it offers low latency and is the right choice for databases and boot volumes, but it is typically bound to a single availability zone and a single attachment (EBS, Managed Disks, Persistent Disk). File storage provides a shared network filesystem speaking NFS or SMB that many hosts can mount simultaneously, suited to legacy applications and shared workspaces (EFS, Azure Files, Filestore). The rule of thumb: object for cheap durable blobs at scale, block for a single host that needs a fast local-feeling disk, and file when multiple hosts must share the same mounted filesystem.",
+      "difficulty": "junior",
+      "category": "Cloud",
+      "tricky": false,
+      "tags": ["storage", "object-storage", "block-storage", "file-storage"],
+      "followUps": ["Why is object storage a poor choice for a database's primary storage?", "How does block storage's single-AZ binding affect HA design?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-multi-az-design",
+      "title": "Design a Highly Available Multi-AZ Architecture",
+      "difficulty": "senior",
+      "category": "Cloud",
+      "prompt": "You are given a three-tier web application (stateless web/app tier plus a relational database) that must survive the loss of an entire availability zone with no data loss and only a brief blip of downtime, while staying in a single region to control cost and latency. Produce an annotated architecture: the edge, app tier, data tier, and networking, and justify each redundancy choice against a specific failure mode. State explicitly what your design does NOT protect against and why that omission is acceptable.",
+      "hints": [
+        "Spread the app tier across at least two, ideally three, AZs behind a regional load balancer, with a minimum of one healthy instance per AZ.",
+        "Use a managed database in multi-AZ mode (synchronous standby in a second AZ with automatic failover) for zero RPO, and keep all instance state externalized so instances are disposable.",
+        "Walk each failure mode (instance dies, whole AZ dies, database primary dies) and describe exactly how traffic and data survive; then note that a full-region outage is out of scope and requires a second region."
+      ],
+      "solutionCode": "region: us-east-1\nedge:\n  dns: managed-dns              # health-check-aware routing\n  cdn: enabled                  # offload static assets, cut egress\napp_tier:\n  load_balancer: application-lb # spans all AZs, health checks targets\n  autoscaling_group:\n    subnets: [private-1a, private-1b, private-1c]\n    min: 3                      # >= 1 healthy instance per AZ\n    max: 30\n    stateless: true             # sessions in cache, files in object store\ndata_tier:\n  database:\n    engine: managed-postgres\n    multi_az: true              # sync standby in a 2nd AZ, auto-failover\n    backups: { pitr: true, retention_days: 14 }\n  cache:\n    engine: redis\n    replica_az: us-east-1b\nnetworking:\n  nat_gateway_per_az: true      # private egress survives one AZ loss\n  db_security_group: allow_from_app_tier_only\nnot_protected_against:\n  - full_region_outage          # would need a second region + async DR",
+      "solutionLanguage": "yaml",
+      "explanation": "The design places the stateless app tier across three AZs behind a regional load balancer with a minimum of one instance per AZ, so the loss of any single AZ still leaves healthy capacity that the load balancer routes to while autoscaling launches replacements in the survivors. State is externalized to a shared cache and object storage, which is what makes instances disposable and lets autoscaling add and kill them freely. The managed database runs multi-AZ with a synchronous standby in a second AZ and automatic failover, giving zero RPO and only a brief failover blip rather than an outage or data loss. A NAT gateway per AZ ensures private-subnet egress survives an AZ failure, and the database security group restricts access to the app tier only for defense in depth. Walking the failure modes confirms coverage: an instance death is handled by health checks and autoscaling, a full AZ loss is handled by cross-AZ redundancy plus database failover, and a database primary loss is handled by the synchronous standby. The deliberate omission is a full-region outage, which this design does not survive; that is acceptable because surviving a region loss requires a second region with asynchronous replication and roughly double the cost, which is only justified when the business RTO/RPO or a compliance requirement demands it, and the stated requirement was explicitly single-region.",
+      "relatedTopic": "cloud-fundamentals"
+    },
+    {
+      "id": "ch-right-size-purchasing",
+      "title": "Right-Size a Workload's Compute Purchasing",
+      "difficulty": "mid",
+      "category": "Cloud",
+      "prompt": "A service runs a steady baseline of about 20 instances around the clock, a predictable daytime bump adding roughly another 15 instances for 10 hours on weekdays, and an asynchronous nightly batch job that can tolerate interruption and retries. It is currently 100% on-demand and the bill is too high. Propose a purchasing mix across on-demand, reserved/savings-plan, and spot capacity, and justify each allocation with its trade-off. Note the main risk you are accepting.",
+      "hints": [
+        "Cover the always-on baseline with a one- or three-year commitment (reserved or savings plan) to capture the largest discount on capacity you are certain to use.",
+        "Serve the predictable but time-bounded daytime bump with on-demand (or a smaller savings-plan commitment) since committing 24/7 to capacity used only part of the day wastes the discount.",
+        "Run the interruptible nightly batch on spot/preemptible instances, diversified across instance types and AZs, and make the job checkpoint and retry so reclamation is harmless."
+      ],
+      "solutionCode": "purchasing_plan:\n  baseline_always_on:\n    quantity: 20 instances\n    model: savings_plan_or_reserved   # 1-3 yr commit\n    rationale: certain 24/7 usage -> capture ~40-70% discount\n  daytime_bump:\n    quantity: ~15 instances, 10h x weekdays\n    model: on_demand                  # (or small savings plan)\n    rationale: part-time capacity; 24/7 commit would waste the discount\n  nightly_batch:\n    quantity: variable\n    model: spot / preemptible\n    diversify: [multiple_instance_types, multiple_azs]\n    requirements: [checkpointing, idempotent_retry]\n    rationale: interruptible work -> up to ~90% off, reclaim is harmless\nrisk_accepted:\n  - reservation_overcommit: baseline must stay >= 20 or discount is wasted\n  - spot_reclamation: acceptable because batch is interruptible + retried",
+      "solutionLanguage": "yaml",
+      "explanation": "The plan matches each pricing model to the shape of the demand it serves. The 20-instance always-on baseline is covered by a reserved or savings-plan commitment, because it is capacity you are certain to run every hour of every day, which is exactly where a one- or three-year commitment yields its largest discount (commonly 40-70%). The daytime bump of about 15 instances for ten weekday hours is left on on-demand, because committing to that capacity around the clock would pay for it during the fourteen-plus hours it is idle and erase the discount; if the daytime pattern is stable enough, a modest additional savings-plan commitment sized to the average could shave a bit more. The interruptible nightly batch runs on spot or preemptible instances at up to roughly 90% off, and because the job checkpoints and retries idempotently, a reclamation simply resumes elsewhere with no harm; diversifying across instance types and AZs reduces the chance of a mass simultaneous reclaim. The main risk accepted is reservation overcommit: if the baseline ever drops below the committed 20 instances, you pay for capacity you are not using, so the commitment should be sized to the reliable floor, not the average. The result cuts cost substantially versus 100% on-demand while preserving resilience, because only the deliberately interruptible portion of the workload is exposed to reclamation.",
+      "relatedTopic": "cloud-fundamentals"
+    }
+  ],
+  "references": [
+    {
+      "label": "AWS Well-Architected Framework",
+      "url": "https://aws.amazon.com/architecture/well-architected/"
+    },
+    {
+      "label": "NIST Definition of Cloud Computing (SP 800-145)",
+      "url": "https://csrc.nist.gov/publications/detail/sp/800-145/final"
+    },
+    {
+      "label": "Microsoft Azure Fundamentals",
+      "url": "https://learn.microsoft.com/en-us/training/paths/microsoft-azure-fundamentals-describe-cloud-concepts/"
+    },
+    {
+      "label": "Google Cloud Architecture Framework",
+      "url": "https://cloud.google.com/architecture/framework"
+    },
+    {
+      "label": "FinOps Foundation: What is FinOps",
+      "url": "https://www.finops.org/introduction/what-is-finops/"
+    }
+  ]
+}

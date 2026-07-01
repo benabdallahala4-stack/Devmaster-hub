@@ -1,0 +1,540 @@
+{
+  "id": "js-algorithms",
+  "title": "JavaScript Algorithmic Patterns",
+  "category": "Computer Science",
+  "subcategory": "Algorithms",
+  "difficulty": "senior",
+  "tags": ["algorithms", "javascript", "patterns", "big-o", "two-pointers", "sliding-window", "dynamic-programming", "interview"],
+  "description": "A hands-on, exercise-heavy tour of the coding-interview patterns every senior engineer should be able to reach for in modern JavaScript. Learn to recognize the problem signal, pick the pattern, and progress from brute force to an optimal solution with confident complexity analysis.",
+  "estReadMinutes": 34,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {"type": "paragraph", "text": "Coding interviews are not tests of how many problems you have memorized. They are tests of whether you can look at an unfamiliar problem, recognize its underlying shape, and reach for a pattern that collapses the brute-force cost into something optimal. A senior engineer does not solve two hundred distinct puzzles; they solve a dozen patterns and then recognize which one is hiding inside the puzzle on the whiteboard."},
+        {"type": "paragraph", "text": "This topic is deliberately exercise-heavy. Each pattern section gives you three things: what the pattern is, the signal in the problem statement that should make you reach for it, and a clean, runnable JavaScript solution with its complexity spelled out. Then the challenges at the end let you practice the recognition-to-solution loop yourself. Every problem statement here is original, modeled on classic patterns but written from scratch, so you practice the thinking rather than pattern-matching a memorized answer."},
+        {"type": "callout", "variant": "info", "text": "Mental model: a pattern is a reusable transformation from a problem signal (sorted array, contiguous subarray, pair that sums to a target) into a cheaper cost model. Learn the signals and the patterns follow."},
+        {"type": "paragraph", "text": "We use modern JavaScript throughout, with occasional TypeScript type annotations where they clarify intent. The techniques transfer to any language, but we call out the JavaScript-specific traps that bite people in interviews and in production: the lexicographic default sort, Map versus plain object for counting, Set semantics, floating-point precision, and the recursion stack limit."}
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why Patterns Matter",
+      "kind": "why",
+      "blocks": [
+        {"type": "paragraph", "text": "Without patterns, every problem feels novel and you burn your limited interview time rediscovering ideas from first principles. With patterns, you spend the first two minutes classifying the problem, and the remaining time is mechanical. The same discipline pays off in production: the difference between an O(n squared) loop that melts on a large payload and an O(n) single pass is often just recognizing that a hash map turns a nested lookup into a constant-time one."},
+        {"type": "list", "items": [
+          "Speed of recognition: naming the pattern out loud ('this is a dynamic sliding window because we want the longest contiguous run under a constraint') signals senior judgment to an interviewer.",
+          "Correct complexity from the start: patterns come with known time and space bounds, so you can commit to an approach before writing code instead of discovering it is too slow at the end.",
+          "The brute-force to optimal narrative: interviewers reward stating the naive solution, its complexity, and then the specific insight that improves it. Patterns give you that narrative for free.",
+          "Fewer bugs: the canonical shape of each pattern (the two-pointer invariant, the window shrink loop, the binary-search boundary) has well-known off-by-one traps you learn to avoid once.",
+          "Transferable to real code: interval merging is calendar logic, prefix sums are running totals in analytics, BFS is dependency resolution. These are not just puzzle tricks."
+        ]},
+        {"type": "callout", "variant": "success", "text": "The senior move: before writing a single line, say the brute force, its Big-O, the signal you noticed, and the pattern it points to. Then code the pattern."}
+      ]
+    },
+    {
+      "id": "big-o",
+      "heading": "Big-O Refresher: The Cost Model",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Big-O describes how time or space grows as input size n grows toward infinity, discarding constants and lower-order terms because the dominant term wins at scale. O(2n + 30) is just O(n). You will state complexity for every solution you write, so internalize the common growth classes and what each feels like on a million-element input."},
+        {"type": "table", "headers": ["Notation", "Name", "Typical source", "n = 1M feels like"],
+         "rows": [
+           ["O(1)", "constant", "Map.get, array index, arithmetic", "instant"],
+           ["O(log n)", "logarithmic", "binary search, balanced tree lookup", "about 20 steps"],
+           ["O(n)", "linear", "single pass, one loop over the input", "1M steps"],
+           ["O(n log n)", "linearithmic", "comparison sort, sort-then-scan", "about 20M steps"],
+           ["O(n^2)", "quadratic", "nested loop, naive pair comparison", "1 trillion steps, too slow"],
+           ["O(2^n)", "exponential", "naive recursion over subsets, unmemoized branching", "effectively never finishes"]
+         ]},
+        {"type": "paragraph", "text": "Two axes matter independently. Time complexity counts operations; space complexity counts extra memory beyond the input. They frequently trade against each other: a frequency counter spends O(n) space to buy O(n) time instead of O(n squared). Memoization spends O(n) space to turn exponential recursion into linear. When you optimize, always name which resource you are spending to save the other."},
+        {"type": "callout", "variant": "warning", "text": "Recursion is not free space. Every recursive call adds a stack frame, so a recursion of depth d costs O(d) space even if you allocate nothing. Deeply recursive solutions can blow the JavaScript call stack (see the recursion-limits note)."},
+        {"type": "paragraph", "text": "Best, average, and worst case are also distinct. Hash map operations are O(1) average but O(n) worst case under adversarial collisions. Quicksort is O(n log n) average but O(n squared) worst case on a bad pivot. In interviews, quote the average case as your typical experience and mention the worst case as the safety caveat."}
+      ]
+    },
+    {
+      "id": "signal-to-pattern",
+      "heading": "From Problem Signal to Pattern",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "The most valuable skill is fast classification. Read the problem, extract the signal, and map it to a pattern before you think about code. This table is the decoder ring you will train until it becomes reflex."},
+        {"type": "table", "headers": ["Signal in the problem", "Pattern to reach for", "Why"],
+         "rows": [
+           ["Count/compare occurrences, anagram, 'same characters'", "Frequency Counter (Map)", "One pass to tally, one pass to compare beats nested loops"],
+           ["Sorted array, find a pair or triplet by value", "Two Pointers", "Move ends inward using the sorted order to skip work"],
+           ["Longest/shortest/max contiguous subarray or substring", "Sliding Window", "Grow and shrink a window instead of re-scanning"],
+           ["Many range-sum queries, subarray sums to target", "Prefix Sum", "Precompute cumulative totals for O(1) range answers"],
+           ["Sorted input, 'find X' or minimize a feasible value", "Binary Search (incl. on answer)", "Halve the search space each step"],
+           ["All combinations/permutations/subsets, build a solution", "Backtracking", "Explore the decision tree, undo choices on the way back"],
+           ["Tree or graph, shortest path in unweighted graph, levels", "BFS / DFS", "Systematic traversal; BFS gives shortest hops"],
+           ["Optimal count/value with overlapping subproblems", "Dynamic Programming", "Memoize or tabulate to avoid recomputation"],
+           ["Overlapping ranges, calendar, merge spans", "Interval Merging", "Sort by start, then sweep and coalesce"],
+           ["Top-k, running median, repeatedly need the min/max", "Heap", "O(log n) push/pop of the extreme element"]
+         ]},
+        {"type": "callout", "variant": "info", "text": "If two patterns fit, prefer the one that avoids sorting when the input is already ordered, and prefer O(n) space over O(n log n) time when n is huge and memory is available."}
+      ]
+    },
+    {
+      "id": "frequency-counter",
+      "heading": "Pattern: Frequency Counter / Hash Map",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "The frequency counter turns a comparison between two collections, or a search for duplicates or complements, from a nested loop into a single pass. You build a map from value to count (or value to index), then answer membership and count questions in O(1) average. Recognize it when the problem mentions counting occurrences, anagrams, 'do these contain the same elements', or 'find the pair that sums to a target'."},
+        {"type": "code", "language": "javascript", "code": "// Do two strings use exactly the same letters with the same multiplicities?\n// Brute force: sort both and compare -> O(n log n). Better: tally in O(n).\nfunction sameLetters(a, b) {\n  if (a.length !== b.length) return false;\n  const counts = new Map();\n  for (const ch of a) counts.set(ch, (counts.get(ch) ?? 0) + 1);\n  for (const ch of b) {\n    const c = counts.get(ch);\n    if (!c) return false;      // absent or already exhausted\n    counts.set(ch, c - 1);\n  }\n  return true;                 // every letter in b canceled one in a\n}\n\n// sameLetters('listen', 'silent') -> true\n// sameLetters('abc', 'abd')       -> false\n// Time: O(n). Space: O(k) where k is the alphabet size."},
+        {"type": "paragraph", "text": "The key move is reframing the question. 'Are these anagrams' becomes 'does every character in b cancel exactly one unused character in a'. The second loop decrements rather than building a second map, which halves the memory and keeps the logic in one place. For pair-sum style problems, store value-to-index as you scan and check for the complement before inserting the current element."},
+        {"type": "callout", "variant": "warning", "text": "Use a Map, not a plain object, when keys might be numbers, collide with prototype names like 'constructor' or '__proto__', or when you need insertion order and a reliable size. Plain objects coerce keys to strings and inherit prototype properties, which causes subtle bugs in counters."}
+      ]
+    },
+    {
+      "id": "two-pointers",
+      "heading": "Pattern: Two Pointers",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Two pointers walk two indices through a structure, usually from opposite ends toward the middle, or with a fast and a slow pointer. The pattern exploits ordering: on a sorted array, if the current pair sums too high you move the right pointer left, and if too low you move the left pointer right, so you never revisit a dead combination. Recognize it with sorted input plus a search for a pair, triplet, or a partition point."},
+        {"type": "code", "language": "javascript", "code": "// Given a SORTED ascending array, find indices of two values summing to target.\n// Brute force is O(n^2). Two pointers is O(n) with O(1) extra space.\nfunction pairSumSorted(sorted, target) {\n  let lo = 0, hi = sorted.length - 1;\n  while (lo < hi) {\n    const sum = sorted[lo] + sorted[hi];\n    if (sum === target) return [lo, hi];\n    if (sum < target) lo++;   // need a bigger sum -> raise the low end\n    else hi--;                // need a smaller sum -> lower the high end\n  }\n  return null;                // no such pair\n}\n\n// pairSumSorted([1, 3, 4, 7, 11], 11) -> [1, 3]  (3 + 8? no) -> actually 4 + 7\n// Time: O(n). Space: O(1)."},
+        {"type": "paragraph", "text": "The invariant is that everything outside the [lo, hi] window has already been ruled out. Because the array is sorted, moving a pointer inward monotonically changes the sum in a known direction, so each element is visited at most once. The same fast/slow variant detects cycles, removes duplicates in place, and finds midpoints of linked lists."},
+        {"type": "callout", "variant": "danger", "text": "Two pointers from opposite ends REQUIRES sorted input. If the array is unsorted, sorting first costs O(n log n) and may destroy original indices. When you must return original indices on unsorted data, prefer the frequency-counter/hash-map approach instead, which is O(n)."}
+      ]
+    },
+    {
+      "id": "sliding-window",
+      "heading": "Pattern: Sliding Window (Fixed and Dynamic)",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "A sliding window maintains a contiguous range over an array or string and slides its boundaries instead of recomputing from scratch. A fixed window has a constant size k and slides one step at a time, adding the incoming element and removing the outgoing one. A dynamic window grows its right edge greedily and shrinks its left edge whenever a constraint is violated. Recognize the pattern with 'contiguous subarray or substring' plus 'longest', 'shortest', 'maximum', or 'at most k'."},
+        {"type": "code", "language": "javascript", "code": "// Fixed window: maximum sum of any contiguous block of exactly k numbers.\nfunction maxWindowSum(nums, k) {\n  if (nums.length < k) return null;\n  let windowSum = 0;\n  for (let i = 0; i < k; i++) windowSum += nums[i]; // first window\n  let best = windowSum;\n  for (let i = k; i < nums.length; i++) {\n    windowSum += nums[i] - nums[i - k];   // slide: add new, drop old\n    best = Math.max(best, windowSum);\n  }\n  return best;\n}\n// maxWindowSum([2, 1, 5, 1, 3, 2], 3) -> 9  (5 + 1 + 3)\n// Time: O(n). Space: O(1)."},
+        {"type": "code", "language": "javascript", "code": "// Dynamic window: length of the longest substring with all distinct characters.\nfunction longestDistinct(s) {\n  const lastSeen = new Map(); // char -> most recent index\n  let left = 0, best = 0;\n  for (let right = 0; right < s.length; right++) {\n    const ch = s[right];\n    if (lastSeen.has(ch) && lastSeen.get(ch) >= left) {\n      left = lastSeen.get(ch) + 1;  // jump past the previous occurrence\n    }\n    lastSeen.set(ch, right);\n    best = Math.max(best, right - left + 1);\n  }\n  return best;\n}\n// longestDistinct('abcabcbb') -> 3 ('abc')\n// longestDistinct('bbbbb')    -> 1\n// Time: O(n). Space: O(min(n, alphabet))."},
+        {"type": "paragraph", "text": "The reason this beats brute force is that every index enters the window once and leaves at most once, so the total work is O(n) even though there are two nested-looking loops. Contrast with the naive approach that recomputes every substring, which is O(n squared) or worse. Whenever you catch yourself re-scanning an overlapping range, a window is probably the fix."},
+        {"type": "callout", "variant": "info", "text": "Dynamic window template: expand right in the outer loop; while the window is invalid, shrink from left; record the answer after each step. The trick is defining 'invalid' precisely (too many distinct chars, sum exceeds target, a required count dropped below one)."}
+      ]
+    },
+    {
+      "id": "prefix-sum",
+      "heading": "Pattern: Prefix Sum",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "A prefix sum array stores the cumulative total up to each index, so the sum of any range [i, j] is prefix[j+1] - prefix[i] in O(1). Precomputing the prefixes is O(n), and then you can answer any number of range queries instantly. Combined with a hash map, prefix sums also count subarrays that hit a target sum in a single pass. Recognize it with repeated range-sum queries or 'how many subarrays sum to k'."},
+        {"type": "code", "language": "javascript", "code": "// Count contiguous subarrays whose elements sum to exactly target.\n// Brute force enumerates all subarrays -> O(n^2). Prefix + map -> O(n).\nfunction countSubarraysWithSum(nums, target) {\n  const seen = new Map([[0, 1]]); // prefix sum 0 has occurred once (empty prefix)\n  let running = 0, count = 0;\n  for (const x of nums) {\n    running += x;\n    // number of earlier prefixes p such that running - p === target\n    count += seen.get(running - target) ?? 0;\n    seen.set(running, (seen.get(running) ?? 0) + 1);\n  }\n  return count;\n}\n// countSubarraysWithSum([1, 1, 1], 2) -> 2\n// countSubarraysWithSum([3, 4, -7, 1, 2], 0) -> 2\n// Time: O(n). Space: O(n)."},
+        {"type": "paragraph", "text": "The insight is that a subarray summing to target exists between two prefix positions whose cumulative sums differ by exactly target. So as you scan, you ask 'have I seen a prefix equal to running minus target', which the map answers in O(1). Seeding the map with prefix sum zero counts subarrays that start at index 0."},
+        {"type": "callout", "variant": "warning", "text": "Prefix sums assume the underlying values do not change between queries. If the array is mutable and you need both updates and range queries efficiently, reach for a Fenwick tree (binary indexed tree) or a segment tree, which give O(log n) updates and queries."}
+      ]
+    },
+    {
+      "id": "binary-search",
+      "heading": "Pattern: Binary Search (and on Answer Space)",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Binary search halves the search space each step, giving O(log n). The classic form finds a value in a sorted array. The more powerful form is 'binary search on the answer': when the answer is a number in a range and you can cheaply test 'is a candidate value feasible', and feasibility is monotonic (once true it stays true), you binary-search the answer space itself. Recognize it with sorted input, or with 'minimize the maximum' / 'maximize the minimum' phrasing."},
+        {"type": "code", "language": "javascript", "code": "// Classic: index of target in a sorted ascending array, or -1.\nfunction binarySearch(sorted, target) {\n  let lo = 0, hi = sorted.length - 1;\n  while (lo <= hi) {\n    const mid = lo + ((hi - lo) >> 1); // avoids overflow, integer midpoint\n    if (sorted[mid] === target) return mid;\n    if (sorted[mid] < target) lo = mid + 1;\n    else hi = mid - 1;\n  }\n  return -1;\n}\n\n// Binary search on the answer: smallest capacity to ship all packages\n// within `days`, where each day loads packages in order up to capacity.\nfunction minCapacity(weights, days) {\n  const feasible = (cap) => {\n    let need = 1, load = 0;\n    for (const w of weights) {\n      if (w > cap) return false;         // one package cannot fit at all\n      if (load + w > cap) { need++; load = 0; }\n      load += w;\n    }\n    return need <= days;\n  };\n  let lo = Math.max(...weights);          // must fit the heaviest package\n  let hi = weights.reduce((a, b) => a + b, 0); // one day, everything\n  while (lo < hi) {\n    const mid = lo + ((hi - lo) >> 1);\n    if (feasible(mid)) hi = mid;           // try to do better\n    else lo = mid + 1;                     // need more capacity\n  }\n  return lo;\n}\n// minCapacity([1,2,3,4,5,6,7,8,9,10], 5) -> 15\n// Time: O(n log(sum)). Space: O(1)."},
+        {"type": "paragraph", "text": "Compute the midpoint as lo + (hi - lo) / 2 rather than (lo + hi) / 2 to avoid integer overflow in fixed-width languages and to make the intent clear. The boundary discipline matters: the 'lo <= hi with return in loop' form finds an exact value, while the 'lo < hi, shrink toward feasible' form finds the smallest feasible answer. Pick one template and never mix them."},
+        {"type": "callout", "variant": "danger", "text": "The most common binary-search bug is an infinite loop from a midpoint that never advances. In the lo < hi form, when feasible you set hi = mid (not mid - 1) and when infeasible you set lo = mid + 1; getting either boundary wrong either loops forever or skips the answer."}
+      ]
+    },
+    {
+      "id": "recursion-backtracking",
+      "heading": "Pattern: Recursion and Backtracking",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Recursion solves a problem in terms of smaller instances of itself with a base case that stops the descent. Backtracking is recursion that builds a candidate solution incrementally and abandons a branch (backtracks) as soon as it cannot lead to a valid answer. Recognize backtracking when the problem asks for all combinations, permutations, subsets, or arrangements subject to constraints."},
+        {"type": "code", "language": "javascript", "code": "// Generate every subset (the power set) of a list of distinct items.\nfunction subsets(items) {\n  const result = [];\n  const current = [];\n  function backtrack(start) {\n    result.push([...current]);        // record the current partial choice\n    for (let i = start; i < items.length; i++) {\n      current.push(items[i]);         // choose\n      backtrack(i + 1);               // explore with this choice\n      current.pop();                  // un-choose (backtrack)\n    }\n  }\n  backtrack(0);\n  return result;\n}\n// subsets([1, 2, 3]) -> [[], [1], [1,2], [1,2,3], [1,3], [2], [2,3], [3]]\n// Time: O(n * 2^n) to build all subsets. Space: O(n) recursion depth."},
+        {"type": "paragraph", "text": "The choose / explore / un-choose rhythm is the heart of backtracking. Pushing before the recursive call and popping after it keeps a single mutable path that represents the current position in the decision tree, which avoids allocating a fresh array at every node. Pruning (returning early when a partial candidate already violates a constraint) is what makes backtracking tractable on otherwise exponential search spaces."},
+        {"type": "callout", "variant": "info", "text": "Backtracking is exponential by nature because the answer set itself can be exponential (there are 2^n subsets). The optimization lever is pruning: cut branches early with a feasibility check so you never descend into subtrees that cannot produce a valid answer."}
+      ]
+    },
+    {
+      "id": "bfs-dfs",
+      "heading": "Pattern: BFS and DFS on Trees and Graphs",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Breadth-first search explores level by level using a queue and finds the shortest path in an unweighted graph. Depth-first search dives as far as possible along one branch using a stack (or the call stack via recursion) and is natural for exhausting a subtree, detecting cycles, and topological ordering. Recognize these with trees, grids, adjacency lists, 'shortest number of steps', 'connected components', or 'can you reach X from Y'."},
+        {"type": "code", "language": "javascript", "code": "// BFS on a graph given as an adjacency map: shortest hop count from start to goal.\nfunction shortestHops(adj, start, goal) {\n  if (start === goal) return 0;\n  const visited = new Set([start]);\n  let frontier = [start];\n  let distance = 0;\n  while (frontier.length) {\n    distance++;\n    const next = [];\n    for (const node of frontier) {\n      for (const neighbor of adj.get(node) ?? []) {\n        if (neighbor === goal) return distance;\n        if (!visited.has(neighbor)) {\n          visited.add(neighbor);\n          next.push(neighbor);\n        }\n      }\n    }\n    frontier = next;   // advance to the next level\n  }\n  return -1;           // goal unreachable\n}\n// Time: O(V + E). Space: O(V) for the visited set and frontier."},
+        {"type": "code", "language": "javascript", "code": "// DFS on a binary tree: maximum root-to-leaf depth (recursive).\nfunction maxDepth(node) {\n  if (node === null) return 0;\n  return 1 + Math.max(maxDepth(node.left), maxDepth(node.right));\n}\n// Time: O(n) visiting each node once. Space: O(h) where h is tree height\n// (the recursion stack). Balanced -> O(log n); degenerate -> O(n)."},
+        {"type": "paragraph", "text": "Mark nodes visited as you enqueue them in BFS, not as you dequeue them, or the same node can be added multiple times and inflate the queue. On a graph you must track visited to avoid infinite loops on cycles; on a tree you can skip that because there are no cycles. BFS guarantees the shortest hop count precisely because it exhausts distance d before touching distance d+1."},
+        {"type": "callout", "variant": "warning", "text": "Recursive DFS uses the call stack, whose depth equals the tree or path height. On a skewed or very deep structure this can exceed the JavaScript stack limit and throw a RangeError. Convert to an explicit stack with a loop when depth can approach tens of thousands."}
+      ]
+    },
+    {
+      "id": "dynamic-programming",
+      "heading": "Pattern: Dynamic Programming (Memoization vs Tabulation)",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Dynamic programming applies when a problem has optimal substructure (the answer is built from answers to subproblems) and overlapping subproblems (the same subproblem recurs). Memoization is top-down: write the natural recursion, then cache results so each subproblem is computed once. Tabulation is bottom-up: fill a table from base cases upward in a loop. Both turn exponential recursion into polynomial time. Recognize DP with 'count the ways', 'minimum/maximum cost', or a recursion whose branches revisit the same inputs."},
+        {"type": "code", "language": "javascript", "code": "// How many distinct ways to climb n steps taking 1 or 2 steps at a time?\n// Naive recursion is O(2^n) because subproblems repeat.\n\n// Top-down memoization.\nfunction climbMemo(n, memo = new Map()) {\n  if (n <= 2) return n;              // 1 way for 1 step, 2 ways for 2 steps\n  if (memo.has(n)) return memo.get(n);\n  const ways = climbMemo(n - 1, memo) + climbMemo(n - 2, memo);\n  memo.set(n, ways);\n  return ways;\n}\n\n// Bottom-up tabulation with O(1) space (only the last two values matter).\nfunction climbTab(n) {\n  if (n <= 2) return n;\n  let prev = 1, curr = 2;\n  for (let i = 3; i <= n; i++) {\n    const next = prev + curr;\n    prev = curr;\n    curr = next;\n  }\n  return curr;\n}\n// climbMemo(5) -> 8 ; climbTab(5) -> 8\n// Time: O(n). Space: memo O(n); tabulation O(1)."},
+        {"type": "paragraph", "text": "Memoization is easier to write because you start from the obvious recursion and add a cache, and it only computes the subproblems you actually need. Tabulation avoids recursion entirely (no stack-overflow risk) and often permits rolling the table down to O(1) space when each state depends only on a few previous states, as in the climbing-stairs example. Choose memoization when the recursion is intuitive and sparse; choose tabulation when depth is large or you want the tightest space."},
+        {"type": "callout", "variant": "success", "text": "DP recipe: define the state (what the subproblem index means), write the recurrence (how a state combines smaller states), set the base cases, then decide top-down vs bottom-up. If each state uses only the last k states, compress the table to O(k) space."}
+      ]
+    },
+    {
+      "id": "sorting-heap-intervals",
+      "heading": "Pattern: Sorting, Heaps, and Interval Merging",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Sorting is a preprocessing step that unlocks other patterns: two pointers, interval merging, and greedy scans all begin by sorting. Comparison sorts are O(n log n). A heap (priority queue) gives O(log n) insertion and O(log n) removal of the extreme element, which is the right tool for top-k, running median, and repeatedly needing the current min or max without fully sorting. Interval merging sorts spans by start and then sweeps, coalescing any that overlap."},
+        {"type": "code", "language": "javascript", "code": "// Merge overlapping intervals given as [start, end] pairs.\nfunction mergeIntervals(intervals) {\n  if (intervals.length === 0) return [];\n  // Sort by start; the comparator MUST return a number, not a boolean.\n  const sorted = [...intervals].sort((a, b) => a[0] - b[0]);\n  const merged = [sorted[0].slice()];\n  for (let i = 1; i < sorted.length; i++) {\n    const last = merged[merged.length - 1];\n    const [start, end] = sorted[i];\n    if (start <= last[1]) {\n      last[1] = Math.max(last[1], end);  // overlap -> extend the current span\n    } else {\n      merged.push([start, end]);         // disjoint -> start a new span\n    }\n  }\n  return merged;\n}\n// mergeIntervals([[1,3],[2,6],[8,10],[15,18]]) -> [[1,6],[8,10],[15,18]]\n// Time: O(n log n) dominated by the sort. Space: O(n)."},
+        {"type": "paragraph", "text": "After sorting by start time, any interval that overlaps the running last one must start at or before the last one's end, so a single linear sweep suffices. This same sort-then-sweep shape solves meeting-room scheduling, free-slot finding, and range coalescing. For top-k problems, a size-k min-heap keeps the k largest seen so far in O(n log k) time, cheaper than sorting the whole input when k is small."},
+        {"type": "callout", "variant": "danger", "text": "JavaScript's Array.prototype.sort defaults to comparing elements as STRINGS. [10, 9, 2, 1].sort() yields [1, 10, 2, 9], not numeric order. Always pass a comparator (a, b) => a - b for numbers. A comparator must return a number; returning a boolean gives implementation-defined, buggy ordering."}
+      ]
+    },
+    {
+      "id": "string-manipulation",
+      "heading": "Pattern: String Manipulation",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Strings are sequences, so most array patterns apply: frequency counters for anagrams, two pointers for palindromes, sliding windows for substrings. The extra care is that JavaScript strings are immutable, so building a result character by character with concatenation is O(n squared); push characters into an array and join once at the end for O(n). Recognize string problems as array problems with an immutability caveat."},
+        {"type": "code", "language": "javascript", "code": "// Is a string a palindrome, ignoring case and non-alphanumeric characters?\nfunction isPalindrome(s) {\n  // Normalize once: lowercase, keep only letters and digits.\n  const clean = s.toLowerCase().replace(/[^a-z0-9]/g, '');\n  let lo = 0, hi = clean.length - 1;\n  while (lo < hi) {\n    if (clean[lo] !== clean[hi]) return false;\n    lo++; hi--;\n  }\n  return true;\n}\n// isPalindrome('A man, a plan, a canal: Panama') -> true\n// isPalindrome('race a car') -> false\n// Time: O(n). Space: O(n) for the normalized copy."},
+        {"type": "paragraph", "text": "Two pointers from both ends is the canonical palindrome check. Normalizing the string once up front keeps the comparison loop simple. For substring search and pattern matching at scale, know that naive matching is O(n*m) and algorithms like Knuth-Morris-Pratt bring it to O(n + m), though interviewers rarely require you to implement KMP from memory."},
+        {"type": "callout", "variant": "warning", "text": "Iterating a string by index counts UTF-16 code units, so characters outside the Basic Multilingual Plane (many emoji, some CJK) occupy two units and can be split incorrectly. Use for...of or Array.from(str), which iterate by code point, when your input may contain such characters."}
+      ]
+    },
+    {
+      "id": "worked-example",
+      "heading": "Worked Example: Brute Force to Optimal",
+      "kind": "example",
+      "blocks": [
+        {"type": "paragraph", "text": "Let us walk the interviewer's favorite arc on one problem: given a list of integers and a target, does any contiguous subarray sum to the target (all values positive)? First state the brute force, then optimize, narrating complexity at each step."},
+        {"type": "heading", "text": "Step 1: brute force, O(n squared)"},
+        {"type": "code", "language": "javascript", "code": "function hasSubarraySumBrute(nums, target) {\n  for (let i = 0; i < nums.length; i++) {\n    let sum = 0;\n    for (let j = i; j < nums.length; j++) {\n      sum += nums[j];\n      if (sum === target) return true;\n    }\n  }\n  return false;\n}\n// Correct, but O(n^2): every start i re-scans to the end."},
+        {"type": "heading", "text": "Step 2: recognize the signal and optimize"},
+        {"type": "paragraph", "text": "The signal is 'contiguous subarray' plus 'all positive values', which means growing a window increases the sum monotonically and shrinking decreases it. That monotonicity is exactly what a dynamic sliding window needs, so we can solve it in one pass."},
+        {"type": "code", "language": "javascript", "code": "function hasSubarraySum(nums, target) {\n  let left = 0, sum = 0;\n  for (let right = 0; right < nums.length; right++) {\n    sum += nums[right];               // grow the window\n    while (sum > target && left <= right) {\n      sum -= nums[left++];            // shrink from the left while too big\n    }\n    if (sum === target) return true;\n  }\n  return false;\n}\n// Time: O(n) - each index enters and leaves the window at most once.\n// Space: O(1)."},
+        {"type": "callout", "variant": "success", "text": "Notice the narrative: brute force (O(n squared)), the signal (contiguous + positive => monotonic window), the pattern (dynamic sliding window), and the improved complexity (O(n) time, O(1) space). That four-beat story is what senior interviewers score."}
+      ]
+    },
+    {
+      "id": "js-gotchas",
+      "heading": "JavaScript-Specific Gotchas",
+      "kind": "mistake",
+      "blocks": [
+        {"type": "paragraph", "text": "Even a correct algorithm fails an interview if a language quirk silently corrupts it. These are the JavaScript traps that most often turn a right idea into a wrong answer."},
+        {"type": "list", "items": [
+          "Default sort is lexicographic: [1, 2, 10].sort() gives [1, 10, 2]. Always pass (a, b) => a - b for numbers, and remember the comparator must return a number.",
+          "Map versus object for frequency counts: plain objects stringify keys, inherit prototype properties (obj['constructor'] is truthy before you set it), and have no reliable size. Prefer Map for counters keyed by arbitrary or numeric values.",
+          "Set gives O(1) average membership and dedup, but it uses SameValueZero equality, so NaN equals NaN inside a Set while objects compare by reference, not by value.",
+          "Number precision: all numbers are IEEE-754 doubles, so 0.1 + 0.2 !== 0.3 and integers above 2^53 lose precision. Use BigInt for exact large-integer arithmetic and compare floats with a small epsilon.",
+          "Array.shift and Array.unshift are O(n) because they reindex every element. For a queue in a hot loop, use two pointers over an array or a ring buffer instead of shift.",
+          "Recursion depth is bounded: deep or unbalanced recursion throws 'Maximum call stack size exceeded'. Convert to an explicit stack or tabulation when depth can reach tens of thousands, since engines generally do not perform tail-call optimization."
+        ]},
+        {"type": "callout", "variant": "danger", "text": "The single most common interview bug in JavaScript is forgetting the numeric sort comparator. It passes on tiny examples that happen to sort the same lexicographically and then fails on the hidden test with multi-digit numbers."}
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices for Interview Coding",
+      "kind": "bestpractice",
+      "blocks": [
+        {"type": "paragraph", "text": "The pattern is half the battle; the other half is how you communicate and defend your solution. These habits consistently read as senior."},
+        {"type": "list", "items": [
+          "Restate the problem and clarify constraints first: input size, value ranges, sorted or not, duplicates allowed, in-place required. Constraints often reveal the intended pattern.",
+          "State the brute force and its Big-O before optimizing. It proves you understand the problem and gives you a correctness baseline to compare against.",
+          "Name the signal and the pattern out loud: 'contiguous subarray with a max constraint tells me sliding window'. This is the clearest senior signal you can send.",
+          "Commit to complexity up front: say the target time and space, then write code that meets it, rather than discovering the complexity at the end.",
+          "Test on edge cases deliberately: empty input, one element, all equal, already sorted, and the largest allowed size. Walk one small example by hand.",
+          "Prefer clear names and a documented invariant over clever one-liners. An interviewer must follow your reasoning, and clarity prevents your own off-by-one bugs."
+        ]},
+        {"type": "callout", "variant": "info", "text": "When stuck, deliberately fall back to brute force and ship a correct O(n squared) solution first. A working slow answer plus a stated plan to optimize beats an elegant broken one every time."}
+      ]
+    },
+    {
+      "id": "complexity-cheat-note",
+      "heading": "Note: Pattern Complexity Quick Reference",
+      "kind": "note",
+      "blocks": [
+        {"type": "paragraph", "text": "Keep this compact map of pattern to typical complexity in your head; it lets you commit to a target before coding."},
+        {"type": "table", "headers": ["Pattern", "Typical time", "Typical space", "Beats which brute force"],
+         "rows": [
+           ["Frequency counter", "O(n)", "O(k)", "O(n^2) nested comparison"],
+           ["Two pointers", "O(n)", "O(1)", "O(n^2) pair search"],
+           ["Sliding window", "O(n)", "O(1) or O(k)", "O(n^2) re-scan of subranges"],
+           ["Prefix sum", "O(n) build, O(1) query", "O(n)", "O(n) per range query"],
+           ["Binary search", "O(log n)", "O(1)", "O(n) linear scan"],
+           ["Backtracking", "O(branch^depth)", "O(depth)", "brute enumeration, but pruned"],
+           ["BFS / DFS", "O(V + E)", "O(V)", "repeated re-traversal"],
+           ["Dynamic programming", "O(states * work)", "O(states)", "O(2^n) naive recursion"],
+           ["Interval merge", "O(n log n)", "O(n)", "O(n^2) pairwise overlap check"]
+         ]},
+        {"type": "callout", "variant": "success", "text": "If your chosen pattern's typical complexity is not clearly better than the brute force for the given constraints, you have probably mis-classified the problem. Re-read for the signal."}
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "sliding-window-walkthrough",
+      "title": "ASCII: Dynamic Sliding Window Walkthrough",
+      "type": "ascii",
+      "content": "Longest substring with all distinct chars in \"abcba\"\n\nindex:   0   1   2   3   4\nchar:    a   b   c   b   a\n\nstep 1  [a]              window=a         best=1\nstep 2  [a  b]           window=ab        best=2\nstep 3  [a  b  c]        window=abc       best=3\nstep 4      shrink: 'b' repeats at 3\n            left jumps past old b (idx 1)\n            [b  c] then add b -> [c  b]   best=3\nstep 5      add 'a' -> [c  b  a]          best=3\n\nEach index enters once, left never moves back -> O(n)."
+    },
+    {
+      "id": "pick-a-pattern",
+      "title": "Mermaid: How to Pick a Pattern from Problem Clues",
+      "type": "mermaid",
+      "content": "flowchart TD\n  A[Read the problem] --> B{Contiguous subarray or substring?}\n  B -- Yes --> C[Sliding Window]\n  B -- No --> D{Input already sorted?}\n  D -- Yes --> E{Find pair or feasible value?}\n  E -- Pair --> F[Two Pointers]\n  E -- Feasible value --> G[Binary Search on answer]\n  D -- No --> H{Count or compare occurrences?}\n  H -- Yes --> I[Frequency Counter Map]\n  H -- No --> J{Tree or graph traversal?}\n  J -- Yes --> K[BFS or DFS]\n  J -- No --> L{Optimal with overlapping subproblems?}\n  L -- Yes --> M[Dynamic Programming]\n  L -- No --> N{All combinations or permutations?}\n  N -- Yes --> O[Backtracking]\n  N -- No --> P[State brute force, then refine]"
+    },
+    {
+      "id": "bfs-vs-dfs-tree",
+      "title": "ASCII: BFS vs DFS Visit Order on a Tree",
+      "type": "ascii",
+      "content": "        1\n       / \\\n      2   3\n     / \\   \\\n    4   5   6\n\nBFS (queue, level by level): 1  2  3  4  5  6\nDFS (stack/recursion, deep first): 1  2  4  5  3  6\n\nBFS finds shortest hop count from the root.\nDFS naturally exhausts a subtree before moving on."
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-recognize-sliding-window",
+      "question": "How do you recognize a sliding-window problem, and how does it beat brute force?",
+      "answer": "The signal is a request about a contiguous subarray or substring combined with an optimization word like longest, shortest, maximum, or a constraint like 'at most k distinct'. Contiguity is the giveaway: if the answer must be a run of adjacent elements, you can maintain a window and slide it rather than re-examining every subrange. Brute force enumerates all subranges in O(n squared) or worse and recomputes overlapping work. The window instead adds the incoming element and removes the outgoing one, so each index enters and leaves at most once, giving O(n). A fixed window slides a constant size k; a dynamic window grows the right edge greedily and shrinks the left edge whenever a constraint is violated. Recognizing contiguity plus a constraint is what tells you a window applies rather than a hash map or sort.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["sliding-window", "recognition"],
+      "followUps": ["What distinguishes a fixed window from a dynamic one?", "How do you define the shrink condition precisely?"]
+    },
+    {
+      "id": "q-sort-lexicographic",
+      "question": "Why does JavaScript's default Array.sort produce lexicographic order, and how do you fix it?",
+      "answer": "Array.prototype.sort with no comparator converts every element to a string and compares those strings by UTF-16 code unit, so it sorts numbers as text. That is why [1, 2, 10].sort() returns [1, 10, 2]: the string '10' is less than '2' because '1' precedes '2'. The behavior is specified this way for historical consistency and because sort must handle mixed types. The fix is to always pass a comparator, (a, b) => a - b for ascending numbers, which returns a negative, zero, or positive number. A critical subtlety is that the comparator must return a number, not a boolean; returning a > b yields true or false, which coerces unpredictably and produces implementation-defined ordering. This is one of the most common silent bugs in JavaScript interview solutions because it passes on single-digit examples.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["sorting", "javascript", "gotcha"],
+      "followUps": ["Is JavaScript's sort stable?", "How do you sort objects by two keys?"]
+    },
+    {
+      "id": "q-map-vs-object",
+      "question": "When should you use a Map instead of a plain object for frequency counts?",
+      "answer": "Prefer a Map when keys are not plain string literals you fully control. Plain objects coerce every key to a string, so numeric keys 1 and '1' collide, and they inherit prototype properties, meaning obj['constructor'] or obj['__proto__'] can appear truthy before you ever set them, which corrupts a counter. Map keys can be any value including numbers, objects, and NaN, preserve insertion order, and expose an O(1) size property, whereas an object requires Object.keys().length to count. Map also generally performs better for frequent additions and deletions of unknown keys. A plain object is fine and slightly more ergonomic when keys are a small, known set of safe string literals. For a frequency counter over arbitrary input, Map is the safer default because it avoids the prototype-pollution and key-coercion traps entirely.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["hash-map", "javascript", "frequency-counter"],
+      "followUps": ["What equality does Map use for keys?", "When is a plain object actually faster?"]
+    },
+    {
+      "id": "q-two-pointers-sorted",
+      "question": "Why do opposite-end two pointers require sorted input, and what do you do if the array is unsorted?",
+      "answer": "The opposite-end two-pointer technique relies on monotonicity: on a sorted array, moving the left pointer right can only increase the pair sum and moving the right pointer left can only decrease it, so from any state you know exactly which pointer to move. That guarantee is what lets each element be visited at most once for O(n). On unsorted data the sum does not change monotonically as you move a pointer, so you cannot decide which end to advance and the invariant collapses. If the input is unsorted you have two options: sort it first at O(n log n), which is fine if you only need values, or use a hash-map frequency-counter approach at O(n), which is the better choice when you must return original indices because sorting would scramble them. Recognizing this distinction prevents applying two pointers where it silently gives wrong answers.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["two-pointers", "sorting", "recognition"],
+      "followUps": ["How would you preserve original indices while sorting?", "When is the O(n log n) sort acceptable over the O(n) hash map?"]
+    },
+    {
+      "id": "q-recursion-stack-overflow",
+      "question": "What causes a stack overflow in recursive JavaScript, and how do you convert recursion to iteration?",
+      "answer": "Every function call pushes a frame onto the call stack, and recursion nests frames until the base case unwinds them. If the recursion depth exceeds the engine's stack limit (often on the order of ten thousand frames, and lower for frame-heavy functions), the engine throws a RangeError with 'Maximum call stack size exceeded'. This bites on deep or unbalanced structures, such as a degenerate linked list or a skewed tree processed by recursive DFS. JavaScript engines generally do not perform tail-call optimization in practice, so you cannot rely on it to flatten the stack. The conversion is to maintain your own explicit stack (an array) and loop: push the initial state, then while the stack is non-empty pop a state, process it, and push its successors. For dynamic programming, bottom-up tabulation replaces recursion with a simple loop and eliminates the risk entirely. The trade is a bit more manual bookkeeping in exchange for depth bounded only by heap memory.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["recursion", "javascript", "stack"],
+      "followUps": ["Does JavaScript ever do tail-call optimization?", "How do you convert tree DFS to an explicit stack?"]
+    },
+    {
+      "id": "q-memoization-vs-tabulation",
+      "question": "What is the difference between memoization and tabulation, and how do you choose?",
+      "answer": "Both are dynamic programming techniques that eliminate recomputation of overlapping subproblems, and both reduce exponential recursion to polynomial time. Memoization is top-down: you write the natural recursion and cache each subproblem's result on first computation, so it only evaluates the subproblems actually reachable from the target. Tabulation is bottom-up: you fill a table starting from base cases and iterate upward with loops, computing every subproblem in dependency order. Memoization is usually easier to derive because it mirrors the obvious recurrence, and it is efficient when the reachable subproblem set is sparse. Tabulation avoids recursion so it has no stack-overflow risk on deep inputs, and it often allows compressing the table to O(1) or O(k) space when each state depends only on a few recent states, as in climbing stairs. Choose memoization for intuitive, sparse recursions and tabulation for deep problems or when you need the tightest space.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["dynamic-programming", "memoization", "tabulation"],
+      "followUps": ["How do you reduce a DP table from O(n) to O(1) space?", "How do you define the state and recurrence for a new DP problem?"]
+    },
+    {
+      "id": "q-binary-search-on-answer",
+      "question": "What is 'binary search on the answer' and when does it apply?",
+      "answer": "Binary search on the answer applies when the answer is a numeric value in a known range and you can write a cheap feasibility test that is monotonic: once a candidate value is feasible, every larger (or every smaller) value is also feasible. Instead of searching a sorted array, you binary-search the range of possible answers, testing feasibility at each midpoint and moving the boundary toward the smallest feasible value. It shows up in problems phrased as 'minimize the maximum' or 'maximize the minimum', such as the least shipping capacity to finish within a number of days, or the smallest largest-page count when splitting work. The total cost is the number of binary-search steps, O(log range), times the cost of one feasibility check, often O(n), giving O(n log range). The keys are that the answer lives in a numeric interval and that feasibility flips exactly once as the candidate grows, which is what makes the search space effectively sorted.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["binary-search", "recognition"],
+      "followUps": ["How do you pick the lo and hi bounds for the answer space?", "How do you prove the feasibility function is monotonic?"]
+    },
+    {
+      "id": "q-brute-force-first",
+      "question": "Why should you state the brute-force solution before optimizing in an interview?",
+      "answer": "Stating the brute force first demonstrates that you fully understand the problem and can produce at least one correct solution, which is more valuable than a broken clever one. It establishes a correctness baseline you can test the optimized version against, and it gives the interviewer insight into your reasoning. Announcing its Big-O also frames the optimization: naming O(n squared) makes the target of O(n) or O(n log n) explicit, so your improvement has a clear goal. It de-risks the interview because even if you run out of time, you have shipped something that works. Finally, the transition from brute force to optimal is exactly where you articulate the key insight ('the nested loop is just repeated lookups, so a hash map removes it'), and that narrative is what senior interviewers are scoring. Skipping straight to the optimal answer can read as memorization rather than reasoning.",
+      "difficulty": "junior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["interview", "strategy"],
+      "followUps": ["How much time should you spend on brute force before optimizing?", "What if you cannot find the optimization?"]
+    },
+    {
+      "id": "q-frequency-counter-recognition",
+      "question": "How do you recognize a frequency-counter problem?",
+      "answer": "The signal is any question about counting occurrences, comparing the composition of two collections, or finding duplicates and complements. Phrases like 'are these anagrams', 'do these contain the same elements', 'which value appears most', or 'find the pair that sums to a target' all point to a hash map from value to count or value to index. The underlying transformation is turning a nested comparison, where you check each element against every other, into a single pass that tallies, followed by O(1) average lookups. That collapses O(n squared) into O(n) at the cost of O(k) space for the map. The recognition cue is that you keep wanting to ask 'have I seen this value, or its complement, before', which is exactly the O(1) membership question a hash map answers. If the problem instead needs ordering-based decisions, a different pattern like two pointers or sorting fits better.",
+      "difficulty": "junior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["frequency-counter", "hash-map", "recognition"],
+      "followUps": ["How is the pair-sum variant different from the anagram variant?", "When would you store value-to-index rather than value-to-count?"]
+    },
+    {
+      "id": "q-bfs-vs-dfs",
+      "question": "When do you choose BFS over DFS, and vice versa?",
+      "answer": "Choose BFS when you need the shortest path or minimum number of steps in an unweighted graph, because BFS explores all nodes at distance d before any at distance d+1, so the first time it reaches the goal it has used the fewest hops. BFS also naturally processes a tree level by level, which suits level-order output. Choose DFS when you need to exhaust a branch or subtree, detect cycles, produce a topological ordering, or explore all paths, because DFS dives deep and backtracks. DFS is often simpler to write recursively and uses O(h) space proportional to the depth, whereas BFS uses O(w) space proportional to the maximum frontier width, which can be large in a bushy graph. On a weighted graph neither gives shortest paths directly; you upgrade to Dijkstra with a priority queue. Both are O(V + E) in time when each node and edge is visited once with a visited set.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["bfs", "dfs", "graphs"],
+      "followUps": ["Why mark nodes visited on enqueue rather than dequeue in BFS?", "How do you extend BFS to weighted graphs?"]
+    },
+    {
+      "id": "q-prefix-sum-recognition",
+      "question": "What signals a prefix-sum problem, and what is its core trick?",
+      "answer": "The signal is repeated range-sum queries over a static array, or a question like 'how many contiguous subarrays sum to k'. The core trick is precomputing cumulative totals so that the sum of any range from i to j equals prefix[j+1] minus prefix[i], answered in O(1) after an O(n) build. For counting subarrays with a target sum, you combine prefix sums with a hash map: as you scan, a subarray summing to the target exists between two prefix positions whose cumulative sums differ by the target, so you look up 'have I seen a prefix equal to running minus target' in O(1). This turns an O(n squared) enumeration of subarrays into a single O(n) pass. The assumption is that the array does not change between queries; if it is mutable and you need efficient updates plus queries, you move to a Fenwick tree or segment tree with O(log n) operations.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["prefix-sum", "hash-map", "recognition"],
+      "followUps": ["How does seeding the map with prefix zero help?", "When do you need a Fenwick tree instead?"]
+    },
+    {
+      "id": "q-number-precision",
+      "question": "What number-precision pitfalls affect algorithm solutions in JavaScript?",
+      "answer": "All JavaScript numbers are IEEE-754 double-precision floats, so decimal fractions like 0.1 and 0.2 cannot be represented exactly and 0.1 + 0.2 evaluates to 0.30000000000000004, which breaks naive equality checks. Compare floating results with a small epsilon tolerance rather than strict equality. Integers are exact only up to Number.MAX_SAFE_INTEGER, which is 2 to the 53 minus 1; beyond that, distinct large integers can round to the same double, corrupting counters, hashing, or big multiplications. For exact large-integer arithmetic use BigInt, which has arbitrary precision but cannot be mixed with regular numbers without explicit conversion. Bitwise operations coerce operands to 32-bit signed integers, so shifts and masks silently truncate values above about two billion. Being aware of these limits matters in problems involving large sums, factorials, hashing, or precise financial arithmetic, where a silent rounding error produces a wrong answer that looks plausible.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["javascript", "precision", "gotcha"],
+      "followUps": ["When must you switch from Number to BigInt?", "Why can bitwise operations corrupt large integers?"]
+    },
+    {
+      "id": "q-backtracking-recognition",
+      "question": "How do you recognize a backtracking problem, and what keeps it tractable?",
+      "answer": "The signal is a request to generate or count all valid arrangements: subsets, permutations, combinations, board placements, or any solution built by a sequence of choices subject to constraints. Backtracking explores the decision tree by making a choice, recursing to explore its consequences, then undoing the choice (the choose, explore, un-choose rhythm) so a single mutable path represents the current position. Because the space of arrangements can be exponential, brute enumeration is inherently expensive; the number of subsets alone is 2 to the n. What keeps backtracking tractable is pruning: at each node you test whether the partial candidate can still lead to a valid solution and abandon the whole subtree early if not, cutting away vast regions of the search space. Recognizing that you must build a solution incrementally and can validate partial states is the cue that backtracking, not a polynomial pattern, is required.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["backtracking", "recursion", "recognition"],
+      "followUps": ["How does pruning change the effective complexity?", "How do you avoid duplicate results when the input has repeats?"]
+    },
+    {
+      "id": "q-when-to-sort",
+      "question": "When is sorting the right first move, and what does it cost you?",
+      "answer": "Sorting is the right first move when the pattern you want depends on order: opposite-end two pointers, interval merging, greedy selection by a key, or deduplication of adjacent equal elements. It costs O(n log n) time, which becomes the dominant term of your solution, so it is worth it only if the resulting linear sweep is cheaper than an unsorted alternative. Sorting also has hidden costs: it may reorder elements and destroy original indices, which matters when the answer must reference positions in the input, and it mutates the array in place unless you copy first. If a hash-map approach already solves the problem in O(n), sorting is usually the wrong choice because it is strictly slower. The decision is a trade: pay O(n log n) to unlock a simple O(n) or O(1)-space sweep, or stay unsorted with O(n) time and O(n) extra space. Choose based on whether you need original indices and how large n is.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["sorting", "strategy"],
+      "followUps": ["How do you sort while keeping original indices?", "Is JavaScript's sort in place and stable?"]
+    },
+    {
+      "id": "q-set-semantics",
+      "question": "What equality and performance semantics should you know about the JavaScript Set?",
+      "answer": "A Set stores unique values with O(1) average insertion, deletion, and membership, which makes it the natural tool for deduplication and fast 'have I seen this' checks. Its uniqueness uses SameValueZero equality, a quirk of which is that NaN is considered equal to NaN inside a Set even though NaN !== NaN with the normal equality operators, so a Set correctly deduplicates NaN. However, objects and arrays are compared by reference, not by structural value, so two distinct arrays with identical contents are treated as different members; to dedupe by value you must key on a serialized form such as a JSON string or a canonical tuple. Iteration order follows insertion order, which is occasionally useful. The worst case for membership degrades to O(n) under pathological hashing, but in practice it is constant. Knowing that reference equality governs object members prevents the common bug of expecting a Set of arrays to collapse structurally equal entries.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["set", "javascript", "gotcha"],
+      "followUps": ["How do you dedupe objects by value using a Set?", "How does Set equality differ from the === operator?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-same-composition",
+      "title": "Same Composition Check (Frequency Counter)",
+      "difficulty": "junior",
+      "category": "Computer Science",
+      "prompt": "You are given two strings. Return true if one is a rearrangement of the other, meaning they contain exactly the same characters with the same multiplicities, and false otherwise. Comparison is case-sensitive and whitespace counts as a character. Aim for linear time in the length of the strings.",
+      "hints": [
+        "The naive approach sorts both strings and compares them, which is O(n log n). What lets you avoid sorting?",
+        "If the lengths differ they cannot match, so you can reject early in O(1).",
+        "Tally each character of the first string in a Map, then decrement while scanning the second; if any count goes missing or negative, they differ."
+      ],
+      "solutionCode": "function sameComposition(a, b) {\n  if (a.length !== b.length) return false;   // quick reject\n  const counts = new Map();\n  for (const ch of a) {\n    counts.set(ch, (counts.get(ch) ?? 0) + 1);\n  }\n  for (const ch of b) {\n    const c = counts.get(ch);\n    if (!c) return false;        // char absent in a, or already used up\n    counts.set(ch, c - 1);\n  }\n  return true;                   // every char in b canceled one in a\n}\n\n// sameComposition('teacher', 'cheater') -> true\n// sameComposition('Hello', 'hello')     -> false (case-sensitive)\n// sameComposition('aab', 'abb')         -> false",
+      "solutionLanguage": "javascript",
+      "explanation": "The brute-force solution sorts both strings and compares character by character, costing O(n log n) time. The frequency-counter approach trades a small amount of space for linear time by tallying counts instead of ordering. First we reject unequal lengths in O(1), since a rearrangement must preserve length. Then we build a Map from character to count over the first string in a single O(n) pass. Scanning the second string, we decrement the matching count and fail immediately if a character is missing or its count has already reached zero, which would mean the second string has more of that character than the first. If we finish without a mismatch, every character canceled exactly, so the strings share the same composition. The time complexity is O(n) and the space complexity is O(k) where k is the number of distinct characters, which is bounded by the alphabet. We use a Map rather than a plain object so that characters like special symbols never collide with inherited prototype keys.",
+      "relatedTopic": "js-algorithms"
+    },
+    {
+      "id": "ch-pair-sum-sorted",
+      "title": "Pair Summing to Target on a Sorted Array (Two Pointers)",
+      "difficulty": "junior",
+      "category": "Computer Science",
+      "prompt": "Given an array of integers sorted in ascending order and a target integer, return the pair of values (not indices) that add up exactly to the target, or null if no such pair exists. There is at most one valid pair. Solve it in linear time using O(1) extra space.",
+      "hints": [
+        "Checking every pair is O(n squared). The array being sorted is a strong hint you can do better.",
+        "Place one pointer at the start and one at the end, then move them based on whether the current sum is too small or too large.",
+        "If the sum is below the target, advance the left pointer to increase it; if above, retreat the right pointer to decrease it."
+      ],
+      "solutionCode": "function pairSum(sorted, target) {\n  let lo = 0, hi = sorted.length - 1;\n  while (lo < hi) {\n    const sum = sorted[lo] + sorted[hi];\n    if (sum === target) return [sorted[lo], sorted[hi]];\n    if (sum < target) lo++;   // too small: raise the low value\n    else hi--;                // too large: lower the high value\n  }\n  return null;                // pointers crossed with no match\n}\n\n// pairSum([1, 2, 4, 7, 11, 15], 15) -> [4, 11]\n// pairSum([2, 3, 5, 8], 20)         -> null\n// pairSum([-3, -1, 0, 2, 6], -1)    -> [-3, 2]",
+      "solutionLanguage": "javascript",
+      "explanation": "The brute force examines every pair with two nested loops for O(n squared) time. The two-pointer technique exploits the sorted order to reach O(n) time and O(1) space. We start with a pointer at each end and compute their sum. Because the array is sorted, the sum increases monotonically when we move the left pointer right and decreases when we move the right pointer left, so from any state we know exactly which pointer to advance: if the sum is too small we raise the low value, and if it is too large we lower the high value. Every step eliminates one element from further consideration, so the pointers meet after at most n steps, visiting each element at most once. The loop ends when the pointers cross, meaning no pair exists. The correctness rests on the sorted precondition; on unsorted input this monotonic reasoning fails and you would instead use a hash-map complement lookup. Time is O(n) and space is O(1) because we only hold two indices.",
+      "relatedTopic": "js-algorithms"
+    },
+    {
+      "id": "ch-longest-run-under-limit",
+      "title": "Longest Run With At Most K Distinct (Dynamic Sliding Window)",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "prompt": "Given a string and an integer k, return the length of the longest contiguous substring that contains at most k distinct characters. If k is zero the answer is zero. Solve it in linear time.",
+      "hints": [
+        "Trying every substring and counting its distinct characters is O(n squared) or worse. Contiguity suggests a window.",
+        "Grow a window by advancing the right edge and track the count of each character inside the window in a Map.",
+        "Whenever the window holds more than k distinct characters, shrink from the left until it is valid again, removing characters from the Map as their count hits zero."
+      ],
+      "solutionCode": "function longestWithKDistinct(s, k) {\n  if (k === 0) return 0;\n  const counts = new Map();   // char -> occurrences inside the window\n  let left = 0, best = 0;\n  for (let right = 0; right < s.length; right++) {\n    const ch = s[right];\n    counts.set(ch, (counts.get(ch) ?? 0) + 1);   // grow window\n    while (counts.size > k) {                     // too many distinct\n      const leftCh = s[left];\n      const c = counts.get(leftCh) - 1;\n      if (c === 0) counts.delete(leftCh);         // char fully left window\n      else counts.set(leftCh, c);\n      left++;\n    }\n    best = Math.max(best, right - left + 1);\n  }\n  return best;\n}\n\n// longestWithKDistinct('eceba', 2)   -> 3 ('ece')\n// longestWithKDistinct('aabbcc', 1)  -> 2 ('aa')\n// longestWithKDistinct('abc', 0)     -> 0",
+      "solutionLanguage": "javascript",
+      "explanation": "The brute force enumerates all substrings and counts distinct characters in each, costing at least O(n squared) time. The dynamic sliding window solves it in O(n). We advance the right edge one character at a time, incrementing that character's count in a Map, where the Map's size equals the number of distinct characters currently in the window. When the size exceeds k, the window is invalid, so we shrink from the left, decrementing counts and deleting a character entirely when its count reaches zero, until the window is valid again. After each step the window is guaranteed valid, so its length is a candidate for the answer and we track the maximum. The efficiency comes from the fact that the left and right pointers only ever move forward, so each index enters and leaves the window at most once, giving O(n) total work despite the nested-looking while loop. Space is O(k) because the Map holds at most k plus one distinct characters before the shrink restores validity. Handling k equal to zero up front avoids an empty-window edge case.",
+      "relatedTopic": "js-algorithms"
+    },
+    {
+      "id": "ch-min-shelf-capacity",
+      "title": "Minimum Shelf Capacity (Binary Search on Answer)",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "prompt": "You must place a list of items, given by their weights in order, onto shelves. Items are placed in the given order and cannot be reordered, and a shelf holds items until adding the next would exceed its capacity, at which point a new shelf begins. Given the weights and a maximum number of shelves, return the smallest shelf capacity that fits all items within that many shelves.",
+      "hints": [
+        "The answer is a capacity somewhere between the heaviest single item (it must fit) and the sum of all weights (one shelf holds everything).",
+        "For a fixed candidate capacity you can check feasibility in one pass: greedily fill a shelf, starting a new one when the next item overflows, and count the shelves used.",
+        "Feasibility is monotonic: a larger capacity never needs more shelves, so binary-search the capacity range for the smallest feasible value."
+      ],
+      "solutionCode": "function minShelfCapacity(weights, maxShelves) {\n  const shelvesNeeded = (cap) => {\n    let shelves = 1, load = 0;\n    for (const w of weights) {\n      if (w > cap) return Infinity;      // a single item cannot fit\n      if (load + w > cap) { shelves++; load = 0; } // open a new shelf\n      load += w;\n    }\n    return shelves;\n  };\n\n  let lo = Math.max(...weights);          // must at least fit the heaviest\n  let hi = weights.reduce((a, b) => a + b, 0); // everything on one shelf\n  while (lo < hi) {\n    const mid = lo + ((hi - lo) >> 1);\n    if (shelvesNeeded(mid) <= maxShelves) hi = mid; // feasible: try smaller\n    else lo = mid + 1;                              // infeasible: need more\n  }\n  return lo;\n}\n\n// minShelfCapacity([2, 3, 1, 2, 4, 3], 3) -> 6\n// minShelfCapacity([1, 2, 3, 4, 5], 1)    -> 15\n// minShelfCapacity([5, 5, 5], 3)          -> 5",
+      "solutionLanguage": "javascript",
+      "explanation": "A brute-force search would try every capacity from the heaviest item upward and stop at the first that fits, which is linear in the sum of weights times the pass cost and far too slow for large totals. Binary search on the answer reduces this to logarithmic in the capacity range. The insight is that feasibility is monotonic: if a given capacity fits everything within the shelf limit, any larger capacity also does, because more room never forces additional shelves. That monotonicity makes the answer space behave like a sorted boolean array of infeasible-then-feasible, which is exactly what binary search needs. The feasibility helper simulates the greedy placement in O(n), counting shelves and reporting infinity if a single item exceeds the candidate capacity. We bound the search below by the heaviest item, since the answer can never be smaller, and above by the total weight, which trivially fits on one shelf. Each binary-search step halves the range and runs one O(n) feasibility check, giving O(n log(sum)) time and O(1) extra space. We compute the midpoint as lo plus half the gap to keep the intent clear and set hi to mid, not mid minus one, so we converge on the smallest feasible capacity rather than overshooting it.",
+      "relatedTopic": "js-algorithms"
+    },
+    {
+      "id": "ch-count-regions",
+      "title": "Count Connected Regions in a Grid (BFS/DFS Traversal)",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "prompt": "You are given a rectangular grid of ones and zeros, where a one is land and a zero is water. A region of land is a group of one cells connected horizontally or vertically (not diagonally). Return the number of distinct land regions in the grid. You may modify the grid.",
+      "hints": [
+        "Scan every cell; when you find an unvisited land cell, you have discovered a new region, so increment the count.",
+        "From that starting cell, flood-fill all connected land cells so they are not counted again as separate regions.",
+        "Use BFS with a queue or DFS with recursion to visit the four orthogonal neighbors, marking each visited land cell as water (0) to record that it has been seen."
+      ],
+      "solutionCode": "function countRegions(grid) {\n  if (grid.length === 0) return 0;\n  const rows = grid.length, cols = grid[0].length;\n  let regions = 0;\n\n  const flood = (sr, sc) => {\n    const queue = [[sr, sc]];\n    grid[sr][sc] = 0;                 // mark seen by sinking the land\n    while (queue.length) {\n      const [r, c] = queue.shift();\n      const neighbors = [[r-1,c],[r+1,c],[r,c-1],[r,c+1]];\n      for (const [nr, nc] of neighbors) {\n        if (nr >= 0 && nr < rows && nc >= 0 && nc < cols && grid[nr][nc] === 1) {\n          grid[nr][nc] = 0;           // mark before enqueue to avoid dupes\n          queue.push([nr, nc]);\n        }\n      }\n    }\n  };\n\n  for (let r = 0; r < rows; r++) {\n    for (let c = 0; c < cols; c++) {\n      if (grid[r][c] === 1) {         // unvisited land -> new region\n        regions++;\n        flood(r, c);\n      }\n    }\n  }\n  return regions;\n}\n\n// countRegions([[1,1,0],[0,1,0],[0,0,1]]) -> 2\n// countRegions([[0,0],[0,0]])             -> 0",
+      "solutionLanguage": "javascript",
+      "explanation": "This is a connected-components problem on an implicit graph whose nodes are land cells and whose edges connect orthogonally adjacent land. We scan the grid, and each time we encounter a land cell that has not yet been visited we have found a brand-new region, so we increment the count and then flood-fill every cell reachable from it. The flood uses BFS with a queue, visiting the four orthogonal neighbors and sinking each visited land cell to water so it is never counted again or revisited. Marking a cell as visited at the moment we enqueue it, rather than when we dequeue it, is important because it prevents the same cell from being added to the queue multiple times, which would waste memory and time. Sinking the grid in place serves as the visited set, avoiding a separate structure. Every cell is enqueued and dequeued at most once and its constant number of neighbors is inspected, so the time complexity is O(rows times cols) and the space is O(rows times cols) in the worst case for the queue when the whole grid is one region. A recursive DFS would be equally valid but risks a stack overflow on a very large single region, whereas the iterative BFS bounds depth by heap memory.",
+      "relatedTopic": "js-algorithms"
+    },
+    {
+      "id": "ch-ways-to-total",
+      "title": "Count Ways to Reach a Total With Given Steps (DP Memoization)",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "prompt": "You climb toward a total of n points. On each move you may gain any one of the values in a given set of positive step sizes, and different orderings of the same steps count as different ways. Return the number of distinct ordered ways to reach exactly n. Reaching zero counts as one way (the empty sequence).",
+      "hints": [
+        "Define ways(remaining) as the number of ordered sequences of steps that sum to remaining. ways(0) is 1.",
+        "For each step size s that does not overshoot, the ways through it equal ways(remaining minus s); sum over all valid steps.",
+        "The naive recursion recomputes the same remaining totals repeatedly, so cache results in a Map to make it linear in n times the number of step sizes."
+      ],
+      "solutionCode": "function countWays(n, steps) {\n  const memo = new Map();\n  const ways = (remaining) => {\n    if (remaining === 0) return 1;         // one way: take no more steps\n    if (remaining < 0) return 0;           // overshot: dead end\n    if (memo.has(remaining)) return memo.get(remaining);\n    let total = 0;\n    for (const s of steps) {\n      total += ways(remaining - s);        // order matters -> sum all firsts\n    }\n    memo.set(remaining, total);\n    return total;\n  };\n  return ways(n);\n}\n\n// countWays(4, [1, 2])    -> 5   (1111, 112, 121, 211, 22)\n// countWays(3, [1, 2, 3]) -> 4   (111, 12, 21, 3)\n// countWays(0, [1, 2])    -> 1",
+      "solutionLanguage": "javascript",
+      "explanation": "This is a classic ordered-composition count with optimal substructure and overlapping subproblems, the two conditions that make dynamic programming apply. We define ways(remaining) as the number of ordered step sequences summing to the remaining amount, with the base case that ways(0) is one because the empty sequence reaches zero, and ways of any negative amount is zero because that path overshot. Because order matters, the number of ways to reach a total is the sum over every possible first step s of the ways to reach the amount left after taking s, which yields the recurrence total equals the sum of ways(remaining minus s). The naive recursion is exponential because the same remaining values are recomputed across many branches, so we memoize each result in a Map keyed by the remaining amount, ensuring each subproblem is solved once. With memoization there are at most n distinct subproblems and each does O(m) work over the m step sizes, so the time complexity is O(n times m) and the space is O(n) for the memo plus O(n) recursion depth. This top-down formulation mirrors the natural recurrence; a bottom-up tabulation filling an array from 0 to n would give the same result while eliminating recursion depth and any stack-overflow risk on large n.",
+      "relatedTopic": "js-algorithms"
+    }
+  ],
+  "references": [
+    {"label": "MDN: Array.prototype.sort (comparator and default lexicographic behavior)", "url": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/sort"},
+    {"label": "MDN: Map (vs plain object for keyed collections)", "url": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Map"},
+    {"label": "trekhleb/javascript-algorithms (MIT-licensed reference implementations)", "url": "https://github.com/trekhleb/javascript-algorithms"},
+    {"label": "freeCodeCamp: JavaScript Algorithms and Data Structures", "url": "https://www.freecodecamp.org/learn/javascript-algorithms-and-data-structures/"},
+    {"label": "Big-O Cheat Sheet (common complexity classes)", "url": "https://www.bigocheatsheet.com/"},
+    {"label": "Patterns reference (note: all challenge problems here are ORIGINAL wording inspired by these classic patterns, not copied from any source)", "url": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide"}
+  ]
+}
