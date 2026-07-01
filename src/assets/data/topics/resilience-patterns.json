@@ -1,0 +1,628 @@
+{
+  "id": "resilience-patterns",
+  "title": "Resilience & Fault Tolerance Patterns",
+  "category": "Architecture",
+  "subcategory": "Resilience",
+  "difficulty": "senior",
+  "tags": [
+    "resilience",
+    "circuit-breaker",
+    "retries",
+    "bulkhead",
+    "timeouts",
+    "backoff-jitter",
+    "chaos-engineering",
+    "graceful-degradation"
+  ],
+  "description": "A staff-level treatment of resilience in distributed systems: how to survive partial failure using timeouts, bounded retries with backoff and jitter, circuit breakers, bulkheads, fallbacks, and load shedding, and how these patterns compose to stop cascading failures. It covers the idempotency and timeout-budget subtleties that separate a resilient system from one that amplifies its own outages.",
+  "estReadMinutes": 30,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Resilience Is a First-Class Requirement",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Resilience is the ability of a system to keep delivering acceptable service in the presence of faults, and to recover quickly when it degrades. In a single-process monolith, a dependency is a function call that either returns or throws. In a distributed system, every dependency is a remote call that can also hang forever, return slowly, return a partial result, or succeed on the server while the response is lost on the network. Resilience patterns exist to make those partial-failure modes survivable rather than fatal."
+        },
+        {
+          "type": "paragraph",
+          "text": "The core mental shift for senior engineers is to stop treating remote calls like local ones. A local call has two outcomes; a remote call has at least four: success, explicit failure, timeout, and ambiguous outcome where you never learn what happened. The patterns in this topic — timeouts, retries with jitter, circuit breakers, bulkheads, fallbacks, and load shedding — are the standard vocabulary for handling those extra outcomes without turning a small fault into a system-wide outage."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The goal is not to eliminate failure — that is impossible at scale — but to contain it. A resilient system fails partially and predictably instead of totally and unpredictably, and it recovers automatically without a human paging in at 3am."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Stop the bleeding: timeouts and circuit breakers keep a slow dependency from consuming all your threads.",
+            "Isolate the blast radius: bulkheads ensure one failing dependency cannot starve the others.",
+            "Degrade, do not collapse: fallbacks and load shedding preserve core function under stress.",
+            "Recover automatically: half-open probing and health checks bring the system back without manual intervention."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "why-partial-failure",
+      "heading": "Why Partial Failure Is the Normal Case",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "In a distributed system, partial failure is not an edge case you occasionally hit — it is the steady state. At any given moment some node is garbage-collecting, some disk is slow, some network link is dropping packets, and some downstream service is mid-deploy. With hundreds of services and thousands of instances, the probability that everything is healthy simultaneously approaches zero. Peter Deutsch's 'Fallacies of Distributed Computing' — the network is reliable, latency is zero, bandwidth is infinite, the topology never changes — are the assumptions that resilience patterns exist to violate safely."
+        },
+        {
+          "type": "paragraph",
+          "text": "The most dangerous failure mode is not a crash but a slowdown. A service that returns errors quickly is easy to handle; a service that responds in 30 seconds instead of 30 milliseconds silently ties up threads, connections, and memory upstream. Without a timeout, a single slow dependency will eventually exhaust every request thread in every caller, and the caller's callers, until the whole chain is blocked waiting on one sick component. This is how a minor blip in a non-critical service takes down an entire product."
+        },
+        {
+          "type": "table",
+          "headers": ["Failure mode", "Symptom", "Pattern that helps"],
+          "rows": [
+            ["Crash / connection refused", "Fast, explicit error", "Retry, fallback"],
+            ["Slow response / latency spike", "Threads block, queues grow", "Timeout, circuit breaker, bulkhead"],
+            ["Overload", "Rising latency then errors for everyone", "Rate limiting, load shedding"],
+            ["Ambiguous outcome (lost response)", "Client unsure if write applied", "Idempotency keys, outbox"],
+            ["Correlated / cascading failure", "One dependency sinks the whole system", "Bulkhead, circuit breaker, degradation"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Latency is a partial availability failure. A dependency at p99.9 of 10 seconds is 'up' by every naive health check yet is actively destroying the systems that call it. Treat sustained slowness as an outage."
+        }
+      ]
+    },
+    {
+      "id": "concept-timeouts",
+      "heading": "Timeouts: Every Remote Call Needs One",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A timeout is the most fundamental resilience primitive: it bounds how long you are willing to wait for a remote call before giving up. Without it, a hung dependency holds your thread indefinitely. The default timeout in most HTTP clients and database drivers is either infinite or absurdly long (minutes), which is why the single highest-leverage resilience change in most codebases is simply setting sane, explicit timeouts on every socket connect, socket read, and overall request."
+        },
+        {
+          "type": "paragraph",
+          "text": "Timeouts must be set with a budget in mind across the entire call chain. If the user-facing request has a 3-second SLA and it calls service A which calls service B which calls the database, the timeouts must decrease as you go deeper: the database call cannot be allowed 3 seconds when the outer request only has 3 seconds total minus the time already spent. A common mistake is giving every hop the same generous timeout, so the outermost caller has already returned an error to the user while the innermost calls keep running and consuming resources for work nobody is waiting for."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "text": "// Explicit timeouts at every layer. Never rely on defaults.\nHttpClient client = HttpClient.newBuilder()\n    .connectTimeout(Duration.ofMillis(500))   // TCP connect budget\n    .build();\n\nHttpRequest request = HttpRequest.newBuilder()\n    .uri(URI.create(\"https://inventory/api/stock\"))\n    .timeout(Duration.ofMillis(800))          // whole-request budget\n    .GET()\n    .build();\n\n// Propagate the remaining budget so downstream hops shrink, not repeat, the timeout.\nlong deadlineMs = requestStartMs + 3000;\nlong remaining = deadlineMs - System.currentTimeMillis();\nif (remaining <= 0) {\n    throw new DeadlineExceededException(\"budget exhausted before inventory call\");\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "A retry on top of an infinite timeout is worse than no retry at all: the first attempt never returns to trigger the second, so you get the worst of both — a permanently blocked thread and the illusion of resilience."
+        }
+      ]
+    },
+    {
+      "id": "concept-retries",
+      "heading": "Retries with Exponential Backoff and Jitter",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Retries handle transient faults — a dropped packet, a brief GC pause, a leader election — by trying again. The naive implementation, retrying immediately in a tight loop, is actively harmful: it multiplies load exactly when the downstream is struggling. The correct approach is exponential backoff (wait 1x, 2x, 4x, 8x the base delay) so that pressure decreases as failures persist, combined with jitter (randomizing the delay) so that many clients do not retry in lockstep."
+        },
+        {
+          "type": "paragraph",
+          "text": "Jitter is the non-obvious part. If a downstream blips and 10,000 clients all back off by exactly 2 seconds, they all retry at the same instant, producing a synchronized thundering herd that re-crashes the service — a retry storm. Full jitter picks a random delay uniformly in [0, base * 2^attempt], spreading the retries smoothly across time. AWS's analysis showed full jitter dramatically reduces the peak concurrent load and completes the total work faster than equal-jitter or no-jitter schemes."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "text": "// Retry with capped exponential backoff and full jitter.\n// Only retry idempotent operations, and only on retryable failures.\nint maxAttempts = 4;\nlong baseMs = 100, capMs = 2000;\nfor (int attempt = 0; ; attempt++) {\n    try {\n        return call(); // must be idempotent\n    } catch (RetryableException e) {\n        if (attempt >= maxAttempts - 1) throw e;\n        long exp = Math.min(capMs, baseMs * (1L << attempt));\n        long sleep = ThreadLocalRandom.current().nextLong(0, exp + 1); // FULL jitter\n        Thread.sleep(sleep);\n    } catch (NonRetryableException e) {\n        throw e; // 4xx, validation, non-idempotent write => do NOT retry\n    }\n}"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Do NOT retry non-idempotent operations blindly (e.g. 'charge card', 'send email') unless protected by an idempotency key — the first attempt may have succeeded on the server before the response was lost.",
+            "Do NOT retry client errors (HTTP 4xx): they will fail identically every time and only waste capacity.",
+            "Bound retries with a total attempt cap AND a total time budget, so retries never exceed the outer deadline.",
+            "Add a circuit breaker in front of retries so that during a sustained outage you stop retrying entirely instead of hammering a dead service."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Retries compose multiplicatively across a call chain. If each of three layers retries 3 times, a single logical request can hit the bottom service 27 times. Retry at exactly one layer (usually the lowest that understands idempotency) — a rule often stated as 'retry budgets' or 'no nested retries.'"
+        }
+      ]
+    },
+    {
+      "id": "concept-circuit-breaker",
+      "heading": "The Circuit Breaker Pattern",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A circuit breaker, popularized by Michael Nygard in 'Release It!', wraps a remote call and monitors its failure rate. When failures cross a threshold, the breaker 'trips' to OPEN and short-circuits subsequent calls: instead of waiting for a timeout and failing slowly, it fails instantly (fail fast), giving the struggling downstream room to recover and freeing the caller's threads immediately. After a cool-down it moves to HALF-OPEN, letting a limited number of trial requests through to probe whether the dependency has healed."
+        },
+        {
+          "type": "table",
+          "headers": ["State", "Behavior", "Transition"],
+          "rows": [
+            ["CLOSED", "Calls pass through; failures are counted over a sliding window.", "-> OPEN when failure rate (or count) exceeds the threshold."],
+            ["OPEN", "Calls short-circuit instantly with an error/fallback; no request reaches the dependency.", "-> HALF-OPEN after the wait-duration cool-down elapses."],
+            ["HALF-OPEN", "A limited number of trial calls are allowed through to test recovery.", "-> CLOSED if trials succeed; -> OPEN if any trial fails."]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The key configuration knobs are the failure-rate threshold (e.g. trip at 50% failures), the sliding window (count-based or time-based) over which that rate is measured, the wait duration in OPEN, and the number of permitted calls in HALF-OPEN. Modern implementations like Resilience4j also treat slow calls (above a slow-call-duration threshold) as failures for the purpose of tripping, because a dependency that is up but slow is exactly what a breaker should protect against. Hystrix pioneered this pattern in the JVM world but is now in maintenance mode; Resilience4j is its lightweight, functional-style successor."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "text": "// Resilience4j: declarative circuit breaker + retry + bulkhead stacked.\n// Order matters: Retry(Bulkhead(CircuitBreaker(TimeLimiter(call)))).\n@CircuitBreaker(name = \"inventory\", fallbackMethod = \"stockFallback\")\n@Retry(name = \"inventory\")\n@Bulkhead(name = \"inventory\", type = Bulkhead.Type.THREADPOOL)\npublic StockLevel getStock(String sku) {\n    return inventoryClient.fetch(sku); // remote call\n}\n\n// Fallback runs when the breaker is OPEN or the call ultimately fails.\nprivate StockLevel stockFallback(String sku, Throwable t) {\n    return StockLevel.unknown(sku); // graceful degradation, not an exception\n}"
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "text": "# Resilience4j configuration for the 'inventory' breaker.\nresilience4j:\n  circuitbreaker:\n    instances:\n      inventory:\n        sliding-window-type: TIME_BASED\n        sliding-window-size: 60          # seconds of history\n        minimum-number-of-calls: 20      # don't trip on tiny samples\n        failure-rate-threshold: 50       # percent\n        slow-call-rate-threshold: 80     # percent\n        slow-call-duration-threshold: 800ms\n        wait-duration-in-open-state: 10s\n        permitted-number-of-calls-in-half-open-state: 3\n        automatic-transition-from-open-to-half-open-enabled: true"
+        }
+      ]
+    },
+    {
+      "id": "concept-circuit-breaker-code",
+      "heading": "A Hand-Rolled Circuit Breaker State Machine",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Understanding the internals matters even when you use a library, because you will need to tune it. The following is a minimal but correct breaker: it counts failures in CLOSED, trips to OPEN at a threshold, waits out a cool-down, then admits exactly one probe in HALF-OPEN and promotes to CLOSED only on success. The subtlety is HALF-OPEN concurrency control — you must let through only a bounded number of probes, or a flood of waiting requests all hit the recovering dependency at once and re-trip the breaker."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "text": "final class CircuitBreaker {\n    enum State { CLOSED, OPEN, HALF_OPEN }\n    private volatile State state = State.CLOSED;\n    private final AtomicInteger failures = new AtomicInteger();\n    private volatile long openedAt = 0;\n    private final AtomicBoolean probeInFlight = new AtomicBoolean(false);\n    private final int threshold; private final long cooldownMs;\n\n    CircuitBreaker(int threshold, long cooldownMs) {\n        this.threshold = threshold; this.cooldownMs = cooldownMs;\n    }\n\n    <T> T execute(Supplier<T> call) {\n        if (state == State.OPEN) {\n            if (System.currentTimeMillis() - openedAt < cooldownMs)\n                throw new CircuitOpenException(); // fail fast\n            state = State.HALF_OPEN;              // cool-down elapsed\n        }\n        if (state == State.HALF_OPEN && !probeInFlight.compareAndSet(false, true))\n            throw new CircuitOpenException();     // only one probe allowed\n        try {\n            T result = call.get();\n            onSuccess();\n            return result;\n        } catch (RuntimeException e) {\n            onFailure();\n            throw e;\n        } finally {\n            if (state == State.HALF_OPEN) probeInFlight.set(false);\n        }\n    }\n\n    private void onSuccess() {\n        failures.set(0);\n        state = State.CLOSED;                     // probe succeeded => healed\n    }\n    private void onFailure() {\n        if (state == State.HALF_OPEN || failures.incrementAndGet() >= threshold) {\n            state = State.OPEN;                   // trip / re-trip\n            openedAt = System.currentTimeMillis();\n        }\n    }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Notice that HALF-OPEN promotes to CLOSED on a single success here for clarity; production breakers usually require N consecutive successes to avoid flapping on a dependency that is only intermittently healthy."
+        }
+      ]
+    },
+    {
+      "id": "concept-bulkhead",
+      "heading": "The Bulkhead Pattern: Isolate Resource Pools",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The bulkhead pattern is named after the watertight compartments in a ship's hull: if one compartment floods, the sealed bulkheads keep the ship afloat. In software, a bulkhead isolates the resources used for each dependency — most commonly by giving each downstream its own thread pool or its own bounded concurrency limit — so that if one dependency becomes slow and saturates its pool, the other dependencies still have threads to run on. Without bulkheads, a shared thread pool means one sick dependency consumes every thread and the entire service stops responding, even for endpoints that never touch the failing dependency."
+        },
+        {
+          "type": "paragraph",
+          "text": "There are two common flavors. A semaphore bulkhead caps the number of concurrent calls with a counter and runs them on the caller's thread — cheap, no context switch, but it cannot enforce a timeout on a thread already blocked in I/O. A thread-pool bulkhead runs calls on a dedicated, bounded pool, which adds isolation and the ability to time out a hung call, at the cost of extra threads and context-switching. Hystrix defaulted to thread-pool isolation for exactly this reason; Resilience4j offers both.",
+          "kind": "text"
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "text": "// Semaphore bulkhead: cap concurrency to a single dependency so it can't\n// exhaust the shared web-server thread pool.\nfinal class SemaphoreBulkhead {\n    private final Semaphore permits;\n    SemaphoreBulkhead(int maxConcurrent) { this.permits = new Semaphore(maxConcurrent); }\n\n    <T> T call(Supplier<T> op) {\n        if (!permits.tryAcquire()) {\n            throw new BulkheadFullException(); // shed load fast, protect the rest\n        }\n        try {\n            return op.get();\n        } finally {\n            permits.release();\n        }\n    }\n}\n// If 'inventory' saturates its 20 permits, 'pricing' and 'recommendations'\n// keep their own permits and remain fully available."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Bulkheads and circuit breakers are complementary, not alternatives. The bulkhead limits how much of your capacity a single dependency can ever consume (isolation); the circuit breaker decides when to stop calling it entirely (state). Use both: the bulkhead contains the damage while the breaker is still deciding to trip."
+        }
+      ]
+    },
+    {
+      "id": "concept-fallback",
+      "heading": "Fallbacks, Graceful Degradation, and Load Shedding",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "When a dependency is unavailable, failing the whole request is often the wrong answer. A fallback substitutes a degraded-but-useful response: serve stale cached data, return a default, omit a non-critical widget, or queue the work for later. This is graceful degradation — the product keeps working with reduced fidelity instead of showing an error page. The art is deciding what is degradable: a personalized-recommendations failure should silently show generic bestsellers, but a payment-authorization failure must not silently 'succeed.'"
+        },
+        {
+          "type": "paragraph",
+          "text": "Load shedding is degradation applied to yourself under overload. When you are receiving more traffic than you can serve, accepting all of it makes everything slow and everyone fails; deliberately rejecting a fraction of requests fast (with 429/503) keeps the accepted fraction healthy. Rate limiting is the proactive cousin — capping request rates per client to prevent any one caller from overwhelming a shared resource. Prioritized shedding drops low-value traffic (retries, background jobs, non-paying tiers) first so critical requests survive."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Static fallback: return a sensible default (empty list, 'unknown', feature hidden).",
+            "Cached fallback: serve the last-known-good value from a local or distributed cache, even if slightly stale.",
+            "Functional degradation: disable an expensive feature but keep the core flow working.",
+            "Load shedding: reject excess requests quickly to protect the requests you do accept.",
+            "Never fall back in a way that violates correctness — a fallback that fabricates a payment confirmation is a bug, not resilience."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Fallbacks hide failures, which is both the point and the danger. Emit metrics every time a fallback fires, and alert on the fallback rate — otherwise you will run degraded for weeks without noticing until the fallback itself breaks."
+        }
+      ]
+    },
+    {
+      "id": "concept-idempotency",
+      "heading": "Idempotency: The Foundation of Safe Retries",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Retries and safe recovery both depend on idempotency — the property that performing an operation twice has the same effect as performing it once. Reads are naturally idempotent; writes usually are not. The ambiguous-outcome problem makes this critical: when a write times out, you do not know whether the server applied it. Retrying a non-idempotent write can double-charge a customer or create duplicate orders. Making the operation idempotent removes the guesswork, so you can retry freely."
+        },
+        {
+          "type": "paragraph",
+          "text": "The standard technique is an idempotency key: the client generates a unique key per logical operation and sends it with every attempt. The server records the key with the result of the first successful execution; subsequent attempts with the same key return the stored result instead of re-executing. This pairs naturally with the transactional outbox pattern, where a service writes an event to an outbox table in the same transaction as its state change, and a relay publishes it at-least-once — consumers deduplicate by event id, closing the loop between at-least-once delivery and exactly-once effect."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "text": "// Server-side idempotency: first write wins, retries return the same result.\npublic OrderResult placeOrder(String idempotencyKey, OrderRequest req) {\n    Optional<StoredResult> prior = idempotencyStore.find(idempotencyKey);\n    if (prior.isPresent()) {\n        return prior.get().asOrderResult(); // safe replay of a retried request\n    }\n    OrderResult result = orders.create(req); // the real, non-idempotent effect\n    idempotencyStore.save(idempotencyKey, result); // dedupe future retries\n    return result;\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Idempotency is what makes 'retry non-idempotent operations' go from reckless to routine. With an idempotency key on the write path, at-least-once retries produce exactly-once effects."
+        }
+      ]
+    },
+    {
+      "id": "concept-health-fast-safe",
+      "heading": "Health Checks, Failing Fast vs Failing Safe",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Orchestrators need to know whether an instance can serve traffic. Distinguish liveness (is the process alive, or should it be restarted?) from readiness (is it ready to accept requests right now?). A common mistake is a readiness probe that checks downstream dependencies: if a shared database blips, every instance simultaneously reports not-ready, the load balancer removes them all, and a minor blip becomes a total outage. Readiness should reflect the instance's own ability to serve; dependency health belongs to circuit breakers, not to readiness gates that can empty your whole fleet."
+        },
+        {
+          "type": "paragraph",
+          "text": "Failing fast means returning an error immediately rather than blocking — this is what circuit breakers and short timeouts deliver, and it is usually right because it frees resources and surfaces problems quickly. Failing safe means degrading to a known-good state that preserves correctness or user safety — serving stale data, denying by default, or entering a read-only mode. The two are not opposites: you fail fast on the call (do not block) and then fail safe in the response (serve a sensible fallback). Choose based on the cost of being wrong: for a recommendations widget, degrade; for a door lock or a payment, deny by default."
+        },
+        {
+          "type": "table",
+          "headers": ["Probe", "Question it answers", "On failure"],
+          "rows": [
+            ["Liveness", "Is the process wedged/deadlocked?", "Kill and restart the container."],
+            ["Readiness", "Can THIS instance serve now?", "Remove from load balancer temporarily."],
+            ["Startup", "Has slow init finished?", "Delay liveness checks during boot."]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Do not fail readiness on shared-dependency health. A readiness probe that queries the central database will flip your entire fleet out of rotation the instant that database hiccups, converting a recoverable dependency blip into a hard, self-inflicted outage."
+        }
+      ]
+    },
+    {
+      "id": "example-cascading-incident",
+      "heading": "Example: A Cascading Failure Incident",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Consider a real-shaped incident on an e-commerce checkout. The recommendations service — a non-critical widget on the product page — began responding slowly after a bad cache-config deploy pushed its p99 from 40ms to 9s. The product-page service called recommendations synchronously on a shared thread pool with the default (infinite) HTTP read timeout and no circuit breaker."
+        },
+        {
+          "type": "list",
+          "items": [
+            "T+0: recommendations p99 jumps to 9s. Product-page threads start blocking on the slow call.",
+            "T+90s: the shared thread pool is fully consumed by threads waiting on recommendations. Product-page can no longer serve ANY endpoint — including pages that don't use recommendations.",
+            "T+2m: the load balancer's health check (which hit a product-page endpoint) times out; instances are marked unhealthy and pulled, concentrating traffic on the survivors, which saturate faster.",
+            "T+3m: upstream API gateway retries the failing product-page calls 3x with no jitter, tripling load — a retry storm — and the checkout flow that merely renders on the product page goes down too.",
+            "Result: a non-critical recommendations widget took down checkout. Revenue impact for a cosmetic feature."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The fix was pure composition of the patterns in this topic. An 800ms timeout on the recommendations call stops threads from blocking for 9 seconds. A bulkhead gives recommendations its own small pool of 20 threads, so even fully saturated it cannot touch the threads serving checkout. A circuit breaker trips after the failure rate crosses 50%, so calls fail fast instead of waiting out the timeout. A fallback renders 'popular items' from cache so the page still looks complete. Finally, retries were consolidated to a single layer with full jitter and a retry budget, eliminating the storm."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The lesson every senior engineer internalizes from an incident like this: the criticality of a dependency at design time tells you nothing about the blast radius of its failure at runtime. Isolation (bulkheads) and fast-failure (timeouts + breakers) are what bound the blast radius."
+        }
+      ]
+    },
+    {
+      "id": "mistake-antipatterns",
+      "heading": "Common Mistakes and Anti-Patterns",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Most resilience outages come from applying the patterns incorrectly rather than omitting them. These are the recurring anti-patterns that turn protective mechanisms into failure amplifiers."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Retrying without a circuit breaker: during a real outage, retries keep hammering a dead service and prevent it from recovering. Always gate retries behind a breaker.",
+            "Retrying at every layer: nested retries multiply. Three layers retrying 3x each is 27x load. Retry at exactly one layer.",
+            "No jitter: synchronized backoff creates thundering herds that re-crash a recovering service. Always add full jitter.",
+            "Timeouts longer than the outer deadline: an inner call given more time than the caller has left keeps consuming resources for a request nobody is waiting for.",
+            "Retrying non-idempotent writes without an idempotency key: double charges, duplicate orders. Make the operation idempotent first.",
+            "Readiness probes that check shared dependencies: one dependency blip empties the whole fleet from rotation.",
+            "Fallbacks that lie: a fallback returning a fake success for a payment is a correctness bug wearing a resilience costume."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The most expensive resilience bug is the retry storm: a well-meaning retry policy, deployed everywhere with no jitter and no breaker, that turns every transient blip into a self-sustaining, self-amplifying outage. Retries are load; treat them with a budget.",
+          "kind": "warning"
+        }
+      ]
+    },
+    {
+      "id": "bestpractice-composition",
+      "heading": "Best Practices: Composing the Patterns",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The patterns are strongest when layered deliberately. A canonical stack around a remote call, from outermost to innermost, is: bulkhead (cap concurrency) wrapping a retry (bounded, jittered) wrapping a circuit breaker (fail fast when broken) wrapping a time limiter/timeout (bound each attempt), with a fallback catching whatever escapes. Ordering matters: you want the breaker to see per-attempt outcomes and the retry to see breaker decisions, so retries stop quickly once the breaker is OPEN."
+        },
+        {
+          "type": "table",
+          "headers": ["Pattern", "Problem solved", "Key config", "Common pitfall"],
+          "rows": [
+            ["Timeout", "Hung/slow calls block threads", "connect + read + total budget", "Using infinite defaults; budget not shrinking downstream"],
+            ["Retry + backoff + jitter", "Transient faults", "max attempts, base/cap delay, full jitter", "No jitter (herd); retrying non-idempotent ops; nested retries"],
+            ["Circuit breaker", "Repeated calls to a broken dependency", "failure-rate threshold, window, wait duration", "Tripping on tiny samples; no half-open probe limit"],
+            ["Bulkhead", "One dependency starves shared resources", "max concurrency / pool size per dependency", "Shared pool across dependencies; pool too large to isolate"],
+            ["Fallback / degradation", "Hard failure of a degradable feature", "default value, cache TTL, criticality tag", "Fallbacks that violate correctness; no metric on fallback rate"],
+            ["Load shedding / rate limit", "Overload", "concurrency/rate cap, priority classes", "Shedding critical traffic; no fast-reject path"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Tie resilience to SLOs and error budgets. An SLO (e.g. 99.9% of checkout requests succeed under 2s) quantifies how much failure is acceptable; the error budget is the allowed shortfall. Resilience patterns spend and defend that budget: degradation converts hard failures into partial successes that still count, and load shedding sacrifices some requests to keep the SLO for the rest. Chaos engineering — deliberately injecting latency, errors, and instance kills in production-like conditions (GameDays, tools like Chaos Monkey/Gremlin) — validates that these patterns actually fire as designed, because an untested breaker or fallback is just a hypothesis."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Resilience is not a library you install; it is a property you continuously verify. If you have never watched your circuit breaker trip and your fallback serve traffic under real injected failure, you do not yet know whether they work."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "cb-state-machine",
+      "title": "Circuit Breaker State Machine",
+      "type": "mermaid",
+      "content": "stateDiagram-v2\n    [*] --> Closed\n    Closed --> Open : failure rate exceeds threshold\n    Open --> HalfOpen : cool-down elapsed\n    HalfOpen --> Closed : probe calls succeed\n    HalfOpen --> Open : probe call fails\n    Closed --> Closed : call succeeds\n    Open --> Open : short-circuit (fail fast)"
+    },
+    {
+      "id": "cascading-bulkhead",
+      "title": "Cascading Failure and How a Bulkhead Contains It",
+      "type": "mermaid",
+      "content": "flowchart TD\n    U[User request] --> PP[Product Page service]\n    PP --> B1[Bulkhead: recommendations pool 20]\n    PP --> B2[Bulkhead: pricing pool 20]\n    PP --> B3[Bulkhead: checkout pool 40]\n    B1 --> R[Recommendations SLOW]\n    B2 --> P[Pricing OK]\n    B3 --> C[Checkout OK]\n    R --> X[recs pool saturated]\n    X --> D[recs calls fail fast via breaker]\n    D --> F[Fallback: cached popular items]\n    P --> OK1[served]\n    C --> OK2[checkout unaffected]"
+    },
+    {
+      "id": "retry-timeline-ascii",
+      "title": "Retry With Backoff: No Jitter vs Full Jitter",
+      "type": "ascii",
+      "content": "NO JITTER (synchronized herd re-crashes downstream)\n  clients:  |||||        |||||        |||||\n  time  ->  t0           t0+2s        t0+4s\n            (all retry at the same instant each round)\n\nFULL JITTER (load spread smoothly, downstream recovers)\n  clients:  | | ||  |   | |  ||   |  | | |  ||\n  time  ->  t0 ........ t0+2s ........ t0+4s\n            (each client: sleep = rand(0, base*2^attempt))"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-why-timeouts",
+      "question": "Why does every remote call need an explicit timeout, and what is the danger of relying on client defaults?",
+      "answer": "A remote call, unlike a local one, can hang indefinitely if the downstream is slow or the network stalls, and without a timeout the calling thread is blocked the whole time. Under load this exhausts the caller's thread pool, connection pool, or memory, so one slow dependency stops the caller from serving any request. Most HTTP clients and DB drivers default to an infinite or multi-minute timeout, far longer than any user-facing SLA. Explicit, short timeouts on connect, read, and total-request budget convert a slow failure into a fast one that frees resources. The timeout is the primitive that makes circuit breakers and retries meaningful, because it guarantees a call eventually returns control.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["timeouts", "thread-pool", "defaults"],
+      "followUps": ["How do timeouts interact with retries?", "What is a connect vs read timeout?"]
+    },
+    {
+      "id": "q-timeout-budget",
+      "question": "Explain the timeout-budget problem across a call chain. Why is giving every hop the same generous timeout wrong?",
+      "answer": "In a chain A -> B -> C -> DB, the user-facing request has one overall deadline (say 3s). If every hop is independently given a 3s timeout, the deep calls can keep running long after the outermost caller has already given up and returned an error to the user. That work is pure waste: it consumes threads, connections, and downstream capacity for a request nobody is waiting for, and it can even amplify an overload. The correct model is a shrinking deadline: each hop passes down the remaining budget (deadline minus elapsed time), so inner timeouts are strictly smaller than outer ones. If the remaining budget is already exhausted, the call should fail immediately without even attempting the downstream. This is often implemented with a deadline propagated in request context or headers. The tricky part is that the sum of inner timeouts plus retries must fit within the outer budget, or the outer call times out mid-flight.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["timeout-budget", "deadline-propagation", "call-chain"],
+      "followUps": ["How do you propagate a deadline in gRPC or HTTP?", "How do retries fit inside a budget?"]
+    },
+    {
+      "id": "q-why-jitter",
+      "question": "Why is jitter essential in a retry backoff strategy, not just exponential backoff alone?",
+      "answer": "Exponential backoff alone reduces the frequency of retries but does not desynchronize the clients. If a downstream blips and thousands of clients all fail at nearly the same moment, plain exponential backoff makes them all wait the same delay and then retry at the same instant, producing a synchronized thundering herd that re-crashes the recovering service. Jitter randomizes each client's delay so the retries are spread smoothly across time, flattening the peak load. AWS's analysis of full jitter (sleep = random(0, base * 2^attempt)) showed it both lowers peak concurrent load and completes the total work sooner than no-jitter or equal-jitter schemes. Without jitter, the backoff itself becomes a mechanism for correlated retry storms. The counterintuitive result is that adding randomness makes the system more, not less, predictable under stress.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["jitter", "backoff", "thundering-herd"],
+      "followUps": ["Compare full jitter, equal jitter, and decorrelated jitter.", "Where does the base delay come from?"]
+    },
+    {
+      "id": "q-retry-storm",
+      "question": "What is a retry storm, and what practices prevent one?",
+      "answer": "A retry storm is a self-amplifying overload where retries add load to an already-struggling dependency, keeping it down and triggering yet more retries. It commonly arises from three mistakes: retrying without a circuit breaker, so calls keep hammering a dead service; retrying at multiple layers, so a single logical request multiplies into dozens of downstream calls; and retrying without jitter, so clients synchronize. Prevention is layered: gate retries behind a circuit breaker so they stop entirely during a sustained outage, retry at exactly one layer (usually the lowest that understands idempotency), add full jitter, and enforce a retry budget that caps retries as a fraction of total traffic. The mental model is that retries are additional load, so they must be rationed like any other scarce resource. A system that treats retries as free will eventually DDoS itself.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["retry-storm", "retry-budget", "circuit-breaker"],
+      "followUps": ["What is a retry budget and how is it enforced?", "Why retry at only one layer?"]
+    },
+    {
+      "id": "q-retry-nonidempotent",
+      "question": "Is it ever safe to retry a non-idempotent operation like 'charge this card'? Explain.",
+      "answer": "Blindly retrying a non-idempotent write is unsafe because of the ambiguous-outcome problem: when a write times out, you cannot tell whether the server applied it before the response was lost, so a retry may double-charge the customer. However, it becomes safe if you make the operation idempotent, typically with an idempotency key. The client generates a unique key per logical charge and sends it on every attempt; the server records the key with the result of the first successful execution and returns that stored result for any repeat, so the effect happens exactly once regardless of how many times the request is retried. With that in place, at-least-once retries produce exactly-once effects, and retrying the charge is not only safe but recommended. So the honest answer is: not as-is, but yes once you add an idempotency key. This is why idempotency is described as the foundation of safe retries.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["idempotency", "non-idempotent", "safe-retries"],
+      "followUps": ["How does the transactional outbox relate to this?", "How long must the server retain idempotency keys?"]
+    },
+    {
+      "id": "q-cb-states",
+      "question": "Describe the three circuit breaker states and the transitions between them.",
+      "answer": "A circuit breaker has three states. CLOSED is the normal state: calls pass through and failures are counted over a sliding window; when the failure rate (or slow-call rate) exceeds a threshold, the breaker trips to OPEN. OPEN short-circuits every call, failing fast with an error or fallback instead of waiting for a timeout, which frees the caller's resources and gives the downstream room to recover; after a configured wait duration it transitions to HALF-OPEN. HALF-OPEN admits a limited number of trial calls to probe whether the dependency has healed: if they succeed it returns to CLOSED, and if any fails it goes back to OPEN and restarts the cool-down. The essential design details are measuring failures over a window with a minimum sample size (so tiny samples don't trip it) and strictly bounding the number of half-open probes. This state machine turns repeated slow failures into fast, automatic recovery.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["circuit-breaker", "state-machine", "half-open"],
+      "followUps": ["What does 'fail fast' buy you?", "Why treat slow calls as failures?"]
+    },
+    {
+      "id": "q-half-open-probing",
+      "question": "Why must the HALF-OPEN state limit the number of probe requests, and what goes wrong if it doesn't?",
+      "answer": "HALF-OPEN exists to test whether a recovering dependency can handle traffic again, using a small number of trial requests. If it does not bound the probes, then the moment the cool-down elapses, every request that was being short-circuited floods through simultaneously onto a dependency that may still be fragile. That surge can immediately re-overwhelm the downstream, re-trip the breaker, and produce an oscillation between OPEN and HALF-OPEN that never lets the service actually recover. By permitting only a few concurrent probes (Resilience4j's permitted-number-of-calls-in-half-open-state, or a single-probe CAS gate in a hand-rolled breaker), you feed the recovering dependency a trickle of load and promote to CLOSED only when it proves healthy. Some implementations further require several consecutive successes to avoid flapping on an intermittently-healthy downstream. The subtlety is that recovery is a gradual, load-sensitive process, not a binary flip, so the probe budget is what makes recovery stable.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["half-open", "probing", "flapping"],
+      "followUps": ["How many consecutive successes should promote to CLOSED?", "How does this interact with load balancing across instances?"]
+    },
+    {
+      "id": "q-bulkhead-vs-cb",
+      "question": "What is the difference between a bulkhead and a circuit breaker, and why would you use both?",
+      "answer": "They solve different problems and are complementary. A bulkhead is about isolation: it caps how much of your resource capacity (threads, concurrency) a single dependency can ever consume, so that a saturated dependency cannot starve the threads serving everything else. A circuit breaker is about state and timing: it decides when to stop calling a dependency entirely and to fail fast, based on observed failure rates, then automatically probes for recovery. In an incident, the bulkhead immediately contains the blast radius — a slow dependency can only ever tie up its own bounded pool — while the breaker is still accumulating enough failures to decide to trip. Used together, the bulkhead guarantees the rest of the service stays alive even before the breaker reacts, and the breaker then relieves the pressure on the sick dependency and enables clean recovery. Choosing one over the other leaves a gap: a breaker alone still lets a slow dependency consume shared threads until it trips, and a bulkhead alone keeps calling a dead dependency and failing slowly within its pool.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["bulkhead", "circuit-breaker", "isolation"],
+      "followUps": ["Semaphore vs thread-pool bulkhead?", "In what order do you compose them?"]
+    },
+    {
+      "id": "q-bulkhead-types",
+      "question": "Compare semaphore bulkheads and thread-pool bulkheads. When would you pick each?",
+      "answer": "A semaphore bulkhead limits concurrency with a counter and runs the call on the caller's own thread. It is cheap — no extra threads, no context switches — but because the work runs on the caller's thread, it cannot forcibly interrupt a call already blocked in synchronous I/O; it only caps how many can be in flight. A thread-pool bulkhead runs each call on a dedicated bounded pool, which provides stronger isolation and, crucially, the ability to time out and abandon a hung call by not waiting on that pool's thread. The cost is extra threads, context-switching overhead, and loss of the caller's thread-local context. Pick semaphore isolation for very high-throughput, low-latency calls where the overhead of a pool would dominate and you already have timeouts elsewhere. Pick thread-pool isolation when calls can block for a long time and you need timeout enforcement and maximum isolation, which is why Hystrix defaulted to it. Many systems use semaphores for cheap fan-out and thread pools for the risky, latency-prone dependencies.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["bulkhead", "semaphore", "thread-pool"],
+      "followUps": ["How does async/reactive change this trade-off?", "Where do timeouts live in the semaphore case?"]
+    },
+    {
+      "id": "q-graceful-degradation",
+      "question": "What is graceful degradation, and how do you decide what is safe to degrade?",
+      "answer": "Graceful degradation means continuing to serve a reduced-but-useful experience when a dependency fails, instead of returning a hard error. Examples include serving stale cached data, returning a static default, hiding a non-critical widget, or entering a read-only mode. You decide what is degradable by the cost of being wrong. A recommendations widget can silently fall back to generic bestsellers because a slightly worse suggestion harms nothing; a payment authorization cannot fall back to a fake success because that violates correctness and could cost real money. The rule is that fallbacks may reduce fidelity but must never violate correctness or safety. Every fallback should also emit a metric so you can alert on the fallback rate; otherwise the system runs silently degraded until the fallback itself breaks. Deciding degradability is fundamentally a product and correctness question, not a purely technical one.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["degradation", "fallback", "criticality"],
+      "followUps": ["How do you avoid stale-cache correctness bugs?", "How do you alert on fallback rate?"]
+    },
+    {
+      "id": "q-load-shedding",
+      "question": "What is load shedding, and how does it differ from rate limiting?",
+      "answer": "Load shedding is the deliberate, fast rejection of a fraction of incoming requests when a service is receiving more traffic than it can serve, so that the accepted fraction stays healthy instead of everything becoming slow and failing. It is reactive — triggered by the server's own saturation signals such as queue depth, latency, or CPU. Rate limiting is proactive and per-caller: it caps the request rate a given client or key may send, preventing any one caller from monopolizing a shared resource before saturation occurs. They are often used together: rate limits enforce fairness and prevent abuse, while load shedding is the last line of defense when aggregate demand exceeds capacity regardless of fairness. Good shedding is prioritized, dropping low-value traffic (retries, background jobs, non-critical tiers) first so that critical requests survive. The key insight is that under overload, saying no quickly to some requests is how you say yes reliably to the rest.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["load-shedding", "rate-limiting", "overload"],
+      "followUps": ["What signals trigger shedding?", "How do you prioritize which requests to drop?"]
+    },
+    {
+      "id": "q-cascading",
+      "question": "How does a cascading failure develop, and which patterns stop it?",
+      "answer": "A cascading failure starts with one component slowing down or failing and propagates upward as its callers block on it, exhaust their own resources, and in turn fail their callers. The classic trigger is an un-timed synchronous call to a slow dependency: threads pile up waiting, a shared thread pool is exhausted, and the caller can no longer serve even unrelated endpoints, so a non-critical dependency takes down critical functionality. Health checks that then pull the struggling instances out of rotation and retry storms that multiply load both accelerate the collapse. The patterns that stop it compose together: timeouts prevent unbounded blocking, bulkheads isolate each dependency to its own resource pool so saturation cannot spread, circuit breakers fail fast once a dependency is clearly broken, fallbacks preserve degraded function, and jittered single-layer retries with budgets prevent the storm. The overarching lesson is that a dependency's design-time criticality tells you nothing about its runtime blast radius, so isolation and fast-failure are what bound the damage.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["cascading-failure", "blast-radius", "composition"],
+      "followUps": ["Why can health checks worsen a cascade?", "How do you find hidden synchronous dependencies?"]
+    },
+    {
+      "id": "q-chaos",
+      "question": "What is chaos engineering and why is it necessary if you have already implemented resilience patterns?",
+      "answer": "Chaos engineering is the practice of deliberately injecting failures — added latency, error responses, instance terminations, network partitions — into production-like environments to verify that the system behaves as designed under stress. It is necessary because resilience code paths are, by definition, rarely exercised: a circuit breaker that has never tripped, a fallback that has never served traffic, and a timeout that has never fired are all untested hypotheses. Config drift, wrong ordering of patterns, misset thresholds, and hidden synchronous dependencies routinely mean the protections do not actually engage when a real fault occurs. Controlled experiments (GameDays, tools like Chaos Monkey and Gremlin) reveal these gaps safely, with a defined blast radius and abort criteria, before a real incident does. The discipline pairs with SLOs and error budgets: you experiment only while you have budget to spend. In short, resilience you have not tested under failure is resilience you do not actually have.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["chaos-engineering", "gameday", "validation"],
+      "followUps": ["How do you bound the blast radius of an experiment?", "How does this relate to error budgets?"]
+    },
+    {
+      "id": "q-slo-tie",
+      "question": "How do resilience patterns relate to SLOs and error budgets?",
+      "answer": "An SLO defines the target reliability of a service (for example, 99.9% of requests succeed under 2 seconds), and the error budget is the allowed shortfall — the 0.1% you may fail without breaching the objective. Resilience patterns are the tools that spend and defend that budget deliberately. Graceful degradation converts what would be hard failures into partial successes that still count as successful under the SLO, effectively stretching the budget. Load shedding spends a little budget on purpose — rejecting some requests — to protect the SLO for the rest during overload. Timeouts and circuit breakers keep tail latency bounded so the latency portion of the SLO holds. The error budget also governs risk-taking: when the budget is healthy you can run chaos experiments and ship faster; when it is exhausted you freeze changes and focus on reliability. This framing turns resilience from a vague aspiration into a measurable, prioritized engineering trade-off.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["slo", "error-budget", "reliability"],
+      "followUps": ["How does an error budget gate deploys?", "How do you set an SLO target?"]
+    },
+    {
+      "id": "q-hystrix-r4j",
+      "question": "What is the relationship between Hystrix and Resilience4j, and why did the ecosystem move?",
+      "answer": "Hystrix, from Netflix, popularized the circuit breaker and bulkhead patterns in the JVM ecosystem and made thread-pool isolation mainstream. It is now in maintenance mode and no longer actively developed. Resilience4j is its lightweight successor, designed for Java 8+ with a functional, composable API and no heavy dependencies (Hystrix pulled in Archaius and RxJava). Resilience4j lets you compose independent modules — CircuitBreaker, Retry, Bulkhead, RateLimiter, TimeLimiter — as decorators or annotations, so you only take what you need, and it integrates cleanly with Spring Boot and Micrometer metrics. It also refined the model, for example treating slow calls as failures for tripping the breaker and offering both semaphore and thread-pool bulkheads. The move reflects a general preference for small, focused, dependency-light libraries over monolithic frameworks. Conceptually the patterns are identical; the change is ergonomics, modularity, and maintenance.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["resilience4j", "hystrix", "libraries"],
+      "followUps": ["How do you order Resilience4j decorators?", "What does the TimeLimiter add?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-circuit-breaker",
+      "title": "Implement a Circuit Breaker with Half-Open Probing",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "prompt": "Implement a thread-safe circuit breaker with CLOSED, OPEN, and HALF_OPEN states. In CLOSED, count consecutive failures and trip to OPEN when they reach a threshold. In OPEN, short-circuit calls (throw immediately) until a cool-down elapses, then move to HALF_OPEN. In HALF_OPEN, allow only a single probe call at a time; a successful probe closes the breaker and resets counters, a failed probe re-opens it and restarts the cool-down. Expose a generic execute(Supplier<T>) method.",
+      "hints": [
+        "Use volatile fields for state/openedAt and an AtomicBoolean to admit exactly one HALF_OPEN probe via compareAndSet.",
+        "Compute the OPEN -> HALF_OPEN transition lazily at call time by comparing now - openedAt against the cool-down, rather than using a background timer.",
+        "Reset the failure counter to zero on any success, and set state back to OPEN (recording a fresh openedAt) whenever a HALF_OPEN probe fails."
+      ],
+      "solutionCode": "import java.util.function.Supplier;\nimport java.util.concurrent.atomic.*;\n\npublic final class CircuitBreaker {\n    public enum State { CLOSED, OPEN, HALF_OPEN }\n    public static final class CircuitOpenException extends RuntimeException {}\n\n    private final int failureThreshold;\n    private final long cooldownMs;\n    private volatile State state = State.CLOSED;\n    private volatile long openedAt = 0L;\n    private final AtomicInteger consecutiveFailures = new AtomicInteger(0);\n    private final AtomicBoolean probeInFlight = new AtomicBoolean(false);\n\n    public CircuitBreaker(int failureThreshold, long cooldownMs) {\n        this.failureThreshold = failureThreshold;\n        this.cooldownMs = cooldownMs;\n    }\n\n    public State state() { return state; }\n\n    public <T> T execute(Supplier<T> call) {\n        if (state == State.OPEN) {\n            if (System.currentTimeMillis() - openedAt < cooldownMs) {\n                throw new CircuitOpenException(); // fail fast\n            }\n            state = State.HALF_OPEN; // cool-down elapsed, allow probing\n        }\n\n        boolean isProbe = false;\n        if (state == State.HALF_OPEN) {\n            if (!probeInFlight.compareAndSet(false, true)) {\n                throw new CircuitOpenException(); // another probe already running\n            }\n            isProbe = true;\n        }\n\n        try {\n            T result = call.get();\n            onSuccess();\n            return result;\n        } catch (RuntimeException e) {\n            onFailure(isProbe);\n            throw e;\n        } finally {\n            if (isProbe) probeInFlight.set(false);\n        }\n    }\n\n    private void onSuccess() {\n        consecutiveFailures.set(0);\n        state = State.CLOSED; // healthy again\n    }\n\n    private synchronized void onFailure(boolean wasProbe) {\n        if (wasProbe) {\n            trip();\n            return;\n        }\n        if (consecutiveFailures.incrementAndGet() >= failureThreshold) {\n            trip();\n        }\n    }\n\n    private void trip() {\n        state = State.OPEN;\n        openedAt = System.currentTimeMillis();\n    }\n}",
+      "solutionLanguage": "java",
+      "explanation": "The breaker tracks state in a volatile field so reads are visible across threads without locking on the hot path. In CLOSED it counts consecutive failures with an AtomicInteger and trips to OPEN once they reach the threshold, recording openedAt. In OPEN it throws CircuitOpenException immediately (failing fast) until now - openedAt exceeds the cool-down, at which point the next call lazily promotes the breaker to HALF_OPEN without needing a background timer. The critical concurrency detail is the AtomicBoolean probeInFlight: in HALF_OPEN, only the thread that wins compareAndSet(false, true) is allowed to make the trial call, and all other concurrent requests are short-circuited, which prevents a flood of waiting requests from re-crashing the recovering dependency. A successful probe (or any success) resets the failure counter and returns to CLOSED, while a failed probe immediately re-trips to OPEN with a fresh openedAt so the cool-down restarts. The onFailure method is synchronized to make the read-increment-compare-and-trip sequence atomic, avoiding a race where two threads each see a sub-threshold count. A production version would extend this with a sliding-window failure rate instead of consecutive counts, a slow-call threshold, and a requirement of N consecutive successes before closing to avoid flapping.",
+      "relatedTopic": "resilience-patterns"
+    },
+    {
+      "id": "ch-retry-jitter",
+      "title": "Retry With Exponential Backoff, Full Jitter, and Idempotency Guarding",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "prompt": "Implement a retry helper that retries a supplied operation on retryable failures using capped exponential backoff with full jitter. It must (1) stop after a maximum number of attempts, (2) respect an overall deadline so total time including sleeps never exceeds a budget, (3) never retry when the exception is classified as non-retryable, and (4) accept a flag indicating whether the operation is idempotent, refusing to retry a non-idempotent operation unless an idempotency key is present. Return the successful result or rethrow the last exception.",
+      "hints": [
+        "Full jitter is sleep = random(0, min(cap, base * 2^attempt)); compute the exponent with a bit shift and clamp it.",
+        "Before each sleep, check the remaining budget (deadline - now) and clamp the sleep so you never overshoot the overall deadline.",
+        "Decide retryability from both the exception type AND the idempotency contract: a non-idempotent op without an idempotency key must fail immediately even on a 'retryable' error."
+      ],
+      "solutionCode": "import java.util.concurrent.ThreadLocalRandom;\nimport java.util.function.Predicate;\nimport java.util.function.Supplier;\n\npublic final class Retrier {\n    private final int maxAttempts;\n    private final long baseMs;\n    private final long capMs;\n    private final Predicate<RuntimeException> isRetryable;\n\n    public Retrier(int maxAttempts, long baseMs, long capMs,\n                   Predicate<RuntimeException> isRetryable) {\n        this.maxAttempts = maxAttempts;\n        this.baseMs = baseMs;\n        this.capMs = capMs;\n        this.isRetryable = isRetryable;\n    }\n\n    /** @param idempotent whether re-executing the op is safe (key present or naturally idempotent). */\n    public <T> T call(Supplier<T> op, boolean idempotent, long deadlineMs) {\n        RuntimeException last = null;\n        for (int attempt = 0; attempt < maxAttempts; attempt++) {\n            try {\n                return op.get();\n            } catch (RuntimeException e) {\n                last = e;\n                boolean canRetry = isRetryable.test(e) && idempotent;\n                if (!canRetry || attempt == maxAttempts - 1) {\n                    throw e; // non-retryable, unsafe to retry, or attempts exhausted\n                }\n                long now = System.currentTimeMillis();\n                long remaining = deadlineMs - now;\n                if (remaining <= 0) throw e; // budget exhausted\n\n                long expWindow = Math.min(capMs, baseMs * (1L << attempt)); // capped exp\n                long jittered = ThreadLocalRandom.current().nextLong(0, expWindow + 1); // FULL jitter\n                long sleep = Math.min(jittered, remaining); // never overshoot deadline\n                try {\n                    Thread.sleep(sleep);\n                } catch (InterruptedException ie) {\n                    Thread.currentThread().interrupt();\n                    throw e;\n                }\n            }\n        }\n        throw last; // unreachable in practice, but keeps the compiler happy\n    }\n}",
+      "solutionLanguage": "java",
+      "explanation": "The retrier loops up to maxAttempts, returning immediately on success. On a caught exception it computes canRetry from two independent conditions: the exception must be classified retryable (the caller-supplied predicate typically excludes 4xx and validation errors), AND the operation must be idempotent — the idempotent flag encodes 'either naturally idempotent or protected by an idempotency key', so a non-idempotent write with no key is never retried even on an otherwise-retryable error, which is what prevents double-charges. When a retry is allowed, the delay is capped exponential backoff, baseMs * 2^attempt clamped to capMs using a bit shift, and then full jitter is applied by drawing a uniform random value in [0, window], which desynchronizes clients and avoids thundering herds. Before sleeping, the code reads the remaining budget from the overall deadline and both aborts if the budget is already spent and clamps the sleep so total elapsed time never exceeds the caller's deadline — this keeps the retrier honest inside an outer timeout budget. InterruptedException is handled by restoring the interrupt flag and rethrowing rather than swallowing it. In a real system you would also gate this retrier behind a circuit breaker and enforce a retry budget across the fleet so aggregate retries stay a bounded fraction of traffic, closing the door on retry storms.",
+      "relatedTopic": "resilience-patterns"
+    }
+  ],
+  "references": [
+    {
+      "label": "Resilience4j Documentation",
+      "url": "https://resilience4j.readme.io/docs/getting-started"
+    },
+    {
+      "label": "Release It! (2nd ed.) — Michael T. Nygard",
+      "url": "https://pragprog.com/titles/mnee2/release-it-second-edition/"
+    },
+    {
+      "label": "AWS Architecture Blog — Timeouts, Retries, and Backoff with Jitter",
+      "url": "https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/"
+    },
+    {
+      "label": "Martin Fowler — CircuitBreaker",
+      "url": "https://martinfowler.com/bliki/CircuitBreaker.html"
+    },
+    {
+      "label": "microservices.io — Circuit Breaker Pattern",
+      "url": "https://microservices.io/patterns/reliability/circuit-breaker.html"
+    },
+    {
+      "label": "Google SRE Book — Addressing Cascading Failures",
+      "url": "https://sre.google/sre-book/addressing-cascading-failures/"
+    }
+  ]
+}

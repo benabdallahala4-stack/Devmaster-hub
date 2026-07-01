@@ -1,0 +1,831 @@
+{
+  "id": "feature-flags",
+  "title": "Feature Flags & Progressive Delivery",
+  "category": "DevOps",
+  "subcategory": "Delivery",
+  "difficulty": "mid",
+  "tags": [
+    "feature-flags",
+    "progressive-delivery",
+    "canary",
+    "trunk-based-development",
+    "ab-testing",
+    "kill-switch",
+    "launchdarkly",
+    "openfeature"
+  ],
+  "description": "Feature flags decouple deploy from release so you can ship code dark, ramp it to users gradually, and kill it instantly. This topic covers flag types, targeting, progressive delivery, evaluation architecture, flag debt, and the pitfalls senior engineers must reason about.",
+  "estReadMinutes": 28,
+  "sections": [
+    {
+      "id": "introduction",
+      "heading": "What Feature Flags Are",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A feature flag (also called a feature toggle) is a runtime switch that lets you change how your software behaves without deploying new code. Instead of hard-coding a branch of logic, you wrap it in a conditional that asks a flag system: 'is this feature on for this context?' The answer can vary per user, per environment, per percentage of traffic, and it can change in seconds without a redeploy."
+        },
+        {
+          "type": "paragraph",
+          "text": "The single most important idea is that flags decouple deploy from release. Deploying is putting bytes onto servers; releasing is exposing behavior to users. Without flags those two events are welded together: the moment you deploy, everyone sees the change. With flags you can deploy code that is dark (present but off), then release it later by flipping a switch, ramp it gradually, and roll it back instantly if metrics degrade, all without touching the deployment pipeline."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Deploy != release: code can ship to production while remaining invisible to users until a flag turns it on.",
+            "Trunk-based development enabler: teams merge unfinished work to main behind a flag instead of maintaining long-lived branches.",
+            "Kill switch: a risky feature or a struggling dependency can be disabled in seconds without a rollback or hotfix deploy.",
+            "Targeted release: the same build serves different behavior to internal users, beta cohorts, or a 5% traffic slice."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The canonical reference is Martin Fowler's 'Feature Toggles (aka Feature Flags)' article by Pete Hodgson, which classifies toggles by how often they change and how long they live. That lifecycle framing is the key to avoiding flag debt."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why Feature Flags Matter",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Feature flags exist to reduce the blast radius of change. Every deploy is a bet that the new code is correct; flags turn that all-or-nothing bet into a dial you can turn up slowly and turn down instantly. This is the mechanism that makes continuous delivery safe: you can merge and deploy dozens of times a day because release is a separate, low-risk decision."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Concern",
+            "Without flags",
+            "With flags"
+          ],
+          "rows": [
+            [
+              "Unfinished work",
+              "Long-lived branches, painful merges",
+              "Merge to main dark, integrate continuously"
+            ],
+            [
+              "Risky change",
+              "Deploy to 100%, hope, hotfix if broken",
+              "Ramp 1% -> 5% -> 50% -> 100%, watch metrics"
+            ],
+            [
+              "Bad release",
+              "Roll back the whole deploy",
+              "Flip the flag off in seconds"
+            ],
+            [
+              "Experiments",
+              "Guess which design wins",
+              "A/B test variants and measure"
+            ],
+            [
+              "Ops incident",
+              "Wait for a fix and redeploy",
+              "Kill switch degrades gracefully"
+            ]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The trade-off is real: flags add conditional branches, configuration state, and a service dependency to your evaluation path. Managed carelessly they become flag debt, a swamp of stale toggles nobody dares delete. The rest of this topic is about capturing the benefit while controlling that cost."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "A flag is a branch in your code that stays live in production. Two flags means up to four code paths; ten flags means up to a thousand. You cannot test every combination, so flags must be short-lived and independent by design."
+        }
+      ]
+    },
+    {
+      "id": "flag-types",
+      "heading": "Flag Types and Their Lifecycles",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Not all flags are the same. Conflating them is a common senior-level mistake because their lifecycles, ownership, and cleanup urgency differ enormously. Four broad categories cover most real systems."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Release / rollout toggles: gate work-in-progress or a gradual rollout of a finished feature. Short-lived, owned by the delivery team, must be removed once the feature is fully live.",
+            "Experiment / A-B toggles: split users into variants to measure impact on a metric. Medium-lived, owned by product/data, removed when the experiment concludes and a winner is chosen.",
+            "Ops / kill-switch toggles: let operators disable a subsystem or degrade gracefully during incidents. Long-lived and intentionally permanent, owned by the operations team.",
+            "Permission / entitlement toggles: gate features by plan, tier, or license (e.g. 'enterprise export'). Effectively permanent product configuration, owned by product; often not really 'flags' but business rules."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Type",
+            "Purpose",
+            "Typical lifecycle",
+            "Cleanup urgency"
+          ],
+          "rows": [
+            [
+              "Release / rollout",
+              "Ship WIP dark; ramp a finished feature to 100%",
+              "Days to weeks",
+              "High - delete right after 100% rollout"
+            ],
+            [
+              "Experiment / A-B",
+              "Split traffic into variants to measure a metric",
+              "Weeks to months",
+              "Medium - remove when experiment ends"
+            ],
+            [
+              "Ops / kill-switch",
+              "Disable or degrade a subsystem during incidents",
+              "Permanent by design",
+              "Low - keep, but review annually"
+            ],
+            [
+              "Permission / entitlement",
+              "Gate features by plan, tier, or license",
+              "Lifetime of the product",
+              "None - it is product configuration"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The dangerous mistake is treating a release toggle like a permanent config value. Release flags that outlive their rollout become the primary source of flag debt: dead branches, confusing behavior, and combinatorial test risk."
+        }
+      ]
+    },
+    {
+      "id": "targeting",
+      "heading": "Targeting and Segmentation",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A flag is rarely a simple boolean for everyone. Real flag systems evaluate targeting rules against a context (user id, plan, country, app version, custom attributes) and return a variation. This lets you release to precisely the audience you want and ramp exposure over time."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Per-user targeting: explicitly turn a feature on for named users, e.g. the developers building it or a specific customer.",
+            "Per-cohort targeting: match on attributes such as plan == 'enterprise', country in ['DE','AT'], or betaTester == true.",
+            "Percentage rollout: bucket a stable percentage of the audience, e.g. 10% of all users, independent of who they are.",
+            "Gradual ramp: increase that percentage over time (1% -> 5% -> 25% -> 50% -> 100%) while watching error and latency metrics.",
+            "Canary: expose a tiny slice (internal users or 1% of traffic) first to catch problems before wide release."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Targeting rules are evaluated top to bottom: individual overrides first, then cohort rules, then a percentage rollout, then a default. This ordering means you can force-enable a feature for QA while the rest of the world is still on the percentage ramp. The order is deliberate, not incidental, and getting it wrong is a frequent bug."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A percentage rollout is not random per request. The same user must always land in the same bucket, or they will see a feature flicker on and off between page loads. That consistency requirement is why bucketing uses deterministic hashing, covered in the architecture section."
+        }
+      ]
+    },
+    {
+      "id": "progressive-delivery",
+      "heading": "Progressive Delivery: Canary, Blue-Green, Rings",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Progressive delivery is the practice of rolling out change in controlled increments with automated guardrails, rather than flipping everyone at once. Feature flags are one of the two engines that drive it (the other being traffic-shifting at the infrastructure layer). The strategies differ in what they shift and how fast they can roll back."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Canary release: route a small percentage of traffic (or users) to the new version, watch health metrics, then widen. A flag percentage ramp is a canary at the application layer.",
+            "Blue-green deployment: run two full environments (blue = current, green = new); cut traffic over all at once and roll back by flipping back to blue. Fast rollback, but no gradual exposure.",
+            "Ring deployment: expand through concentric audiences - ring 0 = your own team, ring 1 = internal company, ring 2 = beta customers, ring 3 = everyone. Microsoft popularized this model."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Strategy",
+            "What shifts",
+            "Exposure granularity",
+            "Rollback speed",
+            "Best for"
+          ],
+          "rows": [
+            [
+              "Canary",
+              "A percentage of traffic/users to new code",
+              "Fine (1% -> 100%)",
+              "Fast - lower the percentage",
+              "Ramping a risky change while watching metrics"
+            ],
+            [
+              "Blue-green",
+              "All traffic between two full environments",
+              "Coarse (all or nothing)",
+              "Instant - flip back to blue",
+              "Fast rollback and easy environment testing"
+            ],
+            [
+              "Ring",
+              "Concentric audiences over time",
+              "Medium (per audience ring)",
+              "Fast - stop advancing rings",
+              "Dogfooding then staged customer exposure"
+            ]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Flags and infrastructure traffic-shifting are complementary. Blue-green and pure canary operate on which build serves the request; feature flags operate on which behavior the running build exposes and can target by user identity, which infrastructure routing usually cannot. Mature teams use both: deploy the build via canary, then release the feature inside it via a flag ramp."
+        }
+      ]
+    },
+    {
+      "id": "ab-testing",
+      "heading": "A/B Testing and Experimentation",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The same targeting machinery that ramps a rollout can run experiments. In an A/B test you assign users deterministically to a control variant and one or more treatment variants, then compare a metric (conversion, revenue per user, retention) between groups. Because assignment is random-but-stable, the groups are statistically comparable and any difference in the metric can be attributed to the variant."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Define one primary metric up front; watching many metrics inflates false positives (the multiple-comparisons problem).",
+            "Assign users deterministically so each user stays in one variant for the whole experiment.",
+            "Run until you reach a pre-computed sample size, not until the result looks good.",
+            "Guard against novelty effects and seasonality by running full weekly cycles."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Peeking at results and stopping the moment p < 0.05 is a classic statistical trap. Repeatedly testing a running experiment massively inflates the false-positive rate. Decide the sample size and duration before you start, or use a sequential-testing method designed for continuous monitoring."
+        },
+        {
+          "type": "paragraph",
+          "text": "As an interview point, statistical significance answers 'is this difference likely real?' not 'is it large enough to matter?'. A change can be significant and still economically worthless. Seniors separate statistical significance from practical significance and insist on a minimum detectable effect before launching an experiment."
+        }
+      ]
+    },
+    {
+      "id": "evaluation-architecture",
+      "heading": "Flag Evaluation Architecture",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "How a flag is evaluated at runtime determines your latency, availability, and correctness. The dominant pattern is a client SDK embedded in your service. The SDK holds an in-memory copy of the flag rules and evaluates them locally, so a flag check is a microsecond in-process function call, not a network round trip on every request."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Local (in-SDK) evaluation: rules are cached in memory and evaluated in-process; near-zero latency and no per-check network dependency. Preferred for hot paths.",
+            "Remote evaluation: the SDK calls the flag service for each decision; simpler and centralizes logic, but adds latency and a hard runtime dependency on the service.",
+            "Streaming config: the SDK holds a persistent connection (SSE/WebSocket) and receives rule changes within a second - flips propagate almost instantly.",
+            "Polling config: the SDK fetches the ruleset on an interval (e.g. every 30s); simpler and firewall-friendly, but changes lag by up to the poll interval."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The flag service will eventually be unreachable. Every flag evaluation must have a safe default (fallback) baked into the calling code, so an outage degrades to a known-good behavior instead of throwing. Never let a flag lookup failure take down the request path."
+        },
+        {
+          "type": "paragraph",
+          "text": "The resilient evaluation path is: try the in-memory cache first; if the cache is warm, evaluate locally with zero network cost. If the cache was never populated (cold start during an outage) or an unexpected error occurs, return the caller-supplied default. The flag service being down should slow nothing and break nothing - it just means everyone gets the default variation until the cache refreshes."
+        }
+      ]
+    },
+    {
+      "id": "consistency-code",
+      "heading": "Deterministic Bucketing and Safe Evaluation",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The heart of a flag SDK is two pieces of logic: deterministic percentage bucketing (so the same user always lands in the same bucket) and a targeting evaluation with a guaranteed safe default on failure. Randomly bucketing per call would make a user see a feature flicker on and off; hashing the user id makes the assignment stable across requests, servers, and process restarts."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "text": "import { createHash } from 'crypto';\n\ninterface EvalContext {\n  userId: string;\n  attributes?: Record<string, string | number | boolean>;\n}\n\ninterface Rule {\n  attribute: string;\n  equals: string | number | boolean;\n  variation: boolean;\n}\n\ninterface FlagConfig {\n  key: string;\n  enabled: boolean;          // master off switch\n  individualOn: string[];    // userIds forced on\n  rules: Rule[];             // cohort targeting\n  rolloutPercent: number;    // 0..100 for the remainder\n}\n\n// Deterministic bucketing: hash (flagKey + userId) into a stable 0..99 bucket.\n// Same inputs -> same bucket, forever. Salting with the flag key means a user\n// is not correlated across different flags (avoids cross-flag bias).\nfunction bucketOf(flagKey: string, userId: string): number {\n  const digest = createHash('sha1').update(`${flagKey}:${userId}`).digest();\n  // Use the first 4 bytes as an unsigned int, then map to 0..99.\n  const n = digest.readUInt32BE(0);\n  return n % 100;\n}\n\n// Evaluate a flag with targeting + a guaranteed safe default.\nfunction evaluate(\n  flag: FlagConfig | undefined,\n  ctx: EvalContext,\n  defaultValue: boolean,\n): boolean {\n  try {\n    // Cache miss / service outage: config is undefined -> safe default.\n    if (!flag) return defaultValue;\n    // Master kill switch.\n    if (!flag.enabled) return false;\n    // 1) Individual overrides win first.\n    if (flag.individualOn.includes(ctx.userId)) return true;\n    // 2) Cohort rules next.\n    for (const rule of flag.rules) {\n      if (ctx.attributes?.[rule.attribute] === rule.equals) {\n        return rule.variation;\n      }\n    }\n    // 3) Deterministic percentage rollout for everyone else.\n    return bucketOf(flag.key, ctx.userId) < flag.rolloutPercent;\n  } catch {\n    // Any unexpected error must never break the request path.\n    return defaultValue;\n  }\n}\n\n// Usage on a hot path - note the mandatory safe default (false).\nconst showNewCheckout = evaluate(cache.get('new-checkout'), ctx, false);"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Two properties make this correct: bucketing is a pure function of (flagKey, userId) so a user is stable across servers and restarts, and every path returns defaultValue when the config is missing or an error is thrown. The flag service can be completely down and this code still returns a safe, consistent answer."
+        }
+      ]
+    },
+    {
+      "id": "lifecycle-debt",
+      "heading": "Flag Lifecycle and Tech Debt",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A flag has a birth and, for most types, a death. Release toggles in particular should be born with an expiry in mind. Flag debt is the accumulation of stale flags whose rollout finished long ago but whose code branches, config entries, and dashboard clutter remain. It is a real and well-documented failure mode at scale."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Create the flag with an owner, a type, and an expected removal date recorded in the tracker.",
+            "Ramp to 100% and let it soak; confirm the new path is healthy and no one relies on the old branch.",
+            "Remove the flag from code (delete the dead branch), then remove it from the flag service.",
+            "Automate detection: alert on flags older than N days, or on flags stuck at 100% or 0% for weeks."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Every long-lived release flag doubles the number of code paths that must (in principle) be tested and reasoned about. Stale flags cause real incidents: a forgotten flag flipped years later, or a default that silently changed behavior. Treat flag cleanup as part of 'done', not optional hygiene."
+        },
+        {
+          "type": "paragraph",
+          "text": "A useful discipline is a 'flag budget': cap the number of live temporary flags per service, and when the cap is hit you must retire an old one before adding a new one. Tools like LaunchDarkly and Unleash surface stale-flag reports to make this visible, but the discipline has to be owned by the team."
+        }
+      ]
+    },
+    {
+      "id": "testing-flags",
+      "heading": "Testing With Flags: Combinatorial Explosion",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Flags multiply the number of possible states of your system. With n independent boolean flags there are 2^n combinations of behavior, and you cannot test them all. The engineering answer is not more test matrices; it is keeping flags few, short-lived, and independent so the combinations that actually occur stay small."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Test the two states of each new flag (on and off) in isolation, not the full cross product.",
+            "Test the code path you are shipping to, i.e. the flag's intended final state, most thoroughly.",
+            "Keep flags independent: avoid flags whose correctness depends on the value of another flag.",
+            "Delete flags promptly so the live combination count never grows without bound."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Interdependent flags are a trap: if feature B only works when feature A is on, you have coupled two rollouts and multiplied your risk. Model such dependencies explicitly or merge them into one flag; never leave the dependency implicit."
+        }
+      ]
+    },
+    {
+      "id": "security",
+      "heading": "Security and Client-Side Flags",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A dangerous and common mistake is using a client-side feature flag as an authorization control. If a flag in the browser or mobile app decides whether a user 'can' access premium data, an attacker simply flips the flag in their own client, or calls the API directly, and gets in. The flag hid the button; it did not protect the data."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "text": "// WRONG: client-side flag is the only gate. Trivially bypassed by the user.\nif (flags.evaluate('premium-export', ctx, false)) {\n  renderExportButton();\n}\n// Attacker just POSTs /api/export directly -> data leaks.\n\n// RIGHT: the flag controls UX; the SERVER independently enforces entitlement.\napp.post('/api/export', (req, res) => {\n  if (!req.user.plan.includes('premium')) {\n    return res.status(403).json({ error: 'forbidden' });\n  }\n  // ...perform export\n});\n// The client flag may still hide the button for a clean UX,\n// but authorization is enforced server-side, every time."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Client-side flags are UX hints, never a security boundary - anything shipped to the client is attacker-controlled.",
+            "Entitlement checks must be enforced on the server against a trusted identity, independently of any flag.",
+            "Do not ship secret business logic or unreleased data to the client behind an 'off' flag; the payload is still visible.",
+            "Treat the flag payload itself as public: do not encode sensitive targeting rules that leak customer lists to the client."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Rule of thumb: a feature flag can decide what a user sees, but only server-side authorization can decide what a user is allowed to do. Never conflate the two."
+        }
+      ]
+    },
+    {
+      "id": "tools-observability",
+      "heading": "Tools, Standards, and Observability",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "You rarely build a flag platform from scratch. LaunchDarkly is the dominant commercial SaaS; Unleash and Flagsmith are popular open-source options you can self-host; Flipt and GrowthBook target experimentation. OpenFeature is a CNCF standard that provides a vendor-neutral SDK API so your code depends on an abstraction and you can swap the backend provider without rewriting evaluation calls."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Tool / standard",
+            "What it is",
+            "Notable for"
+          ],
+          "rows": [
+            [
+              "LaunchDarkly",
+              "Commercial SaaS flag platform",
+              "Mature targeting, streaming SDKs, experimentation"
+            ],
+            [
+              "Unleash",
+              "Open-source, self-hostable",
+              "Popular OSS choice, flexible strategies"
+            ],
+            [
+              "Flagsmith",
+              "Open-source / SaaS",
+              "Self-host friendly, remote config"
+            ],
+            [
+              "OpenFeature",
+              "CNCF vendor-neutral standard",
+              "One SDK API, pluggable providers"
+            ]
+          ]
+        },
+        {
+          "type": "list",
+          "items": [
+            "Emit an event for every flag evaluation (flag key, variation served, context) so you can correlate a metric change with a flag flip.",
+            "Attach the active variation to your traces and logs so a spike in errors points straight at the responsible flag.",
+            "Alert on flag flips in production the way you alert on deploys - a flip is a change to production behavior.",
+            "Track flag age and rollout percentage as first-class telemetry to surface flag debt."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Observability closes the loop that makes progressive delivery safe: you ramp a flag, watch error rate and latency by variation, and either advance or roll back. Without per-variation metrics, a canary is just a slower way to break for a subset of users."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The teams that get durable value from flags treat them as disciplined, temporary infrastructure rather than a place to stash logic forever."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Always pass a safe default at the call site; assume the flag service can be down.",
+            "Use deterministic hash bucketing so a user gets a consistent variation across requests and servers.",
+            "Give every temporary flag an owner, a type, and an expiry; delete it the moment its rollout is done.",
+            "Keep flags independent and few; interdependent flags multiply risk and test surface.",
+            "Never gate authorization on a client-side flag; enforce entitlements on the server.",
+            "Ramp behind metrics: 1% -> 5% -> 25% -> 50% -> 100% with automated rollback triggers.",
+            "Emit an evaluation event per decision and alert on flag flips like you alert on deploys."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "A well-run flag program lets a team deploy continuously, release fearlessly, ramp safely, and kill instantly - while keeping the number of live flags small enough that the system stays comprehensible."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "rollout-ramp",
+      "title": "Gradual Percentage Rollout / Canary Ramp",
+      "type": "mermaid",
+      "content": "flowchart LR\n  A[Deploy dark 0 percent] --> B[Canary 1 percent internal]\n  B --> C{Metrics healthy}\n  C -- No --> K[Kill switch to 0]\n  C -- Yes --> D[Ramp 5 percent]\n  D --> E{Metrics healthy}\n  E -- No --> K\n  E -- Yes --> F[Ramp 25 percent]\n  F --> G[Ramp 50 percent]\n  G --> H[Full release 100 percent]\n  H --> I[Remove flag - cleanup]"
+    },
+    {
+      "id": "evaluation-path",
+      "title": "Flag Evaluation Path: Cache First, Safe Default on Outage",
+      "type": "mermaid",
+      "content": "flowchart TD\n  A[App calls evaluate flag ctx default] --> B{Local cache warm}\n  B -- Yes --> C[Evaluate rules locally]\n  C --> D[Return variation]\n  B -- No cold or outage --> E[Return safe default]\n  F[Flag service] -. streaming or polling .-> G[SDK cache]\n  G --> B\n  F -. service down .-> E"
+    },
+    {
+      "id": "eval-order-ascii",
+      "title": "Targeting Rule Evaluation Order",
+      "type": "ascii",
+      "content": "  evaluate(flag, ctx, default)\n        |\n        v\n  [ flag missing? ] --yes--> return DEFAULT (safe)\n        | no\n        v\n  [ master enabled? ] --no--> return FALSE\n        | yes\n        v\n  [ individual override? ] --match--> return TRUE\n        | no match\n        v\n  [ cohort rule match? ] --match--> return rule.variation\n        | no match\n        v\n  [ bucket(flagKey,userId) < rollout% ] --> TRUE / FALSE"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-deploy-vs-release",
+      "question": "What does it mean that feature flags 'decouple deploy from release', and why is that valuable?",
+      "answer": "Deploying is the act of putting code onto production servers; releasing is the act of exposing new behavior to users. Without flags these happen together: the instant you deploy, everyone sees the change. A feature flag inserts a runtime switch so you can deploy code that is present but off (dark), then release it later by flipping the flag. This is valuable because it turns an all-or-nothing bet into a controllable dial: you can deploy continuously, release when ready, ramp gradually, and roll back by flipping the flag instead of redeploying. It is also the enabler for trunk-based development, since unfinished work can be merged to main behind an off flag. The result is smaller, safer, more frequent changes.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": [
+        "deploy-vs-release",
+        "trunk-based-development"
+      ],
+      "followUps": [
+        "How does this enable trunk-based development?",
+        "What is 'dark launching'?"
+      ]
+    },
+    {
+      "id": "q-deterministic-bucketing",
+      "question": "Why must percentage rollout use deterministic hashing rather than a random number per evaluation?",
+      "answer": "If you picked a fresh random number on every flag check, a user near the rollout boundary would sometimes fall inside the percentage and sometimes outside, so the feature would flicker on and off between requests and even within a single session. That is a broken, confusing experience and it also corrupts experiments because a user could be counted in both variants. Deterministic bucketing hashes a stable key such as (flagKey + userId) into a fixed bucket from 0 to 99, so the same user always lands in the same bucket regardless of which server, process, or moment handles the request. Salting the hash with the flag key also decorrelates a user's bucket across different flags, so being in the treatment for one feature does not bias their assignment for another. The property you need is a pure, stable function of identity, and hashing gives exactly that.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": [
+        "bucketing",
+        "consistency",
+        "hashing"
+      ],
+      "followUps": [
+        "Why salt the hash with the flag key?",
+        "How does this support A/B test correctness?"
+      ]
+    },
+    {
+      "id": "q-safe-default",
+      "question": "What should a flag evaluation return when the flag service is unreachable, and how do you guarantee it?",
+      "answer": "It must return a safe default (fallback) chosen by the calling code, never throw and never block. The flag service is a runtime dependency that will eventually be down, restarting, or slow, and a flag check sits on the request path, so an outage must degrade to known-good behavior rather than take down the feature. You guarantee this two ways. First, the SDK evaluates from an in-memory cache, so once the cache is warm it needs no network at all; a service outage just means the cache stops updating. Second, every evaluate() call at the call site passes an explicit default that is returned on cache miss, cold start, or any thrown error, wrapped in a try/catch so nothing escapes. The safe default is usually 'off' (fall back to the old, proven behavior), so an outage of the flag system quietly reverts everyone to the pre-feature state.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": [
+        "resilience",
+        "fallback",
+        "availability"
+      ],
+      "followUps": [
+        "Should the default usually be on or off, and why?",
+        "How does caching interact with the default?"
+      ]
+    },
+    {
+      "id": "q-flag-debt",
+      "question": "What is flag debt and how do you keep it under control?",
+      "answer": "Flag debt is the accumulation of stale flags whose purpose has ended but whose code branches, config entries, and dashboard clutter remain. It is most acute with release toggles, which should be short-lived but often outlive their rollout because deleting them is nobody's priority. Debt is harmful because each live flag is a branch in production that must be reasoned about and (in principle) tested, and forgotten flags cause real incidents when someone flips one years later or a stale default silently changes behavior. You control it by giving every temporary flag an owner, a type, and an expected removal date at creation, and by making cleanup part of the definition of done: ramp to 100%, soak, delete the dead branch from code, then remove the flag from the service. Automation helps a lot: alert on flags older than N days or stuck at 0%/100%, and enforce a 'flag budget' cap so adding a flag requires retiring one.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": [
+        "flag-debt",
+        "lifecycle",
+        "cleanup"
+      ],
+      "followUps": [
+        "Which flag type accumulates debt fastest?",
+        "What is a flag budget?"
+      ]
+    },
+    {
+      "id": "q-client-authz",
+      "question": "Why is it dangerous to gate authorization solely on a client-side feature flag?",
+      "answer": "Anything that runs in the browser or a mobile app is fully under the attacker's control, including the flag value. If a client-side flag is the only thing deciding whether a user can access premium or restricted functionality, the user can simply flip the flag in their own client, or bypass the UI entirely and call the API directly, and get access. The flag hid a button; it never protected the data. The correct model is that a flag controls UX presentation while the server independently enforces entitlement against a trusted identity on every request. It is also unsafe to ship secret logic or unreleased data to the client behind an 'off' flag, because the payload is still delivered and inspectable. The rule of thumb is that a flag decides what a user sees, but only server-side authorization decides what a user is allowed to do.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": [
+        "security",
+        "authorization",
+        "client-side"
+      ],
+      "followUps": [
+        "Where should the entitlement check live?",
+        "Can you still use the flag for UX?"
+      ]
+    },
+    {
+      "id": "q-combinatorial",
+      "question": "How do feature flags create a testing combinatorial explosion, and how do you manage it?",
+      "answer": "Each independent boolean flag doubles the number of possible behavior states of the system: with n flags there are up to 2^n combinations, so even ten flags is over a thousand states you cannot exhaustively test. The temptation to build ever-larger test matrices is a losing battle. The real fix is architectural: keep flags few, short-lived, and independent so the combinations that actually occur in production stay small. In tests you cover each new flag's two states in isolation and test most thoroughly the final state you are shipping toward, rather than the full cross product. You avoid interdependent flags, where feature B only works if feature A is on, because that couples rollouts and multiplies risk; if a dependency is real, model it explicitly or merge the flags. Prompt deletion of finished flags is what keeps the live combination count bounded over time.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": [
+        "testing",
+        "combinatorial-explosion"
+      ],
+      "followUps": [
+        "Why are interdependent flags especially bad?",
+        "What do you actually test for a new flag?"
+      ]
+    },
+    {
+      "id": "q-canary-vs-bluegreen",
+      "question": "Compare canary, blue-green, and ring deployments. When would you choose each?",
+      "answer": "Canary routes a small percentage of traffic or users to the new version, lets you watch health metrics, and then widens; rollback is fast because you just lower the percentage, and it gives fine-grained exposure control, so it is the default for ramping a risky change under observation. Blue-green runs two complete environments and cuts all traffic from the old (blue) to the new (green) at once; it offers instant rollback by flipping back to blue and easy pre-production testing of green, but it is all-or-nothing with no gradual exposure. Ring deployment expands through concentric audiences - your team, then the whole company, then beta customers, then everyone - which is ideal when you want to dogfood before staged customer exposure. Feature flags implement canary and ring at the application layer and can target by user identity, which infrastructure routing usually cannot; blue-green is an infrastructure-level strategy. Mature teams combine them: canary the build, then flag-ramp the feature inside it.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": [
+        "canary",
+        "blue-green",
+        "ring",
+        "progressive-delivery"
+      ],
+      "followUps": [
+        "Where do flags fit versus infra traffic-shifting?",
+        "Which gives the fastest rollback?"
+      ]
+    },
+    {
+      "id": "q-flag-types",
+      "question": "What are the main types of feature flags and how do their lifecycles differ?",
+      "answer": "There are four broad categories with very different lifecycles. Release/rollout toggles gate work-in-progress or a gradual rollout; they are short-lived (days to weeks) and must be deleted right after reaching 100%. Experiment/A-B toggles split users into variants to measure a metric; they are medium-lived (weeks to months) and removed when the experiment concludes. Ops/kill-switch toggles let operators disable or degrade a subsystem during incidents; they are permanent by design and owned by operations. Permission/entitlement toggles gate features by plan, tier, or license; they effectively live forever because they are product configuration, not temporary flags. The lifecycles matter because conflating them is a common mistake: treating a release toggle as if it were permanent config is the primary source of flag debt.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": [
+        "flag-types",
+        "lifecycle"
+      ],
+      "followUps": [
+        "Which type should you delete most urgently?",
+        "Is an entitlement flag really a flag?"
+      ]
+    },
+    {
+      "id": "q-targeting-order",
+      "question": "In what order should targeting rules be evaluated, and why does the order matter?",
+      "answer": "The standard order is: master enabled check, then individual user overrides, then cohort rules, then percentage rollout, then a default. Individual overrides come first so you can force-enable a feature for QA or a specific customer regardless of the broader rollout state. Cohort rules (attribute matches like plan == 'enterprise') come next to target segments. The percentage rollout applies to everyone who did not match a more specific rule, and the default catches the rest. Order matters because rules are checked top to bottom and the first match wins; if you put the percentage rollout before individual overrides, you could not reliably force a user on during a partial ramp. Getting this ordering wrong is a frequent and subtle bug.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": [
+        "targeting",
+        "segmentation"
+      ],
+      "followUps": [
+        "How would you force a feature on for QA only?",
+        "What happens if two cohort rules match?"
+      ]
+    },
+    {
+      "id": "q-streaming-vs-polling",
+      "question": "What is the difference between streaming and polling for flag config delivery, and what are the trade-offs?",
+      "answer": "Both keep the SDK's in-memory ruleset up to date, but differently. Streaming holds a persistent connection (server-sent events or WebSocket) so rule changes are pushed to the SDK within about a second, making a flag flip propagate almost instantly across all clients. Polling has the SDK fetch the ruleset on a fixed interval, say every 30 seconds, so changes lag by up to that interval. Streaming gives the fastest kill-switch response but requires persistent connections that some firewalls and proxies dislike and that add connection overhead at high fleet counts. Polling is simpler, more firewall-friendly, and easier to cache behind a CDN, at the cost of propagation latency. Both should still evaluate locally from the cache and fall back to a safe default when the connection is lost.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": [
+        "architecture",
+        "streaming",
+        "polling"
+      ],
+      "followUps": [
+        "Which gives a faster kill switch?",
+        "How do both handle a lost connection?"
+      ]
+    },
+    {
+      "id": "q-local-vs-remote",
+      "question": "What is the difference between local (in-SDK) and remote flag evaluation, and which do you prefer on a hot path?",
+      "answer": "In local evaluation the SDK holds the flag rules in memory and evaluates them in-process, so a flag check is a microsecond function call with no network dependency per decision. In remote evaluation the SDK calls the flag service for each decision, which centralizes logic and keeps rules off the client but adds network latency and a hard runtime dependency on the service for every check. On a hot path you strongly prefer local evaluation because it is fast and resilient: an outage of the flag service just freezes the cached rules rather than adding latency or failures to every request. Remote evaluation can make sense for very large or sensitive rulesets you do not want to ship to clients, or for thin clients that cannot hold state, but you accept the latency and availability cost. Either way, a safe default must cover the failure case.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": [
+        "architecture",
+        "latency",
+        "caching"
+      ],
+      "followUps": [
+        "When is remote evaluation justified?",
+        "How does local eval behave during an outage?"
+      ]
+    },
+    {
+      "id": "q-ab-significance",
+      "question": "What statistical caveats matter when running an A/B test with feature flags?",
+      "answer": "The main traps are peeking and multiple comparisons. Peeking means repeatedly checking a running experiment and stopping the instant p drops below 0.05; because you get many chances to cross the threshold by chance, this massively inflates the false-positive rate. The fix is to compute the required sample size and duration in advance and wait, or to use a sequential-testing method designed for continuous monitoring. Watching many metrics at once has the same problem, so you define one primary metric up front. You should also run full weekly cycles to avoid seasonality and novelty effects, and assign users deterministically so each stays in one variant. Finally, statistical significance answers 'is this difference likely real?' not 'is it big enough to matter?', so you separate statistical from practical significance and set a minimum detectable effect before launching.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": [
+        "ab-testing",
+        "statistics",
+        "experimentation"
+      ],
+      "followUps": [
+        "Why is peeking dangerous?",
+        "What is a minimum detectable effect?"
+      ]
+    },
+    {
+      "id": "q-kill-switch",
+      "question": "What is a kill switch (ops toggle) and how does it differ from a release toggle?",
+      "answer": "A kill switch is an operations-oriented flag that lets operators disable or degrade a subsystem quickly during an incident, for example turning off a non-essential recommendation service when it starts failing so the rest of the page still loads. It differs from a release toggle in intent and lifecycle: a release toggle is temporary and exists to roll out a specific feature until it reaches 100% and is deleted, whereas a kill switch is intentionally permanent infrastructure owned by the operations team and reviewed rather than removed. Kill switches favor a safe default of the degraded-but-stable behavior, and they are often wired to alerting and runbooks. Because they can be flipped under pressure during an incident, they need to be simple, well-documented, and fast to propagate, which is one argument for streaming config delivery.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": [
+        "kill-switch",
+        "ops-toggle",
+        "resilience"
+      ],
+      "followUps": [
+        "What default should a kill switch fall back to?",
+        "Why is streaming useful for kill switches?"
+      ]
+    },
+    {
+      "id": "q-openfeature",
+      "question": "What problem does OpenFeature solve, and why would a team adopt it?",
+      "answer": "OpenFeature is a CNCF vendor-neutral standard that defines a common SDK API for feature flag evaluation, with pluggable providers behind it. The problem it solves is vendor lock-in and inconsistency: without a standard, your application code is written directly against a specific vendor's SDK, so switching providers or supporting multiple backends means rewriting every evaluation call. With OpenFeature your code calls a standard client (for example getBooleanValue(key, default, context)) and a provider adapter maps that to LaunchDarkly, Unleash, Flagsmith, or a custom backend. A team adopts it to keep flag evaluation portable, to standardize instrumentation and hooks across services, and to avoid coupling business code to a commercial dependency. It does not replace a flag management backend; it standardizes how your code talks to whatever backend you choose.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": [
+        "openfeature",
+        "tools",
+        "standards"
+      ],
+      "followUps": [
+        "Does OpenFeature store flags itself?",
+        "How does it reduce vendor lock-in?"
+      ]
+    },
+    {
+      "id": "q-observability",
+      "question": "How should you make feature flags observable, and why does it matter for progressive delivery?",
+      "answer": "You emit an event for every flag evaluation recording the flag key, the variation served, and enough of the context to segment it, and you attach the active variation to your traces and logs. This lets you correlate any change in error rate, latency, or a business metric with a specific flag and variation, which is exactly what makes a ramp safe: you increase the percentage, watch metrics broken down by variation, and either advance or roll back. You also alert on flag flips in production the same way you alert on deploys, because a flip is a change to production behavior. Tracking flag age and rollout percentage as telemetry surfaces flag debt. Without per-variation metrics a canary is just a slower way to break for a subset of users, because you have no signal telling you to stop.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": [
+        "observability",
+        "metrics",
+        "progressive-delivery"
+      ],
+      "followUps": [
+        "Why alert on flag flips?",
+        "What does per-variation telemetry enable?"
+      ]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-flag-evaluator",
+      "title": "Build a Resilient Feature-Flag Evaluator",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "prompt": "Implement a feature-flag evaluator in TypeScript. It must support: (1) a master enable switch, (2) individual user overrides, (3) attribute-based cohort rules, (4) a deterministic percentage rollout that puts the same user in the same bucket every time by hashing the user id, and (5) a guaranteed safe default returned whenever the flag config is missing or an error occurs. Evaluation order must be: missing-config -> default, master off -> false, individual override -> true, cohort rule -> its variation, else percentage rollout.",
+      "hints": [
+        "Hash a stable key like flagKey + ':' + userId and map it to a bucket 0..99 so the assignment is pure and repeatable.",
+        "Salt the hash with the flag key so a user is not correlated across different flags.",
+        "Wrap the whole evaluation in try/catch and return the caller-supplied default on any failure or missing config."
+      ],
+      "solutionCode": "import { createHash } from 'crypto';\n\ninterface EvalContext {\n  userId: string;\n  attributes?: Record<string, string | number | boolean>;\n}\ninterface Rule {\n  attribute: string;\n  equals: string | number | boolean;\n  variation: boolean;\n}\ninterface FlagConfig {\n  key: string;\n  enabled: boolean;\n  individualOn: string[];\n  rules: Rule[];\n  rolloutPercent: number; // 0..100\n}\n\n// Pure, deterministic bucketing: same (flagKey,userId) -> same 0..99 bucket.\nexport function bucketOf(flagKey: string, userId: string): number {\n  const digest = createHash('sha1').update(`${flagKey}:${userId}`).digest();\n  return digest.readUInt32BE(0) % 100;\n}\n\nexport function evaluate(\n  flag: FlagConfig | undefined,\n  ctx: EvalContext,\n  defaultValue: boolean,\n): boolean {\n  try {\n    if (!flag) return defaultValue;              // missing config / outage\n    if (!flag.enabled) return false;             // master kill switch\n    if (flag.individualOn.includes(ctx.userId))  // individual override\n      return true;\n    for (const rule of flag.rules) {             // cohort rules\n      if (ctx.attributes?.[rule.attribute] === rule.equals) {\n        return rule.variation;\n      }\n    }\n    // deterministic percentage rollout for the remainder\n    return bucketOf(flag.key, ctx.userId) < flag.rolloutPercent;\n  } catch {\n    return defaultValue;                         // never break the request path\n  }\n}\n\n// --- quick sanity checks ---\nconst flag: FlagConfig = {\n  key: 'new-checkout',\n  enabled: true,\n  individualOn: ['qa-1'],\n  rules: [{ attribute: 'plan', equals: 'enterprise', variation: true }],\n  rolloutPercent: 10,\n};\n\n// stable: same user always same result\nconst u = { userId: 'user-42' };\nconsole.log(evaluate(flag, u, false) === evaluate(flag, u, false)); // true\n// override wins\nconsole.log(evaluate(flag, { userId: 'qa-1' }, false)); // true\n// cohort wins over rollout\nconsole.log(evaluate(flag, { userId: 'x', attributes: { plan: 'enterprise' } }, false)); // true\n// outage -> safe default\nconsole.log(evaluate(undefined, u, false)); // false",
+      "solutionLanguage": "typescript",
+      "explanation": "The evaluator encodes the two hard requirements of a real flag SDK: deterministic bucketing and a guaranteed safe default. bucketOf is a pure function of (flagKey, userId): it hashes the salted key with SHA-1, reads the first four bytes as an unsigned integer, and maps to a 0..99 bucket, so the same user lands in the same bucket on every server and after every restart, which is what prevents a feature from flickering on and off. Salting with the flag key decorrelates a user's bucket across different flags so being in one treatment does not bias another. The evaluate function applies rules in strict precedence order - missing config, master switch, individual overrides, cohort rules, then the percentage rollout - so a QA user can be forced on during a partial ramp. Every failure path, whether a missing config from a cold cache during an outage or an unexpected thrown error caught by the try/catch, returns the caller-supplied default, so the flag service being down degrades to known-good behavior instead of breaking the request. The sanity checks demonstrate stability, override precedence, cohort precedence over rollout, and the outage fallback. In production you would source the FlagConfig from an in-memory cache kept fresh by a streaming or polling connection, but the evaluation logic stays exactly this.",
+      "relatedTopic": "feature-flags"
+    },
+    {
+      "id": "ch-rollout-plan",
+      "title": "Design a Gradual Rollout and Kill-Switch Plan",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "prompt": "You must ship a risky rewrite of the payment-processing path. Design and encode a rollout plan as a small TypeScript controller that advances a flag through canary and ramp stages only while health metrics are within thresholds, and that trips a kill switch (drops to 0%) when error rate or latency breaches a limit. Represent stages, a health check, and the advance/rollback decision.",
+      "hints": [
+        "Model the ramp as an ordered list of percentages: 0 (dark) -> 1 (canary) -> 5 -> 25 -> 50 -> 100.",
+        "Only advance to the next stage when the current stage has soaked and metrics are healthy; drop straight to 0 on a breach.",
+        "Keep the kill switch independent so an operator can force 0% at any time regardless of the ramp state."
+      ],
+      "solutionCode": "interface Health {\n  errorRate: number;   // 0..1\n  p99LatencyMs: number;\n}\ninterface Thresholds {\n  maxErrorRate: number;\n  maxP99Ms: number;\n}\n\nclass RolloutController {\n  // dark -> canary -> ramp -> full\n  private readonly stages = [0, 1, 5, 25, 50, 100];\n  private stageIndex = 0;\n  private killed = false;\n\n  constructor(private readonly thresholds: Thresholds) {}\n\n  get currentPercent(): number {\n    return this.killed ? 0 : this.stages[this.stageIndex];\n  }\n\n  private healthy(h: Health): boolean {\n    return (\n      h.errorRate <= this.thresholds.maxErrorRate &&\n      h.p99LatencyMs <= this.thresholds.maxP99Ms\n    );\n  }\n\n  // Operator or automation can force the kill switch at any time.\n  kill(reason: string): void {\n    this.killed = true;\n    console.warn(`KILL SWITCH: payments rollout -> 0% (${reason})`);\n  }\n\n  // Call once per soak window with fresh metrics.\n  tick(h: Health): number {\n    if (this.killed) return 0;\n    if (!this.healthy(h)) {\n      this.kill(\n        `errorRate=${h.errorRate} p99=${h.p99LatencyMs}ms breached threshold`,\n      );\n      return 0;\n    }\n    // Healthy: advance one stage if not already at 100%.\n    if (this.stageIndex < this.stages.length - 1) {\n      this.stageIndex++;\n      console.log(`payments rollout advanced -> ${this.currentPercent}%`);\n    }\n    return this.currentPercent;\n  }\n}\n\n// --- simulation ---\nconst rc = new RolloutController({ maxErrorRate: 0.02, maxP99Ms: 400 });\nrc.tick({ errorRate: 0.001, p99LatencyMs: 210 }); // -> 1% canary\nrc.tick({ errorRate: 0.005, p99LatencyMs: 260 }); // -> 5%\nrc.tick({ errorRate: 0.03,  p99LatencyMs: 380 }); // breach -> kill to 0%\nconsole.log('final percent:', rc.currentPercent); // 0",
+      "solutionLanguage": "typescript",
+      "explanation": "The controller turns the abstract rollout policy into executable guardrails. The ramp is an ordered list of percentages starting at 0 (deployed dark) and progressing through a 1% canary before widening, which is exactly the safe pattern for a risky payment rewrite: expose a tiny slice first, then widen only under observation. Each tick represents one soak window and takes fresh health metrics; the controller advances exactly one stage when metrics are within thresholds and otherwise trips the kill switch, dropping to 0% immediately, so a breach never lets the rollout continue. The kill switch is modeled independently of the ramp index through the killed flag, so once tripped currentPercent returns 0 regardless of stageIndex, and an operator can call kill() manually at any time during an incident - the ops toggle is deliberately separate from the release ramp. Thresholds on error rate and p99 latency are injected, making the policy tunable per service. The simulation shows the flag advancing from canary to 5% on healthy ticks and then collapsing to 0% the moment a tick reports an error rate above the 2% limit. In a real system tick would be driven by your metrics pipeline and currentPercent would feed the flag's rolloutPercent, closing the loop between observability and progressive delivery.",
+      "relatedTopic": "feature-flags"
+    }
+  ],
+  "references": [
+    {
+      "label": "Martin Fowler / Pete Hodgson - Feature Toggles (aka Feature Flags)",
+      "url": "https://martinfowler.com/articles/feature-toggles.html"
+    },
+    {
+      "label": "LaunchDarkly Documentation",
+      "url": "https://docs.launchdarkly.com/"
+    },
+    {
+      "label": "Unleash Documentation",
+      "url": "https://docs.getunleash.io/"
+    },
+    {
+      "label": "OpenFeature - CNCF Feature Flag Standard",
+      "url": "https://openfeature.dev/"
+    },
+    {
+      "label": "Progressive Delivery (LaunchDarkly overview)",
+      "url": "https://launchdarkly.com/blog/what-is-progressive-delivery/"
+    },
+    {
+      "label": "Trunk Based Development",
+      "url": "https://trunkbaseddevelopment.com/"
+    }
+  ]
+}

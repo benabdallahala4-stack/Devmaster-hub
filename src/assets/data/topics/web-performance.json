@@ -1,0 +1,695 @@
+{
+  "id": "web-performance",
+  "title": "Web Performance & Core Web Vitals",
+  "category": "Frontend",
+  "subcategory": "Performance",
+  "difficulty": "senior",
+  "tags": [
+    "web-performance",
+    "core-web-vitals",
+    "lcp",
+    "cls",
+    "inp",
+    "critical-rendering-path",
+    "lazy-loading",
+    "lighthouse"
+  ],
+  "description": "A staff-level treatment of browser performance: the critical rendering path, Core Web Vitals (LCP, CLS, INP), the RAIL model, and the loading, rendering, image, font, and JavaScript techniques that move real-user metrics. Written for engineers who must diagnose regressions with field and lab data, not just chase a green Lighthouse score.",
+  "estReadMinutes": 31,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "What 'Web Performance' Actually Means",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Web performance is not a single number. It is a family of questions: how fast does something useful appear (loading), how quickly does the page respond to input (interactivity), and does the layout stay stable while it loads (visual stability). Users experience these as distinct feelings, and Google's Core Web Vitals encode them as three metrics: Largest Contentful Paint (LCP), Interaction to Next Paint (INP), and Cumulative Layout Shift (CLS). At senior level you are expected to reason about the browser mechanics beneath each metric, not just recite thresholds."
+        },
+        {
+          "type": "paragraph",
+          "text": "The central mental model is the main thread. Almost everything the browser does for your page, parsing HTML, running JavaScript, computing style, layout, paint, and handling input, competes for one thread. Performance work is largely the discipline of keeping that thread free: doing less work, doing it later, doing it off-thread, or doing it before the user asks. Everything in this topic is an application of that idea."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "This topic is frontend/browser performance and is distinct from backend performance-engineering. Here the bottleneck is usually the user's device and network, not your database. A p50 phone on a 4G connection is your real target, not your MacBook on office wifi."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Loading: how fast meaningful content paints (LCP, TTFB, FCP).",
+            "Interactivity: how fast the page responds to input (INP, replaced FID in 2024).",
+            "Visual stability: whether content jumps around while loading (CLS).",
+            "Field data (real users) is the source of truth; lab data (Lighthouse) is a debugging tool."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why Performance Is a Product Concern",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Performance is not a vanity metric; it correlates directly with revenue, retention, and reach. Study after study shows that added latency depresses conversion: users abandon slow pages, and the effect is nonlinear once you cross a few seconds. For content and commerce sites the business case is usually strong enough that performance budgets are treated as release gates."
+        },
+        {
+          "type": "paragraph",
+          "text": "There is also a ranking dimension. Core Web Vitals are a Google Search ranking signal, measured on real Chrome users via the Chrome User Experience Report (CrUX). Two pages with equal content relevance can rank differently based on field vitals. That makes performance one of the few engineering concerns with a direct, measurable SEO consequence."
+        },
+        {
+          "type": "paragraph",
+          "text": "Finally, performance is an accessibility and equity issue. Your median user is often on a mid-tier Android device over a congested mobile network, not the flagship phone on the engineering team's desk. A 2 MB JavaScript bundle that feels instant in development can take many seconds to parse and execute on that device. Testing under throttled CPU and network is how you avoid shipping an experience only your team can enjoy."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The most common senior anti-pattern is optimizing lab scores on a fast machine. Lighthouse on your laptop can show 99 while real users see a p75 LCP of 5 seconds. Always confirm wins in field data before declaring victory."
+        }
+      ]
+    },
+    {
+      "id": "critical-rendering-path",
+      "heading": "The Critical Rendering Path",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The critical rendering path (CRP) is the sequence the browser follows to turn bytes into pixels. Understanding it tells you exactly why a resource is render-blocking and where a metric is being spent. The stages are: parse HTML into the DOM, parse CSS into the CSSOM, combine them into the render tree, run layout (compute geometry), paint (fill pixels into layers), and composite (assemble layers on the GPU)."
+        },
+        {
+          "type": "list",
+          "items": [
+            "DOM: the HTML parser builds the Document Object Model tree incrementally as bytes arrive.",
+            "CSSOM: CSS is parsed into the CSS Object Model. CSS is render-blocking because the browser will not paint until it knows the computed styles.",
+            "Render tree: DOM and CSSOM are merged; nodes with display:none are excluded.",
+            "Layout (reflow): compute the exact position and size of every box. Depends on viewport and content.",
+            "Paint: rasterize text, colors, borders, and images into layers.",
+            "Composite: the compositor thread assembles layers, applying transforms and opacity on the GPU."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Two facts do most of the work in interviews. First, a synchronous script in the head is parser-blocking: the parser stops at the <script> tag, and if that script reads style it must also wait for the CSSOM, so CSS can transitively block scripts. Second, painting and compositing are the only cheap phases; if you can express an animation as a compositor-only change (transform and opacity), you skip layout and paint entirely, which is why those two properties animate smoothly at 60fps."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Minimize the critical path by (1) reducing the number of critical resources, (2) reducing their bytes, and (3) shortening the round trips to fetch them. Inlining critical CSS, deferring non-critical JS, and preconnecting to key origins all attack these three levers."
+        }
+      ]
+    },
+    {
+      "id": "core-web-vitals",
+      "heading": "Core Web Vitals: LCP, CLS, INP",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Core Web Vitals are the subset of metrics Google considers essential for user experience. Each has a 'good' threshold measured at the 75th percentile of page loads, segmented by device. You do not pass by having a good median; a quarter of your users can still be having a bad time. The three current vitals and their thresholds are summarized below."
+        },
+        {
+          "type": "table",
+          "headers": ["Metric", "What it measures", "Good (p75)", "Common fix"],
+          "rows": [
+            ["LCP (Largest Contentful Paint)", "Time until the largest content element (hero image, heading block, or video poster) is rendered in the viewport", "<= 2.5s", "Preload the LCP image, fix slow TTFB, remove render-blocking CSS/JS, use fetchpriority=high"],
+            ["INP (Interaction to Next Paint)", "Overall responsiveness: worst-case latency from user interaction to the next visual update, across the whole visit", "<= 200ms", "Break up long tasks, yield to the main thread, move heavy work to web workers, reduce hydration cost"],
+            ["CLS (Cumulative Layout Shift)", "Sum of unexpected layout shift scores over the page lifetime (impact fraction times distance fraction)", "<= 0.1", "Set width/height or aspect-ratio on images and embeds, reserve space for ads/fonts, avoid inserting content above existing content"],
+            ["TTFB (Time To First Byte)", "Server + network time until the first response byte; a diagnostic that gates LCP", "<= 0.8s", "CDN edge caching, server-side caching, streaming SSR, reduce redirects"],
+            ["FCP (First Contentful Paint)", "Time until the first text or image paints; a diagnostic for LCP and loading", "<= 1.8s", "Inline critical CSS, defer non-critical resources, reduce blocking scripts"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "INP replaced FID as a Core Web Vital in March 2024. FID measured only the input delay of the FIRST interaction; INP measures the full interaction latency (input delay + processing + presentation) across ALL interactions and reports a near-worst-case value. A page can have a great FID and a terrible INP."
+        },
+        {
+          "type": "paragraph",
+          "text": "A subtlety worth internalizing: LCP is not 'when the page looks done'. It is specifically the render time of the single largest in-viewport content element. Optimizing the wrong element is a classic waste of effort, so the first step in any LCP investigation is to identify which element the browser actually flagged as the LCP element via the PerformanceObserver 'largest-contentful-paint' entries or the DevTools Performance panel."
+        }
+      ]
+    },
+    {
+      "id": "measuring-vitals-code",
+      "heading": "Measuring Vitals in the Field",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The web-vitals library is the reference implementation for collecting field (RUM) data. It handles the awkward parts: waiting for the final LCP candidate, summing CLS across the whole session window, and reporting INP on visibility change. You call onLCP, onINP, and onCLS with a callback that ships the value to your analytics endpoint via navigator.sendBeacon."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "text": "import { onLCP, onINP, onCLS, onTTFB } from 'web-vitals';\n\nfunction sendToAnalytics(metric) {\n  // metric = { name, value, rating, delta, id, navigationType }\n  const body = JSON.stringify({\n    name: metric.name,\n    value: metric.value,\n    rating: metric.rating,   // 'good' | 'needs-improvement' | 'poor'\n    id: metric.id,\n    path: location.pathname\n  });\n  // sendBeacon survives page unload; keeps the request off the critical path.\n  (navigator.sendBeacon && navigator.sendBeacon('/rum', body)) ||\n    fetch('/rum', { body, method: 'POST', keepalive: true });\n}\n\nonLCP(sendToAnalytics);\nonINP(sendToAnalytics);\nonCLS(sendToAnalytics);\nonTTFB(sendToAnalytics);"
+        },
+        {
+          "type": "paragraph",
+          "text": "If you want to see the raw signals without a dependency, PerformanceObserver exposes the same underlying entries. This is useful for custom instrumentation, debugging which element is the LCP, or attributing a layout shift to a specific node."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "text": "// Raw LCP: the last entry before the user interacts is the real LCP.\nnew PerformanceObserver((list) => {\n  const entries = list.getEntries();\n  const last = entries[entries.length - 1];\n  console.log('LCP', last.startTime, 'element:', last.element);\n}).observe({ type: 'largest-contentful-paint', buffered: true });\n\n// Raw CLS: sum shifts that were not caused by recent user input.\nlet cls = 0;\nnew PerformanceObserver((list) => {\n  for (const entry of list.getEntries()) {\n    if (!entry.hadRecentInput) {\n      cls += entry.value;\n      console.log('shift', entry.value, entry.sources?.map(s => s.node));\n    }\n  }\n}).observe({ type: 'layout-shift', buffered: true });\n\n// Long tasks (>50ms) are the raw material of poor INP.\nnew PerformanceObserver((list) => {\n  for (const entry of list.getEntries()) {\n    console.warn('long task', entry.duration, 'ms', entry.attribution);\n  }\n}).observe({ type: 'longtask', buffered: true });"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Report field vitals to your own backend, not only to Google. CrUX gives you a 28-day rolling p75 with no attribution; your own RUM lets you slice by route, device, release, and A/B arm, and correlate a regression with the exact deploy that caused it."
+        }
+      ]
+    },
+    {
+      "id": "rail-model",
+      "heading": "The RAIL Performance Model",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "RAIL is a user-centric budget model that predates Core Web Vitals but still frames the work usefully. It breaks the experience into four phases, each with a human-perception budget: Response, Animation, Idle, and Load. The value of RAIL is that it anchors targets in perception thresholds rather than arbitrary numbers."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Response: handle input in under 50ms so the reaction feels instant (this now maps closely to INP).",
+            "Animation: produce each frame in about 10ms (16.7ms per frame minus browser overhead) to hold 60fps.",
+            "Idle: use idle time in ~50ms chunks (requestIdleCallback) so you can still respond within the 100ms window if the user acts.",
+            "Load: deliver interactive content quickly (aim for a fast, interactive first load) on target hardware and networks."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The 100ms and 50ms numbers are not arbitrary. Research on perception shows that responses within ~100ms feel immediate; beyond that the user notices lag. RAIL splits that budget: reserve 50ms for your handler so that even if input arrives just as work begins, total latency stays under 100ms. This is the reasoning behind INP's 200ms 'good' threshold, which allows some slack for slower devices."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Treat these budgets as constraints during design, not audits after the fact. A 'yield to main thread every 50ms' rule shapes how you write a heavy loop; retrofitting it into shipped code is far harder."
+        }
+      ]
+    },
+    {
+      "id": "loading-performance",
+      "heading": "Loading Performance: Ship Less, Ship Later",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The cheapest byte is the one you never send. Loading performance is a hierarchy: first eliminate code, then defer it, then split it, then cache it. Tree-shaking removes dead exports at build time; make sure your modules are side-effect-free (package.json sideEffects: false) so the bundler can drop them. Code-splitting breaks the bundle at route and interaction boundaries so the initial download contains only what the first screen needs."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "text": "// Route-level code-splitting: the chart bundle is only fetched when needed.\nconst routes = [\n  {\n    path: '/dashboard',\n    // Dynamic import returns a promise; the bundler emits a separate chunk.\n    component: () => import('./pages/Dashboard.js')\n  }\n];\n\n// Interaction-level splitting: load the heavy editor only on demand.\nbutton.addEventListener('click', async () => {\n  const { openEditor } = await import('./editor.js'); // separate chunk\n  openEditor();\n}, { once: true });"
+        },
+        {
+          "type": "paragraph",
+          "text": "Resource hints let you overlap network work with the critical path. preconnect opens the TCP+TLS connection to a third-party origin early. preload declares a high-priority fetch for a resource the parser will need soon (a hero image, a critical font) so it does not wait to be discovered. prefetch is a low-priority hint for a resource the NEXT navigation will likely need. Use them surgically: preloading everything just re-creates contention on the network."
+        },
+        {
+          "type": "code",
+          "language": "html",
+          "text": "<!-- Warm the connection to the image CDN before the request is even made. -->\n<link rel=\"preconnect\" href=\"https://cdn.example.com\" crossorigin>\n\n<!-- Preload the LCP image and mark it high priority so it wins the race. -->\n<link rel=\"preload\" as=\"image\" href=\"/hero.avif\"\n      imagesrcset=\"/hero-800.avif 800w, /hero-1600.avif 1600w\"\n      fetchpriority=\"high\">\n\n<!-- Prefetch the likely-next route's chunk during idle time. -->\n<link rel=\"prefetch\" href=\"/assets/dashboard.chunk.js\">"
+        },
+        {
+          "type": "paragraph",
+          "text": "On the transport side, serve text assets with Brotli compression (better ratio than gzip for HTML/CSS/JS) and set aggressive, correct HTTP caching. Fingerprinted static assets (app.a1b2c3.js) should carry Cache-Control: public, max-age=31536000, immutable, while HTML carries a short or no-cache policy so users pick up new deploys. Getting caching right often produces larger real-world wins than micro-optimizing code."
+        }
+      ]
+    },
+    {
+      "id": "layout-thrash-mistake",
+      "heading": "Common Mistake: Layout Thrashing",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Layout thrashing (forced synchronous layout) is one of the most common and most invisible rendering bugs. It happens when you interleave DOM reads that depend on layout (offsetHeight, getBoundingClientRect, scrollTop) with DOM writes inside a loop. Each read forces the browser to flush pending style and layout so it can return an accurate value, so a read-write-read-write loop triggers layout N times instead of once."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "text": "// BAD: reads offsetWidth (forces layout) then writes, every iteration.\nfunction resizeAll(boxes) {\n  for (const box of boxes) {\n    const w = box.offsetWidth;        // READ -> forces synchronous layout\n    box.style.width = w * 1.5 + 'px'; // WRITE -> invalidates layout again\n  }\n}"
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "text": "// GOOD: batch all reads, then all writes. Layout is computed once.\nfunction resizeAll(boxes) {\n  const widths = boxes.map(box => box.offsetWidth); // all READS together\n  boxes.forEach((box, i) => {                       // all WRITES together\n    box.style.width = widths[i] * 1.5 + 'px';\n  });\n}\n\n// Even better: schedule writes in requestAnimationFrame so they land\n// just before the next paint, aligned with the browser's own cycle.\nfunction animate(box, x) {\n  requestAnimationFrame(() => {\n    box.style.transform = `translateX(${x}px)`; // compositor-only, no layout\n  });\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The DevTools Performance panel flags forced reflows with a red triangle and a 'Recalculate Style / Layout' warning attributed to the exact line. If you see repeated purple layout bars inside a single task, you have thrashing. Libraries like FastDOM formalize the read-then-write batching pattern."
+        }
+      ]
+    },
+    {
+      "id": "rendering-performance",
+      "heading": "Rendering Performance and the Main Thread",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Smooth rendering is about respecting the frame budget. At 60fps you have ~16.7ms per frame, and the browser needs a few of those for its own compositing work, leaving roughly 10ms for your JavaScript plus style, layout, and paint. Exceed it and frames drop, producing jank. The compositor thread can keep scrolling and animating transform/opacity smoothly even when the main thread is busy, which is why those properties are the preferred way to animate."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Animate transform and opacity, not top/left/width/height. The former are compositor-only; the latter trigger layout and paint.",
+            "Use will-change: transform sparingly to promote an element to its own layer BEFORE the animation, avoiding a mid-animation hiccup. Overusing it wastes GPU memory.",
+            "Long tasks (>50ms) block input; INP is largely a story of long tasks. Break them up.",
+            "Offload pure CPU work (parsing, diffing, crypto, image processing) to a web worker so the main thread stays free for input and rendering."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Breaking up long tasks is the highest-leverage INP fix. The modern primitive is scheduler.yield() (with a setTimeout fallback), which yields to the browser so it can process pending input and paint, then resumes your work. The pattern below chunks a heavy loop and yields between chunks, converting one 200ms task into many short tasks that never block an interaction for long."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "text": "async function processInChunks(items, handle) {\n  const yieldToMain = () =>\n    (window.scheduler?.yield?.() ?? new Promise(r => setTimeout(r, 0)));\n\n  let start = performance.now();\n  for (const item of items) {\n    handle(item);\n    // Yield if we have held the thread for ~50ms so input can be handled.\n    if (performance.now() - start > 50) {\n      await yieldToMain();\n      start = performance.now();\n    }\n  }\n}"
+        }
+      ]
+    },
+    {
+      "id": "image-optimization",
+      "heading": "Image Optimization and CLS",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Images are usually the largest bytes on a page and frequently the LCP element, so they are where loading and stability meet. Three levers matter: serve modern formats (AVIF, then WebP, with a legacy fallback), serve appropriately sized variants via srcset so a phone does not download a desktop image, and always set intrinsic dimensions so the browser can reserve space and avoid layout shift."
+        },
+        {
+          "type": "code",
+          "language": "html",
+          "text": "<!-- Responsive, modern-format image that also prevents CLS. -->\n<img\n  src=\"/photo-800.jpg\"\n  srcset=\"/photo-400.avif 400w,\n          /photo-800.avif 800w,\n          /photo-1600.avif 1600w\"\n  sizes=\"(max-width: 600px) 100vw, 800px\"\n  width=\"1600\" height=\"900\"\n  loading=\"lazy\"\n  decoding=\"async\"\n  alt=\"City skyline at dusk\">\n\n<!-- For full format control, use <picture> with explicit type ordering. -->\n<picture>\n  <source type=\"image/avif\" srcset=\"/hero.avif\">\n  <source type=\"image/webp\" srcset=\"/hero.webp\">\n  <img src=\"/hero.jpg\" width=\"1600\" height=\"900\" alt=\"Hero\" fetchpriority=\"high\">\n</picture>"
+        },
+        {
+          "type": "paragraph",
+          "text": "Two rules avoid the most common mistakes. First, never lazy-load the LCP image: loading=\"lazy\" on the hero delays discovery and hurts LCP; reserve lazy loading for below-the-fold images and give the hero fetchpriority=\"high\" instead. Second, providing width and height (or CSS aspect-ratio) lets the browser compute the box before the image arrives, so surrounding content does not jump when it loads, which is the single most effective CLS fix."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "AVIF gives the best compression but encodes slowly and lacks universal support in older clients; WebP is a safe default with near-universal support today. Serve AVIF with a WebP/JPEG fallback via <picture> or content negotiation, and always benchmark decode cost, not just file size, on low-end devices."
+        }
+      ]
+    },
+    {
+      "id": "font-loading",
+      "heading": "Font Loading: FOUT vs FOIT",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Web fonts are render-blocking by default in a subtle way: text using a not-yet-loaded font may be hidden (Flash Of Invisible Text, FOIT) or shown in a fallback and then swapped (Flash Of Unstyled Text, FOUT). FOIT hurts perceived loading (blank text) and FOUT can cause CLS if the fallback and web font have different metrics. The font-display descriptor controls this trade-off."
+        },
+        {
+          "type": "table",
+          "headers": ["font-display", "Behavior", "When to use"],
+          "rows": [
+            ["swap", "Show fallback immediately, swap to web font when ready (FOUT). Best for LCP.", "Body text where readability beats brand fidelity"],
+            ["optional", "Short block; if the font is not cached in time, keep the fallback for this load. No swap, minimal CLS.", "Best overall for CLS and perf; brand-tolerant text"],
+            ["fallback", "Very short invisible block, then fallback, small swap window.", "A middle ground"],
+            ["block", "Invisible text up to ~3s (FOIT) waiting for the font.", "Icon fonts where a fallback glyph would be wrong"]
+          ]
+        },
+        {
+          "type": "code",
+          "language": "css",
+          "text": "@font-face {\n  font-family: 'Inter';\n  src: url('/fonts/inter.woff2') format('woff2');\n  font-display: swap;              /* avoid invisible text */\n  font-weight: 100 900;           /* variable font: one file, all weights */\n}\n\n/* Tune the fallback metrics so the swap does not shift layout (CLS). */\n@font-face {\n  font-family: 'Inter-fallback';\n  src: local('Arial');\n  size-adjust: 107%;\n  ascent-override: 90%;\n  descent-override: 22%;\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Preload the one or two critical fonts (<link rel=preload as=font type=font/woff2 crossorigin>), subset to the glyphs you use, prefer WOFF2, and use a variable font to collapse many weight files into one. size-adjust and the *-override descriptors let you match fallback metrics and eliminate font-swap CLS."
+        }
+      ]
+    },
+    {
+      "id": "js-performance",
+      "heading": "JavaScript Performance Patterns",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Beyond shipping less JavaScript, a handful of runtime patterns keep the main thread responsive. Debounce and throttle limit how often expensive handlers run in response to high-frequency events (input, scroll, resize). Virtualization renders only the visible slice of a long list, keeping the DOM small and layout cheap. Memoization caches pure computations so repeated renders do not recompute derived data."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "text": "// Debounce: run only after the burst of events stops (e.g. search input).\nfunction debounce(fn, wait) {\n  let t;\n  return (...args) => {\n    clearTimeout(t);\n    t = setTimeout(() => fn(...args), wait);\n  };\n}\n\n// Throttle: run at most once per interval (e.g. scroll position tracking).\nfunction throttle(fn, interval) {\n  let last = 0;\n  return (...args) => {\n    const now = performance.now();\n    if (now - last >= interval) {\n      last = now;\n      fn(...args);\n    }\n  };\n}\n\nsearchInput.addEventListener('input', debounce(runQuery, 300));\nwindow.addEventListener('scroll', throttle(updateScrollSpy, 100), { passive: true });"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Virtualize lists over ~100 rows (react-window, CDK Virtual Scroll, TanStack Virtual). Rendering 10,000 rows kills layout and memory.",
+            "Memoize expensive pure derivations (useMemo, computed signals, reselect) but do not memoize trivially cheap work; the bookkeeping can cost more than it saves.",
+            "Prefer passive event listeners for scroll/touch so the browser can scroll without waiting for your handler.",
+            "Avoid large synchronous JSON.parse on the main thread; parse in a worker or stream it."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Framework notes: in React, useMemo/useCallback and React.memo curb re-renders, and the React Compiler automates much of it. In Angular, OnPush change detection, signals, and trackBy on *ngFor play the same role, cutting the work the framework does per tick."
+        }
+      ]
+    },
+    {
+      "id": "ssr-hydration",
+      "heading": "SSR, Hydration, and Streaming",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Server-side rendering (SSR) sends HTML the browser can paint immediately, improving FCP and often LCP because meaningful content does not wait for a JavaScript bundle to download, parse, and execute. The cost is hydration: the client must download the same component tree, attach event listeners, and reconcile with the server HTML. Until hydration completes, the page can look ready but not respond, which shows up as poor INP on load."
+        },
+        {
+          "type": "paragraph",
+          "text": "Streaming SSR improves TTFB and LCP by flushing HTML in chunks as the server produces it, rather than buffering the whole document. Combined with Suspense-style boundaries, the shell paints first while slower data streams in. Selective and progressive hydration (React Server Components, Astro islands, Qwik resumability) reduce hydration cost by shipping less client JavaScript, hydrating only interactive islands instead of the whole page."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "text": "// Node streaming SSR with React: flush the shell early, stream the rest.\nimport { renderToPipeableStream } from 'react-dom/server';\n\napp.get('*', (req, res) => {\n  const stream = renderToPipeableStream(<App url={req.url} />, {\n    bootstrapScripts: ['/client.js'],\n    onShellReady() {\n      // TTFB win: send the shell before slow data resolves.\n      res.setHeader('Content-Type', 'text/html');\n      stream.pipe(res);\n    },\n    onError(err) { console.error(err); res.statusCode = 500; }\n  });\n});"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Hydration is a frequent, invisible INP tax. A page that scores well on LCP can feel broken if a user taps during a long hydration task. Mitigations: ship less client JS, defer non-critical hydration, use islands/RSC, and measure INP on load in the field, not just after the page settles."
+        }
+      ]
+    },
+    {
+      "id": "measuring-tools",
+      "heading": "Measuring: Lab vs Field",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "There are two kinds of performance data and they answer different questions. Lab data comes from a controlled, synthetic run (Lighthouse, WebPageTest, the DevTools Performance panel) on a fixed device and network. It is reproducible and great for debugging and CI gates, but it is one machine's experience, not your users'. Field data (RUM) comes from real users on real devices and networks, aggregated as percentiles; it is the ground truth for Core Web Vitals and Search."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Lighthouse: lab audit with scores and opportunities. Run it throttled; treat the number as a diagnostic, not a KPI.",
+            "WebPageTest: lab tool with filmstrips, waterfalls, and real devices/locations. Best for deep waterfall analysis.",
+            "Chrome DevTools Performance panel: flame chart of main-thread work; find long tasks, forced reflows, and expensive paints.",
+            "CrUX / PageSpeed Insights: field vitals for your origin and URLs, 28-day p75 from real Chrome users.",
+            "web-vitals + PerformanceObserver: your own RUM, sliceable by route, device, and release."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The senior workflow is: watch field data for regressions and thresholds, then reproduce in the lab to debug. Lab and field will disagree, and that disagreement is information, not error. A green Lighthouse with poor field LCP usually means your test conditions are kinder than reality (faster device, warm cache, no third-party contention). Always close the loop by confirming the fix in field p75 over the following weeks."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "CI tip: run Lighthouse CI on every PR with performance budgets (max bundle size, min score) to catch regressions before merge. But keep a field dashboard as the final arbiter, because only real users can move a Core Web Vital."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices Checklist",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A durable performance program is a set of habits and guardrails, not a one-time cleanup. The following checklist captures the highest-leverage practices for staying fast across releases."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Set and enforce performance budgets in CI (bundle size, Lighthouse score, request count).",
+            "Measure the field with web-vitals; alert on p75 regressions per route and per release.",
+            "Optimize the LCP element first: identify it, then preload it, prioritize it, and unblock its render.",
+            "Prevent CLS by reserving space: width/height on media, aspect-ratio, min-height for async content, font metric overrides.",
+            "Keep the main thread free: split long tasks, yield with scheduler.yield, move CPU work to workers.",
+            "Ship modern formats (AVIF/WebP, WOFF2, Brotli) with sensible fallbacks and immutable caching for fingerprinted assets.",
+            "Code-split by route and interaction; lazy-load below-the-fold; preconnect to critical third-party origins.",
+            "Test on a throttled mid-tier device, not your dev machine; treat the p75 phone as the real target."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "If you internalize one rule: optimize what the field data says is slow for the 75th-percentile user, and verify the win in the field. Everything else is a means to that end."
+        }
+      ]
+    },
+    {
+      "id": "worked-example",
+      "heading": "Worked Example: Diagnosing a Slow LCP",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Suppose field data shows p75 LCP of 4.2s on the homepage. Here is the disciplined path from symptom to fix, using the tools and concepts above."
+        },
+        {
+          "type": "list",
+          "items": [
+            "1. Identify the LCP element via PerformanceObserver or DevTools: it is the hero image.",
+            "2. Break LCP into sub-parts (PageSpeed Insights shows this): TTFB 1.2s, resource load delay 1.5s, resource load time 1.0s, render delay 0.5s.",
+            "3. The big cost is 'load delay': the image is discovered late because it is set via CSS background and behind a render-blocking stylesheet.",
+            "4. Fix: move it to an <img> with fetchpriority=high, add <link rel=preload as=image>, and preconnect to the image CDN.",
+            "5. Attack TTFB separately: add CDN edge caching and streaming SSR.",
+            "6. Re-measure in the lab, then confirm the field p75 drops over the next weeks."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "html",
+          "text": "<!-- Before: background-image discovered late, no priority. -->\n<div class=\"hero\" style=\"background-image:url('/hero.jpg')\"></div>\n\n<!-- After: discoverable, preloaded, high priority, no CLS. -->\n<link rel=\"preconnect\" href=\"https://cdn.example.com\" crossorigin>\n<link rel=\"preload\" as=\"image\" href=\"https://cdn.example.com/hero.avif\" fetchpriority=\"high\">\n<img src=\"https://cdn.example.com/hero.avif\" width=\"1600\" height=\"900\"\n     fetchpriority=\"high\" alt=\"Product hero\">"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Note the ordering discipline: always decompose the metric before optimizing. Guessing that 'the image is big' when the real cost is TTFB or late discovery wastes effort and can even regress other metrics."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "crp-flow",
+      "title": "Critical Rendering Path",
+      "type": "mermaid",
+      "content": "flowchart TD\n  A[HTML bytes] --> B[Parse to DOM]\n  C[CSS bytes] --> D[Parse to CSSOM]\n  B --> E[Render Tree]\n  D --> E\n  E --> F[Layout Reflow]\n  F --> G[Paint layers]\n  G --> H[Composite on GPU]\n  H --> I[Pixels on screen]\n  J[Sync script] -.-> B\n  D -.-> G"
+    },
+    {
+      "id": "loading-waterfall",
+      "title": "Loading Waterfall with Hints",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n  participant B as Browser\n  participant S as Server\n  participant C as CDN\n  B->>S: GET index.html\n  S-->>B: HTML shell streamed\n  Note over B: preconnect to CDN early\n  B->>C: preload hero.avif high priority\n  C-->>B: hero image bytes\n  B->>S: fetch route chunk dynamic import\n  S-->>B: dashboard.chunk.js\n  Note over B: prefetch next route during idle\n  B->>B: paint LCP element"
+    },
+    {
+      "id": "vitals-timeline",
+      "title": "Core Web Vitals on the Timeline",
+      "type": "ascii",
+      "content": "Navigation start\n |\n |--- TTFB (<=0.8s) ---> first byte\n |\n |------- FCP (<=1.8s) -------> first paint\n |\n |----------- LCP (<=2.5s) ----------> largest element painted\n |\n |  [ user interactions any time ]\n |     INP (<=200ms) = near-worst interaction latency\n |\n |  CLS (<=0.1) = sum of unexpected layout shifts over the whole visit\n v\nEnd of visit"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-inp-vs-fid",
+      "question": "INP replaced FID as a Core Web Vital in 2024. What is the difference, and why was the change made?",
+      "answer": "FID (First Input Delay) measured only the input delay of the very first interaction on the page, that is, the time between the user's action and the browser starting to process the event handler. It ignored the handler's own execution time and every interaction after the first, so a page could score a great FID while still feeling sluggish on every subsequent click. INP (Interaction to Next Paint) measures the full latency of an interaction, input delay plus processing time plus presentation delay, and reports a near-worst-case value across all interactions during the visit. The 'good' threshold is 200ms at p75. The change was made because FID was too easy to pass and did not reflect real responsiveness; INP captures the whole-session experience and correlates far better with how responsive a page actually feels. Practically, INP shifts the focus to breaking up long tasks and reducing main-thread work throughout the session, including hydration.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["inp", "fid", "core-web-vitals"],
+      "followUps": ["What are the three components of INP latency?", "Why does hydration hurt INP specifically?", "How would you improve INP for a page with heavy click handlers?"]
+    },
+    {
+      "id": "q-cls-causes",
+      "question": "What causes Cumulative Layout Shift, and how do you prevent it?",
+      "answer": "CLS accumulates when content moves unexpectedly after it has already been painted, and it is scored as the impact fraction (how much of the viewport moved) times the distance fraction (how far it moved), summed over session windows. The classic causes are: images and iframes without width/height so the browser cannot reserve space; web fonts that swap and change text metrics; ads, embeds, or banners injected above existing content; and content that expands asynchronously (a cookie banner, a lazy-loaded component). Prevention is about reserving space up front: set width and height or aspect-ratio on all media, use min-height or skeleton placeholders for async content, insert late content below the fold or in reserved slots rather than shoving existing content down, and use font-display: optional or size-adjust/metric overrides so font swaps do not reflow text. Layout shifts that happen within 500ms of user input are excluded, so shifts you cause in response to a click are not penalized.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["cls", "layout-shift", "images"],
+      "followUps": ["How does the impact-fraction times distance-fraction formula work?", "Why are input-triggered shifts excluded?", "How do font metric overrides eliminate swap CLS?"]
+    },
+    {
+      "id": "q-lab-vs-field",
+      "question": "What is the difference between lab data and field data, and why do they disagree?",
+      "answer": "Lab data is collected in a controlled synthetic environment, a single device, a fixed network throttle, a clean profile, as with Lighthouse or WebPageTest. It is reproducible and ideal for debugging and CI gates. Field data (RUM) is collected from real users on their real devices and networks, aggregated as percentiles, as in CrUX or your own web-vitals reporting; it is the source of truth for Core Web Vitals and Search ranking. They disagree because a lab run is only one point in a distribution: it cannot reproduce the variety of devices, network conditions, cache states, and third-party contention that real users experience. A common pattern is a green Lighthouse LCP with a poor field p75 because the lab machine is faster and the cache is warm. The correct workflow is to watch field data for what is actually slow, reproduce it in the lab to debug, then confirm the fix in field p75 over the following weeks.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["lab-data", "field-data", "measurement", "lighthouse"],
+      "followUps": ["What is CrUX and how is p75 computed?", "Why is p75 used instead of the median?", "When would you trust lab data over field data?"]
+    },
+    {
+      "id": "q-lcp-element",
+      "question": "Why does it matter which element is the LCP element, and how do you find it?",
+      "answer": "LCP is not a measure of when the page looks finished; it is the render time of the single largest contentful element in the viewport, typically a hero image, a video poster, a background image, or a large block of text. Optimizing anything other than that element does not move LCP, so identifying it is the first step of any LCP investigation. You find it via the PerformanceObserver 'largest-contentful-paint' entries (the last entry before user interaction is the final LCP, and entry.element points at the node), or via the DevTools Performance panel and PageSpeed Insights, which highlight the element and break LCP into TTFB, load delay, load time, and render delay. Once identified, the fixes depend on which sub-part dominates: preload and prioritize a late-discovered image, fix TTFB with caching and streaming SSR, or remove render-blocking CSS/JS that delays the paint. Guessing without identifying the element is the most common way to waste LCP effort.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["lcp", "largest-contentful-paint", "measurement"],
+      "followUps": ["What are the four sub-parts of LCP?", "Why should you never lazy-load the LCP image?", "How does fetchpriority=high help LCP?"]
+    },
+    {
+      "id": "q-render-blocking",
+      "question": "What makes a resource render-blocking, and how do you deblock it?",
+      "answer": "A resource is render-blocking if the browser must wait for it before it can paint. CSS is render-blocking by default because the browser will not paint content until it has computed the styles for it, otherwise you would see a flash of unstyled content. Synchronous scripts are parser-blocking: when the HTML parser hits a <script> without async or defer, it stops building the DOM, fetches and executes the script, and only then resumes; and because a script may query styles, CSS can transitively block the script too. You deblock by: adding defer (execute after parsing, in order) or async (execute as soon as fetched) to scripts, inlining critical CSS and loading the rest with media tricks or rel=preload plus onload, splitting CSS by media query so only relevant sheets block, and removing unused CSS. The goal is to shrink the set of resources on the critical path so first paint happens as early as possible.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["render-blocking", "critical-rendering-path", "css", "javascript"],
+      "followUps": ["What is the difference between async and defer?", "How does inlining critical CSS help?", "Why can CSS block a script's execution?"]
+    },
+    {
+      "id": "q-hydration-cost",
+      "question": "What is hydration and why is it a performance cost?",
+      "answer": "Hydration is the process where a client-side framework takes server-rendered HTML and makes it interactive: it downloads the same component tree as JavaScript, walks the existing DOM, and attaches event listeners and internal state so the page can respond to input. The cost is that the browser must download, parse, and execute a bundle roughly equal to the whole app, and much of that runs as long tasks on the main thread. During hydration the page can look ready, content is painted, but not respond, so taps and clicks are delayed or dropped, which shows up as poor INP on load. It also delays Time to Interactive. Mitigations include shipping less client JavaScript, streaming SSR with Suspense boundaries, and partial or progressive hydration approaches, React Server Components, Astro islands, Qwik resumability, that hydrate only the interactive parts of the page instead of everything. Measuring INP during load in the field is how you catch hydration problems that lab tests miss.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["hydration", "ssr", "inp", "react"],
+      "followUps": ["How do islands architectures reduce hydration cost?", "Why does streaming SSR help even if hydration is unchanged?", "How would you measure hydration's INP impact?"]
+    },
+    {
+      "id": "q-crp",
+      "question": "Walk through the critical rendering path from HTML bytes to pixels.",
+      "answer": "The browser first parses the HTML byte stream into tokens and builds the DOM tree incrementally as bytes arrive. In parallel it parses CSS into the CSSOM, a tree of computed style rules. It combines the DOM and CSSOM into the render tree, which contains only visible nodes (display:none nodes are excluded). Next comes layout, or reflow, where the browser computes the exact geometry, position and size, of every box based on the viewport. Then paint rasterizes each render-tree node into pixels across one or more layers, drawing text, colors, borders, and images. Finally the compositor thread assembles the layers, applying transforms and opacity on the GPU, and displays the result. The key performance insight is that layout and paint are expensive, while compositing transforms and opacity is cheap, which is why smooth animations stick to those two properties.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["critical-rendering-path", "dom", "cssom", "layout", "paint"],
+      "followUps": ["Which properties trigger layout vs paint vs composite?", "What is the difference between layout and paint?", "Why is display:none excluded from the render tree?"]
+    },
+    {
+      "id": "q-preload-prefetch-preconnect",
+      "question": "Explain the difference between preload, prefetch, and preconnect.",
+      "answer": "These are resource hints that let you influence the network ahead of the browser's default discovery. preconnect tells the browser to perform the DNS lookup, TCP handshake, and TLS negotiation to a specified origin early, so that when a request to that origin is made the connection is already warm; it is ideal for critical third-party origins like a font or image CDN. preload is a high-priority, mandatory-fetch hint for a resource the current page will definitely need soon but that the parser would otherwise discover late, such as a hero image, a critical font, or a CSS-referenced asset; you must specify the correct 'as' attribute. prefetch is a low-priority hint for a resource the NEXT navigation is likely to need, fetched during idle time and stored in the cache so the future navigation is faster. The rule of thumb is: preconnect for origins, preload for this page's late-discovered critical resources, prefetch for the probable next page. Overusing preload backfires because it creates contention and can delay the very resources you care about.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["preload", "prefetch", "preconnect", "resource-hints"],
+      "followUps": ["Why must preload specify the 'as' attribute?", "When does over-preloading hurt?", "What is fetchpriority and how does it relate to preload?"]
+    },
+    {
+      "id": "q-code-splitting",
+      "question": "How does code-splitting improve loading performance, and where should you split?",
+      "answer": "Code-splitting breaks a monolithic JavaScript bundle into smaller chunks that are loaded on demand, so the initial download contains only the code the first screen needs. Bundlers implement it via dynamic import(), which returns a promise and emits a separate chunk. The two most valuable split points are routes, load a page's code only when the user navigates to it, and interactions, load a heavy feature (a rich editor, a charting library, a modal) only when the user triggers it. This directly reduces the bytes parsed and executed before first interaction, improving TTI and often INP, since less JavaScript competes for the main thread on load. It pairs well with prefetch: you can hint the likely-next route's chunk during idle time so navigation still feels instant. The trade-off is many small requests and potential waterfalls, so you balance chunk granularity and can preload chunks you know are imminent.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["code-splitting", "dynamic-import", "tree-shaking", "bundle"],
+      "followUps": ["How does tree-shaking differ from code-splitting?", "What is a loading waterfall and how do you avoid it?", "How do you prefetch a split chunk before navigation?"]
+    },
+    {
+      "id": "q-layout-thrash",
+      "question": "What is layout thrashing and how do you fix it?",
+      "answer": "Layout thrashing, also called forced synchronous layout, happens when JavaScript interleaves DOM reads that depend on layout (offsetHeight, getBoundingClientRect, scrollTop, getComputedStyle) with DOM writes inside a loop. Normally the browser batches style and layout work and flushes it once before paint, but when you read a layout-dependent property while there are pending writes, the browser is forced to synchronously recompute layout so it can return an accurate value. A read-write-read-write loop therefore triggers layout on every iteration, turning O(1) layout into O(n) and producing jank or a long task. The fix is to batch: read all the values you need first, then perform all writes, so layout is computed at most once. Scheduling writes inside requestAnimationFrame aligns them with the browser's paint cycle, and libraries like FastDOM formalize the read-then-write separation. The DevTools Performance panel flags forced reflows with a warning on the exact line, which is how you locate them.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["layout-thrashing", "reflow", "rendering", "requestanimationframe"],
+      "followUps": ["Which DOM reads force layout?", "How does requestAnimationFrame help here?", "How do you spot forced reflow in DevTools?"]
+    },
+    {
+      "id": "q-long-tasks-workers",
+      "question": "What are long tasks, and how do web workers and yielding help?",
+      "answer": "A long task is any block of main-thread work that runs for more than 50ms without yielding. Because input handling, rendering, and JavaScript all share the main thread, a long task means the browser cannot respond to a tap or produce a frame until it finishes, which is the primary driver of poor INP and jank. There are two complementary fixes. First, break long tasks into smaller chunks and yield to the main thread between them using scheduler.yield() or a setTimeout fallback, so the browser can process pending input and paint in the gaps. Second, move pure CPU-bound work that does not touch the DOM, such as parsing large JSON, diffing data, image processing, or cryptography, into a web worker, which runs on a separate thread and communicates via postMessage. The worker keeps the main thread free entirely. The rule is: if the work must touch the DOM, chunk and yield; if it is pure computation, offload it to a worker.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["long-tasks", "web-workers", "inp", "main-thread"],
+      "followUps": ["What is scheduler.yield and how does it differ from setTimeout(0)?", "What can and cannot run in a web worker?", "How do you find long tasks with PerformanceObserver?"]
+    },
+    {
+      "id": "q-rail",
+      "question": "What is the RAIL model and how do its budgets map to modern metrics?",
+      "answer": "RAIL is a user-centric performance model that divides the experience into four phases with perception-based budgets: Response, Animation, Idle, and Load. Response says handle user input within about 50ms so the reaction feels instant, which maps closely to INP today. Animation says produce each frame in roughly 10ms to sustain 60fps, since the ~16.7ms frame budget must also cover the browser's own work. Idle says use idle time in ~50ms chunks (via requestIdleCallback) so you remain able to respond within the 100ms window if the user acts. Load says deliver interactive content quickly on the user's actual device and network. The budgets derive from human perception research: responses under ~100ms feel immediate, and RAIL reserves half of that so even worst-case timing stays under the limit. This same reasoning underlies INP's 200ms threshold, which allows extra slack for slower devices.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["rail", "performance-model", "budgets"],
+      "followUps": ["Why is the response budget 50ms and not 100ms?", "How does requestIdleCallback fit the Idle phase?", "How does RAIL relate to the frame budget?"]
+    },
+    {
+      "id": "q-images",
+      "question": "How do responsive images and modern formats improve performance without causing CLS?",
+      "answer": "Images are usually the heaviest bytes on a page and often the LCP element, so they must be both small and stable. srcset with the sizes attribute lets the browser pick an appropriately sized variant for the device's viewport and pixel density, so a phone does not download a desktop-sized image. Modern formats compress far better than JPEG/PNG: AVIF gives the best ratio but encodes slowly and has weaker legacy support, while WebP is a safe near-universal default; you serve them with a fallback via <picture> and explicit type ordering. To avoid CLS you always set width and height (or CSS aspect-ratio) so the browser reserves the correct box before the image arrives and surrounding content does not jump when it loads. Two rules complete the picture: lazy-load below-the-fold images with loading=\"lazy\" to save bandwidth, but never lazy-load the LCP image, instead give the hero fetchpriority=\"high\" and preload it so it is discovered and prioritized early.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["images", "srcset", "avif", "webp", "cls"],
+      "followUps": ["When do you use <picture> instead of srcset alone?", "Why is lazy-loading the LCP image harmful?", "How does aspect-ratio prevent layout shift?"]
+    },
+    {
+      "id": "q-font-loading",
+      "question": "Explain FOUT vs FOIT and how font-display controls the trade-off.",
+      "answer": "When a page uses a web font that has not loaded yet, the browser must decide what to show. FOIT (Flash Of Invisible Text) hides the text until the font arrives, which hurts perceived loading because content is briefly blank. FOUT (Flash Of Unstyled Text) shows the text immediately in a fallback font and swaps to the web font when it loads, which is faster to read but can cause a layout shift if the fallback and web font have different metrics. The font-display descriptor picks the behavior: swap gives immediate fallback plus a later swap (best for LCP but risks CLS), optional keeps the fallback for the current load if the font is not cached in time (best for CLS and perf, no swap), block causes FOIT for up to about 3 seconds (only appropriate for icon fonts where a fallback glyph would be wrong), and fallback is a middle ground. To eliminate swap-induced CLS you match the fallback's metrics to the web font using size-adjust and the ascent/descent/line-gap override descriptors, and you preload and subset the one or two critical fonts in WOFF2.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["fonts", "font-display", "fout", "foit", "cls"],
+      "followUps": ["When would you choose font-display: optional over swap?", "How do size-adjust and metric overrides remove swap CLS?", "Why preload only one or two fonts?"]
+    },
+    {
+      "id": "q-debounce-throttle",
+      "question": "When do you use debounce versus throttle, and why?",
+      "answer": "Both limit how often an expensive handler runs in response to high-frequency events, but they have different semantics. Debounce waits until a burst of events has stopped for a specified quiet period before running the handler once; it is ideal when you only care about the final state, such as firing a search query after the user stops typing or recalculating a layout after resize settles. Throttle runs the handler at most once per fixed interval regardless of how many events fire; it is ideal when you want steady periodic updates during a continuous stream, such as updating a scroll-position indicator or a drag preview while the user keeps scrolling or dragging. Using the wrong one is a common bug: debouncing a scroll spy makes it feel unresponsive because updates only happen when scrolling stops, while throttling a search box wastes queries on intermediate keystrokes. For scroll and touch listeners, also pass { passive: true } so the browser does not wait for your handler before scrolling.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["debounce", "throttle", "javascript", "events"],
+      "followUps": ["Why use passive listeners for scroll?", "How would you implement a leading-edge debounce?", "How does throttling relate to the frame budget?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-instrument-vitals",
+      "title": "Instrument a Page to Report Core Web Vitals",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "prompt": "Write a self-contained RUM module that measures LCP, INP, and CLS using PerformanceObserver (no external library), and reports the final values to '/rum' via navigator.sendBeacon when the page is hidden or unloaded. LCP must be the last candidate before the first user interaction; CLS must sum only shifts without recent input; and reporting must fire exactly once on visibilitychange to hidden.",
+      "hints": [
+        "LCP: observe 'largest-contentful-paint' with buffered:true and keep the last entry; stop updating after the first user interaction (listen for pointerdown/keydown once).",
+        "CLS: observe 'layout-shift' and accumulate entry.value only when entry.hadRecentInput is false.",
+        "INP: observe 'event' with durationThreshold and track the maximum interaction duration; report on visibilitychange === 'hidden' using sendBeacon so it survives unload."
+      ],
+      "solutionCode": "// vitals-rum.js - dependency-free Core Web Vitals reporting.\n(function reportVitals() {\n  const metrics = { LCP: 0, CLS: 0, INP: 0 };\n  let reported = false;\n\n  // ---- LCP: last candidate before first interaction ----\n  let lcpDone = false;\n  const lcpObserver = new PerformanceObserver((list) => {\n    if (lcpDone) return;\n    const entries = list.getEntries();\n    const last = entries[entries.length - 1];\n    if (last) metrics.LCP = Math.round(last.startTime);\n  });\n  lcpObserver.observe({ type: 'largest-contentful-paint', buffered: true });\n  const stopLCP = () => { lcpDone = true; lcpObserver.disconnect(); };\n  addEventListener('pointerdown', stopLCP, { once: true, capture: true });\n  addEventListener('keydown', stopLCP, { once: true, capture: true });\n\n  // ---- CLS: sum shifts without recent input ----\n  new PerformanceObserver((list) => {\n    for (const entry of list.getEntries()) {\n      if (!entry.hadRecentInput) metrics.CLS += entry.value;\n    }\n  }).observe({ type: 'layout-shift', buffered: true });\n\n  // ---- INP: worst interaction latency ----\n  new PerformanceObserver((list) => {\n    for (const entry of list.getEntries()) {\n      if (entry.interactionId) {\n        metrics.INP = Math.max(metrics.INP, Math.round(entry.duration));\n      }\n    }\n  }).observe({ type: 'event', buffered: true, durationThreshold: 40 });\n\n  // ---- Report once when the page is hidden ----\n  function flush() {\n    if (reported) return;\n    reported = true;\n    const body = JSON.stringify({\n      lcp: metrics.LCP,\n      cls: Math.round(metrics.CLS * 1000) / 1000,\n      inp: metrics.INP,\n      path: location.pathname\n    });\n    if (navigator.sendBeacon) navigator.sendBeacon('/rum', body);\n    else fetch('/rum', { method: 'POST', body, keepalive: true });\n  }\n  addEventListener('visibilitychange', () => {\n    if (document.visibilityState === 'hidden') flush();\n  });\n  addEventListener('pagehide', flush);\n})();",
+      "solutionLanguage": "javascript",
+      "explanation": "This solution demonstrates the mechanics that libraries like web-vitals encapsulate. LCP is tricky because the browser reports multiple candidates as larger elements paint; the correct value is the last one before the user first interacts, so we keep updating on each entry and freeze the value on the first pointerdown or keydown. CLS must exclude shifts caused by user input, which is why we only accumulate entries where hadRecentInput is false, matching the spec's exclusion of shifts within 500ms of interaction. INP is approximated here by tracking the maximum event duration across interactions with an interactionId, using the 'event' entry type with a durationThreshold to avoid flooding on trivial events; a production implementation would report a high percentile rather than the strict max for pages with many interactions. Reporting uses navigator.sendBeacon on visibilitychange to hidden and pagehide, because these are the only reliable moments to send data as a page is being unloaded, and sendBeacon is designed to survive unload without blocking. The reported flag prevents double-sending when both events fire. The whole module is an IIFE with no dependencies, so it can be inlined early to capture metrics from the very start of the page lifecycle.",
+      "relatedTopic": "web-performance"
+    },
+    {
+      "id": "ch-fix-cls-lcp",
+      "title": "Fix a Snippet That Causes CLS and Slow LCP",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "prompt": "The markup below causes layout shift and a slow LCP. The hero is a CSS background image (discovered late, no dimensions), the font swaps and reflows text, and an ad slot is injected above the content. Rewrite the HTML/CSS so the hero is a preloaded, prioritized <img> with reserved dimensions, the font does not cause CLS, and the ad slot reserves its space. Explain each change.",
+      "hints": [
+        "Convert the background-image hero to an <img> with width/height and fetchpriority=high, and preload it plus preconnect to the CDN.",
+        "Give the ad container a fixed min-height so injecting the ad does not push content down.",
+        "Use font-display: optional (or metric overrides) so the web font swap does not reflow text."
+      ],
+      "solutionCode": "<!-- BEFORE (problematic):\n<div class=\"hero\" style=\"background-image:url(https://cdn.x.com/hero.jpg)\"></div>\n<div class=\"ad\"></div>            // injected async, pushes content down\n<h1>Welcome</h1>\n<style> @font-face{font-family:Brand;src:url(/b.woff2);font-display:swap;} </style>\n-->\n\n<!-- AFTER (fixed) -->\n<head>\n  <link rel=\"preconnect\" href=\"https://cdn.x.com\" crossorigin>\n  <link rel=\"preload\" as=\"image\" href=\"https://cdn.x.com/hero.avif\"\n        fetchpriority=\"high\">\n  <style>\n    /* Reserve the hero box via intrinsic ratio to prevent CLS. */\n    .hero { width: 100%; aspect-ratio: 16 / 9; }\n    .hero img { width: 100%; height: 100%; object-fit: cover; }\n\n    /* Reserve ad space so late injection does not shift content. */\n    .ad { min-height: 250px; }\n\n    /* optional: keep fallback if font is not cached in time -> no swap CLS. */\n    @font-face {\n      font-family: 'Brand';\n      src: url('/b.woff2') format('woff2');\n      font-display: optional;\n      size-adjust: 105%;\n    }\n    body { font-family: 'Brand', Arial, sans-serif; }\n  </style>\n</head>\n<body>\n  <div class=\"hero\">\n    <img src=\"https://cdn.x.com/hero.avif\" width=\"1600\" height=\"900\"\n         fetchpriority=\"high\" alt=\"Product hero\">\n  </div>\n  <div class=\"ad\"><!-- ad injected here; space already reserved --></div>\n  <h1>Welcome</h1>\n</body>",
+      "solutionLanguage": "html",
+      "explanation": "Each change targets a specific metric. Converting the hero from a CSS background-image to a real <img> makes it discoverable by the preload scanner, so it is fetched early instead of after the CSS that referenced it; adding <link rel=preload as=image> and fetchpriority=high pushes it to the front of the network queue, and preconnect warms the CDN connection, together cutting the LCP load-delay and load-time sub-parts. Setting width and height on the image plus aspect-ratio on the container reserves the exact box before the image arrives, so nothing below it moves when it loads, eliminating a large CLS contribution. Giving the ad container a fixed min-height reserves its space so the asynchronously injected ad fills a slot instead of pushing the heading and content down, which is a classic above-the-content shift. Switching the font to font-display: optional means that if the web font is not cached in time for this load, the browser keeps the fallback rather than swapping mid-render, and size-adjust tunes the fallback metrics so text does not reflow; both avoid font-driven CLS. The net effect is a hero that paints fast and a page whose layout is stable from first paint, moving both LCP and CLS into the good range.",
+      "relatedTopic": "web-performance"
+    }
+  ],
+  "references": [
+    { "label": "web.dev - Core Web Vitals", "url": "https://web.dev/articles/vitals" },
+    { "label": "web.dev - Learn Core Web Vitals (LCP, INP, CLS)", "url": "https://web.dev/explore/learn-core-web-vitals" },
+    { "label": "web.dev - Optimize INP", "url": "https://web.dev/articles/optimize-inp" },
+    { "label": "MDN - Performance and the PerformanceObserver API", "url": "https://developer.mozilla.org/en-US/docs/Web/API/PerformanceObserver" },
+    { "label": "Chrome DevTools - Analyze runtime performance", "url": "https://developer.chrome.com/docs/devtools/performance" },
+    { "label": "web-vitals (npm)", "url": "https://www.npmjs.com/package/web-vitals" }
+  ]
+}

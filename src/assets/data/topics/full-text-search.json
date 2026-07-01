@@ -1,0 +1,638 @@
+{
+  "id": "full-text-search",
+  "title": "Full-Text Search & Elasticsearch",
+  "category": "Backend",
+  "subcategory": "Search",
+  "difficulty": "senior",
+  "tags": [
+    "full-text-search",
+    "elasticsearch",
+    "opensearch",
+    "inverted-index",
+    "bm25",
+    "analyzers",
+    "relevance",
+    "sharding"
+  ],
+  "description": "A staff-level tour of full-text search: why a search engine beats SQL LIKE, how the inverted index and analysis pipeline turn text into fast term lookups, and how Elasticsearch/OpenSearch score relevance with BM25 across sharded, replicated clusters. Covers query DSL, mapping pitfalls, keeping search in sync with the source of truth, deep pagination, and a look at vector/semantic search.",
+  "estReadMinutes": 32,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "What Full-Text Search Actually Is",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Full-text search is the problem of finding documents that are relevant to a free-form query, not just documents that contain an exact substring. \"Relevant\" is doing a lot of work in that sentence: a search for \"running shoes\" should match a product titled \"Trail Runner Sneakers\", rank a title match above a buried footnote match, tolerate a typo like \"runing\", and return in single-digit milliseconds over hundreds of millions of documents. None of that is what a relational database was built to do."
+        },
+        {
+          "type": "paragraph",
+          "text": "A dedicated search engine solves this by pre-computing an inverted index: instead of scanning rows, it maps every term to the list of documents that contain it. Elasticsearch and its fork OpenSearch are the dominant open-source engines, both built on the Apache Lucene library, which owns the index format, the analysis pipeline, and the relevance math. This topic reasons about that stack from the term level up to a distributed, replicated cluster."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Mental model: a database answers \"give me the rows where this predicate is true\"; a search engine answers \"give me the documents most relevant to this text, ranked, and do it before the user notices\"."
+        }
+      ]
+    },
+    {
+      "id": "why-not-sql",
+      "heading": "Why Not Just Use SQL LIKE?",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The instinct is to reach for WHERE description LIKE '%running%'. It works for a demo and collapses in production. A leading-wildcard LIKE cannot use a B-tree index, so it degrades to a full table scan that grows linearly with data. It is also purely literal: it will not match \"ran\" or \"runs\", will not tolerate \"runing\", cannot rank a title hit above a hit in the returns policy, and has no concept of stopwords, stemming, or synonyms."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- Full scan, no ranking, no stemming, no typo tolerance\nSELECT id, title\nFROM products\nWHERE lower(title) LIKE '%running%'\n   OR lower(description) LIKE '%running%';\n\n-- Postgres full-text search is a real improvement (GIN index + tsvector),\n-- but still lacks BM25 tuning, rich analyzers, facets, and horizontal scaling.\nSELECT id, ts_rank(tsv, plainto_tsquery('running shoes')) AS rank\nFROM products\nWHERE tsv @@ plainto_tsquery('running shoes')\nORDER BY rank DESC;"
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Performance: an inverted index turns search into a lookup, not a scan, and stays fast as data grows.",
+            "Relevance: real ranking (BM25) with field boosts, so titles outrank footers.",
+            "Linguistics: analyzers give you lowercasing, stemming, stopwords, and synonyms out of the box.",
+            "Features: facets/aggregations, typo tolerance, autocomplete, highlighting, and geo — none native to LIKE.",
+            "Scale: sharding and replication let one logical index span many machines for volume and HA."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Postgres tsvector/tsquery is a legitimate answer for small-to-medium search embedded in your OLTP database. Reach for Elasticsearch when you need scale, tunable relevance, facets, autocomplete, and typo tolerance as first-class citizens."
+        }
+      ]
+    },
+    {
+      "id": "inverted-index",
+      "heading": "The Inverted Index",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The inverted index is the data structure that makes search fast. A forward index maps a document to its terms (doc -> [terms]); the inverted index flips that to map each term to the sorted list of documents that contain it, called a posting list. To answer a query you intersect or union posting lists rather than scanning documents. The term dictionary is held in a compact, sorted structure (in Lucene, an FST) so term lookup is effectively O(term length), and posting lists are delta-encoded and compressed so they stay small and cache-friendly."
+        },
+        {
+          "type": "paragraph",
+          "text": "Each posting typically stores more than a document id: the term frequency (how many times the term appears in that document, used for scoring) and, when enabled, the positions of each occurrence (used for phrase and proximity queries). Because posting lists are sorted by document id, a boolean AND of two terms is a linear merge of two sorted lists — the reason multi-term queries stay cheap. Lucene writes these structures into immutable segments; new documents create new segments that are periodically merged in the background."
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "Docs:\n  1: \"the fast red fox\"\n  2: \"a fast car\"\n  3: \"red fox runs fast\"\n\nAnalysis drops stopwords (the, a) and lowercases. Inverted index:\n\n  term    -> postings (docId: term_freq @positions)\n  car     -> [2:1@2]\n  fast    -> [1:1@1, 2:1@1, 3:1@3]\n  fox     -> [1:1@3, 3:1@1]\n  red     -> [1:1@2, 3:1@0]\n  runs    -> [3:1@2]\n\nQuery \"red fox\" (AND) = intersect(red, fox) = merge [1,3] and [1,3] = {1,3}."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Segments are immutable. Deletes are tombstones and updates are delete-plus-reindex; space is reclaimed only when segments merge. This is why heavy update workloads produce merge pressure and why search engines favor append-heavy, read-heavy access patterns."
+        }
+      ]
+    },
+    {
+      "id": "analysis-pipeline",
+      "heading": "The Analysis Pipeline",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "What goes into the inverted index is not raw text but the output of an analyzer. An analyzer runs three stages in order: character filters transform the raw string (strip HTML, map & to \"and\"); a single tokenizer splits the stream into tokens (the standard tokenizer breaks on word boundaries); then a chain of token filters transforms the token stream — lowercase, remove stopwords, apply stemming, expand synonyms. Whatever the analyzer emits is exactly what becomes searchable terms."
+        },
+        {
+          "type": "list",
+          "style": "ordered",
+          "items": [
+            "Char filters: pre-tokenization string edits (html_strip, mapping like C++ -> cplusplus).",
+            "Tokenizer: exactly one; splits text into tokens (standard, whitespace, keyword, edge_ngram).",
+            "Token filters: lowercase, stop (drop the/a/of), stemmer (running/ran -> run), synonym (tv -> television), asciifolding (café -> cafe)."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The single most important rule: the same analyzer must run at index time and at query time, otherwise the terms will not match. If \"Running\" is indexed as the stemmed lowercase term \"run\" but the query \"run\" is not analyzed the same way, you get zero hits. By default Elasticsearch uses the field's analyzer for both, but you can override search_analyzer — a common pattern for autocomplete, where you index with edge n-grams but search with a plain analyzer so the query is not itself exploded into prefixes."
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "Input:  \"The Fast-Running <b>Foxes</b>!\"\n\nchar_filter (html_strip)  -> \"The Fast-Running Foxes!\"\ntokenizer (standard)      -> [The, Fast, Running, Foxes]\nlowercase                 -> [the, fast, running, foxes]\nstop (english)            -> [fast, running, foxes]\nstemmer (english)         -> [fast, run, fox]\n\nIndexed terms: fast, run, fox   (query \"foxes\" is stemmed to \"fox\" -> match)"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Test analyzers before you ship a mapping. The _analyze API (POST /index/_analyze with analyzer + text) shows exactly which terms will be produced. Guessing here is the number-one cause of \"why does my search return nothing?\"."
+        }
+      ]
+    },
+    {
+      "id": "relevance-bm25",
+      "heading": "Relevance Scoring: TF-IDF and BM25",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Matching finds candidates; scoring ranks them. Classic TF-IDF combines three intuitions: term frequency (a term appearing more often in a document signals relevance), inverse document frequency (a term appearing in few documents is more discriminating than a common one), and field-length normalization (a hit in a short title matters more than a hit in a long body). TF-IDF multiplies TF by IDF and divides by field length. It works, but its term-frequency component grows without bound, so a page that repeats \"shoes\" fifty times can dominate purely by keyword stuffing."
+        },
+        {
+          "type": "paragraph",
+          "text": "BM25 (Best Matching 25) is a probabilistic refinement and has been the Elasticsearch default since 5.0. Its key improvement is term-frequency saturation: the k1 parameter makes each additional occurrence of a term contribute less, following a diminishing-returns curve, so the tenth \"shoes\" barely moves the score above the fifth. The b parameter controls how aggressively long documents are penalized. The result is more stable, harder to game, and better calibrated across fields of varying length — which is exactly why it replaced TF-IDF as the default."
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "BM25 score for term t in document d, query q:\n\n  score = IDF(t) * ( tf(t,d) * (k1 + 1) )\n                   / ( tf(t,d) + k1 * (1 - b + b * (|d| / avgdl)) )\n\n  tf(t,d) = term frequency of t in d\n  |d|     = length of field d in terms\n  avgdl   = average field length across the index\n  k1      = TF saturation (default 1.2) -> higher = TF matters more, longer\n  b       = length normalization (default 0.75) -> higher = penalize long docs more\n\nUse the _explain / explain:true API to see the exact term-by-term math per hit."
+        },
+        {
+          "type": "table",
+          "columns": ["Property", "TF-IDF", "BM25"],
+          "rows": [
+            ["Term-frequency growth", "Unbounded (linear-ish)", "Saturating via k1 (diminishing returns)"],
+            ["Length normalization", "Simple divide by length", "Tunable via b parameter"],
+            ["Resistance to keyword stuffing", "Weak", "Strong"],
+            ["Tunability", "Little", "k1 and b per field/index"],
+            ["Elasticsearch status", "Legacy (pre-5.0)", "Default since 5.0"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "BM25 is a bag-of-words model: it does not understand meaning, only term statistics. That gap is what vector/semantic search fills, and why hybrid (BM25 + kNN) is now common."
+        }
+      ]
+    },
+    {
+      "id": "es-model",
+      "heading": "The Elasticsearch / OpenSearch Data Model",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A document is a JSON object — the unit of indexing and search. Documents live in an index, a logical namespace with a mapping (its schema) and settings. An index is split into primary shards, each a self-contained Lucene index; a document is routed to exactly one primary shard. Each primary can have one or more replica shards — exact copies on other nodes that provide high availability and extra read throughput. Shard count for an index is fixed at creation (you must reindex to change it); replica count can change at any time."
+        },
+        {
+          "type": "paragraph",
+          "text": "The mapping defines each field's type, and the most consequential decision is text versus keyword. A text field is analyzed — it is broken into terms and is meant for full-text relevance (match queries). A keyword field is stored as a single exact, un-analyzed token — it is meant for filtering, sorting, aggregations, and exact-match term queries. You very often want both, via a multi-field: index a title as text for searching and title.keyword for sorting and faceting. Getting this wrong is the classic mapping bug."
+        },
+        {
+          "type": "table",
+          "columns": ["Aspect", "text", "keyword"],
+          "rows": [
+            ["Analyzed?", "Yes (tokenized, stemmed, lowercased)", "No (stored verbatim as one token)"],
+            ["Use for", "Full-text relevance (match)", "Exact match, filter, sort, aggregate"],
+            ["Query type", "match / match_phrase", "term / terms"],
+            ["Sortable / aggregatable", "No (needs fielddata, avoid)", "Yes, efficiently (doc values)"],
+            ["Example", "Product description, article body", "Status, category, SKU, tag, email"],
+            ["Typical pattern", "Combine both via a multi-field: title (text) + title.keyword (keyword)", "—"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Trying to sort or aggregate on a text field fails or forces fielddata (a heap-hungry, discouraged mechanism). Sort and facet on keyword; search on text. That one rule prevents most beginner mapping outages."
+        }
+      ]
+    },
+    {
+      "id": "mapping-example",
+      "heading": "Designing a Mapping",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Below is a products mapping that names a custom analyzer (english stemming plus a synonym filter), stores the name as text with a keyword multi-field for sorting/faceting, and marks structured fields as keyword, numeric, or date. Note explicit mapping over dynamic mapping: relying on Elasticsearch to guess types in production leads to strings silently becoming text+keyword pairs and dates parsed as text."
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "code": "PUT /products\n{\n  \"settings\": {\n    \"number_of_shards\": 3,\n    \"number_of_replicas\": 1,\n    \"analysis\": {\n      \"filter\": {\n        \"en_stem\": { \"type\": \"stemmer\", \"language\": \"english\" },\n        \"product_synonyms\": {\n          \"type\": \"synonym\",\n          \"synonyms\": [ \"tv, television\", \"sneaker, trainer, running shoe\" ]\n        }\n      },\n      \"analyzer\": {\n        \"product_text\": {\n          \"type\": \"custom\",\n          \"char_filter\": [ \"html_strip\" ],\n          \"tokenizer\": \"standard\",\n          \"filter\": [ \"lowercase\", \"stop\", \"product_synonyms\", \"en_stem\" ]\n        }\n      }\n    }\n  },\n  \"mappings\": {\n    \"properties\": {\n      \"name\": {\n        \"type\": \"text\",\n        \"analyzer\": \"product_text\",\n        \"fields\": {\n          \"keyword\": { \"type\": \"keyword\", \"ignore_above\": 256 }\n        }\n      },\n      \"description\": { \"type\": \"text\", \"analyzer\": \"product_text\" },\n      \"brand\":       { \"type\": \"keyword\" },\n      \"category\":    { \"type\": \"keyword\" },\n      \"price\":       { \"type\": \"scaled_float\", \"scaling_factor\": 100 },\n      \"in_stock\":    { \"type\": \"boolean\" },\n      \"created_at\":  { \"type\": \"date\" }\n    }\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Synonyms placed in the analyzer's filter chain expand at index time here. For editable synonym lists that must not require reindexing, apply them as a search-time analyzer instead, so you can update the list and reload without touching stored documents."
+        }
+      ]
+    },
+    {
+      "id": "query-dsl",
+      "heading": "Query DSL: match, term, bool, and Filter Context",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Queries run in one of two contexts. In query context a clause both matches and contributes to the relevance _score. In filter context a clause only matches yes/no, contributes nothing to the score, and — crucially — its result is cached in the node query cache, making repeated filters extremely cheap. The bool query is the workhorse: must and should run in query context (scoring), while filter and must_not run in filter context (no scoring, cacheable)."
+        },
+        {
+          "type": "table",
+          "columns": ["Query", "Analyzed?", "Context", "Use when"],
+          "rows": [
+            ["match", "Yes", "Query (scores)", "Full-text search on a text field"],
+            ["match_phrase", "Yes", "Query (scores)", "Exact word order / proximity (\"red fox\")"],
+            ["term", "No", "Filter (usually)", "Exact match on keyword/number/bool"],
+            ["terms", "No", "Filter", "Match any of a set of exact values"],
+            ["range", "No", "Filter", "Numeric/date bounds (price, created_at)"],
+            ["prefix / edge_ngram match", "Depends", "Query", "Autocomplete / type-ahead"],
+            ["fuzzy / match(fuzziness)", "Yes", "Query", "Typo tolerance (edit distance)"],
+            ["bool", "n/a", "Both", "Combine the above (must/should/filter/must_not)"]
+          ]
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "code": "GET /products/_search\n{\n  \"query\": {\n    \"bool\": {\n      \"must\": [\n        { \"match\": { \"name\":        { \"query\": \"running shoes\", \"boost\": 2 } } }\n      ],\n      \"should\": [\n        { \"match\":  { \"description\": \"lightweight trail\" } },\n        { \"match\":  { \"name\": { \"query\": \"runing\", \"fuzziness\": \"AUTO\" } } }\n      ],\n      \"filter\": [\n        { \"term\":  { \"in_stock\": true } },\n        { \"terms\": { \"brand\": [ \"nike\", \"asics\" ] } },\n        { \"range\": { \"price\": { \"gte\": 20, \"lte\": 150 } } }\n      ],\n      \"must_not\": [\n        { \"term\": { \"category\": \"clearance\" } }\n      ]\n    }\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Rule of thumb: put anything that is a hard yes/no constraint (in stock, price range, category, tenant id) in filter; put the free-text relevance signals in must/should. This maximizes cache hits and keeps scoring meaningful."
+        }
+      ]
+    },
+    {
+      "id": "autocomplete-facets",
+      "heading": "Autocomplete and Aggregations",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Type-ahead search needs to match a prefix as the user types. The scalable approach is edge n-grams: at index time, tokenize each term into its prefixes (\"shoe\" -> s, sh, sho, shoe) so a prefix query becomes an ordinary term lookup. The catch is that you must not apply the same edge-ngram analyzer at query time, or the query \"shoe\" would itself explode into s/sh/sho and over-match. Set a plain search_analyzer to keep the query intact."
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "code": "PUT /suggest\n{\n  \"settings\": {\n    \"analysis\": {\n      \"tokenizer\": {\n        \"edge_ngram_tok\": {\n          \"type\": \"edge_ngram\", \"min_gram\": 2, \"max_gram\": 20,\n          \"token_chars\": [ \"letter\", \"digit\" ]\n        }\n      },\n      \"analyzer\": {\n        \"autocomplete_index\":  {\n          \"tokenizer\": \"edge_ngram_tok\", \"filter\": [ \"lowercase\" ]\n        },\n        \"autocomplete_search\": {\n          \"tokenizer\": \"standard\", \"filter\": [ \"lowercase\" ]\n        }\n      }\n    }\n  },\n  \"mappings\": {\n    \"properties\": {\n      \"name\": {\n        \"type\": \"text\",\n        \"analyzer\": \"autocomplete_index\",\n        \"search_analyzer\": \"autocomplete_search\"\n      }\n    }\n  }\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Aggregations power faceted navigation — the counts you see next to filters (\"Nike (42), Asics (17)\"). A terms aggregation buckets documents by a keyword field; you can nest sub-aggregations (average price per brand) and combine them with a filtered query so facets reflect the current search. Aggregations run on keyword or numeric fields via doc values, which is exactly why category and brand are mapped as keyword."
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "code": "GET /products/_search\n{\n  \"size\": 0,\n  \"query\": { \"match\": { \"name\": \"running shoes\" } },\n  \"aggs\": {\n    \"by_brand\": {\n      \"terms\": { \"field\": \"brand\", \"size\": 10 },\n      \"aggs\": {\n        \"avg_price\":   { \"avg\": { \"field\": \"price\" } },\n        \"price_range\": { \"stats\": { \"field\": \"price\" } }\n      }\n    },\n    \"price_buckets\": {\n      \"range\": {\n        \"field\": \"price\",\n        \"ranges\": [ { \"to\": 50 }, { \"from\": 50, \"to\": 100 }, { \"from\": 100 } ]\n      }\n    }\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "size: 0 tells Elasticsearch to skip returning hit documents and compute only the aggregations — the standard pattern when you want facet counts without the result rows."
+        }
+      ]
+    },
+    {
+      "id": "distributed",
+      "heading": "Distributed Architecture: Sharding, Routing, Scatter-Gather",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "An index is partitioned into primary shards spread across nodes. When you index a document, a hash of its routing value (the id by default) selects the shard: shard = hash(routing) % number_of_primary_shards. That formula is why primary shard count is immutable — changing it would relocate every document. A search hits any node, which becomes the coordinating node: it fans the query out to one copy (primary or replica) of every shard (scatter), each shard executes locally and returns its top-K, and the coordinator merges and re-ranks the partial results into the final page (gather)."
+        },
+        {
+          "type": "paragraph",
+          "text": "Replicas are exact copies of primaries on different nodes. They provide high availability (if a node dies, a replica is promoted to primary) and read scalability (searches can be served by replicas, spreading load). Writes go to the primary first and are then replicated. Because relevance statistics like IDF are computed per shard by default, scores can vary slightly across shards; for small indexes or exact scoring you can use the dfs_query_then_fetch search type to compute global term statistics first."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Coordinating node: receives the request, scatters to shards, gathers and merges results — any node can play this role.",
+            "Routing: hash(routing) % primaries picks the shard; custom routing can co-locate related docs on one shard for faster queries.",
+            "Scatter-gather: each shard returns its local top-K; the coordinator globally re-ranks — the reason deep pagination is expensive.",
+            "Replicas: HA plus read throughput; number_of_replicas is changeable live, number_of_shards is not."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Over-sharding is a classic mistake: thousands of tiny shards waste heap and slow scatter-gather. Aim for shards in the tens-of-GB range and size shard count to data volume, not optimism."
+        }
+      ]
+    },
+    {
+      "id": "consistency-sync",
+      "heading": "Near-Real-Time, Refresh, and Keeping Search in Sync",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Elasticsearch is near-real-time, not real-time. A newly indexed document is durable once written to the translog but is not searchable until a refresh flushes the in-memory buffer into a new searchable segment. The default refresh_interval is 1 second, so there is a small window where a write exists but is invisible to search. For heavy bulk ingestion you often raise the interval (or set it to -1) to reduce segment churn and re-enable it afterward — a large throughput win at the cost of visibility latency."
+        },
+        {
+          "type": "paragraph",
+          "text": "The deeper problem is that Elasticsearch should almost never be your system of record — it is a derived read model. Your relational database owns the truth; the search index is a projection of it. Naive dual writes (write to the DB, then write to ES in the same request) are unsafe: the second write can fail after the first commits, leaving the two stores divergent with no atomicity across systems. The robust pattern is to derive the index from the database's committed state."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Outbox pattern: within the same DB transaction, write the domain change and an outbox event row; a relay reads the outbox and updates ES — no lost updates, at-least-once delivery.",
+            "CDC (change data capture): a tool like Debezium tails the DB write-ahead log and streams committed changes to Kafka, and a consumer projects them into Elasticsearch.",
+            "Idempotent upserts: index with the DB primary key as the document _id and use external versioning so out-of-order events cannot overwrite newer data.",
+            "Full reindex: keep a batch job that can rebuild the index from scratch, aliased with zero-downtime switchover, for mapping changes and disaster recovery."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Dual-write (app writes DB and ES separately) is the most common source of silent search drift. If the ES write fails after the DB commits, users see stale or missing results with no error. Use the outbox or CDC so the index is always derived from committed DB state."
+        }
+      ]
+    },
+    {
+      "id": "pagination",
+      "heading": "Pagination: from/size vs search_after",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Naive pagination with from and size looks harmless but is a scatter-gather trap. To return results 10,000 to 10,010, every shard must produce its top 10,010 hits and send them to the coordinator to merge — memory and CPU that grows with the offset, which is why Elasticsearch caps from+size at index.max_result_window (default 10,000). Deep from/size is an availability risk, not just slow."
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "code": "// First page: sort by a tiebreaker-inclusive key so order is total\nGET /products/_search\n{\n  \"size\": 20,\n  \"query\": { \"match\": { \"name\": \"running shoes\" } },\n  \"sort\": [ { \"_score\": \"desc\" }, { \"_id\": \"asc\" } ]\n}\n\n// Next page: pass the sort values of the LAST hit from the previous page.\n// No offset -> constant cost regardless of depth.\nGET /products/_search\n{\n  \"size\": 20,\n  \"query\": { \"match\": { \"name\": \"running shoes\" } },\n  \"sort\": [ { \"_score\": \"desc\" }, { \"_id\": \"asc\" } ],\n  \"search_after\": [ 8.42137, \"prod-10420\" ]\n}"
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "from/size: fine for shallow paging (a handful of pages); capped at 10,000; cost grows with offset.",
+            "search_after: stateless cursor keyed on the last hit's sort values; constant cost, ideal for infinite scroll and deep paging. Requires a total, tiebroken sort.",
+            "PIT (point in time): pair search_after with a PIT id to get a consistent snapshot across pages even as the index changes.",
+            "scroll: legacy, for exporting whole result sets in a batch job, not for user-facing pagination."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Rule: user-facing deep pagination or infinite scroll -> search_after (+ PIT for consistency). Full-dataset export -> PIT + search_after (scroll is deprecated for this). Never let from+size climb into the thousands."
+        }
+      ]
+    },
+    {
+      "id": "vector-search",
+      "heading": "Vector and Semantic Search (kNN)",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "BM25 matches on lexical overlap, so a query for \"laptop\" will not match a document that only says \"notebook computer\" unless you supplied synonyms. Semantic search closes this gap by embedding text into high-dimensional vectors with a model, so semantically similar text lands nearby in vector space. Search becomes k-nearest-neighbor (kNN): find the vectors closest to the query vector by cosine or dot-product similarity, accelerated by an approximate index such as HNSW."
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "code": "PUT /docs\n{\n  \"mappings\": {\n    \"properties\": {\n      \"body\":   { \"type\": \"text\" },\n      \"embedding\": {\n        \"type\": \"dense_vector\", \"dims\": 768,\n        \"index\": true, \"similarity\": \"cosine\"\n      }\n    }\n  }\n}\n\nGET /docs/_search\n{\n  \"knn\": {\n    \"field\": \"embedding\",\n    \"query_vector\": [ 0.12, -0.03, 0.88 ],\n    \"k\": 10, \"num_candidates\": 100\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "In practice the strongest results come from hybrid search: run BM25 and kNN together and fuse the rankings (for example with reciprocal rank fusion). Lexical precision plus semantic recall beats either alone — and it is where modern search and RAG pipelines are converging."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "inverted-index-ascii",
+      "title": "Inverted index: term to posting list",
+      "type": "ascii",
+      "content": "Documents (after analysis, lowercased, stemmed):\n  doc1: fast red fox\n  doc2: fast car\n  doc3: red fox run fast\n\nInverted index  (term -> posting list of docIds)\n\n  +--------+     +-----------------------------+\n  | car    | --> | doc2                        |\n  +--------+     +-----------------------------+\n  | fast   | --> | doc1  doc2  doc3            |\n  +--------+     +-----------------------------+\n  | fox    | --> | doc1  doc3                  |\n  +--------+     +-----------------------------+\n  | red    | --> | doc1  doc3                  |\n  +--------+     +-----------------------------+\n  | run    | --> | doc3                        |\n  +--------+     +-----------------------------+\n\nQuery: red AND fox  =  intersect([doc1,doc3],[doc1,doc3]) = {doc1, doc3}"
+    },
+    {
+      "id": "scatter-gather-mermaid",
+      "title": "Scatter-gather search across shards",
+      "type": "mermaid",
+      "content": "flowchart TD\n  C[Client search request] --> COORD[Coordinating node]\n  COORD -->|scatter| S0[Shard 0 primary]\n  COORD -->|scatter| S1[Shard 1 replica]\n  COORD -->|scatter| S2[Shard 2 primary]\n  S0 -->|top-K local| COORD\n  S1 -->|top-K local| COORD\n  S2 -->|top-K local| COORD\n  COORD -->|gather + merge + re-rank| R[Final ranked page]\n  R --> C"
+    },
+    {
+      "id": "analysis-pipeline-mermaid",
+      "title": "Analysis pipeline stages",
+      "type": "mermaid",
+      "content": "flowchart LR\n  RAW[Raw text] --> CF[Char filters html_strip mapping]\n  CF --> TOK[Tokenizer standard]\n  TOK --> LC[lowercase]\n  LC --> STOP[stop words]\n  STOP --> SYN[synonyms]\n  SYN --> STEM[stemmer]\n  STEM --> IDX[Terms into inverted index]"
+    },
+    {
+      "id": "sync-outbox-ascii",
+      "title": "Keeping search in sync via outbox / CDC",
+      "type": "ascii",
+      "content": "  +-----------+   one transaction    +------------------+\n  |  App      | -------------------> |  Postgres (truth)|\n  +-----------+  write row + outbox  +--------+---------+\n                                              |\n                               CDC / outbox relay\n                                              |\n                                              v\n                                     +------------------+\n                                     |  Kafka / queue   |\n                                     +--------+---------+\n                                              |\n                                     idempotent upsert (_id = pk)\n                                              v\n                                     +------------------+\n                                     |  Elasticsearch   |\n                                     |  (derived index) |\n                                     +------------------+"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-why-not-like",
+      "question": "Why use a search engine instead of SQL LIKE '%term%' for full-text search?",
+      "answer": "A leading-wildcard LIKE cannot use a B-tree index, so it degrades to a full table scan that grows linearly with data. It is also purely literal: no stemming (\"run\" will not match \"running\"), no typo tolerance, no relevance ranking, and no facets. A search engine pre-computes an inverted index that maps terms to documents, turning search into a fast lookup rather than a scan. It adds an analysis pipeline for linguistics and BM25 scoring for ranking. It also brings aggregations, autocomplete, and horizontal scaling via sharding. Postgres full-text search (tsvector) is a reasonable middle ground for smaller datasets, but lacks the tunable relevance, facets, and scale of a dedicated engine.",
+      "difficulty": "easy",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [ "sql", "why", "inverted-index" ],
+      "followUps": [ "When is Postgres full-text search enough?", "What does LIKE cost on a 100M row table?" ]
+    },
+    {
+      "id": "q-inverted-index",
+      "question": "What is an inverted index and why is it fast?",
+      "answer": "An inverted index maps each term to a posting list: the sorted set of document ids that contain that term, often with term frequencies and positions. It is the inverse of a forward index (document to terms). Search becomes a lookup in a sorted term dictionary followed by merging posting lists, rather than scanning documents. Because posting lists are sorted by document id, a boolean AND is a linear merge of sorted lists, which stays cheap even for multi-term queries. Term frequencies enable scoring and positions enable phrase queries. In Lucene these structures are written into immutable, compressed segments, so lookups are cache-friendly and stay fast as data grows.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [ "inverted-index", "lucene", "postings" ],
+      "followUps": [ "What is stored in a posting besides the doc id?", "Why are Lucene segments immutable?" ]
+    },
+    {
+      "id": "q-analysis-pipeline",
+      "question": "Walk through the analysis pipeline: char filters, tokenizer, token filters.",
+      "answer": "An analyzer runs three ordered stages. Character filters transform the raw string before tokenization (for example html_strip, or mapping C++ to cplusplus). Exactly one tokenizer then splits the stream into tokens; the standard tokenizer breaks on word boundaries. Finally a chain of token filters transforms tokens: lowercase for case-insensitivity, stop to remove common words, stemmer to reduce running/ran to run, synonym to expand tv to television, and asciifolding to normalize accents. Whatever the analyzer emits is exactly what becomes searchable terms in the inverted index. You can inspect the exact output with the _analyze API before committing a mapping.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [ "analyzers", "tokenizer", "stemming" ],
+      "followUps": [ "How many tokenizers can an analyzer have?", "What does asciifolding solve?" ]
+    },
+    {
+      "id": "q-analyzer-index-vs-query",
+      "question": "Why must the same analyzer usually run at index time and query time, and when do you deliberately differ?",
+      "answer": "Search matches terms, not raw strings, so a query only matches if it produces the same terms that were indexed. If \"Running\" is indexed as the stemmed token \"run\" but the query is compared un-analyzed, the terms differ and you get zero hits. By default Elasticsearch applies the field analyzer at both index and search time to guarantee they align. The deliberate exception is autocomplete with edge n-grams: you want to index each term's prefixes (s, sh, sho, shoe) but you do NOT want the query itself exploded into prefixes, or \"shoe\" would over-match. You solve this by setting a plain search_analyzer that leaves the query intact while the index analyzer generates the n-grams. This is the canonical case where index and search analyzers should differ.",
+      "difficulty": "hard",
+      "category": "Backend",
+      "tricky": true,
+      "tags": [ "analyzers", "autocomplete", "edge-ngram" ],
+      "followUps": [ "What breaks if you n-gram at query time too?", "How do you set search_analyzer in a mapping?" ]
+    },
+    {
+      "id": "q-tfidf-vs-bm25",
+      "question": "Why is BM25 the default relevance model over TF-IDF?",
+      "answer": "Both combine term frequency, inverse document frequency, and field-length normalization, but TF-IDF's term-frequency component grows roughly linearly and unbounded, so a document can dominate purely by repeating a keyword. BM25 introduces term-frequency saturation through the k1 parameter: each additional occurrence contributes less on a diminishing-returns curve, so the tenth mention barely beats the fifth. Its b parameter gives tunable control over how strongly long documents are penalized, replacing TF-IDF's rigid divide-by-length. The result is more stable, harder to game with keyword stuffing, and better calibrated across fields of differing length. Because it is a strict, tunable improvement with sensible defaults (k1=1.2, b=0.75), Elasticsearch made it the default in version 5.0. Both remain bag-of-words models that understand statistics, not meaning.",
+      "difficulty": "hard",
+      "category": "Backend",
+      "tricky": true,
+      "tags": [ "bm25", "tf-idf", "relevance" ],
+      "followUps": [ "What do k1 and b control?", "How do you inspect a document's score breakdown?" ]
+    },
+    {
+      "id": "q-text-vs-keyword",
+      "question": "What is the difference between a text and a keyword field, and when do you use each?",
+      "answer": "A text field is analyzed: it is tokenized, lowercased, and often stemmed, producing multiple terms meant for full-text relevance with match queries. A keyword field is stored verbatim as a single un-analyzed token, meant for exact matching, filtering, sorting, and aggregations via term queries. You cannot efficiently sort or aggregate on a text field — that requires fielddata, which is heap-hungry and discouraged — whereas keyword uses compact doc values. The common pattern is a multi-field: index a title as text for searching and expose title.keyword for sorting and faceting. Choosing text where you needed keyword (or vice versa) is the classic mapping bug: search returns nothing, or sorting and aggregations fail. Structured attributes like status, category, SKU, and email should be keyword; free prose should be text.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": true,
+      "tags": [ "mapping", "text", "keyword" ],
+      "followUps": [ "Why does aggregating on a text field fail?", "What is a multi-field?" ]
+    },
+    {
+      "id": "q-filter-vs-must",
+      "question": "In a bool query, what is the difference between filter and must clauses?",
+      "answer": "must and should run in query context: they match AND contribute to the relevance _score. filter and must_not run in filter context: they match yes/no, contribute nothing to the score, and their bitset result is cached in the node query cache. That caching makes filters dramatically cheaper for repeated constraints like tenant id, in-stock, or a price range. The rule of thumb is to put hard yes/no constraints in filter and free-text relevance signals in must/should. Doing so maximizes cache hits and keeps scores meaningful, because you are not letting a boolean constraint like in_stock=true pollute the relevance calculation. Misusing must for exact filters wastes scoring work and cache opportunities.",
+      "difficulty": "hard",
+      "category": "Backend",
+      "tricky": true,
+      "tags": [ "bool-query", "filter-context", "caching" ],
+      "followUps": [ "What is cached in filter context?", "Where should tenant id go and why?" ]
+    },
+    {
+      "id": "q-shards-replicas",
+      "question": "Explain primary shards versus replicas and why shard count is fixed.",
+      "answer": "An index is split into primary shards, each a self-contained Lucene index living on some node; a document is routed to one primary via hash(routing) % number_of_primary_shards. Because that formula depends on the shard count, changing the count would relocate every document, so primary shard count is immutable and can only change via reindex. Replicas are exact copies of primaries on different nodes; they provide high availability (a replica is promoted if a primary's node dies) and read scalability (searches can be served from replicas). Writes go to the primary and are then replicated. Unlike shard count, number_of_replicas can be changed live. Over-sharding into thousands of tiny shards wastes heap and slows scatter-gather, so shard count should track data volume.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [ "sharding", "replicas", "routing" ],
+      "followUps": [ "How do you change shard count?", "What are the symptoms of over-sharding?" ]
+    },
+    {
+      "id": "q-scatter-gather",
+      "question": "How does a distributed search execute across shards?",
+      "answer": "A search arrives at any node, which becomes the coordinating node. In the query phase it scatters the request to one copy (primary or replica) of every shard of the index. Each shard executes the query locally and returns its own top-K document ids and scores. The coordinator gathers these partial results and merges them into a globally ranked list (scatter-gather). In the fetch phase it then retrieves the full source for just the documents on the final page. Because relevance statistics like IDF are computed per shard by default, scores can vary slightly; dfs_query_then_fetch computes global term statistics first for exact scoring at a small cost. This model is also why deep pagination is expensive: every shard must produce from+size hits for the coordinator to merge.",
+      "difficulty": "hard",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [ "scatter-gather", "coordinating-node", "distributed" ],
+      "followUps": [ "What does dfs_query_then_fetch fix?", "Why does deep from/size get expensive here?" ]
+    },
+    {
+      "id": "q-deep-pagination",
+      "question": "Why is deep from/size pagination a problem, and what should you use instead?",
+      "answer": "To return results at a large offset, every shard must produce its top from+size hits and ship them to the coordinator to merge, so memory and CPU grow with the offset. Elasticsearch caps from+size at index.max_result_window (default 10,000) precisely because deep offsets threaten cluster stability, not just latency. The correct tool for deep or infinite-scroll pagination is search_after: you sort on a total, tiebroken key and pass the last hit's sort values as a stateless cursor for the next page, giving constant cost regardless of depth. Pairing search_after with a point-in-time (PIT) id gives a consistent snapshot across pages even as the index changes. The legacy scroll API is for batch exports, not user-facing pagination.",
+      "difficulty": "hard",
+      "category": "Backend",
+      "tricky": true,
+      "tags": [ "pagination", "search-after", "pit" ],
+      "followUps": [ "Why does search_after need a tiebreaker in the sort?", "When would you still use scroll?" ]
+    },
+    {
+      "id": "q-sync-db",
+      "question": "How do you keep an Elasticsearch index in sync with your source-of-truth database?",
+      "answer": "Elasticsearch should be treated as a derived read model, not the system of record; your database owns the truth and the index is a projection. Naive dual writes (commit to the DB, then write to ES in the same request) are unsafe because the second write can fail after the first commits, leaving the stores divergent with no cross-system atomicity. The robust patterns derive the index from committed DB state: the outbox pattern writes the domain change and an event row in the same transaction, then a relay projects events into ES; or CDC tools like Debezium tail the write-ahead log and stream committed changes through Kafka to an ES consumer. Index with the DB primary key as _id and use external versioning so out-of-order events cannot overwrite newer data, and keep a full-reindex job with alias switchover for mapping changes and recovery.",
+      "difficulty": "hard",
+      "category": "Backend",
+      "tricky": true,
+      "tags": [ "cdc", "outbox", "dual-write" ],
+      "followUps": [ "Why is dual-write unsafe?", "How does external versioning prevent stale overwrites?" ]
+    },
+    {
+      "id": "q-near-real-time",
+      "question": "What does near-real-time mean, and what is the refresh interval?",
+      "answer": "Elasticsearch is near-real-time: an indexed document is durable once written to the translog but is not searchable until a refresh flushes the in-memory buffer into a new searchable Lucene segment. The default refresh_interval is one second, so there is a brief window where a write exists but is invisible to search. This decoupling is what lets indexing stay fast. For heavy bulk ingestion you often raise refresh_interval or set it to -1 to cut segment churn, then restore it and refresh once at the end — a large throughput gain at the cost of temporary visibility latency. If a caller truly needs read-your-write, they can force ?refresh=true, but doing that on every write is a performance anti-pattern.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [ "refresh", "near-real-time", "ingestion" ],
+      "followUps": [ "Why raise refresh_interval during bulk loads?", "What is the translog for?" ]
+    },
+    {
+      "id": "q-match-vs-term",
+      "question": "When do you use a match query versus a term query?",
+      "answer": "Use match for full-text search on a text field: the query string is run through the same analyzer as the field, so \"Running Shoes\" becomes analyzed terms that match the indexed terms, with BM25 scoring. Use term for exact, un-analyzed matching on keyword, numeric, boolean, or date fields, typically inside filter context for filtering. A frequent bug is running a term query against a text field: because the field was analyzed (lowercased, stemmed) but the term query is not, \"Running\" will not match the indexed \"run\" and you get nothing. Conversely, running match on a keyword field mostly works but wastes the analyzer. As a rule: match text, term keyword.",
+      "difficulty": "easy",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [ "match", "term", "query-dsl" ],
+      "followUps": [ "Why might term on a text field return nothing?", "Which context does term usually run in?" ]
+    },
+    {
+      "id": "q-autocomplete",
+      "question": "How do you implement scalable autocomplete in Elasticsearch?",
+      "answer": "The scalable approach is edge n-grams: at index time, tokenize each term into its increasing prefixes (shoe -> s, sh, sho, shoe) so a prefix lookup becomes an ordinary term match rather than an expensive wildcard. You configure an edge_ngram tokenizer with min_gram and max_gram and use it as the index analyzer. Critically, you must set a plain search_analyzer (for example standard + lowercase) so the query \"shoe\" is not itself exploded into prefixes, which would over-match. Alternatives include the completion suggester (an FST-backed, extremely fast prefix suggester good for pure type-ahead) and search-as-you-type field type. For typo tolerance layered on top, add fuzziness to the query. Edge n-grams trade extra index size for very fast prefix search.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [ "autocomplete", "edge-ngram", "search-analyzer" ],
+      "followUps": [ "Why set a separate search_analyzer?", "When is the completion suggester a better fit?" ]
+    },
+    {
+      "id": "q-fuzzy",
+      "question": "How does fuzzy matching provide typo tolerance, and what is the cost?",
+      "answer": "Fuzzy matching uses Levenshtein edit distance: a term matches candidates within a bounded number of insertions, deletions, or substitutions. In a match query, fuzziness: AUTO scales the allowed edits with term length (0 for very short terms, 1 for medium, 2 for longer), which balances recall against noise. Under the hood Elasticsearch enumerates the terms in the dictionary within that edit distance, so fuzziness above 2 is not supported and high fuzziness on large dictionaries can be expensive. You typically constrain it with a prefix_length so the first characters must match exactly, sharply cutting the candidate set. Fuzzy is great for tolerating typos but should be a should clause boosting relevance rather than the sole must, so exact matches still rank first.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [ "fuzzy", "typo-tolerance", "levenshtein" ],
+      "followUps": [ "Why cap fuzziness at 2?", "How does prefix_length reduce cost?" ]
+    },
+    {
+      "id": "q-aggregations",
+      "question": "What are aggregations and why do they need keyword fields?",
+      "answer": "Aggregations compute analytics over the documents matching a query, most commonly the faceted counts shown beside filters (Nike 42, Asics 17). A terms aggregation buckets documents by a field's distinct values, and you can nest sub-aggregations such as average price per brand, or combine range and stats aggregations. They execute over doc values — a compact, columnar, on-disk structure — which exist for keyword, numeric, date, and boolean fields but not for analyzed text fields. That is why faceted fields like brand and category must be mapped as keyword; aggregating on a text field would require fielddata, which loads terms into heap and is discouraged. Pairing aggregations with the search query and size: 0 returns facet counts without the hit documents.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [ "aggregations", "facets", "doc-values" ],
+      "followUps": [ "Why can't you aggregate a text field?", "What does size: 0 do?" ]
+    },
+    {
+      "id": "q-vector-search",
+      "question": "What is vector/semantic search and how does it relate to BM25?",
+      "answer": "BM25 is lexical: it matches on term overlap and term statistics, so \"laptop\" will not match a document that only says \"notebook computer\" unless synonyms were configured. Vector search embeds text into high-dimensional vectors with a model so semantically similar text lands close together, and retrieval becomes k-nearest-neighbor over those vectors using cosine or dot-product similarity, accelerated by an approximate index like HNSW. Elasticsearch supports this with a dense_vector field and a knn query. The two approaches are complementary: BM25 gives precise lexical matching while kNN gives semantic recall. In practice, hybrid search runs both and fuses the rankings (for example reciprocal rank fusion), which outperforms either alone and underpins modern search and RAG systems.",
+      "difficulty": "hard",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [ "vector-search", "knn", "hybrid" ],
+      "followUps": [ "What is HNSW?", "How does reciprocal rank fusion combine rankings?" ]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-typo-tolerant-autocomplete",
+      "title": "Design a typo-tolerant product autocomplete",
+      "difficulty": "medium",
+      "category": "Backend",
+      "prompt": "Design an Elasticsearch index and query for product-name autocomplete that (1) matches as the user types (prefix), (2) tolerates a one-character typo, and (3) still allows exact sorting/faceting on the name. Provide the mapping (with an edge n-gram index analyzer and a plain search analyzer, plus a keyword multi-field) and a search query for the partial input 'runing sho'. Explain why the index and search analyzers must differ.",
+      "hints": [
+        "Use an edge_ngram tokenizer at index time so prefixes become plain terms; do NOT n-gram the query.",
+        "Set search_analyzer to standard+lowercase so 'runing sho' is not itself exploded into prefixes.",
+        "Add a keyword multi-field for sorting/faceting, and add fuzziness on the match for the typo."
+      ],
+      "solutionCode": "PUT /product_suggest\n{\n  \"settings\": {\n    \"analysis\": {\n      \"tokenizer\": {\n        \"edge_ngram_tok\": {\n          \"type\": \"edge_ngram\", \"min_gram\": 2, \"max_gram\": 20,\n          \"token_chars\": [ \"letter\", \"digit\" ]\n        }\n      },\n      \"analyzer\": {\n        \"ac_index\":  { \"tokenizer\": \"edge_ngram_tok\", \"filter\": [ \"lowercase\" ] },\n        \"ac_search\": { \"tokenizer\": \"standard\",       \"filter\": [ \"lowercase\" ] }\n      }\n    }\n  },\n  \"mappings\": {\n    \"properties\": {\n      \"name\": {\n        \"type\": \"text\",\n        \"analyzer\": \"ac_index\",\n        \"search_analyzer\": \"ac_search\",\n        \"fields\": { \"keyword\": { \"type\": \"keyword\", \"ignore_above\": 256 } }\n      }\n    }\n  }\n}\n\nGET /product_suggest/_search\n{\n  \"size\": 8,\n  \"query\": {\n    \"match\": {\n      \"name\": { \"query\": \"runing sho\", \"operator\": \"and\", \"fuzziness\": \"AUTO\" }\n    }\n  },\n  \"sort\": [ \"_score\", { \"name.keyword\": \"asc\" } ]\n}",
+      "solutionLanguage": "json",
+      "explanation": "At index time the edge_ngram tokenizer stores every prefix of each term, so 'running' is indexed as run, runn, runni, runnin, running and 'shoe' as sho, shoe. A prefix lookup therefore becomes an ordinary term match instead of an expensive leading-wildcard scan. The search_analyzer must differ: if the query 'runing sho' were also run through the edge_ngram analyzer it would be exploded into its own prefixes and match far too broadly, so we use a plain standard+lowercase analyzer that leaves the query terms intact. fuzziness: AUTO adds Levenshtein tolerance so the typo 'runing' still matches the indexed 'runn...' prefixes within one edit, giving typo tolerance on top of prefix matching. operator: and requires every input token to match, which keeps precision as the query grows. The keyword multi-field name.keyword is not analyzed, so it can be used for exact sorting and for aggregations/faceting, which the analyzed text field cannot do. The result is fast prefix matching, one-character typo tolerance, and correct sorting from a single mapping.",
+      "relatedTopic": "full-text-search"
+    },
+    {
+      "id": "ch-relevance-plus-filters",
+      "title": "Combine full-text relevance with hard filters",
+      "difficulty": "hard",
+      "category": "Backend",
+      "prompt": "Write a bool query for a product search that ranks by full-text relevance on name and description for the query 'lightweight running shoes', boosting name matches, while strictly enforcing three hard constraints: in stock only, brand in {nike, asics}, and price between 20 and 150. The clearance category must be excluded. Explain precisely why each hard constraint belongs in filter (or must_not) rather than must.",
+      "hints": [
+        "Relevance signals (name, description) go in must/should so they contribute to _score.",
+        "Yes/no constraints (in_stock, brand, price, category) go in filter/must_not — no scoring.",
+        "Filter context results are cached, so repeated filters like in_stock/price become very cheap."
+      ],
+      "solutionCode": "GET /products/_search\n{\n  \"query\": {\n    \"bool\": {\n      \"must\": [\n        { \"match\": { \"name\": { \"query\": \"lightweight running shoes\", \"boost\": 2 } } }\n      ],\n      \"should\": [\n        { \"match\": { \"description\": \"lightweight running shoes\" } }\n      ],\n      \"filter\": [\n        { \"term\":  { \"in_stock\": true } },\n        { \"terms\": { \"brand\": [ \"nike\", \"asics\" ] } },\n        { \"range\": { \"price\": { \"gte\": 20, \"lte\": 150 } } }\n      ],\n      \"must_not\": [\n        { \"term\": { \"category\": \"clearance\" } }\n      ]\n    }\n  }\n}",
+      "solutionLanguage": "json",
+      "explanation": "The two match clauses on name and description live in query context (must and should) because they are relevance signals: they both select candidates and contribute to the BM25 _score, and the boost of 2 makes a title hit count roughly twice as much as a description hit so the most on-topic products rise to the top. Every remaining constraint is a hard yes/no fact, so it belongs in filter context. in_stock, brand, and price do not make a product 'more relevant' — a document either satisfies them or it does not — so scoring them would be meaningless and would let, say, an in-stock flag distort the ranking. Filter context also skips score computation and caches its bitset result in the node query cache, so common filters like in_stock=true and the same price band across many queries become nearly free on repeat. The clearance exclusion uses must_not, which is likewise filter context and cacheable. Putting these constraints in must instead would waste scoring work, pollute the relevance calculation, and forfeit the cache. The rule is: relevance in must/should, hard constraints in filter/must_not.",
+      "relatedTopic": "full-text-search"
+    }
+  ],
+  "references": [
+    { "label": "Elasticsearch Guide (official reference)", "url": "https://www.elastic.co/guide/en/elasticsearch/reference/current/index.html" },
+    { "label": "Elastic blog: Practical BM25 explained", "url": "https://www.elastic.co/blog/practical-bm25-part-2-the-bm25-algorithm-and-its-variables" },
+    { "label": "OpenSearch documentation", "url": "https://opensearch.org/docs/latest/" },
+    { "label": "Apache Lucene: index file formats and the inverted index", "url": "https://lucene.apache.org/core/9_10_0/core/org/apache/lucene/codecs/lucene99/package-summary.html" },
+    { "label": "Relevant Search (Turnbull & Berryman, Manning)", "url": "https://www.manning.com/books/relevant-search" },
+    { "label": "Elasticsearch: paginate search results (search_after / PIT)", "url": "https://www.elastic.co/guide/en/elasticsearch/reference/current/paginate-search-results.html" }
+  ]
+}

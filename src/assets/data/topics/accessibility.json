@@ -1,0 +1,560 @@
+{
+  "id": "accessibility",
+  "title": "Web Accessibility (a11y)",
+  "category": "Frontend",
+  "subcategory": "Accessibility",
+  "difficulty": "senior",
+  "tags": ["accessibility", "a11y", "wcag", "aria", "semantic-html", "keyboard-navigation", "screen-readers", "focus-management"],
+  "description": "A staff-level guide to building accessible web applications — how assistive technology consumes the accessibility tree, when native semantics beat ARIA, and the focus, naming, and live-region patterns that make complex components and SPAs usable for everyone.",
+  "estReadMinutes": 30,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction: What Accessibility Actually Means",
+      "kind": "intro",
+      "blocks": [
+        {"type": "paragraph", "text": "Web accessibility (abbreviated a11y — 'a', then eleven letters, then 'y') is the practice of building interfaces that people can perceive, operate, and understand regardless of ability or the technology they use to interact with the page. That includes people using screen readers, screen magnifiers, switch devices, voice control, or nothing more than a keyboard because a hand injury makes a mouse impractical this week."},
+        {"type": "paragraph", "text": "Accessibility is not a special mode you build for a niche audience. It is a property of the interface, the same way correctness and performance are. When you get it right, the person using VoiceOver, the power user who lives on the keyboard, the search-engine crawler, and the automated test suite all benefit from the same well-structured, semantic markup. When you get it wrong, you have shipped a product that a meaningful fraction of your users — and in many jurisdictions, the law — consider broken."},
+        {"type": "list", "items": [
+          "Roughly one in six people worldwide lives with a significant disability, and far more experience temporary or situational impairments (a broken arm, bright sunlight, a noisy train).",
+          "Accessibility overlaps heavily with usability: clear focus states, good contrast, and predictable keyboard behavior help everyone.",
+          "The governing standard is WCAG (Web Content Accessibility Guidelines); the technical vocabulary for rich components is WAI-ARIA.",
+          "As a senior engineer you own the accessibility of what you ship — it cannot be bolted on by a separate audit at the end without enormous rework."
+        ]},
+        {"type": "callout", "variant": "info", "text": "The single most important mental model in this topic: assistive technology does not read your CSS or your visual layout. It reads the accessibility tree, which is derived from your semantic HTML and ARIA. If the semantics are wrong, the experience is wrong no matter how good it looks."}
+      ]
+    },
+    {
+      "id": "why",
+      "heading": "Why Accessibility Matters",
+      "kind": "why",
+      "blocks": [
+        {"type": "paragraph", "text": "There are four independent reasons to care, and any one of them is sufficient. The strongest is simply that excluding people from your product because of how they navigate a computer is a poor outcome you can prevent with modest, well-understood engineering effort."},
+        {"type": "list", "items": [
+          "Legal exposure: in the US the Americans with Disabilities Act (ADA) has been applied to websites, and Section 508 governs federal procurement. In the EU, EN 301 549 and the European Accessibility Act mandate WCAG-aligned conformance for many products, with the EAA taking effect in June 2025. Lawsuits and enforcement actions are common and expensive.",
+          "Real users: screen-reader, keyboard-only, low-vision, colorblind, cognitive, and motor-impairment users are a large, permanent, and often high-value segment (public sector, education, healthcare, banking).",
+          "SEO and machine consumption: semantic HTML, heading structure, alt text, and accessible names are exactly what search crawlers and AI agents parse. Accessible pages tend to rank and machine-read better.",
+          "Product quality: accessibility forces discipline — proper labels, focus order, and states — that reduces bugs and improves the experience for all users, including on mobile and with voice assistants."
+        ]},
+        {"type": "paragraph", "text": "The economic argument is that accessibility is dramatically cheaper when designed in than retrofitted. Fixing a color-contrast token in the design system costs minutes; re-architecting a custom, div-based component library to be keyboard-and-screen-reader accessible after launch can cost months. The senior instinct is to treat 'can a keyboard-only screen-reader user complete this flow?' as a first-class acceptance criterion, not a QA afterthought."},
+        {"type": "callout", "variant": "warning", "text": "An accessibility overlay widget (a third-party script that claims to 'fix' your site automatically) is not a substitute for accessible markup. Overlays are widely criticized by disabled users and have themselves been the subject of lawsuits. Fix the source, not the symptom."}
+      ]
+    },
+    {
+      "id": "wcag-pour",
+      "heading": "Core Concept: WCAG and the POUR Principles",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "WCAG (currently version 2.2, published October 2023) is the internationally referenced standard, maintained by the W3C. It is organized as a hierarchy: four top-level principles, thirteen guidelines under them, and dozens of testable success criteria under those. The four principles form the acronym POUR — every requirement in the spec rolls up to one of them."},
+        {"type": "table", "headers": ["Principle", "Meaning", "Representative requirements"], "rows": [
+          ["Perceivable", "Users must be able to perceive the information — it can't be invisible to all their senses.", "Text alternatives for images, captions for video, sufficient color contrast, content not conveyed by color alone."],
+          ["Operable", "Users must be able to operate the interface with whatever input they use.", "All functionality available by keyboard, no keyboard traps, enough time, visible focus, no seizure-inducing flashing."],
+          ["Understandable", "Content and operation must be understandable and predictable.", "Readable language declared, consistent navigation, clear labels and instructions, helpful error identification."],
+          ["Robust", "Content must be robust enough for current and future user agents, including assistive tech.", "Valid, well-formed markup; correct name/role/value exposed for all UI components (parsing and status messages)."]
+        ]},
+        {"type": "paragraph", "text": "Each success criterion is assigned a conformance level: A (minimum — failing these blocks whole groups of users), AA (the practical target that laws and contracts almost universally reference), and AAA (enhanced, often impractical to meet site-wide). When a stakeholder says 'we need to be accessible,' they almost always mean WCAG 2.2 Level AA."},
+        {"type": "list", "items": [
+          "Level A example: images have text alternatives; keyboard operability; page has a lang attribute.",
+          "Level AA example: 4.5:1 contrast for normal text; visible focus indicator; consistent navigation; resize text to 200% without loss.",
+          "Level AAA example: 7:1 contrast; sign language for prerecorded audio; no interruptions — rarely required contractually."
+        ]},
+        {"type": "callout", "variant": "info", "text": "WCAG 2.2 added nine new criteria over 2.1, including Focus Not Obscured, Dragging Movements (offer a non-drag alternative), Target Size (Minimum) of 24x24 CSS pixels, and Accessible Authentication (don't force a cognitive test like remembering a password without alternatives)."}
+      ]
+    },
+    {
+      "id": "semantic-html",
+      "heading": "Core Concept: Semantic HTML Comes First",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "The cheapest and most reliable accessibility comes from using the right native HTML element for the job. A native element carries its role, its keyboard behavior, its focusability, and its states for free — implemented and tested by the browser vendors across every assistive technology. A button announces itself as a button, is reachable by Tab, activates on Enter and Space, and fires a click on both. Reproducing all of that on a div is a surprising amount of code, and you will get it subtly wrong."},
+        {"type": "code", "language": "html", "code": "<!-- GOOD: native semantics do the work -->\n<button type=\"button\" (click)=\"save()\">Save</button>\n<a href=\"/settings\">Settings</a>\n<nav aria-label=\"Primary\">...</nav>\n<main>...</main>\n<input type=\"checkbox\" id=\"terms\" />\n<label for=\"terms\">I accept the terms</label>\n\n<!-- BAD: a div pretending to be a button -->\n<div class=\"btn\" onclick=\"save()\">Save</div>\n<!-- Not focusable, no keyboard activation, no role,\n     invisible to screen readers as an interactive control. -->"},
+        {"type": "paragraph", "text": "Use landmark elements (header, nav, main, aside, footer) to give screen-reader users a structural map they can jump between. Use a single logical heading outline (one h1, then h2/h3 nested by meaning, never skipping levels for visual size — control size with CSS). Use lists for lists, tables with th and scope for tabular data, and form controls that are real inputs associated with real labels."},
+        {"type": "list", "items": [
+          "Landmarks let AT users jump directly to navigation, main content, or search without wading through everything.",
+          "Headings are the primary way screen-reader users skim a page — most jump heading-to-heading with a single keystroke.",
+          "Native form controls give you labeling, focus, keyboard, and mobile keyboards (email, tel, number) automatically.",
+          "The best ARIA is often no ARIA: reach for the native element before writing a single role attribute."
+        ]},
+        {"type": "callout", "variant": "success", "text": "A useful heuristic: if you find yourself writing role, tabindex, and a keydown handler to rebuild something HTML already provides, stop and use the native element. It will be more accessible with less code."}
+      ]
+    },
+    {
+      "id": "accessibility-tree",
+      "heading": "Core Concept: The Accessibility Tree and How AT Consumes It",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "When the browser parses your HTML it builds the DOM, and from the DOM it derives a parallel structure called the accessibility tree. Each node in that tree exposes an accessible object with a small set of properties — most importantly its role (what kind of thing it is), its name (what it's called), its value or state, and its relationships to other nodes. Assistive technologies do not read your pixels or your CSS; they read this tree through the operating system's accessibility API (UIA on Windows, AX on macOS, AT-SPI on Linux)."},
+        {"type": "paragraph", "text": "A screen reader (NVDA, JAWS, VoiceOver) walks the accessibility tree and turns each node into speech or braille: 'Save, button' or 'I accept the terms, checkbox, not checked.' This is why semantics matter so much — the screen reader can only announce the role and name that the tree exposes. If your control is a div, the tree has no role and no name to announce, and the user hears nothing useful."},
+        {"type": "list", "items": [
+          "Role — comes from the element (button, link, heading) or an explicit ARIA role; tells the user what the thing is and how it behaves.",
+          "Name — the accessible name, computed from label associations, aria-label/aria-labelledby, or text content; tells the user which thing it is.",
+          "State/value — checked, expanded, disabled, selected, the current value of a slider; kept in sync as the user interacts.",
+          "Relationships — labelled-by, described-by, controls, owns; wire nodes together so the user understands structure."
+        ]},
+        {"type": "callout", "variant": "warning", "text": "display:none and visibility:hidden remove an element from the accessibility tree entirely. aria-hidden=\"true\" also removes a subtree from AT while leaving it visible. Conversely, visually hidden CSS (clip / sr-only patterns) keeps content in the tree for screen readers while hiding it from sighted users — the correct technique for skip links and extra context."}
+      ]
+    },
+    {
+      "id": "aria",
+      "heading": "Core Concept: ARIA Roles, States, and the First Rule",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "WAI-ARIA (Accessible Rich Internet Applications) is a specification that lets you attach semantics to elements that HTML alone cannot express — the roles, states, and properties needed for complex widgets like tabs, tree grids, and comboboxes. ARIA changes what the accessibility tree exposes; it does not change behavior. Adding role=\"button\" does not make an element focusable or make Enter activate it — you still have to add tabindex and key handlers yourself. This gap is the source of most broken ARIA."},
+        {"type": "table", "headers": ["Role", "What it represents", "Key required states/notes"], "rows": [
+          ["button", "An activatable control", "Prefer native <button>; if custom, add tabindex=0 and Enter/Space handlers."],
+          ["dialog", "A modal or non-modal dialog", "aria-modal=\"true\", accessible name via aria-labelledby; manage focus in/out."],
+          ["tablist / tab / tabpanel", "A tabbed interface", "aria-selected on active tab, aria-controls linking tab to panel, roving tabindex."],
+          ["combobox", "Text input with a popup listbox", "aria-expanded, aria-controls, aria-activedescendant for the highlighted option."],
+          ["menu / menuitem", "An application menu (not site nav)", "Arrow-key navigation, roving tabindex; do NOT use for a page's link navigation."],
+          ["alert", "An important, time-sensitive message", "Implicit aria-live=\"assertive\"; content is announced immediately when inserted."],
+          ["region", "A generic significant landmark", "Requires an accessible name (aria-label) to be exposed as a landmark."]
+        ]},
+        {"type": "paragraph", "text": "The first rule of ARIA is the one to memorize: if you can use a native HTML element or attribute with the semantics and behavior you need, do that instead of repurposing an element and adding an ARIA role. The corollary rules: don't change native semantics unless you truly must, all interactive ARIA controls must be keyboard operable, don't set role=\"presentation\" or aria-hidden on a focusable element, and every interactive element must have an accessible name."},
+        {"type": "callout", "variant": "danger", "text": "No ARIA is better than bad ARIA. A study of the top million home pages found that pages using ARIA averaged more detectable accessibility errors than pages without it, because ARIA is so often applied incorrectly. Misused ARIA actively lies to screen-reader users — for example, role=\"button\" on something that a keyboard user cannot actually reach or activate."}
+      ]
+    },
+    {
+      "id": "keyboard",
+      "heading": "Core Concept: Keyboard Accessibility and Focus Management",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Every piece of functionality must be usable with the keyboard alone, because screen-reader users, switch users, and many motor-impaired users never touch a mouse. Keyboard accessibility rests on three ideas: a sensible focus order, a visible focus indicator, and deliberate focus management when the UI changes underneath the user."},
+        {"type": "list", "items": [
+          "Focus order should follow reading/DOM order. Avoid positive tabindex values (tabindex=\"1\" and up) — they hijack the global tab order and are almost always a bug. Use tabindex=\"0\" to make a custom control focusable and tabindex=\"-1\" to make an element programmatically focusable (via .focus()) but skipped by Tab.",
+          "Never remove the focus outline without replacing it. outline: none with no substitute is one of the most common WCAG failures. Use :focus-visible so the ring shows for keyboard users without appearing on every mouse click.",
+          "Provide a skip link — a visually-hidden-until-focused link at the very top that jumps to <main> — so keyboard users can bypass the repeated navigation on every page.",
+          "Manage focus on view changes: when a modal opens, move focus into it; when it closes, return focus to the element that triggered it; when content is removed, move focus somewhere sensible so it isn't lost on the body."
+        ]},
+        {"type": "paragraph", "text": "A focus trap is essential for modal dialogs: while the dialog is open, Tab and Shift+Tab must cycle only through the dialog's focusable elements, and Escape must close it. Without a trap, Tab escapes into the page behind the modal — which is visually hidden but still in the tab order — and a screen-reader user gets hopelessly lost. The modal example section below implements this."},
+        {"type": "code", "language": "html", "code": "<!-- Skip link: hidden until focused, first thing in the DOM -->\n<a href=\"#main\" class=\"skip-link\">Skip to main content</a>\n<style>\n.skip-link {\n  position: absolute;\n  left: -9999px;\n  top: 0;\n}\n.skip-link:focus {\n  left: 8px;\n  top: 8px;\n  z-index: 1000;\n}\n:focus-visible {\n  outline: 3px solid #2563eb;\n  outline-offset: 2px;\n}\n</style>\n<!-- ... nav ... -->\n<main id=\"main\" tabindex=\"-1\">...</main>"}
+      ]
+    },
+    {
+      "id": "accessible-names",
+      "heading": "Core Concept: Accessible Names and Descriptions",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "The accessible name is the string a screen reader announces to identify a control — for a button it's the label, for a link the link text, for an input the associated <label>. If a control has no accessible name, the screen reader announces only its role ('button') and the user has no idea what it does. Naming is computed by a precise algorithm (the Accessible Name and Description Computation) with a priority order you should know."},
+        {"type": "table", "headers": ["Technique", "Use when", "Example"], "rows": [
+          ["<label for>", "The visible text label is the name (preferred for forms).", "<label for=\"email\">Email</label><input id=\"email\">"],
+          ["aria-labelledby", "The name already exists as visible text elsewhere; reference its id(s).", "aria-labelledby points at a heading's id inside a dialog."],
+          ["aria-label", "There is NO visible text (e.g. an icon-only button).", "<button aria-label=\"Close dialog\">x</button>"],
+          ["aria-describedby", "Supplementary help/error text, announced after the name.", "input aria-describedby points at a hint and an error message."]
+        ]},
+        {"type": "paragraph", "text": "The precedence is: aria-labelledby wins over aria-label, which wins over a native label or the element's own text content. A frequent bug is putting both an aria-label and visible text on a control — the aria-label silently overrides the visible text, so the screen reader announces something different from what sighted users see, and voice-control users who say the visible word can't activate it. Prefer a real <label> or aria-labelledby that references the visible text."},
+        {"type": "callout", "variant": "warning", "text": "aria-label and aria-labelledby do not work on every element — they are ignored on generic non-interactive elements like <span> and <div> without a role. Put them on elements that have a role that supports naming (interactive controls, landmarks, headings). And never use a placeholder as a substitute for a label: it disappears on input and is not reliably exposed as the accessible name."}
+      ]
+    },
+    {
+      "id": "live-regions",
+      "heading": "Core Concept: Live Regions for Dynamic Updates",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "In a single-page app, content changes without a page reload — a search returns results, a save succeeds, a validation error appears. A sighted user sees the change; a screen-reader user, whose virtual cursor may be elsewhere, hears nothing unless you tell the AT to announce it. ARIA live regions solve this: mark a container with aria-live and the screen reader will announce changes to its contents automatically."},
+        {"type": "code", "language": "html", "code": "<!-- Polite: waits until the user is idle, does not interrupt -->\n<div aria-live=\"polite\" aria-atomic=\"true\" class=\"sr-only\" id=\"status\"></div>\n\n<!-- Assertive: interrupts immediately; reserve for urgent errors -->\n<div aria-live=\"assertive\" role=\"alert\" class=\"sr-only\" id=\"errors\"></div>\n\n<script>\n// The region must already be in the DOM and empty at load.\n// Then inject text; the change is what triggers the announcement.\nfunction announce(message) {\n  document.getElementById('status').textContent = message;\n}\nannounce('5 results found.');\n</script>"},
+        {"type": "list", "items": [
+          "aria-live=\"polite\" is the default choice: the announcement is queued and spoken when the user pauses, so it doesn't clobber whatever they're reading. Use it for status messages, result counts, and non-urgent updates.",
+          "aria-live=\"assertive\" (and role=\"alert\", which implies it) interrupts the user immediately. Reserve it for genuinely urgent, time-sensitive content like a submission error or a session-timeout warning — overusing it is hostile.",
+          "aria-atomic=\"true\" makes the AT re-announce the whole region on any change, rather than only the changed node; useful when a short status string is rewritten.",
+          "The live region container must exist in the DOM before you put text into it. Injecting a brand-new element that already contains the message is unreliable — many screen readers won't announce it."
+        ]},
+        {"type": "callout", "variant": "info", "text": "role=\"status\" is equivalent to aria-live=\"polite\" and role=\"alert\" to aria-live=\"assertive\". For a single, predictable status line, a role=\"status\" region is the simplest robust choice."}
+      ]
+    },
+    {
+      "id": "color-contrast",
+      "heading": "Core Concept: Color Contrast and Non-Color Cues",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Color must not be the only way information is conveyed, and text must have enough contrast against its background to be readable by people with low vision or in poor lighting. These are two distinct WCAG requirements and both are among the most commonly failed."},
+        {"type": "table", "headers": ["Content", "WCAG level", "Minimum contrast ratio"], "rows": [
+          ["Normal text (< 18.66px bold / 24px)", "AA", "4.5 : 1"],
+          ["Large text (>= 24px, or 18.66px bold)", "AA", "3 : 1"],
+          ["UI components & graphical objects (icons, input borders, focus ring)", "AA", "3 : 1"],
+          ["Normal text", "AAA", "7 : 1"]
+        ]},
+        {"type": "paragraph", "text": "The non-color rule (WCAG 1.4.1 Use of Color) means a red border on an invalid field is not enough — a colorblind user may not perceive it. Pair every color cue with a second signal: an icon, text, a shape, or an underline. A required field marked only by a red asterisk color needs the asterisk shape plus programmatic required semantics; a link distinguished from body text only by color needs an underline or other non-color indicator."},
+        {"type": "list", "items": [
+          "Errors: don't rely on red alone — add an error icon and an explicit text message tied to the field with aria-describedby.",
+          "Charts and status: use patterns, labels, or shapes in addition to color (e.g. solid vs dashed lines, direct labels).",
+          "Links in body text: underline them or otherwise distinguish beyond hue.",
+          "Test contrast with tooling (axe, Lighthouse, browser devtools, WebAIM's contrast checker) rather than eyeballing it."
+        ]},
+        {"type": "callout", "variant": "warning", "text": "Placeholder-gray text and light-gray secondary labels are the classic contrast failures. Design tokens should encode a compliant text palette so no one has to remember ratios per component. Note that disabled controls are exempt from the contrast requirement, but genuine content is not."}
+      ]
+    },
+    {
+      "id": "forms-example",
+      "heading": "Example: An Accessible Form With Validation Errors",
+      "kind": "example",
+      "blocks": [
+        {"type": "paragraph", "text": "Forms are where accessibility most often breaks, and where it matters most. Every input needs a programmatically associated label, errors must be announced and tied to their field, and invalid state must be exposed to AT via aria-invalid — not just a red border. Here is a robust pattern combining a native label, a hint, aria-describedby, aria-invalid, and a live region for the error."},
+        {"type": "code", "language": "html", "code": "<form novalidate>\n  <div class=\"field\">\n    <label for=\"email\">Email address</label>\n\n    <!-- Hint and error are both referenced by aria-describedby.\n         The error id is included; when there is no error the\n         referenced element is simply empty, which is fine. -->\n    <input\n      id=\"email\"\n      name=\"email\"\n      type=\"email\"\n      autocomplete=\"email\"\n      aria-describedby=\"email-hint email-error\"\n      aria-invalid=\"false\"\n      required />\n\n    <p id=\"email-hint\" class=\"hint\">We'll only use this to sign you in.</p>\n\n    <!-- role=\"alert\" => it is announced the moment we fill it. -->\n    <p id=\"email-error\" class=\"error\" role=\"alert\"></p>\n  </div>\n\n  <button type=\"submit\">Create account</button>\n</form>"},
+        {"type": "code", "language": "typescript", "code": "// Framework-neutral validation wiring (works in Angular/React the same way).\nfunction validateEmail(input: HTMLInputElement): boolean {\n  const error = document.getElementById('email-error')!;\n  const valid = /.+@.+\\..+/.test(input.value);\n\n  input.setAttribute('aria-invalid', String(!valid));\n\n  if (!valid) {\n    // Setting text in a role=\"alert\" region announces it to screen readers.\n    error.textContent = 'Enter a valid email address, e.g. name@example.com.';\n    // On submit, move focus to the FIRST invalid field so the\n    // keyboard/SR user is taken straight to the problem.\n    input.focus();\n  } else {\n    error.textContent = '';\n  }\n  return valid;\n}"},
+        {"type": "list", "items": [
+          "The <label for> ties the visible label to the input so clicking the label focuses it and the SR announces 'Email address, edit text'.",
+          "aria-describedby stitches the hint and the error onto the accessible description, read after the name.",
+          "aria-invalid flips to true on failure so the SR announces the field as invalid — the red border alone would be invisible to it.",
+          "On submit failure, set focus to the first invalid control and summarize the count in a live region for longer forms.",
+          "Use autocomplete tokens (email, name, tel) — WCAG 1.3.5 requires them for common fields, and they help everyone."
+        ]},
+        {"type": "callout", "variant": "success", "text": "In Angular, bind [attr.aria-invalid]=\"control.invalid && control.touched\" and [attr.aria-describedby] to conditionally include the error id. In React, drive aria-invalid and aria-describedby off form state. The markup semantics are identical across frameworks."}
+      ]
+    },
+    {
+      "id": "modal-example",
+      "heading": "Example: An Accessible Modal Dialog With Focus Trap",
+      "kind": "example",
+      "blocks": [
+        {"type": "paragraph", "text": "A dialog is the canonical hard component because it requires the full focus-management toolkit: a dialog role, an accessible name, moving focus in on open, trapping Tab inside while open, closing on Escape, hiding the background from AT, and restoring focus to the trigger on close. Below is a self-contained, framework-neutral implementation."},
+        {"type": "code", "language": "html", "code": "<button id=\"open-btn\" type=\"button\">Edit profile</button>\n\n<!-- Rendered but hidden until opened. aria-modal tells AT the rest\n     of the page is inert; aria-labelledby names the dialog. -->\n<div id=\"dialog\"\n     role=\"dialog\"\n     aria-modal=\"true\"\n     aria-labelledby=\"dialog-title\"\n     hidden>\n  <div class=\"backdrop\"></div>\n  <div class=\"panel\">\n    <h2 id=\"dialog-title\">Edit profile</h2>\n    <label for=\"name\">Name</label>\n    <input id=\"name\" type=\"text\" />\n    <button id=\"save-btn\" type=\"button\">Save</button>\n    <button id=\"close-btn\" type=\"button\">Cancel</button>\n  </div>\n</div>"},
+        {"type": "code", "language": "typescript", "code": "const dialog = document.getElementById('dialog')!;\nconst openBtn = document.getElementById('open-btn')!;\nconst closeBtn = document.getElementById('close-btn')!;\nlet lastFocused: HTMLElement | null = null;\n\nconst FOCUSABLE =\n  'a[href], button:not([disabled]), input:not([disabled]),' +\n  ' select, textarea, [tabindex]:not([tabindex=\"-1\"])';\n\nfunction openDialog() {\n  lastFocused = document.activeElement as HTMLElement; // remember trigger\n  dialog.hidden = false;\n  const focusables = dialog.querySelectorAll<HTMLElement>(FOCUSABLE);\n  focusables[0]?.focus();                              // move focus IN\n  document.addEventListener('keydown', onKeydown);\n}\n\nfunction closeDialog() {\n  dialog.hidden = true;\n  document.removeEventListener('keydown', onKeydown);\n  lastFocused?.focus();                                // restore focus\n}\n\nfunction onKeydown(e: KeyboardEvent) {\n  if (e.key === 'Escape') { closeDialog(); return; }\n  if (e.key !== 'Tab') return;\n\n  // Focus trap: cycle Tab / Shift+Tab within the dialog only.\n  const items = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE));\n  if (items.length === 0) return;\n  const first = items[0];\n  const last = items[items.length - 1];\n\n  if (e.shiftKey && document.activeElement === first) {\n    e.preventDefault();\n    last.focus();\n  } else if (!e.shiftKey && document.activeElement === last) {\n    e.preventDefault();\n    first.focus();\n  }\n}\n\nopenBtn.addEventListener('click', openDialog);\ncloseBtn.addEventListener('click', closeDialog);"},
+        {"type": "list", "items": [
+          "role=\"dialog\" + aria-modal=\"true\" + aria-labelledby gives the dialog its role and accessible name.",
+          "Focus moves into the dialog on open and is restored to the triggering button on close — the user is never dumped on the body.",
+          "The keydown handler traps Tab and Shift+Tab within the dialog and closes on Escape.",
+          "In modern browsers, the native <dialog> element with showModal() provides the trap, backdrop, Escape handling, and inert background for free — prefer it when support allows.",
+          "Angular CDK's cdkTrapFocus / A11yModule and React libraries like focus-trap-react or Radix/Headless UI dialogs implement this correctly so you don't hand-roll it in production."
+        ]},
+        {"type": "callout", "variant": "info", "text": "The WAI-ARIA Authoring Practices Guide (APG) publishes tested, reference implementations for dialog, tabs, combobox, menu, and more. Start from the APG pattern rather than inventing keyboard interaction models — users expect the conventional keys (arrows in a menu, Home/End in a listbox)."}
+      ]
+    },
+    {
+      "id": "spa-concerns",
+      "heading": "Core Concept: SPA Route Changes and Announcing Navigation",
+      "kind": "concept",
+      "blocks": [
+        {"type": "paragraph", "text": "Single-page apps break a fundamental assumption of assistive technology: that navigating to a new 'page' reloads the document and resets focus to the top. In an SPA the router swaps content in place, so focus stays wherever it was — often on the link that was just clicked, which no longer exists — and the screen reader never announces that the view changed. The user is stranded with no signal that navigation happened."},
+        {"type": "list", "items": [
+          "On each route change, move focus to a sensible landing point — commonly the new view's <h1> or its <main> container given tabindex=\"-1\" — so the next Tab starts from the new content and the SR reads the heading.",
+          "Announce the navigation in a polite live region ('Navigated to Settings') so users who don't track focus still know the page changed.",
+          "Set the document title on each route (Router title strategy in Angular, effect/head management in React) — the title is what many SR users rely on to confirm navigation.",
+          "Do not scroll-restore silently without also handling focus; visual scroll position and focus position are independent for AT users."
+        ]},
+        {"type": "code", "language": "typescript", "code": "// Angular: focus main + announce on every NavigationEnd.\nimport { LiveAnnouncer } from '@angular/cdk/a11y';\n\nconstructor(router: Router, announcer: LiveAnnouncer, title: Title) {\n  router.events\n    .pipe(filter(e => e instanceof NavigationEnd))\n    .subscribe(() => {\n      const pageTitle = title.getTitle();\n      const main = document.getElementById('main');\n      main?.focus();                       // main has tabindex=\"-1\"\n      announcer.announce(pageTitle, 'polite'); // speak the new view\n    });\n}"},
+        {"type": "callout", "variant": "info", "text": "React equivalents: use a focus-management library (e.g. @reach/router historically, or a manual ref.focus() in a route effect) plus a live region, and set document.title in a useEffect. The pattern — move focus, announce, set title — is framework-independent."}
+      ]
+    },
+    {
+      "id": "images-alt",
+      "heading": "Best Practice: Images, Alt Text, and Text Alternatives",
+      "kind": "bestpractice",
+      "blocks": [
+        {"type": "paragraph", "text": "Every image that conveys information needs a text alternative that serves the same purpose as the image. The hard part is not the syntax — it's judgment about what the image communicates in context, which is why alt text can't be reliably auto-generated for meaningful content."},
+        {"type": "list", "items": [
+          "Informative images: alt describes the information, not the picture. For a chart, summarize the takeaway; for a product photo, describe what matters to the task.",
+          "Decorative images: use alt=\"\" (empty, not missing) so screen readers skip them entirely. A missing alt attribute causes many SRs to read the file name — worse than nothing.",
+          "Functional images (a logo that's a home link, an icon button): the alt/accessible name describes the ACTION ('Home'), not the graphic.",
+          "Complex images (diagrams, infographics): provide a short alt plus a longer description nearby or via a details/figure caption.",
+          "SVG icons: give an accessible name with role=\"img\" and aria-label, or mark purely decorative SVGs aria-hidden=\"true\"; ensure inline text isn't the only cue for icon-only buttons."
+        ]},
+        {"type": "code", "language": "html", "code": "<!-- Informative -->\n<img src=\"sales.png\" alt=\"Sales rose 40% from Q1 to Q2.\" />\n\n<!-- Decorative: skipped by screen readers -->\n<img src=\"divider.png\" alt=\"\" />\n\n<!-- Functional: name the action -->\n<a href=\"/\"><img src=\"logo.svg\" alt=\"Acme home\" /></a>\n\n<!-- Icon-only button: accessible name, decorative glyph hidden -->\n<button type=\"button\" aria-label=\"Delete item\">\n  <svg aria-hidden=\"true\" focusable=\"false\">...</svg>\n</button>"},
+        {"type": "callout", "variant": "success", "text": "Write alt text as if describing the image to someone over the phone who needs the same information to complete the task. If the image adds nothing beyond adjacent text, it's decorative — use alt=\"\"."}
+      ]
+    },
+    {
+      "id": "components-apg",
+      "heading": "Best Practice: Accessible Components and the WAI-ARIA APG",
+      "kind": "bestpractice",
+      "blocks": [
+        {"type": "paragraph", "text": "Complex widgets — tabs, comboboxes, menus, tree grids, date pickers — have established, tested interaction patterns. Users have muscle memory for them: arrow keys move between tabs and menu items, Home/End jump to ends, Escape closes a popup, typing filters a listbox. Inventing your own keyboard model is a bug, not a feature. The WAI-ARIA Authoring Practices Guide documents the correct role/state/keyboard contract for each pattern with working examples."},
+        {"type": "table", "headers": ["Component", "Key roles", "Expected keyboard model"], "rows": [
+          ["Tabs", "tablist, tab, tabpanel", "Left/Right (or Up/Down) move between tabs; roving tabindex; Tab enters the panel."],
+          ["Menu", "menu, menuitem", "Up/Down move items, Escape closes, Enter/Space activate; roving tabindex (not for site nav)."],
+          ["Combobox", "combobox, listbox, option", "Type to filter, Down opens/moves, aria-activedescendant tracks highlight, Enter selects, Escape closes."],
+          ["Dialog", "dialog", "Focus trapped inside, Escape closes, focus restored to trigger on close."],
+          ["Disclosure", "button + aria-expanded", "Enter/Space toggle; aria-controls links to the region shown/hidden."]
+        ]},
+        {"type": "list", "items": [
+          "Prefer a battle-tested library implementation (Angular CDK/Material, Radix, React Aria, Headless UI) over hand-rolling — these encode the APG patterns and years of AT bug fixes.",
+          "Roving tabindex vs aria-activedescendant are the two standard strategies for managing focus within a composite widget; pick one per widget and be consistent.",
+          "Keep visible focus in sync with the widget's internal selection state so keyboard users can see where they are.",
+          "Test every custom widget against a real screen reader, not just automated tooling — keyboard interaction correctness is largely undetectable by static analysis."
+        ]}
+      ]
+    },
+    {
+      "id": "mistake-div-onclick",
+      "heading": "Common Mistake: The div-with-onclick Anti-Pattern",
+      "kind": "mistake",
+      "blocks": [
+        {"type": "paragraph", "text": "The most pervasive accessibility bug is attaching a click handler to a non-interactive element — a div or span — to make a 'button'. It looks fine and works with a mouse, so it passes casual review. But it fails four ways at once, and every failure is invisible to a sighted mouse user."},
+        {"type": "list", "items": [
+          "Not focusable: a keyboard user cannot Tab to it, so the action is completely unreachable without a mouse.",
+          "No role: the accessibility tree exposes no role, so a screen reader doesn't announce it as an interactive control — the user doesn't know it exists.",
+          "No keyboard activation: even if you add tabindex, a click handler doesn't fire on Enter/Space the way a real button does; you must add key handlers yourself.",
+          "No name computation and no disabled semantics: you re-implement everything <button> gives you for free, and usually get an edge case wrong."
+        ]},
+        {"type": "code", "language": "html", "code": "<!-- BROKEN -->\n<div class=\"button\" onclick=\"doThing()\">Do thing</div>\n\n<!-- If you truly cannot use <button>, you must add ALL of this: -->\n<div class=\"button\"\n     role=\"button\"\n     tabindex=\"0\"\n     onclick=\"doThing()\"\n     onkeydown=\"if(event.key==='Enter'||event.key===' '){event.preventDefault();doThing();}\">\n  Do thing\n</div>\n\n<!-- CORRECT: just use the element that does all of that for you -->\n<button type=\"button\" onclick=\"doThing()\">Do thing</button>"},
+        {"type": "callout", "variant": "danger", "text": "The fix is almost never 'add ARIA to the div' — it's 'replace the div with a <button>'. Reach for ARIA only when no native element expresses what you need. And style the button: <button> can be made to look like anything with CSS, so there is no visual excuse for the div."}
+      ]
+    },
+    {
+      "id": "mistake-focus-loss",
+      "heading": "Common Mistake: Losing or Removing Focus",
+      "kind": "mistake",
+      "blocks": [
+        {"type": "paragraph", "text": "Focus-related bugs are subtle because they only manifest for keyboard and screen-reader users, so they routinely ship. Three recur constantly."},
+        {"type": "list", "items": [
+          "Removing the outline (outline: none) with no replacement: the keyboard user loses all sense of where they are on the page. This is a direct WCAG 2.4.7 failure. Style :focus-visible instead of deleting the ring.",
+          "Focus lost to the body: when you delete the element that had focus (close a menu, remove a row, dismiss a toast) without moving focus, it falls to document.body and the next Tab restarts from the top. Move focus to a logical neighbor first.",
+          "Focus trapped unintentionally: a widget that captures Tab but never releases it (or a modal that never returns focus) strands the user. Traps are correct only for modal dialogs, and they must always have an escape route (Escape key)."
+        ]},
+        {"type": "code", "language": "css", "code": "/* WRONG: kills the focus indicator for everyone */\nbutton:focus { outline: none; }\n\n/* RIGHT: strong, visible ring for keyboard users only */\nbutton:focus-visible {\n  outline: 3px solid #2563eb;\n  outline-offset: 2px;\n}"},
+        {"type": "callout", "variant": "warning", "text": "A quick manual audit: unplug the mouse and Tab through the whole flow. If you ever can't see where focus is, can't reach a control, or get stuck, you have found a bug that automated tools frequently miss."}
+      ]
+    },
+    {
+      "id": "testing",
+      "heading": "Best Practice: Testing Accessibility",
+      "kind": "bestpractice",
+      "blocks": [
+        {"type": "paragraph", "text": "Accessibility testing is a layered strategy. Automated tools catch a real but limited slice — roughly 30 to 50 percent of WCAG issues — mostly the mechanical ones (missing alt, low contrast, missing labels, invalid ARIA). The rest requires manual keyboard and screen-reader testing because they involve judgment and interaction, which static analysis can't evaluate."},
+        {"type": "list", "items": [
+          "Automated in CI: axe-core (via jest-axe, Playwright/Cypress axe, or the Deque browser extension) and Lighthouse's accessibility audit catch regressions on every build. Fast, cheap, zero false-negatives-are-fine mindset — but not sufficient alone.",
+          "Keyboard-only pass: Tab through every flow with the mouse unplugged. Check focus order, visible focus, that everything is reachable and operable, and that modals trap and restore focus.",
+          "Screen-reader testing: NVDA (free, Windows) with Firefox/Chrome, VoiceOver (built into macOS/iOS) with Safari, and JAWS for enterprise coverage. Verify names, roles, states, and that dynamic updates are announced.",
+          "Contrast and zoom: check color contrast with tooling, and verify the layout survives 200% text zoom and 400% page zoom without loss of content or function.",
+          "Real users: for high-stakes products, usability testing with actual assistive-technology users surfaces issues no tool or checklist finds."
+        ]},
+        {"type": "code", "language": "typescript", "code": "// Example: fail a Jest test on any axe violation.\nimport { render } from '@testing-library/react';\nimport { axe, toHaveNoViolations } from 'jest-axe';\nexpect.extend(toHaveNoViolations);\n\ntest('signup form has no detectable a11y violations', async () => {\n  const { container } = render(<SignupForm />);\n  const results = await axe(container);\n  expect(results).toHaveNoViolations();\n});"},
+        {"type": "callout", "variant": "info", "text": "Treat automated a11y checks like unit tests: run them in CI so violations block merges. But never claim conformance from a green axe run alone — a page can pass every automated check and still be unusable with a keyboard or screen reader."}
+      ]
+    },
+    {
+      "id": "note-culture",
+      "heading": "Note: Making Accessibility Stick",
+      "kind": "note",
+      "blocks": [
+        {"type": "paragraph", "text": "Accessibility fails as a one-time audit and succeeds as an engineering practice baked into the workflow. The senior contribution is systemic: encode it in the design system so components are accessible by default, put it in the definition of done, and automate the regressions."},
+        {"type": "list", "items": [
+          "Build accessible primitives once (in the design system / component library) so product teams inherit correct semantics, focus, and contrast for free.",
+          "Add axe/Lighthouse to CI and keyboard-plus-SR checks to the review checklist for interactive components.",
+          "Include accessibility acceptance criteria in tickets: 'operable by keyboard, announced correctly by a screen reader, meets AA contrast'.",
+          "Educate the team on the first rule of ARIA and the div-onclick anti-pattern — most violations trace back to a handful of repeated mistakes."
+        ]},
+        {"type": "callout", "variant": "success", "text": "The payoff compounds: an accessible design system means the hundredth feature is accessible with no extra effort, because the primitives already got it right."}
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "dom-to-a11y-tree",
+      "title": "From DOM to Accessibility Tree to Assistive Technology",
+      "type": "mermaid",
+      "content": "flowchart TD\n  A[HTML source] --> B[DOM tree]\n  B --> C[Accessibility tree]\n  C -->|role name state| D[Platform accessibility API]\n  D --> E[Screen reader]\n  D --> F[Voice control]\n  D --> G[Switch device]\n  E --> H[Speech or braille output]\n  B -.CSS ignored by AT.-> C"
+    },
+    {
+      "id": "spa-focus-flow",
+      "title": "Focus Management on an SPA Route Change",
+      "type": "mermaid",
+      "content": "flowchart TD\n  A[User activates a link] --> B[Router swaps view content]\n  B --> C{Focus handled?}\n  C -->|No| D[Focus stays on removed link]\n  D --> E[User stranded no announcement]\n  C -->|Yes| F[Move focus to main or h1]\n  F --> G[Set document title]\n  G --> H[Announce via polite live region]\n  H --> I[User hears new view and continues]"
+    },
+    {
+      "id": "aria-decision",
+      "title": "Deciding Whether to Reach for ARIA",
+      "type": "mermaid",
+      "content": "flowchart TD\n  A[Need a control] --> B{Native HTML element exists?}\n  B -->|Yes| C[Use native element]\n  C --> D[Role focus keyboard states are free]\n  B -->|No| E[Use ARIA role]\n  E --> F[Add tabindex]\n  F --> G[Add keyboard handlers]\n  G --> H[Add and sync states]\n  H --> I[Test with a screen reader]"
+    },
+    {
+      "id": "modal-focus-ascii",
+      "title": "Modal Focus Trap Lifecycle",
+      "type": "ascii",
+      "content": "  Trigger button focused\n         |\n         v  (open)\n  remember trigger --> move focus INTO dialog\n         |\n         v\n  +-----------------------------+\n  |  [First] Tab -> ... -> Last |\n  |    ^                    |   |\n  |    | Shift+Tab   Tab    |   |  <- focus cycles, page behind inert\n  |    +--------------------+   |\n  |            Esc              |\n  +-------------|---------------+\n                v  (close)\n     restore focus to trigger button"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q1",
+      "question": "What is the first rule of ARIA, and why does it exist?",
+      "answer": "The first rule of ARIA is: if you can use a native HTML element or attribute with the semantics and behavior you need, use it instead of repurposing an element and adding an ARIA role. It exists because ARIA only changes what the accessibility tree exposes — it does not add any behavior. Adding role=\"button\" to a div does not make it focusable, does not make Enter or Space activate it, and does not give it disabled semantics; you must add all of that yourself, and people routinely get it wrong. Native elements ship with correct role, focusability, keyboard handling, and states already implemented and tested across every browser and assistive technology. Studies of real-world pages find that ARIA is misused more often than not, so incorrect ARIA frequently makes accessibility worse than no ARIA. The practical takeaway is to reach for a native <button>, <a>, <input>, or landmark first, and only use ARIA when no native element can express the pattern.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["aria", "semantic-html"],
+      "followUps": ["When is it legitimately necessary to use ARIA?", "What does 'no ARIA is better than bad ARIA' mean in practice?"]
+    },
+    {
+      "id": "q2",
+      "question": "Why is a <div> with an onclick handler an accessibility failure compared to a <button>?",
+      "answer": "A div is not an interactive element, so it fails in several independent ways that are all invisible to a sighted mouse user. First, it is not in the tab order, so a keyboard-only user cannot reach it at all. Second, it has no role in the accessibility tree, so a screen reader does not announce it as a control and the user doesn't know it exists. Third, a click handler on a div does not fire on Enter or Space the way a real button does, so even if you add tabindex you must also add key handlers. Fourth, you lose free features like the disabled state and correct accessible-name computation. A native <button> provides focusability, the button role, keyboard activation, and disabled semantics automatically, and it can be styled to look like anything with CSS. The correct fix is almost always to replace the div with a button, not to paper over it with role and tabindex.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["semantic-html", "keyboard-navigation"],
+      "followUps": ["What exact attributes would you need to make a div behave like a button?", "How would you style a native button to match a custom design?"]
+    },
+    {
+      "id": "q3",
+      "question": "What is the accessibility tree and how do screen readers use it?",
+      "answer": "The accessibility tree is a structure the browser derives from the DOM that exposes, for each relevant node, its role, accessible name, value or state, and relationships to other nodes. Assistive technologies do not read your pixels, your CSS, or your visual layout — they read this tree through the operating system's accessibility API (UI Automation on Windows, AX on macOS, AT-SPI on Linux). A screen reader walks the tree and turns each node into speech or braille, for example announcing 'Save, button' or 'I accept the terms, checkbox, not checked'. Because the tree is built from semantics, using the correct element or role is what makes a control announceable at all; a bare div contributes no role or name for the screen reader to speak. Things like display:none and aria-hidden remove nodes from the tree, while visually-hidden CSS keeps them in it for screen-reader-only content. Understanding this tree is the key mental model for everything else in accessibility.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["accessibility", "screen-readers"],
+      "followUps": ["How do display:none, visibility:hidden, and aria-hidden differ in their effect on the tree?", "How can you inspect the accessibility tree in browser devtools?"]
+    },
+    {
+      "id": "q4",
+      "question": "Explain WCAG's POUR principles and the A / AA / AAA conformance levels.",
+      "answer": "WCAG is organized under four principles that spell POUR: Perceivable (users can perceive the content — text alternatives, contrast, captions), Operable (users can operate the interface — full keyboard support, no traps, visible focus, enough time), Understandable (content and behavior are predictable — readable language, consistent navigation, clear errors), and Robust (markup is valid and exposes correct name/role/value so current and future user agents including AT can consume it). Every success criterion in the spec rolls up to one of these four principles. Each criterion is assigned a conformance level: A is the minimum and failing it blocks whole groups of users, AA is the practical target that virtually all laws and contracts reference, and AAA is enhanced and often impractical to meet site-wide. When someone says a product must be 'accessible', they almost always mean WCAG 2.2 Level AA. Knowing that AA is the real target — and that AAA is rarely a contractual requirement — is important for scoping work correctly.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["wcag", "accessibility"],
+      "followUps": ["Name a criterion at each of the three levels.", "What did WCAG 2.2 add over 2.1?"]
+    },
+    {
+      "id": "q5",
+      "question": "How do you make a modal dialog accessible, and why is a focus trap necessary?",
+      "answer": "An accessible modal needs the full focus-management toolkit. Give the container role=\"dialog\" with aria-modal=\"true\" and an accessible name via aria-labelledby pointing at its title. When it opens, move focus into the dialog (to the first focusable element or the heading). While it is open, trap Tab and Shift+Tab so focus cycles only among the dialog's focusable elements, and let Escape close it. When it closes, restore focus to the element that triggered it so the user isn't dumped on the page body. A focus trap is necessary because the content behind a modal is visually hidden but, unless you make it inert, still in the tab order — without a trap, pressing Tab walks focus out of the dialog into invisible background controls and a screen-reader user becomes hopelessly lost. In modern browsers the native <dialog> element with showModal() provides the trap, backdrop, and Escape handling for free, and Angular CDK / React libraries implement the pattern correctly so you rarely hand-roll it.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["focus-management", "aria", "keyboard-navigation"],
+      "followUps": ["How does the native <dialog> element help?", "What should happen to focus when the dialog closes?"]
+    },
+    {
+      "id": "q6",
+      "question": "What is the difference between aria-live=\"polite\" and aria-live=\"assertive\", and when do you use each?",
+      "answer": "aria-live marks a container so that when its contents change, a screen reader announces the update even if the user's virtual cursor is elsewhere. With polite, the announcement is queued and spoken only when the user pauses, so it never interrupts what they are currently reading — this is the correct default for status messages, result counts, and other non-urgent updates. With assertive, the announcement interrupts the user immediately; role=\"alert\" implies assertive. You should reserve assertive for genuinely urgent, time-sensitive content such as a form-submission error or a session-timeout warning, because interrupting the user is disruptive and overusing it is hostile. A subtle but critical implementation detail is that the live region must already exist in the DOM and be empty at load; you announce by injecting text into it, since it is the change to an existing region that triggers the announcement. Injecting a new element that already contains the message is unreliable across screen readers. Getting politeness wrong — for example making every toast assertive — is a common real-world mistake.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["a11y", "screen-readers"],
+      "followUps": ["Why must the live region exist in the DOM before you add text?", "How do role=\"status\" and role=\"alert\" relate to aria-live?"]
+    },
+    {
+      "id": "q7",
+      "question": "In a single-page app, why don't screen readers announce route changes, and how do you fix it?",
+      "answer": "Assistive technology assumes that navigating to a new page reloads the document and resets focus to the top. A single-page app breaks that assumption: the router swaps content in place without a reload, so focus stays wherever it was — often on the link the user just activated, which no longer exists — and nothing tells the screen reader the view changed. The user is left with no signal that navigation happened. The fix has three parts. First, on each route change move focus to a sensible landing point, typically the new view's <h1> or its <main> given tabindex=\"-1\", so the next Tab starts from the new content and the heading is read. Second, announce the navigation in a polite live region, for example 'Navigated to Settings'. Third, update the document title on every route, since many screen-reader users rely on the title to confirm they navigated. In Angular you can hook NavigationEnd with the CDK LiveAnnouncer and the Title service; in React you do the equivalent in a route effect. The move-focus, announce, set-title pattern is framework-independent.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["a11y", "focus-management"],
+      "followUps": ["Where exactly should focus land on the new view?", "What role does the document title play for screen-reader users?"]
+    },
+    {
+      "id": "q8",
+      "question": "What are the WCAG AA color-contrast requirements, and why isn't color contrast the whole story?",
+      "answer": "For WCAG 2.2 Level AA, normal-size text needs a contrast ratio of at least 4.5 to 1 against its background, large text (at least 24px, or 18.66px bold) needs 3 to 1, and non-text UI components and meaningful graphical objects such as icons, input borders, and focus indicators need 3 to 1. AAA raises normal text to 7 to 1. But contrast is only one requirement; the separate criterion 1.4.1 Use of Color says color must never be the only means of conveying information. A colorblind user may not perceive that a field is invalid if the sole cue is a red border, or that a word is a link if the only difference from body text is hue. So you pair every color cue with a second signal — an icon, explicit text, a shape, or an underline. A red-bordered invalid field should also have an error icon and a text message tied to it with aria-describedby, plus aria-invalid so the state reaches the accessibility tree. Note that disabled controls are exempt from the contrast requirement, but genuine content is not.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["wcag", "accessibility"],
+      "followUps": ["How would you convey a validation error without relying on color?", "Which elements are exempt from the contrast requirement?"]
+    },
+    {
+      "id": "q9",
+      "question": "How is an accessible name computed for a control, and what is the precedence order?",
+      "answer": "The accessible name is the string a screen reader announces to identify a control, computed by the Accessible Name and Description Computation algorithm. For form fields the preferred source is an associated native <label>; the visible label text becomes the name and clicking the label also focuses the control. When the name already exists as visible text elsewhere, aria-labelledby references that element's id (and can concatenate several). aria-label supplies a name directly and is used only when there is no visible text, such as an icon-only button. The precedence is that aria-labelledby wins over aria-label, which wins over a native label or the element's own text content. A classic bug is putting an aria-label on a control that also has visible text — the aria-label silently overrides the visible text, so the screen reader announces something different from what sighted users see, and voice-control users can't activate it by speaking the visible word. aria-describedby is separate: it supplies a description announced after the name, ideal for hints and error text. Note aria-label and aria-labelledby are ignored on generic non-interactive elements without a role.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["aria", "accessibility"],
+      "followUps": ["Why shouldn't you use a placeholder as a label?", "When would you use aria-describedby instead of aria-labelledby?"]
+    },
+    {
+      "id": "q10",
+      "question": "What are the pitfalls of tabindex, and what do the three common values mean?",
+      "answer": "tabindex=\"0\" adds an element to the natural tab order at its position in the DOM, which is how you make a custom interactive control keyboard-reachable. tabindex=\"-1\" removes an element from the Tab sequence but lets you focus it programmatically with element.focus(), which is exactly what you need for a route-change target, a heading you jump focus to, or the first element in a dialog. A positive value like tabindex=\"1\" is the pitfall: any positive value pulls the element to the front of the global tab order, ahead of everything with tabindex 0 or a natural order, which scrambles focus order across the whole page and is almost always a bug. The right approach is to keep DOM order equal to the intended reading and focus order and use only 0 and -1. Another pitfall is putting tabindex on non-interactive content (like making a paragraph focusable) which adds noise to the tab sequence without purpose. Keep the tab order matching visual reading order, and never rely on positive tabindex to fix an ordering problem — fix the DOM order instead.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["keyboard-navigation", "focus-management"],
+      "followUps": ["When is tabindex=\"-1\" the right choice?", "Why are positive tabindex values discouraged?"]
+    },
+    {
+      "id": "q11",
+      "question": "How should images and their text alternatives be handled for different image roles?",
+      "answer": "The alt text must serve the same purpose the image serves in context, which requires judgment rather than description of the graphic. For informative images, describe the information — for a chart, state the takeaway rather than 'a bar chart'. For decorative images that add nothing beyond adjacent text, use an empty alt=\"\" so screen readers skip them; a missing alt attribute is worse because many screen readers then read the file name. For functional images such as a logo that links home or an icon button, the accessible name should describe the action ('Home', 'Delete item'), not the picture. For complex images like diagrams, provide a short alt plus a longer description nearby, for instance in a figure caption. For inline SVG icons, give them an accessible name via role=\"img\" and aria-label when meaningful, or mark purely decorative SVGs aria-hidden=\"true\" and focusable=\"false\". A good test is to imagine describing the image over the phone to someone who needs the same information to finish the task; if the image adds nothing, treat it as decorative.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["accessibility", "wcag"],
+      "followUps": ["Why is alt=\"\" different from omitting the alt attribute?", "How do you make an icon-only button accessible?"]
+    },
+    {
+      "id": "q12",
+      "question": "What does automated accessibility testing catch, what does it miss, and how do you cover the gap?",
+      "answer": "Automated tools such as axe-core and Lighthouse catch a real but limited slice of issues — commonly cited as roughly 30 to 50 percent of WCAG problems — and those are mostly mechanical: missing alt attributes, insufficient color contrast, missing form labels, invalid or conflicting ARIA, and missing document language. They are fast, deterministic, and belong in CI so they block regressions on every build. What they cannot evaluate is anything requiring judgment or interaction: whether alt text is meaningful, whether focus order makes sense, whether a custom widget's keyboard model matches user expectations, whether dynamic updates are actually announced, and whether the flow is usable end to end. You cover the gap with manual testing: a keyboard-only pass with the mouse unplugged to check focus order, visibility, reachability, and modal traps; screen-reader testing with NVDA, VoiceOver, and JAWS to verify names, roles, states, and announcements; and contrast plus zoom checks. For high-stakes products, usability testing with real assistive-technology users finds issues no tool or checklist surfaces. A green axe run is necessary but never sufficient to claim conformance.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["a11y", "screen-readers"],
+      "followUps": ["Which screen readers pair with which browsers for testing?", "How would you integrate axe into a CI pipeline?"]
+    },
+    {
+      "id": "q13",
+      "question": "What are landmarks and headings, and why do screen-reader users depend on them?",
+      "answer": "Landmarks are the structural regions of a page, exposed by native elements like header, nav, main, aside, and footer (or by ARIA landmark roles). They give screen-reader users a map they can jump between directly — many can list landmarks and navigate to 'main' or 'navigation' with a single command, skipping everything else. Headings (h1 through h6) form the content outline, and heading navigation is one of the most-used features of screen readers: users skim a page by jumping heading to heading. For both to work you need discipline. Use exactly one logical h1 per page, nest heading levels by meaning without skipping levels, and control visual size with CSS rather than by choosing a heading tag for its appearance. Give landmarks accessible names with aria-label when you have more than one of a type, such as two nav regions ('Primary', 'Footer'). Getting structure right is high-leverage because it improves the experience for every screen-reader user across the whole page with almost no code, and it also helps SEO since crawlers parse the same structure.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["semantic-html", "accessibility"],
+      "followUps": ["Why should there be only one h1 and no skipped heading levels?", "How do you disambiguate two nav landmarks on the same page?"]
+    },
+    {
+      "id": "q14",
+      "question": "How do you build an accessible form, including labels, errors, and required fields?",
+      "answer": "Every input needs a programmatically associated label, preferably a native <label for> whose id matches the input, so the label text becomes the accessible name and clicking it focuses the control. Never use a placeholder as a substitute for a label — it disappears on input and is not reliably exposed as the name. Associate helper hints and error messages with the field via aria-describedby so they are announced after the name. When a field is invalid, set aria-invalid=\"true\" so the invalid state reaches the accessibility tree — a red border alone is invisible to a screen reader and to colorblind users. Put the error message in a container that gets announced, for example role=\"alert\", so it is spoken when it appears. On submit failure, move focus to the first invalid control and, for longer forms, summarize the count of errors in a live region. Use autocomplete tokens like email, name, and tel, which WCAG 1.3.5 requires for common fields and which help everyone. In Angular you bind aria-invalid and aria-describedby to form-control state; in React you drive them from form state — the semantics are identical.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["accessibility", "wcag"],
+      "followUps": ["Why is a placeholder not an acceptable label?", "Where should focus go after a failed form submission?"]
+    },
+    {
+      "id": "q15",
+      "question": "When is role=\"menu\" appropriate, and why is it wrong for a site's main navigation?",
+      "answer": "The ARIA menu pattern (role=\"menu\" with role=\"menuitem\" children) models an application menu — the kind you find in a desktop application's menu bar or a right-click context menu — where the items are commands and the expected keyboard model is arrow-key navigation with a roving tabindex, Escape to close, and Enter or Space to activate. Applying it to a website's primary navigation is a common mistake because site navigation is a set of links, best expressed with a <nav> landmark containing a list of anchors. If you slap role=\"menu\" on it, screen-reader users are told it behaves like an application menu and expect arrow-key navigation and command semantics that a link list doesn't provide, which is confusing and often broken. The rule of thumb: if the items navigate to pages, they are links inside a nav landmark; if the items are commands that act on the current view, the menu pattern may fit. This is another instance of the first rule of ARIA — reach for the native nav and links before applying a role that implies interaction you haven't actually built.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["aria", "semantic-html"],
+      "followUps": ["What is the correct markup for a site's primary navigation?", "What keyboard model does the menu pattern require?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "c1",
+      "title": "Make an inaccessible custom dropdown keyboard and screen-reader accessible",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "prompt": "A team shipped a custom select built entirely from divs. Clicking the trigger toggles a list of option divs, and clicking an option updates the displayed value. It works with a mouse but is completely unusable by keyboard and invisible to screen readers. Rework it into an accessible disclosure-style listbox: the trigger must be a real button that exposes expanded state and its selected value, the popup must be a listbox of options with correct roles and selected state, and it must be fully operable by keyboard (open, arrow between options, Enter to select, Escape to close) and announced correctly by a screen reader.",
+      "hints": [
+        "Start by replacing the trigger div with a native <button> that carries aria-haspopup=\"listbox\", aria-expanded, and aria-controls pointing at the list.",
+        "Give the popup role=\"listbox\" and each option role=\"option\" with aria-selected on the chosen one; track the highlighted option with aria-activedescendant on the button.",
+        "Wire keyboard handlers: Down/Up move the active option, Enter or Space selects and closes, Escape closes and returns focus to the button, and update aria-activedescendant as you move."
+      ],
+      "solutionCode": "<!-- Accessible single-select listbox (disclosure pattern) -->\n<label id=\"fruit-label\">Choose a fruit</label>\n<button\n  id=\"fruit-button\"\n  type=\"button\"\n  aria-haspopup=\"listbox\"\n  aria-expanded=\"false\"\n  aria-labelledby=\"fruit-label fruit-button\"\n  aria-controls=\"fruit-list\">\n  <span id=\"fruit-value\">Select...</span>\n</button>\n\n<ul id=\"fruit-list\" role=\"listbox\" aria-labelledby=\"fruit-label\" tabindex=\"-1\" hidden>\n  <li id=\"opt-apple\"  role=\"option\" aria-selected=\"false\">Apple</li>\n  <li id=\"opt-banana\" role=\"option\" aria-selected=\"false\">Banana</li>\n  <li id=\"opt-cherry\" role=\"option\" aria-selected=\"false\">Cherry</li>\n</ul>\n\n<script>\nconst button = document.getElementById('fruit-button');\nconst list = document.getElementById('fruit-list');\nconst valueEl = document.getElementById('fruit-value');\nconst options = Array.from(list.querySelectorAll('[role=\"option\"]'));\nlet activeIndex = 0;\nlet open = false;\n\nfunction render() {\n  button.setAttribute('aria-expanded', String(open));\n  list.hidden = !open;\n  if (open) {\n    // aria-activedescendant lets the SR announce the highlighted\n    // option while DOM focus stays on the button/list.\n    button.setAttribute('aria-activedescendant', options[activeIndex].id);\n    options.forEach((o, i) => o.classList.toggle('active', i === activeIndex));\n  } else {\n    button.removeAttribute('aria-activedescendant');\n  }\n}\n\nfunction openList() { open = true; list.focus(); render(); }\nfunction closeList(returnFocus) {\n  open = false; render();\n  if (returnFocus) button.focus();\n}\n\nfunction selectAt(i) {\n  options.forEach((o, idx) => o.setAttribute('aria-selected', String(idx === i)));\n  valueEl.textContent = options[i].textContent;\n  closeList(true);\n}\n\nbutton.addEventListener('click', () => open ? closeList(true) : openList());\n\nbutton.addEventListener('keydown', (e) => {\n  if (!open && (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ')) {\n    e.preventDefault(); openList();\n  }\n});\n\nlist.addEventListener('keydown', (e) => {\n  switch (e.key) {\n    case 'ArrowDown':\n      e.preventDefault();\n      activeIndex = Math.min(activeIndex + 1, options.length - 1); render(); break;\n    case 'ArrowUp':\n      e.preventDefault();\n      activeIndex = Math.max(activeIndex - 1, 0); render(); break;\n    case 'Home':\n      e.preventDefault(); activeIndex = 0; render(); break;\n    case 'End':\n      e.preventDefault(); activeIndex = options.length - 1; render(); break;\n    case 'Enter':\n    case ' ':\n      e.preventDefault(); selectAt(activeIndex); break;\n    case 'Escape':\n      e.preventDefault(); closeList(true); break;\n  }\n});\n\noptions.forEach((o, i) => o.addEventListener('click', () => selectAt(i)));\n</script>",
+      "solutionLanguage": "html",
+      "explanation": "The rework replaces every div-with-onclick with elements that carry the right role and state so the accessibility tree describes an interactive listbox. The trigger is now a native <button>, so it is focusable and keyboard-activatable for free, and it exposes aria-haspopup=\"listbox\" plus aria-expanded so a screen reader announces that it opens a listbox and whether it is currently open. The popup uses role=\"listbox\" with role=\"option\" children and aria-selected to convey which option is chosen, matching the WAI-ARIA Authoring Practices listbox pattern that users already know. Rather than moving DOM focus onto each option, the code uses aria-activedescendant on the container to point at the highlighted option, which keeps focus stable while letting the screen reader announce the active choice as the user arrows through. The keyboard handlers implement the expected model — Down and Up move the active option, Home and End jump to the ends, Enter or Space selects and closes, and Escape closes and returns focus to the trigger so the user is never stranded. Returning focus to the button on close and reflecting the selected value in the trigger text keeps sighted, keyboard, and screen-reader experiences in sync. In production you would prefer a native <select> or a well-tested library implementation, but this shows exactly what those provide under the hood.",
+      "relatedTopic": "accessibility"
+    },
+    {
+      "id": "c2",
+      "title": "Add focus management and a trap to a modal dialog",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "prompt": "A modal component renders a div overlay with a heading, a form, and Save/Cancel buttons. It opens and closes visually but has no focus handling: when it opens focus stays on the button that triggered it, Tab escapes into the page behind the (visually hidden but still tabbable) overlay, Escape does nothing, and when it closes focus is lost to the body. Add complete focus management: expose the dialog role and an accessible name, move focus in on open, trap Tab and Shift+Tab within the dialog, close on Escape, and restore focus to the trigger on close.",
+      "hints": [
+        "Add role=\"dialog\", aria-modal=\"true\", and aria-labelledby referencing the dialog's heading id so the dialog has a role and an accessible name.",
+        "On open, save document.activeElement as the element to return focus to, then move focus to the first focusable element inside the dialog.",
+        "In a keydown listener, close on Escape, and on Tab compute the first and last focusable elements to wrap focus so it cycles within the dialog; restore focus to the saved trigger on close."
+      ],
+      "solutionCode": "class AccessibleModal {\n  private dialog: HTMLElement;\n  private trigger: HTMLElement | null = null;\n  private readonly FOCUSABLE =\n    'a[href], button:not([disabled]), input:not([disabled]),' +\n    ' select:not([disabled]), textarea:not([disabled]),' +\n    ' [tabindex]:not([tabindex=\"-1\"])';\n\n  constructor(dialogEl: HTMLElement) {\n    this.dialog = dialogEl;\n    // role/name via markup: role=\"dialog\" aria-modal=\"true\"\n    //   aria-labelledby=\"dialog-title\"\n    this.onKeydown = this.onKeydown.bind(this);\n  }\n\n  private focusable(): HTMLElement[] {\n    return Array.from(this.dialog.querySelectorAll<HTMLElement>(this.FOCUSABLE));\n  }\n\n  open(): void {\n    this.trigger = document.activeElement as HTMLElement; // remember opener\n    this.dialog.hidden = false;\n    this.dialog.setAttribute('aria-modal', 'true');\n    const items = this.focusable();\n    (items[0] ?? this.dialog).focus();                     // focus IN\n    document.addEventListener('keydown', this.onKeydown);\n  }\n\n  close(): void {\n    this.dialog.hidden = true;\n    document.removeEventListener('keydown', this.onKeydown);\n    this.trigger?.focus();                                 // restore focus\n  }\n\n  private onKeydown(e: KeyboardEvent): void {\n    if (e.key === 'Escape') {\n      e.preventDefault();\n      this.close();\n      return;\n    }\n    if (e.key !== 'Tab') return;\n\n    const items = this.focusable();\n    if (items.length === 0) {\n      e.preventDefault();          // nothing to move to; keep focus contained\n      return;\n    }\n    const first = items[0];\n    const last = items[items.length - 1];\n    const active = document.activeElement;\n\n    if (e.shiftKey && active === first) {\n      e.preventDefault();\n      last.focus();                // wrap backward\n    } else if (!e.shiftKey && active === last) {\n      e.preventDefault();\n      first.focus();               // wrap forward\n    }\n  }\n}\n\n// Usage:\n// const modal = new AccessibleModal(document.getElementById('dialog')!);\n// openButton.addEventListener('click', () => modal.open());\n// cancelButton.addEventListener('click', () => modal.close());",
+      "solutionLanguage": "typescript",
+      "explanation": "The class turns a plain overlay into a conforming modal dialog by supplying every piece of focus management the pattern requires. The markup gives the container role=\"dialog\", aria-modal=\"true\", and aria-labelledby pointing at the heading, so the accessibility tree exposes both a dialog role and an accessible name and the screen reader announces the dialog when it opens. On open, the code records document.activeElement — the button that triggered the modal — so it can restore focus later, then moves focus to the first focusable element inside the dialog so the keyboard and screen-reader user lands on the content rather than being left behind. The keydown listener implements the trap: on Tab it computes the first and last focusable elements and wraps focus so Tab from the last element returns to the first and Shift+Tab from the first goes to the last, which prevents focus from escaping into the still-tabbable page behind the overlay. Escape closes the dialog, satisfying the expectation that a modal is dismissible from the keyboard, and close() restores focus to the original trigger so the user resumes exactly where they were instead of being dumped on the body. In real applications the native <dialog> element with showModal() or a library such as Angular CDK's cdkTrapFocus provides this behavior, including making the background inert, but implementing it by hand demonstrates precisely which guarantees those tools give you.",
+      "relatedTopic": "accessibility"
+    }
+  ],
+  "references": [
+    {"label": "WCAG 2.2 (W3C Recommendation)", "url": "https://www.w3.org/TR/WCAG22/"},
+    {"label": "WAI-ARIA Authoring Practices Guide (APG)", "url": "https://www.w3.org/WAI/ARIA/apg/"},
+    {"label": "MDN Web Docs — Accessibility", "url": "https://developer.mozilla.org/en-US/docs/Web/Accessibility"},
+    {"label": "WebAIM — Web Accessibility In Mind", "url": "https://webaim.org/"},
+    {"label": "Deque axe-core (accessibility testing engine)", "url": "https://github.com/dequelabs/axe-core"},
+    {"label": "ARIA Authoring Practices — Read Me First (Five Rules of ARIA)", "url": "https://www.w3.org/WAI/ARIA/apg/practices/read-me-first/"}
+  ]
+}
