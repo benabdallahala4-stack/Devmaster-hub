@@ -4,7 +4,14 @@
   "category": "Engineering",
   "subcategory": "Version Control",
   "difficulty": "mid",
-  "tags": ["git", "version-control", "rebase", "merge", "reflog", "branching"],
+  "tags": [
+    "git",
+    "version-control",
+    "rebase",
+    "merge",
+    "reflog",
+    "branching"
+  ],
   "description": "A deep, mental-model-first tour of Git's object graph, history-rewriting commands, recovery techniques, and the branching strategies senior engineers are expected to reason about under pressure.",
   "estReadMinutes": 28,
   "sections": [
@@ -13,9 +20,19 @@
       "heading": "Introduction: Git Is a Content-Addressable Filesystem",
       "kind": "intro",
       "blocks": [
-        {"type": "paragraph", "text": "Most engineers learn Git as a list of incantations: add, commit, push, pull, and a panicked Stack Overflow search when something breaks. That works until it doesn't. The moment you need to recover a lost commit, untangle a botched rebase, or explain why a force-push nuked a teammate's work, command memorization fails you. What scales is a correct mental model: Git is a content-addressable key-value store with a thin version-control UI layered on top."},
-        {"type": "paragraph", "text": "Underneath, Git stores four object types in a Merkle DAG (directed acyclic graph), each addressed by the SHA-1 (or SHA-256 in newer repos) hash of its content. Branches and tags are nothing more than named pointers into that graph. Once you internalize this, nearly every Git command becomes a predictable graph mutation, and the scary operations (reset, rebase, filter-branch) become reasoning exercises rather than coin flips."},
-        {"type": "callout", "variant": "info", "text": "Rule of thumb: in Git, commits are immutable and cheap, branches are mutable and free, and almost nothing is ever truly deleted until garbage collection runs. The reflog is your safety net."}
+        {
+          "type": "paragraph",
+          "text": "Most engineers learn Git as a list of incantations: add, commit, push, pull, and a panicked Stack Overflow search when something breaks. That works until it doesn't. The moment you need to recover a lost commit, untangle a botched rebase, or explain why a force-push nuked a teammate's work, command memorization fails you. What scales is a correct mental model: Git is a content-addressable key-value store with a thin version-control UI layered on top."
+        },
+        {
+          "type": "paragraph",
+          "text": "Underneath, Git stores four object types in a Merkle DAG (directed acyclic graph), each addressed by the SHA-1 (or SHA-256 in newer repos) hash of its content. Branches and tags are nothing more than named pointers into that graph. Once you internalize this, nearly every Git command becomes a predictable graph mutation, and the scary operations (reset, rebase, filter-branch) become reasoning exercises rather than coin flips."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Rule of thumb: in Git, commits are immutable and cheap, branches are mutable and free, and almost nothing is ever truly deleted until garbage collection runs. The reflog is your safety net."
+        }
       ]
     },
     {
@@ -23,15 +40,25 @@
       "heading": "Why It Matters",
       "kind": "why",
       "blocks": [
-        {"type": "paragraph", "text": "Git is the substrate every other engineering workflow runs on top of: code review, CI/CD, deploy provenance, incident forensics, and rollback. A team that uses Git well ships faster and recovers from mistakes calmly; a team that doesn't loses hours to merge hell, accidental data loss, and unreviewable 4000-line pull requests."},
-        {"type": "list", "items": [
-          "Recoverability: knowing reflog and reset semantics turns a career-defining 'I deleted three days of work' incident into a 30-second fix.",
-          "Reviewability: clean, atomic history (via interactive rebase) makes code review and bisecting bugs dramatically cheaper.",
-          "Forensics: git bisect can pinpoint the exact commit that introduced a production regression across thousands of commits in O(log n) steps.",
-          "Collaboration safety: understanding what rewriting published history does to teammates prevents the single most disruptive Git mistake.",
-          "Release engineering: branching strategy (trunk-based vs gitflow) directly shapes deploy cadence, hotfix latency, and merge-conflict load."
-        ]},
-        {"type": "callout", "variant": "warning", "text": "In interviews, Git questions are a proxy for judgment. Anyone can recite 'git rebase rewrites history.' Seniors are expected to explain WHY, WHEN it's dangerous, and how to recover when it goes wrong."}
+        {
+          "type": "paragraph",
+          "text": "Git is the substrate every other engineering workflow runs on top of: code review, CI/CD, deploy provenance, incident forensics, and rollback. A team that uses Git well ships faster and recovers from mistakes calmly; a team that doesn't loses hours to merge hell, accidental data loss, and unreviewable 4000-line pull requests."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Recoverability: knowing reflog and reset semantics turns a career-defining 'I deleted three days of work' incident into a 30-second fix.",
+            "Reviewability: clean, atomic history (via interactive rebase) makes code review and bisecting bugs dramatically cheaper.",
+            "Forensics: git bisect can pinpoint the exact commit that introduced a production regression across thousands of commits in O(log n) steps.",
+            "Collaboration safety: understanding what rewriting published history does to teammates prevents the single most disruptive Git mistake.",
+            "Release engineering: branching strategy (trunk-based vs gitflow) directly shapes deploy cadence, hotfix latency, and merge-conflict load."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "In interviews, Git questions are a proxy for judgment. Anyone can recite 'git rebase rewrites history.' Seniors are expected to explain WHY, WHEN it's dangerous, and how to recover when it goes wrong."
+        }
       ]
     },
     {
@@ -39,18 +66,54 @@
       "heading": "Core Concept: The Object Model",
       "kind": "concept",
       "blocks": [
-        {"type": "paragraph", "text": "Git stores everything as objects in .git/objects, keyed by a hash of their content. There are exactly four object types, and understanding how they nest is the single highest-leverage piece of Git knowledge."},
-        {"type": "table", "headers": ["Object", "Represents", "Points to"],
+        {
+          "type": "paragraph",
+          "text": "Git stores everything as objects in .git/objects, keyed by a hash of their content. There are exactly four object types, and understanding how they nest is the single highest-leverage piece of Git knowledge."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Object",
+            "Represents",
+            "Points to"
+          ],
           "rows": [
-            ["blob", "The raw contents of a file (no name, no mode)", "nothing"],
-            ["tree", "A directory listing: names, modes, and the blobs/trees they map to", "blobs and other trees"],
-            ["commit", "A snapshot: a root tree plus author, committer, message, and parent(s)", "one tree, zero or more parent commits"],
-            ["tag", "An annotated tag: a named, signed pointer to (usually) a commit", "a commit (or other object)"]
+            [
+              "blob",
+              "The raw contents of a file (no name, no mode)",
+              "nothing"
+            ],
+            [
+              "tree",
+              "A directory listing: names, modes, and the blobs/trees they map to",
+              "blobs and other trees"
+            ],
+            [
+              "commit",
+              "A snapshot: a root tree plus author, committer, message, and parent(s)",
+              "one tree, zero or more parent commits"
+            ],
+            [
+              "tag",
+              "An annotated tag: a named, signed pointer to (usually) a commit",
+              "a commit (or other object)"
+            ]
           ]
         },
-        {"type": "paragraph", "text": "Two facts surprise people. First, a commit does NOT store a diff; it stores a full snapshot of the tree. Diffs are computed on demand by comparing two trees. Second, identical file content is stored exactly once: two files with the same bytes share one blob, because the blob's identity IS its content hash. This is why renaming a giant file costs almost nothing."},
-        {"type": "code", "language": "bash", "code": "# Inspect the object graph by hand\n$ git cat-file -t HEAD          # -> commit\n$ git cat-file -p HEAD          # show commit: tree, parent, author, message\ntree 9f1a...\nparent 4b2c...\nauthor Jane Dev <jane@co.com> 1718900000 +0000\n\n$ git cat-file -p 9f1a          # show the root tree\n100644 blob 0a3e...   README.md\n040000 tree 7c12...   src\n\n$ git cat-file -p 0a3e          # show the blob (file contents)\n# Project Title ..."},
-        {"type": "callout", "variant": "info", "text": "A commit's hash is derived from its tree, parents, message, author, AND timestamps. Change any of these and you get a brand-new commit with a different hash. This is exactly why rebase and amend produce new commits rather than editing old ones."}
+        {
+          "type": "paragraph",
+          "text": "Two facts surprise people. First, a commit does NOT store a diff; it stores a full snapshot of the tree. Diffs are computed on demand by comparing two trees. Second, identical file content is stored exactly once: two files with the same bytes share one blob, because the blob's identity IS its content hash. This is why renaming a giant file costs almost nothing."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "# Inspect the object graph by hand\n$ git cat-file -t HEAD          # -> commit\n$ git cat-file -p HEAD          # show commit: tree, parent, author, message\ntree 9f1a...\nparent 4b2c...\nauthor Jane Dev <jane@co.com> 1718900000 +0000\n\n$ git cat-file -p 9f1a          # show the root tree\n100644 blob 0a3e...   README.md\n040000 tree 7c12...   src\n\n$ git cat-file -p 0a3e          # show the blob (file contents)\n# Project Title ..."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A commit's hash is derived from its tree, parents, message, author, AND timestamps. Change any of these and you get a brand-new commit with a different hash. This is exactly why rebase and amend produce new commits rather than editing old ones."
+        }
       ]
     },
     {
@@ -58,19 +121,56 @@
       "heading": "Core Concept: Refs, Branches, and the Staging Area",
       "kind": "concept",
       "blocks": [
-        {"type": "heading", "text": "Branches are pointers"},
-        {"type": "paragraph", "text": "A branch is a single file under .git/refs/heads/ containing one 40-character commit hash. Creating a branch writes that file; committing on it advances the pointer to the new commit. That is the entire mechanism. This is why branching in Git is O(1) and free, unlike older VCS that copied files. HEAD is a special ref that usually points at a branch (a 'symbolic ref'); when it points directly at a commit instead, you are in 'detached HEAD' state."},
-        {"type": "code", "language": "bash", "code": "$ cat .git/HEAD\nref: refs/heads/main\n\n$ cat .git/refs/heads/main\n4b2c8a1f9e0d...      # just a commit hash\n\n# Creating a branch is literally writing one file:\n$ git branch feature      # echoes HEAD's hash into refs/heads/feature"},
-        {"type": "heading", "text": "The three trees: working dir, index, HEAD"},
-        {"type": "paragraph", "text": "Git operations move content between three areas. The working directory is your actual files on disk. The index (a.k.a. staging area, a.k.a. cache) is a binary file at .git/index that holds the proposed next commit. HEAD points at the last commit. 'git add' copies working-dir content into the index; 'git commit' turns the index into a new commit object and advances the branch."},
-        {"type": "table", "headers": ["Area", "What it is", "Set by"],
+        {
+          "type": "heading",
+          "text": "Branches are pointers"
+        },
+        {
+          "type": "paragraph",
+          "text": "A branch is a single file under .git/refs/heads/ containing one 40-character commit hash. Creating a branch writes that file; committing on it advances the pointer to the new commit. That is the entire mechanism. This is why branching in Git is O(1) and free, unlike older VCS that copied files. HEAD is a special ref that usually points at a branch (a 'symbolic ref'); when it points directly at a commit instead, you are in 'detached HEAD' state."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "$ cat .git/HEAD\nref: refs/heads/main\n\n$ cat .git/refs/heads/main\n4b2c8a1f9e0d...      # just a commit hash\n\n# Creating a branch is literally writing one file:\n$ git branch feature      # echoes HEAD's hash into refs/heads/feature"
+        },
+        {
+          "type": "heading",
+          "text": "The three trees: working dir, index, HEAD"
+        },
+        {
+          "type": "paragraph",
+          "text": "Git operations move content between three areas. The working directory is your actual files on disk. The index (a.k.a. staging area, a.k.a. cache) is a binary file at .git/index that holds the proposed next commit. HEAD points at the last commit. 'git add' copies working-dir content into the index; 'git commit' turns the index into a new commit object and advances the branch."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Area",
+            "What it is",
+            "Set by"
+          ],
           "rows": [
-            ["Working directory", "Files you edit on disk", "your editor"],
-            ["Index / staging", "Snapshot of the NEXT commit", "git add, git rm, git reset <path>"],
-            ["HEAD", "Snapshot of the LAST commit", "git commit, git checkout, git reset"]
+            [
+              "Working directory",
+              "Files you edit on disk",
+              "your editor"
+            ],
+            [
+              "Index / staging",
+              "Snapshot of the NEXT commit",
+              "git add, git rm, git reset <path>"
+            ],
+            [
+              "HEAD",
+              "Snapshot of the LAST commit",
+              "git commit, git checkout, git reset"
+            ]
           ]
         },
-        {"type": "paragraph", "text": "The index exists precisely so you can craft a commit that differs from your messy working tree: stage one hunk of a file, leave debug code unstaged, commit only what belongs together. 'git add -p' is how seniors keep commits atomic."}
+        {
+          "type": "paragraph",
+          "text": "The index exists precisely so you can craft a commit that differs from your messy working tree: stage one hunk of a file, leave debug code unstaged, commit only what belongs together. 'git add -p' is how seniors keep commits atomic."
+        }
       ]
     },
     {
@@ -78,25 +178,84 @@
       "heading": "Core Concept: Merge, Rebase, and Fast-Forward",
       "kind": "concept",
       "blocks": [
-        {"type": "paragraph", "text": "Merge and rebase both integrate work from one branch into another, but they produce structurally different histories. This is the single most-asked Git interview topic, so be precise."},
-        {"type": "heading", "text": "Fast-forward"},
-        {"type": "paragraph", "text": "If the target branch is a direct ancestor of the source (no divergent commits), Git can simply slide the branch pointer forward. No new commit is created. This is a fast-forward. It keeps history linear but erases the fact that work happened on a separate branch. Use --no-ff to force a merge commit when you want that grouping preserved."},
-        {"type": "heading", "text": "Merge (three-way)"},
-        {"type": "paragraph", "text": "When branches have diverged, 'git merge' finds the merge base (common ancestor), computes a three-way merge, and records a merge commit with TWO parents. History is non-destructive and truthful: it shows exactly what was integrated and when. The cost is a more tangled graph and noisy merge commits."},
-        {"type": "heading", "text": "Rebase"},
-        {"type": "paragraph", "text": "'git rebase main' replays each commit of your branch, one at a time, on top of the tip of main, creating NEW commits with new hashes. The result is a linear history that looks like you started your work after main's latest commit. It's cleaner to read and bisect, but it rewrites history (new commit identities), which is dangerous if those commits were already shared."},
-        {"type": "code", "language": "bash", "code": "# Merge: preserves topology, adds a merge commit\n$ git checkout main\n$ git merge feature        # creates merge commit M with parents (main, feature)\n\n# Rebase: linear history, new commit hashes for feature's commits\n$ git checkout feature\n$ git rebase main          # replays feature commits on top of main\n$ git checkout main\n$ git merge feature        # now a clean fast-forward"},
-        {"type": "table", "headers": ["Dimension", "Merge", "Rebase"],
+        {
+          "type": "paragraph",
+          "text": "Merge and rebase both integrate work from one branch into another, but they produce structurally different histories. This is the single most-asked Git interview topic, so be precise."
+        },
+        {
+          "type": "heading",
+          "text": "Fast-forward"
+        },
+        {
+          "type": "paragraph",
+          "text": "If the target branch is a direct ancestor of the source (no divergent commits), Git can simply slide the branch pointer forward. No new commit is created. This is a fast-forward. It keeps history linear but erases the fact that work happened on a separate branch. Use --no-ff to force a merge commit when you want that grouping preserved."
+        },
+        {
+          "type": "heading",
+          "text": "Merge (three-way)"
+        },
+        {
+          "type": "paragraph",
+          "text": "When branches have diverged, 'git merge' finds the merge base (common ancestor), computes a three-way merge, and records a merge commit with TWO parents. History is non-destructive and truthful: it shows exactly what was integrated and when. The cost is a more tangled graph and noisy merge commits."
+        },
+        {
+          "type": "heading",
+          "text": "Rebase"
+        },
+        {
+          "type": "paragraph",
+          "text": "'git rebase main' replays each commit of your branch, one at a time, on top of the tip of main, creating NEW commits with new hashes. The result is a linear history that looks like you started your work after main's latest commit. It's cleaner to read and bisect, but it rewrites history (new commit identities), which is dangerous if those commits were already shared."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "# Merge: preserves topology, adds a merge commit\n$ git checkout main\n$ git merge feature        # creates merge commit M with parents (main, feature)\n\n# Rebase: linear history, new commit hashes for feature's commits\n$ git checkout feature\n$ git rebase main          # replays feature commits on top of main\n$ git checkout main\n$ git merge feature        # now a clean fast-forward"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Dimension",
+            "Merge",
+            "Rebase"
+          ],
           "rows": [
-            ["History shape", "Branched, preserves topology", "Linear"],
-            ["Commit hashes", "Unchanged", "Rewritten (new hashes)"],
-            ["Safe on shared branches?", "Yes", "No — never rebase published commits"],
-            ["Conflict resolution", "Once, in the merge commit", "Potentially once per replayed commit"],
-            ["Traceability of integration", "Explicit merge commit", "Lost (looks sequential)"],
-            ["Bisect/readability", "Noisier", "Cleaner"]
+            [
+              "History shape",
+              "Branched, preserves topology",
+              "Linear"
+            ],
+            [
+              "Commit hashes",
+              "Unchanged",
+              "Rewritten (new hashes)"
+            ],
+            [
+              "Safe on shared branches?",
+              "Yes",
+              "No — never rebase published commits"
+            ],
+            [
+              "Conflict resolution",
+              "Once, in the merge commit",
+              "Potentially once per replayed commit"
+            ],
+            [
+              "Traceability of integration",
+              "Explicit merge commit",
+              "Lost (looks sequential)"
+            ],
+            [
+              "Bisect/readability",
+              "Noisier",
+              "Cleaner"
+            ]
           ]
         },
-        {"type": "callout", "variant": "success", "text": "Common team policy: rebase your LOCAL feature branch onto main to keep it current, but MERGE (often squash-merge) into main via PR. You get linear feature history and an auditable integration point without rewriting anyone else's commits."}
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Common team policy: rebase your LOCAL feature branch onto main to keep it current, but MERGE (often squash-merge) into main via PR. You get linear feature history and an auditable integration point without rewriting anyone else's commits."
+        }
       ]
     },
     {
@@ -104,24 +263,86 @@
       "heading": "Core Concept: Interactive Rebase, Cherry-pick, Reset, and Revert",
       "kind": "concept",
       "blocks": [
-        {"type": "heading", "text": "Interactive rebase"},
-        {"type": "paragraph", "text": "'git rebase -i' lets you rewrite a range of commits: reorder, squash several into one, fixup, reword messages, edit a commit's content, or drop it entirely. It's the primary tool for cleaning up a feature branch into a reviewable sequence of atomic commits before opening a PR."},
-        {"type": "code", "language": "bash", "code": "$ git rebase -i HEAD~4\n# Editor opens a todo list:\npick  a1b2c3  Add user model\nsquash 4d5e6f  fix typo            # fold into previous\nreword 7g8h9i  Add login endpoint  # change message\ndrop  0j1k2l  debug logging        # remove entirely\n# Save & close to apply."},
-        {"type": "heading", "text": "Cherry-pick"},
-        {"type": "paragraph", "text": "'git cherry-pick <sha>' takes the diff introduced by one commit and applies it as a NEW commit on your current branch. Classic use: porting a hotfix from main to a release branch. Be aware it creates a duplicate-content commit with a different hash, which can cause confusing conflicts if that branch is later merged back."},
-        {"type": "heading", "text": "Reset: soft, mixed, hard"},
-        {"type": "paragraph", "text": "'git reset' moves the current branch pointer to a target commit and optionally adjusts the index and working directory. The three flags differ in how far the changes ripple."},
-        {"type": "table", "headers": ["Mode", "Moves branch ref", "Resets index", "Resets working dir", "Typical use"],
+        {
+          "type": "heading",
+          "text": "Interactive rebase"
+        },
+        {
+          "type": "paragraph",
+          "text": "'git rebase -i' lets you rewrite a range of commits: reorder, squash several into one, fixup, reword messages, edit a commit's content, or drop it entirely. It's the primary tool for cleaning up a feature branch into a reviewable sequence of atomic commits before opening a PR."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "$ git rebase -i HEAD~4\n# Editor opens a todo list:\npick  a1b2c3  Add user model\nsquash 4d5e6f  fix typo            # fold into previous\nreword 7g8h9i  Add login endpoint  # change message\ndrop  0j1k2l  debug logging        # remove entirely\n# Save & close to apply."
+        },
+        {
+          "type": "heading",
+          "text": "Cherry-pick"
+        },
+        {
+          "type": "paragraph",
+          "text": "'git cherry-pick <sha>' takes the diff introduced by one commit and applies it as a NEW commit on your current branch. Classic use: porting a hotfix from main to a release branch. Be aware it creates a duplicate-content commit with a different hash, which can cause confusing conflicts if that branch is later merged back."
+        },
+        {
+          "type": "heading",
+          "text": "Reset: soft, mixed, hard"
+        },
+        {
+          "type": "paragraph",
+          "text": "'git reset' moves the current branch pointer to a target commit and optionally adjusts the index and working directory. The three flags differ in how far the changes ripple."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Mode",
+            "Moves branch ref",
+            "Resets index",
+            "Resets working dir",
+            "Typical use"
+          ],
           "rows": [
-            ["--soft", "Yes", "No", "No", "Uncommit but keep changes staged (e.g. to recombine commits)"],
-            ["--mixed (default)", "Yes", "Yes", "No", "Uncommit and unstage; changes stay in working dir"],
-            ["--hard", "Yes", "Yes", "Yes", "Throw everything away back to target commit (DESTRUCTIVE)"]
+            [
+              "--soft",
+              "Yes",
+              "No",
+              "No",
+              "Uncommit but keep changes staged (e.g. to recombine commits)"
+            ],
+            [
+              "--mixed (default)",
+              "Yes",
+              "Yes",
+              "No",
+              "Uncommit and unstage; changes stay in working dir"
+            ],
+            [
+              "--hard",
+              "Yes",
+              "Yes",
+              "Yes",
+              "Throw everything away back to target commit (DESTRUCTIVE)"
+            ]
           ]
         },
-        {"type": "code", "language": "bash", "code": "git reset --soft HEAD~1    # undo last commit, keep changes staged\ngit reset HEAD~1           # (mixed) undo last commit, unstage changes\ngit reset --hard HEAD~1    # undo last commit AND discard the changes — careful"},
-        {"type": "heading", "text": "Revert"},
-        {"type": "paragraph", "text": "'git revert <sha>' creates a NEW commit that applies the inverse diff of the target commit. It does not rewrite history, so it's the correct, safe way to undo a change that has already been pushed to a shared branch. Reset rewrites; revert appends."},
-        {"type": "callout", "variant": "warning", "text": "Decision rule: if the commits are still LOCAL/private, reset is fine. If they're already PUSHED to a branch others use, revert — never reset-and-force-push a shared branch."}
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "git reset --soft HEAD~1    # undo last commit, keep changes staged\ngit reset HEAD~1           # (mixed) undo last commit, unstage changes\ngit reset --hard HEAD~1    # undo last commit AND discard the changes — careful"
+        },
+        {
+          "type": "heading",
+          "text": "Revert"
+        },
+        {
+          "type": "paragraph",
+          "text": "'git revert <sha>' creates a NEW commit that applies the inverse diff of the target commit. It does not rewrite history, so it's the correct, safe way to undo a change that has already been pushed to a shared branch. Reset rewrites; revert appends."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Decision rule: if the commits are still LOCAL/private, reset is fine. If they're already PUSHED to a branch others use, revert — never reset-and-force-push a shared branch."
+        }
       ]
     },
     {
@@ -129,14 +350,40 @@
       "heading": "Core Concept: Reflog, Stash, and Bisect",
       "kind": "concept",
       "blocks": [
-        {"type": "heading", "text": "Reflog: the undo history of your refs"},
-        {"type": "paragraph", "text": "The reflog records every movement of HEAD and your branch tips locally — every commit, checkout, reset, rebase, and merge. Even after a 'destructive' command, the old commit is still in the object database and the reflog still points at it (until garbage collection runs, by default after 90 days for reachable-via-reflog and 30 days for unreachable). This is how you recover from almost any mistake."},
-        {"type": "code", "language": "bash", "code": "$ git reflog\n9a8b7c6 HEAD@{0}: reset: moving to HEAD~3\n1f2e3d4 HEAD@{1}: commit: Add payment retry logic   <-- the 'lost' work\n...\n# Recover by pointing a branch at the old position:\n$ git branch recovered 1f2e3d4\n# or jump back directly:\n$ git reset --hard HEAD@{1}"},
-        {"type": "heading", "text": "Stash"},
-        {"type": "paragraph", "text": "'git stash' shelves your uncommitted working-dir and index changes onto a stack and reverts you to a clean HEAD, so you can switch context. 'git stash pop' reapplies and removes the top entry; 'git stash apply' reapplies but keeps it. Stashes are stored as real commits under refs/stash, so they are reflog-recoverable too. Prefer 'git stash push -m \"msg\"' for named, findable stashes; avoid letting stashes pile up — they're easy to forget and lose context."},
-        {"type": "heading", "text": "Bisect"},
-        {"type": "paragraph", "text": "'git bisect' performs a binary search across commit history to find the one that introduced a bug. You mark a known-good and known-bad commit; Git checks out the midpoint and you test, marking each good or bad. In O(log n) steps it isolates the culprit. With a scripted test you can fully automate it."},
-        {"type": "code", "language": "bash", "code": "$ git bisect start\n$ git bisect bad                 # current HEAD is broken\n$ git bisect good v2.3.0         # this release was fine\n# Git checks out a midpoint commit; you test, then:\n$ git bisect good   # or bad\n# Fully automated:\n$ git bisect run ./scripts/repro_test.sh\n# Git prints: 'abc123 is the first bad commit'\n$ git bisect reset               # return to original HEAD"}
+        {
+          "type": "heading",
+          "text": "Reflog: the undo history of your refs"
+        },
+        {
+          "type": "paragraph",
+          "text": "The reflog records every movement of HEAD and your branch tips locally — every commit, checkout, reset, rebase, and merge. Even after a 'destructive' command, the old commit is still in the object database and the reflog still points at it (until garbage collection runs, by default after 90 days for reachable-via-reflog and 30 days for unreachable). This is how you recover from almost any mistake."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "$ git reflog\n9a8b7c6 HEAD@{0}: reset: moving to HEAD~3\n1f2e3d4 HEAD@{1}: commit: Add payment retry logic   <-- the 'lost' work\n...\n# Recover by pointing a branch at the old position:\n$ git branch recovered 1f2e3d4\n# or jump back directly:\n$ git reset --hard HEAD@{1}"
+        },
+        {
+          "type": "heading",
+          "text": "Stash"
+        },
+        {
+          "type": "paragraph",
+          "text": "'git stash' shelves your uncommitted working-dir and index changes onto a stack and reverts you to a clean HEAD, so you can switch context. 'git stash pop' reapplies and removes the top entry; 'git stash apply' reapplies but keeps it. Stashes are stored as real commits under refs/stash, so they are reflog-recoverable too. Prefer 'git stash push -m \"msg\"' for named, findable stashes; avoid letting stashes pile up — they're easy to forget and lose context."
+        },
+        {
+          "type": "heading",
+          "text": "Bisect"
+        },
+        {
+          "type": "paragraph",
+          "text": "'git bisect' performs a binary search across commit history to find the one that introduced a bug. You mark a known-good and known-bad commit; Git checks out the midpoint and you test, marking each good or bad. In O(log n) steps it isolates the culprit. With a scripted test you can fully automate it."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "$ git bisect start\n$ git bisect bad                 # current HEAD is broken\n$ git bisect good v2.3.0         # this release was fine\n# Git checks out a midpoint commit; you test, then:\n$ git bisect good   # or bad\n# Fully automated:\n$ git bisect run ./scripts/repro_test.sh\n# Git prints: 'abc123 is the first bad commit'\n$ git bisect reset               # return to original HEAD"
+        }
       ]
     },
     {
@@ -144,22 +391,72 @@
       "heading": "Core Concept: Resolving Conflicts and Branching Strategies",
       "kind": "concept",
       "blocks": [
-        {"type": "heading", "text": "Conflict resolution"},
-        {"type": "paragraph", "text": "A conflict occurs when both sides of a merge/rebase changed the same region of a file (or one side edited a file the other deleted). Git marks the region with conflict markers and pauses. You edit to the desired final state, 'git add' to mark resolved, then continue. The key insight: you are resolving CONTENT, not picking a winner — often the correct result is a blend of both sides."},
-        {"type": "code", "language": "bash", "code": "<<<<<<< HEAD\nconst TIMEOUT = 30_000;     // ours\n=======\nconst TIMEOUT = 60_000;     // theirs\n>>>>>>> feature/raise-timeout\n\n# After editing to the resolved value:\n$ git add config.ts\n$ git rebase --continue     # or 'git merge --continue'\n# Tip: enable reuse of recorded resolutions for repeated conflicts:\n$ git config rerere.enabled true"},
-        {"type": "heading", "text": "Trunk-based vs Gitflow"},
-        {"type": "paragraph", "text": "Branching strategy is an organizational choice, not a Git feature. The two poles:"},
-        {"type": "table", "headers": ["Aspect", "Trunk-based", "Gitflow"],
+        {
+          "type": "heading",
+          "text": "Conflict resolution"
+        },
+        {
+          "type": "paragraph",
+          "text": "A conflict occurs when both sides of a merge/rebase changed the same region of a file (or one side edited a file the other deleted). Git marks the region with conflict markers and pauses. You edit to the desired final state, 'git add' to mark resolved, then continue. The key insight: you are resolving CONTENT, not picking a winner — often the correct result is a blend of both sides."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "<<<<<<< HEAD\nconst TIMEOUT = 30_000;     // ours\n=======\nconst TIMEOUT = 60_000;     // theirs\n>>>>>>> feature/raise-timeout\n\n# After editing to the resolved value:\n$ git add config.ts\n$ git rebase --continue     # or 'git merge --continue'\n# Tip: enable reuse of recorded resolutions for repeated conflicts:\n$ git config rerere.enabled true"
+        },
+        {
+          "type": "heading",
+          "text": "Trunk-based vs Gitflow"
+        },
+        {
+          "type": "paragraph",
+          "text": "Branching strategy is an organizational choice, not a Git feature. The two poles:"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Aspect",
+            "Trunk-based",
+            "Gitflow"
+          ],
           "rows": [
-            ["Long-lived branches", "Just main (trunk)", "main + develop + release/* + hotfix/*"],
-            ["Feature branches", "Short-lived (hours to ~2 days)", "Can live for weeks"],
-            ["Merge frequency", "Many small merges per day", "Batched at release time"],
-            ["Best fit", "Continuous delivery, feature flags, strong CI", "Scheduled releases, multiple supported versions"],
-            ["Merge-conflict load", "Low (small, frequent integrations)", "High (big, infrequent integrations)"],
-            ["Release model", "Deploy from trunk continuously", "Cut from release branches"]
+            [
+              "Long-lived branches",
+              "Just main (trunk)",
+              "main + develop + release/* + hotfix/*"
+            ],
+            [
+              "Feature branches",
+              "Short-lived (hours to ~2 days)",
+              "Can live for weeks"
+            ],
+            [
+              "Merge frequency",
+              "Many small merges per day",
+              "Batched at release time"
+            ],
+            [
+              "Best fit",
+              "Continuous delivery, feature flags, strong CI",
+              "Scheduled releases, multiple supported versions"
+            ],
+            [
+              "Merge-conflict load",
+              "Low (small, frequent integrations)",
+              "High (big, infrequent integrations)"
+            ],
+            [
+              "Release model",
+              "Deploy from trunk continuously",
+              "Cut from release branches"
+            ]
           ]
         },
-        {"type": "callout", "variant": "info", "text": "Industry trend favors trunk-based development with feature flags for teams practicing continuous delivery. Gitflow still fits products with discrete versioned releases and multiple maintained branches (e.g. on-prem software with v3.x and v4.x supported simultaneously)."}
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Industry trend favors trunk-based development with feature flags for teams practicing continuous delivery. Gitflow still fits products with discrete versioned releases and multiple maintained branches (e.g. on-prem software with v3.x and v4.x supported simultaneously)."
+        }
       ]
     },
     {
@@ -167,11 +464,28 @@
       "heading": "Production Example: Untangling a Bad Squash-Merge Before a Release",
       "kind": "example",
       "blocks": [
-        {"type": "paragraph", "text": "Scenario: A fintech team runs trunk-based development. An engineer rebased their 9-commit feature branch onto main, but during conflict resolution they accidentally dropped a commit that contained an idempotency-key check on the payment-retry path. CI was green (the dropped logic had weak test coverage), the PR squash-merged, and two days later a partial-outage retry storm caused duplicate charges in production."},
-        {"type": "paragraph", "text": "Forensics with bisect pinpointed that the regression appeared exactly at the squash-merge commit, but the fix wasn't 'revert the whole feature' — that feature was already depended on. The engineer needed to recover the specific dropped commit and reapply it."},
-        {"type": "code", "language": "bash", "code": "# 1. The dropped commit still exists in the local reflog of the rebasing dev\n$ git reflog --date=iso | grep -i idempotency\n3c9f1a2 HEAD@{42}: rebase (pick): Add idempotency key to retry path\n\n# 2. Verify it's the right diff\n$ git show 3c9f1a2\n\n# 3. Cherry-pick it onto a fresh hotfix branch off production main\n$ git checkout -b hotfix/restore-idempotency origin/main\n$ git cherry-pick 3c9f1a2\n# resolve the (small) conflict, then:\n$ git add . && git cherry-pick --continue\n\n# 4. Ship via PR; since main is shared we NEVER rewrite it\n$ git push origin hotfix/restore-idempotency"},
-        {"type": "paragraph", "text": "Postmortem actions that a senior would drive: (a) add a regression test for the idempotency path so bisect-able coverage exists, (b) adopt 'git rebase --rebase-merges' awareness and review the rebased range with 'git range-diff main feature@{1} feature' before force-pushing, and (c) gate the duplicate-charge path behind an integration test in CI rather than relying on manual review."},
-        {"type": "callout", "variant": "danger", "text": "The root cause wasn't Git — it was trusting a clean-looking rebase without diffing the before/after. 'git range-diff' shows exactly which commits changed or vanished across a rebase, and would have caught the dropped commit instantly."}
+        {
+          "type": "paragraph",
+          "text": "Scenario: A fintech team runs trunk-based development. An engineer rebased their 9-commit feature branch onto main, but during conflict resolution they accidentally dropped a commit that contained an idempotency-key check on the payment-retry path. CI was green (the dropped logic had weak test coverage), the PR squash-merged, and two days later a partial-outage retry storm caused duplicate charges in production."
+        },
+        {
+          "type": "paragraph",
+          "text": "Forensics with bisect pinpointed that the regression appeared exactly at the squash-merge commit, but the fix wasn't 'revert the whole feature' — that feature was already depended on. The engineer needed to recover the specific dropped commit and reapply it."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "# 1. The dropped commit still exists in the local reflog of the rebasing dev\n$ git reflog --date=iso | grep -i idempotency\n3c9f1a2 HEAD@{42}: rebase (pick): Add idempotency key to retry path\n\n# 2. Verify it's the right diff\n$ git show 3c9f1a2\n\n# 3. Cherry-pick it onto a fresh hotfix branch off production main\n$ git checkout -b hotfix/restore-idempotency origin/main\n$ git cherry-pick 3c9f1a2\n# resolve the (small) conflict, then:\n$ git add . && git cherry-pick --continue\n\n# 4. Ship via PR; since main is shared we NEVER rewrite it\n$ git push origin hotfix/restore-idempotency"
+        },
+        {
+          "type": "paragraph",
+          "text": "Postmortem actions that a senior would drive: (a) add a regression test for the idempotency path so bisect-able coverage exists, (b) adopt 'git rebase --rebase-merges' awareness and review the rebased range with 'git range-diff main feature@{1} feature' before force-pushing, and (c) gate the duplicate-charge path behind an integration test in CI rather than relying on manual review."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The root cause wasn't Git — it was trusting a clean-looking rebase without diffing the before/after. 'git range-diff' shows exactly which commits changed or vanished across a rebase, and would have caught the dropped commit instantly."
+        }
       ]
     },
     {
@@ -179,16 +493,23 @@
       "heading": "Common Mistakes and Production Incidents",
       "kind": "mistake",
       "blocks": [
-        {"type": "list", "items": [
-          "git reset --hard with uncommitted work: discards working-dir changes that were NEVER committed, so the reflog cannot recover them (reflog only tracks commits, not unstaged edits). Commit or stash before any --hard.",
-          "Rebasing/force-pushing a shared branch: rewrites commit hashes everyone else has; their next pull diverges, and a careless 'push --force' overwrites teammates' commits entirely. Use --force-with-lease at minimum.",
-          "Squash-merging then continuing to develop on the old branch: the squashed commit has a new hash, so the next merge re-introduces 'already merged' commits as conflicts. Delete and re-branch after a squash-merge.",
-          "Committing secrets: removing the file in a later commit does NOT remove it from history. The blob remains reachable; you must rewrite history (git filter-repo) AND rotate the secret, since it's already compromised.",
-          "Giant generated files / node_modules committed: blobs are permanent; the repo bloats forever even after deletion. Fix .gitignore early and rewrite history if it already happened.",
-          "Cherry-picking instead of merging across long-lived branches: creates duplicate commits that conflict when the branches finally merge. Prefer merge for ongoing integration; cherry-pick only for isolated backports.",
-          "Detached HEAD commits then checking out a branch: those commits become unreferenced and are GC-eligible. Create a branch before leaving detached HEAD."
-        ]},
-        {"type": "callout", "variant": "danger", "text": "The most expensive real incident pattern: 'git push --force' to main after a local rebase, silently erasing every commit teammates pushed in the meantime. ALWAYS use --force-with-lease, which refuses to push if the remote moved since you last fetched, and protect main with server-side rules forbidding force-push."}
+        {
+          "type": "list",
+          "items": [
+            "git reset --hard with uncommitted work: discards working-dir changes that were NEVER committed, so the reflog cannot recover them (reflog only tracks commits, not unstaged edits). Commit or stash before any --hard.",
+            "Rebasing/force-pushing a shared branch: rewrites commit hashes everyone else has; their next pull diverges, and a careless 'push --force' overwrites teammates' commits entirely. Use --force-with-lease at minimum.",
+            "Squash-merging then continuing to develop on the old branch: the squashed commit has a new hash, so the next merge re-introduces 'already merged' commits as conflicts. Delete and re-branch after a squash-merge.",
+            "Committing secrets: removing the file in a later commit does NOT remove it from history. The blob remains reachable; you must rewrite history (git filter-repo) AND rotate the secret, since it's already compromised.",
+            "Giant generated files / node_modules committed: blobs are permanent; the repo bloats forever even after deletion. Fix .gitignore early and rewrite history if it already happened.",
+            "Cherry-picking instead of merging across long-lived branches: creates duplicate commits that conflict when the branches finally merge. Prefer merge for ongoing integration; cherry-pick only for isolated backports.",
+            "Detached HEAD commits then checking out a branch: those commits become unreferenced and are GC-eligible. Create a branch before leaving detached HEAD."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The most expensive real incident pattern: 'git push --force' to main after a local rebase, silently erasing every commit teammates pushed in the meantime. ALWAYS use --force-with-lease, which refuses to push if the remote moved since you last fetched, and protect main with server-side rules forbidding force-push."
+        }
       ]
     },
     {
@@ -196,18 +517,25 @@
       "heading": "Best Practices",
       "kind": "bestpractice",
       "blocks": [
-        {"type": "list", "items": [
-          "Commit atomically: one logical change per commit, with a clear imperative subject line (<=50 chars) and a body explaining WHY, not what.",
-          "Rebase locally, merge to share: keep your feature branch current with rebase, but integrate into shared branches via PR merge (squash or merge commit per team policy).",
-          "Never rewrite published history: once pushed to a shared branch, use revert, not reset/rebase. If you must rewrite a personal branch others may have pulled, use --force-with-lease and announce it.",
-          "Protect main: enable branch protection — require PR review, passing CI, and forbid force-push and direct commits.",
-          "Make commits bisectable: every commit should build and pass tests, so git bisect can isolate regressions cleanly.",
-          "Use .gitignore from day one and keep generated/large/secret files out of history entirely.",
-          "Stage with intent: use 'git add -p' to craft focused commits; keep debug code out of the staged set.",
-          "Turn on rerere (git config --global rerere.enabled true) so repeated conflict resolutions during long rebases are reapplied automatically.",
-          "Sign commits/tags for release provenance when supply-chain integrity matters."
-        ]},
-        {"type": "callout", "variant": "success", "text": "Adopt a team convention doc covering branching strategy, merge method, and force-push policy. Most 'Git is hard' pain is actually 'our team never agreed on a workflow' pain."}
+        {
+          "type": "list",
+          "items": [
+            "Commit atomically: one logical change per commit, with a clear imperative subject line (<=50 chars) and a body explaining WHY, not what.",
+            "Rebase locally, merge to share: keep your feature branch current with rebase, but integrate into shared branches via PR merge (squash or merge commit per team policy).",
+            "Never rewrite published history: once pushed to a shared branch, use revert, not reset/rebase. If you must rewrite a personal branch others may have pulled, use --force-with-lease and announce it.",
+            "Protect main: enable branch protection — require PR review, passing CI, and forbid force-push and direct commits.",
+            "Make commits bisectable: every commit should build and pass tests, so git bisect can isolate regressions cleanly.",
+            "Use .gitignore from day one and keep generated/large/secret files out of history entirely.",
+            "Stage with intent: use 'git add -p' to craft focused commits; keep debug code out of the staged set.",
+            "Turn on rerere (git config --global rerere.enabled true) so repeated conflict resolutions during long rebases are reapplied automatically.",
+            "Sign commits/tags for release provenance when supply-chain integrity matters."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Adopt a team convention doc covering branching strategy, merge method, and force-push policy. Most 'Git is hard' pain is actually 'our team never agreed on a workflow' pain."
+        }
       ]
     },
     {
@@ -215,8 +543,15 @@
       "heading": "Note: Performance and Packfiles",
       "kind": "note",
       "blocks": [
-        {"type": "paragraph", "text": "Loose objects (one file per object) are eventually compressed into packfiles by 'git gc', which also delta-compresses similar objects. This is why a repo with thousands of commits stays compact. 'git count-objects -vH' shows loose vs packed sizes; aggressive history rewrites or large binaries can bloat packs, which is where partial clone, sparse-checkout, and Git LFS come in for monorepos."},
-        {"type": "callout", "variant": "info", "text": "Unreachable objects (orphaned by reset/rebase) are pruned by gc after the reflog expiry window. To force-recover before that, find them with 'git fsck --lost-found'."}
+        {
+          "type": "paragraph",
+          "text": "Loose objects (one file per object) are eventually compressed into packfiles by 'git gc', which also delta-compresses similar objects. This is why a repo with thousands of commits stays compact. 'git count-objects -vH' shows loose vs packed sizes; aggressive history rewrites or large binaries can bloat packs, which is where partial clone, sparse-checkout, and Git LFS come in for monorepos."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Unreachable objects (orphaned by reset/rebase) are pruned by gc after the reflog expiry window. To force-recover before that, find them with 'git fsck --lost-found'."
+        }
       ]
     }
   ],
@@ -254,8 +589,15 @@
       "difficulty": "junior",
       "category": "Engineering",
       "tricky": false,
-      "tags": ["branches", "refs", "internals"],
-      "followUps": ["What is detached HEAD?", "Where does HEAD point in detached state?"]
+      "tags": [
+        "branches",
+        "refs",
+        "internals"
+      ],
+      "followUps": [
+        "What is detached HEAD?",
+        "Where does HEAD point in detached state?"
+      ]
     },
     {
       "id": "q-staging",
@@ -264,8 +606,15 @@
       "difficulty": "junior",
       "category": "Engineering",
       "tricky": false,
-      "tags": ["index", "staging", "commit"],
-      "followUps": ["What does git reset <path> do to the index?", "Difference between git diff and git diff --staged?"]
+      "tags": [
+        "index",
+        "staging",
+        "commit"
+      ],
+      "followUps": [
+        "What does git reset <path> do to the index?",
+        "Difference between git diff and git diff --staged?"
+      ]
     },
     {
       "id": "q-merge-rebase-tradeoff",
@@ -274,8 +623,16 @@
       "difficulty": "mid",
       "category": "Engineering",
       "tricky": false,
-      "tags": ["merge", "rebase", "workflow"],
-      "followUps": ["What is a fast-forward merge?", "Why might you pass --no-ff?", "What does squash-merge change about the commit hash?"]
+      "tags": [
+        "merge",
+        "rebase",
+        "workflow"
+      ],
+      "followUps": [
+        "What is a fast-forward merge?",
+        "Why might you pass --no-ff?",
+        "What does squash-merge change about the commit hash?"
+      ]
     },
     {
       "id": "q-reset-modes",
@@ -284,8 +641,15 @@
       "difficulty": "mid",
       "category": "Engineering",
       "tricky": false,
-      "tags": ["reset", "index", "recovery"],
-      "followUps": ["Which of these can lose data unrecoverably?", "How would you split the last commit into two?"]
+      "tags": [
+        "reset",
+        "index",
+        "recovery"
+      ],
+      "followUps": [
+        "Which of these can lose data unrecoverably?",
+        "How would you split the last commit into two?"
+      ]
     },
     {
       "id": "q-reset-vs-revert",
@@ -294,8 +658,15 @@
       "difficulty": "mid",
       "category": "Engineering",
       "tricky": false,
-      "tags": ["revert", "reset", "shared-history"],
-      "followUps": ["How do you revert a merge commit?", "What's the -m flag on git revert for?"]
+      "tags": [
+        "revert",
+        "reset",
+        "shared-history"
+      ],
+      "followUps": [
+        "How do you revert a merge commit?",
+        "What's the -m flag on git revert for?"
+      ]
     },
     {
       "id": "q-bisect",
@@ -304,8 +675,15 @@
       "difficulty": "mid",
       "category": "Engineering",
       "tricky": false,
-      "tags": ["bisect", "debugging", "forensics"],
-      "followUps": ["What does exit code 125 do in bisect run?", "Why must each commit build for bisect to work well?"]
+      "tags": [
+        "bisect",
+        "debugging",
+        "forensics"
+      ],
+      "followUps": [
+        "What does exit code 125 do in bisect run?",
+        "Why must each commit build for bisect to work well?"
+      ]
     },
     {
       "id": "q-cherry-pick-dup",
@@ -314,8 +692,15 @@
       "difficulty": "senior",
       "category": "Engineering",
       "tricky": false,
-      "tags": ["cherry-pick", "backport", "branching"],
-      "followUps": ["How does git rerere help with the repeated conflicts?", "When is cherry-pick the right tool?"]
+      "tags": [
+        "cherry-pick",
+        "backport",
+        "branching"
+      ],
+      "followUps": [
+        "How does git rerere help with the repeated conflicts?",
+        "When is cherry-pick the right tool?"
+      ]
     },
     {
       "id": "q-gitflow-trunk",
@@ -324,8 +709,15 @@
       "difficulty": "senior",
       "category": "Engineering",
       "tricky": false,
-      "tags": ["trunk-based", "gitflow", "branching-strategy"],
-      "followUps": ["How do feature flags enable trunk-based?", "How does branching strategy affect hotfix latency?"]
+      "tags": [
+        "trunk-based",
+        "gitflow",
+        "branching-strategy"
+      ],
+      "followUps": [
+        "How do feature flags enable trunk-based?",
+        "How does branching strategy affect hotfix latency?"
+      ]
     },
     {
       "id": "q-ff-detail",
@@ -334,8 +726,14 @@
       "difficulty": "mid",
       "category": "Engineering",
       "tricky": false,
-      "tags": ["fast-forward", "merge"],
-      "followUps": ["Why might a team enforce --no-ff on main?", "What does --ff-only protect against?"]
+      "tags": [
+        "fast-forward",
+        "merge"
+      ],
+      "followUps": [
+        "Why might a team enforce --no-ff on main?",
+        "What does --ff-only protect against?"
+      ]
     },
     {
       "id": "q-tricky-reflog-hard",
@@ -344,8 +742,17 @@
       "difficulty": "senior",
       "category": "Engineering",
       "tricky": true,
-      "tags": ["reflog", "reset", "data-loss", "recovery"],
-      "followUps": ["How long until git gc prunes the unreachable commits?", "Could git fsck --lost-found help here?", "Would the IDE local-history feature recover the uncommitted edits?"]
+      "tags": [
+        "reflog",
+        "reset",
+        "data-loss",
+        "recovery"
+      ],
+      "followUps": [
+        "How long until git gc prunes the unreachable commits?",
+        "Could git fsck --lost-found help here?",
+        "Would the IDE local-history feature recover the uncommitted edits?"
+      ]
     },
     {
       "id": "q-tricky-rebase-public",
@@ -354,8 +761,17 @@
       "difficulty": "senior",
       "category": "Engineering",
       "tricky": true,
-      "tags": ["rebase", "force-push", "shared-history", "footgun"],
-      "followUps": ["Why is --force-with-lease safer than --force?", "How does a teammate recover their work after your force-push?", "What server-side rule prevents this?"]
+      "tags": [
+        "rebase",
+        "force-push",
+        "shared-history",
+        "footgun"
+      ],
+      "followUps": [
+        "Why is --force-with-lease safer than --force?",
+        "How does a teammate recover their work after your force-push?",
+        "What server-side rule prevents this?"
+      ]
     },
     {
       "id": "q-tricky-squash-merge",
@@ -364,8 +780,16 @@
       "difficulty": "senior",
       "category": "Engineering",
       "tricky": true,
-      "tags": ["squash-merge", "conflicts", "branching", "footgun"],
-      "followUps": ["How does a normal merge avoid this?", "What's the right branch hygiene after any merge?"]
+      "tags": [
+        "squash-merge",
+        "conflicts",
+        "branching",
+        "footgun"
+      ],
+      "followUps": [
+        "How does a normal merge avoid this?",
+        "What's the right branch hygiene after any merge?"
+      ]
     },
     {
       "id": "q-secret-history",
@@ -374,8 +798,168 @@
       "difficulty": "senior",
       "category": "Engineering",
       "tricky": false,
-      "tags": ["secrets", "history-rewrite", "security"],
-      "followUps": ["Why is rotation more important than the rewrite?", "Why filter-repo over filter-branch?"]
+      "tags": [
+        "secrets",
+        "history-rewrite",
+        "security"
+      ],
+      "followUps": [
+        "Why is rotation more important than the rewrite?",
+        "Why filter-repo over filter-branch?"
+      ]
+    },
+    {
+      "id": "q-ext-detached-head",
+      "question": "What is detached HEAD state, and why can commits made there be lost?",
+      "answer": "Normally HEAD is a symbolic ref pointing at a branch (e.g. 'ref: refs/heads/main'), so committing advances that branch. In detached HEAD, HEAD points directly at a commit hash rather than a branch — this happens when you 'git checkout <sha>', 'git checkout <tag>', or land on a specific commit during a bisect. You can still commit, but those commits are referenced only by HEAD, not by any branch. The moment you 'git checkout' another branch, HEAD moves and the commits you made become unreachable, making them eligible for garbage collection after the reflog expiry window. The fix is to create a branch before leaving: 'git switch -c my-work' (or 'git branch my-work <sha>') anchors the commits to a real ref. If you already left and the commits are gone from the log, the reflog or 'git fsck --lost-found' can still recover them until gc prunes them.",
+      "difficulty": "mid",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": [
+        "detached-head",
+        "HEAD",
+        "refs",
+        "recovery"
+      ],
+      "followUps": [
+        "How do you turn detached-HEAD commits into a branch?",
+        "Why does git bisect leave you detached?",
+        "What does git switch --detach do?"
+      ]
+    },
+    {
+      "id": "q-ext-annotated-vs-lightweight-tag",
+      "question": "What is the difference between an annotated tag and a lightweight tag, and which should releases use?",
+      "answer": "A lightweight tag is just a named pointer — a file under .git/refs/tags/ containing a commit hash, exactly like a branch that never moves. It stores no extra metadata. An annotated tag is a full tag OBJECT in the object database: it has its own SHA and records the tagger name, email, date, a message, and can be GPG/SSH-signed; it points at the target commit. Because annotated tags carry authorship and can be signed and verified, releases should use them ('git tag -a v1.2.0 -m \"Release 1.2.0\"'). Lightweight tags ('git tag v1.2.0') are fine as private, throwaway bookmarks. A subtle gotcha: 'git describe' and provenance tooling rely on annotated tags by default, and only annotated (or signed) tags can be cryptographically verified with 'git tag -v'.",
+      "difficulty": "mid",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": [
+        "tags",
+        "releases",
+        "annotated",
+        "signing"
+      ],
+      "followUps": [
+        "How does git describe use annotated tags?",
+        "How do you push tags to a remote?",
+        "Do tags follow on a normal git push?"
+      ]
+    },
+    {
+      "id": "q-ext-revert-merge-commit",
+      "question": "TRICKY: How do you revert a merge commit, and what surprising problem does it create later?",
+      "answer": "A merge commit has two (or more) parents, so 'git revert' can't infer which change to undo — you must pick a mainline with '-m', e.g. 'git revert -m 1 <merge-sha>', where 1 means 'keep parent 1 (usually the branch you merged INTO) and undo the changes that came from the other side.' The revert creates a new commit that inverts the merged-in diff. The surprising problem: reverting a merge does NOT un-merge the branch's history — Git still considers those commits as already merged. So if you later fix the feature branch and try to merge it again, Git sees its commits are already in the mainline's ancestry and brings in nothing, leaving the feature effectively 'reverted and stuck.' The canonical fix is to revert the revert ('git revert <revert-sha>') before re-merging, or to rebase/recreate the feature branch so its commits get new identities.",
+      "difficulty": "senior",
+      "category": "Engineering",
+      "tricky": true,
+      "tags": [
+        "revert",
+        "merge",
+        "footgun",
+        "shared-history"
+      ],
+      "followUps": [
+        "What does the -m 1 vs -m 2 choice select?",
+        "Why doesn't re-merging bring the changes back?",
+        "What does 'revert the revert' accomplish?"
+      ]
+    },
+    {
+      "id": "q-ext-submodule-vs-subtree",
+      "question": "Compare git submodules and git subtree for vendoring another repository.",
+      "answer": "A submodule embeds a pointer to a specific commit of an external repo: the superproject records the URL and a pinned SHA in .gitmodules and a gitlink entry, but the submodule's actual objects live in their own repo that you clone separately ('git clone --recurse-submodules' or 'git submodule update --init'). It keeps histories cleanly separated and the dependency explicitly pinned, but it's operationally sharp — contributors forget to init/update, detached-HEAD confusion is common, and every consumer needs access to the submodule's remote. git subtree instead merges the external repo's actual files and (optionally) history INTO your tree under a prefix directory; clones just work with no extra steps, but your repo grows and pulling upstream updates uses the more esoteric 'git subtree pull --prefix=...'. Rule of thumb: submodules when you want strict version pinning and separate ownership; subtree when you want a self-contained clone and don't mind absorbing the code. Many teams now prefer a package manager or vendoring script over either.",
+      "difficulty": "senior",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": [
+        "submodules",
+        "subtree",
+        "vendoring",
+        "monorepo"
+      ],
+      "followUps": [
+        "Why do submodules point at a commit, not a branch?",
+        "How do you update a submodule to a newer commit?",
+        "What breaks if a teammate forgets --recurse-submodules?"
+      ]
+    },
+    {
+      "id": "q-ext-hooks",
+      "question": "What are Git hooks, where do they live, and why aren't they a security boundary?",
+      "answer": "Hooks are executable scripts Git runs at defined points in its workflow — client-side ones like pre-commit, commit-msg, pre-push, and post-checkout, and server-side ones like pre-receive, update, and post-receive. They live in .git/hooks/ (samples are provided with a .sample suffix) and fire automatically when the corresponding action occurs; a non-zero exit from a 'pre-' hook aborts the operation, which is how pre-commit blocks linting failures or pre-push blocks pushing to protected branches. Crucially, client-side hooks live inside .git/ and are NOT cloned or version-controlled, so they can't be relied on as an enforcement or security mechanism — any contributor can skip them with '--no-verify' or simply not install them. To share hooks, teams point 'core.hooksPath' at a tracked directory or use a manager like pre-commit/Husky; real enforcement must happen server-side (protected-branch rules, required CI checks) where users can't bypass it.",
+      "difficulty": "mid",
+      "category": "Engineering",
+      "tricky": true,
+      "tags": [
+        "hooks",
+        "pre-commit",
+        "ci",
+        "enforcement"
+      ],
+      "followUps": [
+        "Why can't client hooks be trusted for policy?",
+        "What does --no-verify do?",
+        "How do you share hooks across a team?"
+      ]
+    },
+    {
+      "id": "q-ext-packfiles-sha",
+      "question": "How does Git store objects on disk, and why is deleting a big file from the latest commit not enough to shrink the repo?",
+      "answer": "Every object (blob, tree, commit, tag) is first written 'loose' — one zlib-compressed file per object under .git/objects/, named by its content hash. Periodically 'git gc' consolidates loose objects into packfiles, which additionally delta-compress similar objects (e.g. versions of the same file) so a repo with thousands of commits stays compact. Because an object's identity IS the hash of its content, and commits reference trees which reference blobs, a large file committed once remains reachable through every historical commit that pointed at it — deleting it from the latest tree only stops the NEWEST commit from referencing it; all prior commits still do. The blob therefore stays in history (and in every clone/pack) forever until you rewrite history to remove those references ('git filter-repo') AND let gc prune the now-unreachable object. This is exactly why accidentally committed node_modules or secrets bloat a repo permanently and why .gitignore matters from day one.",
+      "difficulty": "senior",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": [
+        "packfiles",
+        "internals",
+        "gc",
+        "history-rewrite"
+      ],
+      "followUps": [
+        "What does git count-objects -vH show?",
+        "Why does delta compression help repeated file versions?",
+        "How does filter-repo differ from just deleting the file?"
+      ]
+    },
+    {
+      "id": "q-ext-signed-commits",
+      "question": "Why sign commits and tags, and what does a signature actually prove?",
+      "answer": "Git commit author/committer fields are plain, unauthenticated strings — anyone can set user.name and user.email to yours and produce a commit that appears to be from you. A GPG or SSH signature ('git commit -S', 'git tag -s') cryptographically binds a commit or tag to a key you control, so verifiers ('git log --show-signature', 'git verify-commit') and platforms can confirm it was created by the holder of that key and hasn't been altered. What it proves is INTEGRITY and KEY-ownership, not identity per se — it only means as much as your trust in the key-to-person mapping (which is why platforms tie keys to accounts and show a 'Verified' badge). It's a supply-chain control: for release tags and protected branches you can require signed, verified commits so an attacker who compromises a contributor's credentials still can't forge signed history without the private key. Signatures cover the commit content and metadata, so they also detect tampering after the fact.",
+      "difficulty": "senior",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": [
+        "signing",
+        "gpg",
+        "ssh",
+        "supply-chain",
+        "security"
+      ],
+      "followUps": [
+        "Does a signature prove real-world identity?",
+        "How do you require signed commits on a branch?",
+        "What's the difference between signing with GPG vs SSH keys?"
+      ]
+    },
+    {
+      "id": "q-ext-stash-internals",
+      "question": "TRICKY: How does git stash actually store your changes, and can you recover a stash you dropped by accident?",
+      "answer": "A stash is not a special blob — it's implemented as real commit objects. 'git stash push' creates (at minimum) a commit capturing your working-tree changes and another capturing the index state, ties them under a merge-like stash commit, and points refs/stash at it, with older stashes chained through the stash reflog (stash@{1}, stash@{2}, ...). Because it's an ordinary commit graph, everything is recoverable the same way other commits are. If you 'git stash drop' or 'git stash pop' with a conflict and lose track of it, the dropped stash commit is now unreferenced but still in the object DB: find it with 'git fsck --no-reflog' looking for dangling commits, or if the stash reflog still has the entry, 'git stash apply <sha>'. A common gotcha is that stashes do NOT include untracked files by default (use 'git stash -u') and never include ignored files unless '-a', so people 'lose' new files that were simply never stashed. Prefer named stashes ('git stash push -m \"msg\"') and don't let them pile up.",
+      "difficulty": "senior",
+      "category": "Engineering",
+      "tricky": true,
+      "tags": [
+        "stash",
+        "internals",
+        "recovery",
+        "reflog"
+      ],
+      "followUps": [
+        "Why doesn't stash include untracked files by default?",
+        "How do you recover a dropped stash?",
+        "What's the difference between stash pop and apply?"
+      ]
     }
   ],
   "challenges": [
@@ -413,15 +997,70 @@
       "solutionLanguage": "bash",
       "explanation": "Interactive rebase replays the selected commits one at a time according to the todo list, producing all-new commit objects (new hashes) — which is exactly why this is only safe on a local, unpushed branch. 'fixup' folds a commit's diff into the previous pick and discards its message (use 'squash' instead if you want to combine messages); 'drop' omits a commit's changes entirely; 'reword' replays the commit unchanged but pauses for a new message. The discipline that separates a senior from a junior here is verification: creating 'backup-before-rebase' first gives an anchor, and 'git range-diff backup-before-rebase HEAD' shows commit-by-commit how the old and new histories correspond, instantly revealing if a commit was accidentally dropped or a diff changed. Because the only intended content change was removing the debug-log commit, a plain 'git diff backup HEAD' should show exactly that and nothing else — any other delta means the rebase mangled something. This workflow (rebase to curate, then range-diff to confirm) is precisely how the production incident in this topic's example would have been prevented.",
       "relatedTopic": "git"
+    },
+    {
+      "id": "ch-ext-bisect-automated",
+      "title": "Pinpoint a Regression with an Automated git bisect",
+      "difficulty": "mid",
+      "category": "Engineering",
+      "prompt": "A test that passed in release tag v2.3.0 now fails on main, somewhere across ~200 commits. You have a repro script ./scripts/repro.sh that exits 0 when the code is good and 1 when the bug is present. Write the exact commands to (a) run a fully automated bisect between v2.3.0 (good) and current HEAD (bad), (b) handle commits that don't build (should be skipped, not counted), and (c) return the working tree to normal afterward. Explain what the printed result means.",
+      "hints": [
+        "bisect needs one known-good and one known-bad endpoint before it can search.",
+        "git bisect run <cmd> automates the good/bad marking using the command's exit code.",
+        "An exit code of 125 tells bisect to skip a commit rather than mark it good or bad.",
+        "Always finish with a command that restores your original HEAD."
+      ],
+      "solutionCode": "# (a) Start the bisect and mark the two known endpoints\n$ git bisect start\n$ git bisect bad                 # current HEAD exhibits the bug\n$ git bisect good v2.3.0         # this tagged release was fine\n\n# (b) Automate it. The run command re-invokes the script at each midpoint.\n#     Convention: exit 0 = good, exit 1-124/126-127 = bad, exit 125 = skip (e.g. won't build).\n#     Make the script exit 125 when the build fails so those commits are skipped:\n$ cat scripts/repro.sh\n#!/usr/bin/env bash\nif ! make build >/dev/null 2>&1; then\n  exit 125          # untestable commit -> tell bisect to skip\nfi\nif ./run-the-failing-test >/dev/null 2>&1; then\n  exit 0            # good\nelse\n  exit 1            # bad\nfi\n\n$ git bisect run ./scripts/repro.sh\n# Git narrows the range in O(log n) checkouts and prints, e.g.:\n#   abc1234 is the first bad commit\n#   Author: ...\n#   commit message ...\n\n# (c) Restore the original HEAD and clean up bisect state\n$ git bisect reset\n\n# (Optional) inspect the culprit in detail\n$ git show abc1234",
+      "solutionLanguage": "bash",
+      "explanation": "git bisect performs a binary search over the linear commit range between the good and bad endpoints, so it isolates the first bad commit in roughly log2(N) tests instead of scanning all N. 'git bisect start' followed by 'git bisect bad' and 'git bisect good v2.3.0' defines the boundaries; from there Git checks out the midpoint commit (leaving you in detached HEAD) and, with 'git bisect run', executes your script and interprets its exit code automatically — 0 marks the checkout good, a non-zero code in 1-127 (except 125) marks it bad, and it repeats until one commit remains. The exit-125 convention is the important nuance: some commits in the range may not compile, and marking them good or bad would corrupt the search, so the script detects a build failure and exits 125 to make bisect skip them and pick an adjacent commit instead. When finished, Git prints '<sha> is the first bad commit', meaning that commit is the earliest one where the test transitions from passing to failing — the change that introduced the regression. Finally 'git bisect reset' returns HEAD to where you started and clears the bisect state, because during the search you were on detached, temporary checkouts. This automated approach turns an afternoon of manual checkout-and-test into a hands-off command, and it's why keeping every commit buildable (so few need skipping) makes a codebase far easier to debug.",
+      "relatedTopic": "git"
+    },
+    {
+      "id": "ch-ext-safe-shared-rewrite",
+      "title": "Undo a Bad Commit on a Shared Branch Without Rewriting History",
+      "difficulty": "senior",
+      "category": "Engineering",
+      "prompt": "A feature was merged into the shared 'main' branch via a merge commit, then deployed, and it turns out to be broken. Several teammates have already pulled main. You must (a) get main back to correct behavior WITHOUT rewriting published history or force-pushing, (b) do it in a way that lets the same feature be safely re-introduced later once fixed, and (c) explain the trap that makes naive re-merging silently do nothing. Give the exact commands and the reasoning.",
+      "hints": [
+        "Never reset or force-push a branch others have pulled — append a new commit instead.",
+        "Reverting a merge commit requires telling Git which parent is the mainline.",
+        "Reverting a merge does not un-merge the branch's ancestry, so re-merging brings in nothing.",
+        "To re-introduce the feature later, you revert the revert (or recreate the branch with new commit identities)."
+      ],
+      "solutionCode": "# (a) Identify the bad merge commit\n$ git log --oneline --merges -5\n#   9f3a1c2 Merge pull request #421 'feature/new-checkout'   <-- broken merge\n\n# Revert it. A merge has two parents, so specify the mainline with -m.\n# -m 1 keeps parent #1 (main's prior tip) and undoes the changes that came\n# from the merged-in branch (parent #2).\n$ git checkout main\n$ git pull --ff-only origin main          # be current; do NOT rewrite\n$ git revert -m 1 9f3a1c2\n#   -> creates NEW commit e.g. 'Revert \"Merge ... feature/new-checkout\"'\n\n# Push the revert as a normal, non-destructive commit (open a PR if required)\n$ git push origin main\n# History is intact; teammates just 'git pull' and get the fix. No force-push.\n\n# (c) THE TRAP: main's ancestry still contains the feature's commits, so simply\n#     re-merging the fixed branch later brings in NOTHING (Git thinks it's merged).\n\n# (b) Correct way to re-introduce the feature once it's fixed:\n#   Option 1 - revert the revert, then add the fixes on top:\n$ git revert <sha-of-the-revert-commit>   # re-applies the feature\n#   ...then commit the actual bug fix.\n\n#   Option 2 - rebuild the feature branch so its commits get NEW identities\n#             (new hashes are not in main's ancestry), then merge normally:\n$ git checkout -b feature/new-checkout-v2 origin/main\n#   cherry-pick/reapply the (fixed) work, open a fresh PR, merge.",
+      "solutionLanguage": "bash",
+      "explanation": "The governing rule is that main is published: other clones reference its exact commit hashes, so any reset or rewrite followed by force-push would diverge or overwrite their work — the only safe undo is to APPEND a new commit, which is what 'git revert' does by recording the inverse diff. Because the offending commit is a merge with two parents, 'git revert' can't guess which side to undo, so '-m 1' selects the mainline parent (main's state before the merge) and reverts the changes contributed by the merged-in branch. Pushing that revert is an ordinary fast-forwarding update, so teammates simply pull and are back to correct behavior with no history rewrite. The subtle trap, and the reason this is a senior-level question, is that reverting a merge only inverts the CODE, not the ANCESTRY: main still lists the feature's commits as merged, so when someone later re-merges the fixed feature branch, Git's merge base sees those commits as already integrated and pulls in nothing, making the feature silently disappear. The two escape hatches are to 'revert the revert' (which re-applies the feature so you can then layer the real fix on top) or to rebuild the feature on a fresh branch off current main so its commits carry brand-new hashes that are not yet in main's ancestry, letting a normal merge work again. This mirrors the topic's 'private commits -> reset, published commits -> revert' rule while surfacing the merge-specific gotcha that catches even experienced engineers.",
+      "relatedTopic": "git"
     }
   ],
   "references": [
-    {"label": "Pro Git Book (Chacon & Straub) — Git Internals", "url": "https://git-scm.com/book/en/v2/Git-Internals-Git-Objects"},
-    {"label": "Git Reference — git reset", "url": "https://git-scm.com/docs/git-reset"},
-    {"label": "Git Reference — git rebase", "url": "https://git-scm.com/docs/git-rebase"},
-    {"label": "Git Reference — git reflog", "url": "https://git-scm.com/docs/git-reflog"},
-    {"label": "Atlassian — Merging vs Rebasing", "url": "https://www.atlassian.com/git/tutorials/merging-vs-rebasing"},
-    {"label": "Trunk Based Development", "url": "https://trunkbaseddevelopment.com/"},
-    {"label": "git-filter-repo (history rewriting)", "url": "https://github.com/newren/git-filter-repo"}
+    {
+      "label": "Pro Git Book (Chacon & Straub) — Git Internals",
+      "url": "https://git-scm.com/book/en/v2/Git-Internals-Git-Objects"
+    },
+    {
+      "label": "Git Reference — git reset",
+      "url": "https://git-scm.com/docs/git-reset"
+    },
+    {
+      "label": "Git Reference — git rebase",
+      "url": "https://git-scm.com/docs/git-rebase"
+    },
+    {
+      "label": "Git Reference — git reflog",
+      "url": "https://git-scm.com/docs/git-reflog"
+    },
+    {
+      "label": "Atlassian — Merging vs Rebasing",
+      "url": "https://www.atlassian.com/git/tutorials/merging-vs-rebasing"
+    },
+    {
+      "label": "Trunk Based Development",
+      "url": "https://trunkbaseddevelopment.com/"
+    },
+    {
+      "label": "git-filter-repo (history rewriting)",
+      "url": "https://github.com/newren/git-filter-repo"
+    }
   ]
 }

@@ -4,7 +4,16 @@
   "category": "Engineering",
   "subcategory": "Quality",
   "difficulty": "mid",
-  "tags": ["testing", "tdd", "test-pyramid", "mocking", "property-based", "testcontainers", "contract-testing", "flaky-tests"],
+  "tags": [
+    "testing",
+    "tdd",
+    "test-pyramid",
+    "mocking",
+    "property-based",
+    "testcontainers",
+    "contract-testing",
+    "flaky-tests"
+  ],
   "description": "A staff-level tour of how to design, structure, and reason about automated tests so they catch real bugs, stay fast, and survive refactors.",
   "estReadMinutes": 28,
   "sections": [
@@ -13,9 +22,19 @@
       "heading": "Introduction",
       "kind": "intro",
       "blocks": [
-        {"type": "paragraph", "text": "Testing is not about chasing a coverage number or proving the code you just wrote does what you think it does. It is about building a safety net that lets a team change software quickly and confidently for years. Good tests describe behavior, fail for exactly one reason, and survive refactors of the implementation underneath them."},
-        {"type": "paragraph", "text": "Test-Driven Development (TDD) is one discipline for getting there: write a failing test that specifies a behavior, write the minimum code to make it pass, then refactor with the test as a guard. TDD is not the only valid approach, but the underlying skills it forces — small steps, designing for testability, naming behaviors precisely — pay off regardless of whether you write the test first."},
-        {"type": "callout", "variant": "info", "text": "The senior framing: tests are a design tool and a documentation artifact first, and a regression net second. If your tests are painful to write, that pain is usually feedback about the design of the code under test."}
+        {
+          "type": "paragraph",
+          "text": "Testing is not about chasing a coverage number or proving the code you just wrote does what you think it does. It is about building a safety net that lets a team change software quickly and confidently for years. Good tests describe behavior, fail for exactly one reason, and survive refactors of the implementation underneath them."
+        },
+        {
+          "type": "paragraph",
+          "text": "Test-Driven Development (TDD) is one discipline for getting there: write a failing test that specifies a behavior, write the minimum code to make it pass, then refactor with the test as a guard. TDD is not the only valid approach, but the underlying skills it forces — small steps, designing for testability, naming behaviors precisely — pay off regardless of whether you write the test first."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The senior framing: tests are a design tool and a documentation artifact first, and a regression net second. If your tests are painful to write, that pain is usually feedback about the design of the code under test."
+        }
       ]
     },
     {
@@ -23,15 +42,25 @@
       "heading": "Why It Matters",
       "kind": "why",
       "blocks": [
-        {"type": "paragraph", "text": "The cost of a defect grows by orders of magnitude as it moves from a developer's editor to production. A test that fails locally costs seconds. The same defect found in a customer incident costs an on-call page, a postmortem, lost trust, and sometimes money or data. Automated tests move detection as far left as economically possible."},
-        {"type": "list", "items": [
-          "Refactoring confidence: you cannot safely restructure code you cannot characterize. Tests are what make large refactors and dependency upgrades tractable.",
-          "Executable specification: a well-named test suite tells a new engineer what the system actually does far more reliably than stale wiki docs.",
-          "Faster feedback loops: a 30-second unit suite changes how you work compared to a 40-minute CI-only signal. Speed is a feature.",
-          "Defect localization: a focused failing test points at one unit; an e2e-only suite tells you 'something broke' across thousands of lines.",
-          "Design pressure: hard-to-test code is usually badly coupled code. Testability and good architecture correlate strongly."
-        ]},
-        {"type": "callout", "variant": "warning", "text": "Tests have a carrying cost. Every test is code you maintain. The goal is the maximum confidence per line of test, not the maximum number of tests. A suite of brittle, over-mocked tests can be net-negative."}
+        {
+          "type": "paragraph",
+          "text": "The cost of a defect grows by orders of magnitude as it moves from a developer's editor to production. A test that fails locally costs seconds. The same defect found in a customer incident costs an on-call page, a postmortem, lost trust, and sometimes money or data. Automated tests move detection as far left as economically possible."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Refactoring confidence: you cannot safely restructure code you cannot characterize. Tests are what make large refactors and dependency upgrades tractable.",
+            "Executable specification: a well-named test suite tells a new engineer what the system actually does far more reliably than stale wiki docs.",
+            "Faster feedback loops: a 30-second unit suite changes how you work compared to a 40-minute CI-only signal. Speed is a feature.",
+            "Defect localization: a focused failing test points at one unit; an e2e-only suite tells you 'something broke' across thousands of lines.",
+            "Design pressure: hard-to-test code is usually badly coupled code. Testability and good architecture correlate strongly."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Tests have a carrying cost. Every test is code you maintain. The goal is the maximum confidence per line of test, not the maximum number of tests. A suite of brittle, over-mocked tests can be net-negative."
+        }
       ]
     },
     {
@@ -39,14 +68,52 @@
       "heading": "The Test Pyramid",
       "kind": "concept",
       "blocks": [
-        {"type": "paragraph", "text": "The test pyramid is a heuristic for distributing test effort. The wide base is fast, isolated unit tests; the middle is integration tests that exercise real collaborators (a database, a queue, an HTTP boundary); the narrow top is end-to-end tests that drive the whole system the way a user would."},
-        {"type": "table", "headers": ["Layer", "Scope", "Speed", "Determinism", "Where it shines"], "rows": [
-          ["Unit", "One class/function in isolation", "Milliseconds", "High", "Business logic, branching, edge cases"],
-          ["Integration", "A unit plus a real collaborator", "10s of ms to seconds", "Medium", "SQL, serialization, wiring, contracts"],
-          ["E2E", "Whole system through the UI/API", "Seconds to minutes", "Lower", "Critical user journeys, smoke checks"]
-        ]},
-        {"type": "paragraph", "text": "The shape matters because cost and flakiness rise as you climb. The classic anti-patterns are the 'ice-cream cone' (lots of slow e2e tests, few units) and the 'hourglass' (units and e2e but no integration tests, so wiring bugs slip through). Aim for many fast units, a meaningful band of integration tests, and a small set of high-value e2e journeys."},
-        {"type": "callout", "variant": "info", "text": "Modern practice (the 'testing trophy', popularized by Kent C. Dodds) re-weights toward integration tests for application code, arguing they give the best confidence-to-cost ratio. The pyramid and the trophy agree on the key point: keep e2e small and lean on fast tests for the bulk."}
+        {
+          "type": "paragraph",
+          "text": "The test pyramid is a heuristic for distributing test effort. The wide base is fast, isolated unit tests; the middle is integration tests that exercise real collaborators (a database, a queue, an HTTP boundary); the narrow top is end-to-end tests that drive the whole system the way a user would."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Layer",
+            "Scope",
+            "Speed",
+            "Determinism",
+            "Where it shines"
+          ],
+          "rows": [
+            [
+              "Unit",
+              "One class/function in isolation",
+              "Milliseconds",
+              "High",
+              "Business logic, branching, edge cases"
+            ],
+            [
+              "Integration",
+              "A unit plus a real collaborator",
+              "10s of ms to seconds",
+              "Medium",
+              "SQL, serialization, wiring, contracts"
+            ],
+            [
+              "E2E",
+              "Whole system through the UI/API",
+              "Seconds to minutes",
+              "Lower",
+              "Critical user journeys, smoke checks"
+            ]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The shape matters because cost and flakiness rise as you climb. The classic anti-patterns are the 'ice-cream cone' (lots of slow e2e tests, few units) and the 'hourglass' (units and e2e but no integration tests, so wiring bugs slip through). Aim for many fast units, a meaningful band of integration tests, and a small set of high-value e2e journeys."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Modern practice (the 'testing trophy', popularized by Kent C. Dodds) re-weights toward integration tests for application code, arguing they give the best confidence-to-cost ratio. The pyramid and the trophy agree on the key point: keep e2e small and lean on fast tests for the bulk."
+        }
       ]
     },
     {
@@ -54,15 +121,29 @@
       "heading": "TDD: Red, Green, Refactor",
       "kind": "concept",
       "blocks": [
-        {"type": "paragraph", "text": "TDD runs a tight loop. RED: write a small test for a behavior you have not implemented; run it and watch it fail for the right reason (proving the test can fail). GREEN: write the simplest code that passes, even if it is naive. REFACTOR: with the test green, improve the design — extract, rename, remove duplication — re-running the test after each change."},
-        {"type": "code", "language": "typescript", "code": "// RED: the behavior we want, written before the code exists\ndescribe('slugify', () => {\n  it('lowercases and hyphenates words', () => {\n    expect(slugify('Hello World')).toBe('hello-world');\n  });\n});\n\n// GREEN: simplest thing that passes\nexport function slugify(input: string): string {\n  return input.toLowerCase().replace(/\\s+/g, '-');\n}\n\n// Next RED: drive out a new requirement\nit('strips punctuation', () => {\n  expect(slugify('Hello, World!')).toBe('hello-world');\n});\n\n// GREEN again: extend, keep all tests passing\nexport function slugifyV2(input: string): string {\n  return input.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');\n}"},
-        {"type": "list", "items": [
-          "Watch the RED step actually fail. A test that passes before you write the code tests nothing.",
-          "Take the smallest step that makes the next test pass — resist implementing the whole feature at once.",
-          "Refactor is not optional; it is where the design payoff lives. Skipping it leaves you with 'green spaghetti'.",
-          "Triangulate: add concrete examples until the general implementation is forced out, rather than coding the general case from a single example."
-        ]},
-        {"type": "callout", "variant": "success", "text": "TDD's hidden benefit is that it forces you to define the public interface before the implementation. You become the first consumer of your own API, which surfaces awkward signatures early."}
+        {
+          "type": "paragraph",
+          "text": "TDD runs a tight loop. RED: write a small test for a behavior you have not implemented; run it and watch it fail for the right reason (proving the test can fail). GREEN: write the simplest code that passes, even if it is naive. REFACTOR: with the test green, improve the design — extract, rename, remove duplication — re-running the test after each change."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// RED: the behavior we want, written before the code exists\ndescribe('slugify', () => {\n  it('lowercases and hyphenates words', () => {\n    expect(slugify('Hello World')).toBe('hello-world');\n  });\n});\n\n// GREEN: simplest thing that passes\nexport function slugify(input: string): string {\n  return input.toLowerCase().replace(/\\s+/g, '-');\n}\n\n// Next RED: drive out a new requirement\nit('strips punctuation', () => {\n  expect(slugify('Hello, World!')).toBe('hello-world');\n});\n\n// GREEN again: extend, keep all tests passing\nexport function slugifyV2(input: string): string {\n  return input.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');\n}"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Watch the RED step actually fail. A test that passes before you write the code tests nothing.",
+            "Take the smallest step that makes the next test pass — resist implementing the whole feature at once.",
+            "Refactor is not optional; it is where the design payoff lives. Skipping it leaves you with 'green spaghetti'.",
+            "Triangulate: add concrete examples until the general implementation is forced out, rather than coding the general case from a single example."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "TDD's hidden benefit is that it forces you to define the public interface before the implementation. You become the first consumer of your own API, which surfaces awkward signatures early."
+        }
       ]
     },
     {
@@ -70,10 +151,24 @@
       "heading": "FIRST Principles and Arrange-Act-Assert",
       "kind": "concept",
       "blocks": [
-        {"type": "paragraph", "text": "FIRST is a checklist for what makes a unit test good: Fast (runs in milliseconds), Isolated/Independent (no ordering dependencies, no shared mutable state), Repeatable (same result every run, in any environment), Self-validating (a clear pass/fail with no manual inspection), and Timely (written close to the production code, ideally just before it)."},
-        {"type": "paragraph", "text": "Arrange-Act-Assert (AAA) is the canonical structure for the body of a test: set up the world, perform the single action under test, then assert on the outcome. Keeping these phases visually distinct makes tests readable and discourages the smell of multiple unrelated acts in one test."},
-        {"type": "code", "language": "java", "code": "@Test\nvoid transfer_movesFundsBetweenAccounts() {\n    // Arrange\n    Account from = new Account(\"A\", Money.of(100));\n    Account to   = new Account(\"B\", Money.of(0));\n    TransferService service = new TransferService();\n\n    // Act\n    service.transfer(from, to, Money.of(30));\n\n    // Assert\n    assertThat(from.balance()).isEqualTo(Money.of(70));\n    assertThat(to.balance()).isEqualTo(Money.of(30));\n}"},
-        {"type": "callout", "variant": "warning", "text": "Multiple Act steps in one test is the most common AAA violation. If you find yourself acting, asserting, acting again, you almost always have two tests masquerading as one — and the second assert will not run if the first fails."}
+        {
+          "type": "paragraph",
+          "text": "FIRST is a checklist for what makes a unit test good: Fast (runs in milliseconds), Isolated/Independent (no ordering dependencies, no shared mutable state), Repeatable (same result every run, in any environment), Self-validating (a clear pass/fail with no manual inspection), and Timely (written close to the production code, ideally just before it)."
+        },
+        {
+          "type": "paragraph",
+          "text": "Arrange-Act-Assert (AAA) is the canonical structure for the body of a test: set up the world, perform the single action under test, then assert on the outcome. Keeping these phases visually distinct makes tests readable and discourages the smell of multiple unrelated acts in one test."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "@Test\nvoid transfer_movesFundsBetweenAccounts() {\n    // Arrange\n    Account from = new Account(\"A\", Money.of(100));\n    Account to   = new Account(\"B\", Money.of(0));\n    TransferService service = new TransferService();\n\n    // Act\n    service.transfer(from, to, Money.of(30));\n\n    // Assert\n    assertThat(from.balance()).isEqualTo(Money.of(70));\n    assertThat(to.balance()).isEqualTo(Money.of(30));\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Multiple Act steps in one test is the most common AAA violation. If you find yourself acting, asserting, acting again, you almost always have two tests masquerading as one — and the second assert will not run if the first fails."
+        }
       ]
     },
     {
@@ -81,17 +176,65 @@
       "heading": "Test Doubles: Mocks, Stubs, Fakes, Spies",
       "kind": "concept",
       "blocks": [
-        {"type": "paragraph", "text": "'Test double' is the umbrella term (Gerard Meszaros) for any stand-in you substitute for a real collaborator. The four common kinds differ by what they replace and what you assert against."},
-        {"type": "table", "headers": ["Double", "What it does", "You assert on", "Example"], "rows": [
-          ["Dummy", "Filler passed but never used", "Nothing", "A null logger to satisfy a constructor"],
-          ["Stub", "Returns canned answers to calls", "State / return value", "repo.findById returns a fixed user"],
-          ["Fake", "Working but simplified implementation", "State / behavior", "In-memory repository, H2 database"],
-          ["Spy", "Records how it was called", "Recorded interactions", "Captures emails sent, asserts count"],
-          ["Mock", "Pre-programmed with expectations", "Interactions (verify)", "verify(gateway).charge(amount)"]
-        ]},
-        {"type": "paragraph", "text": "The crucial distinction in interviews: a STUB enables state-based verification — you drive the system into a state and assert on the result. A MOCK enables behavior verification — you assert that a specific interaction happened. Stubs answer 'what came out?'; mocks answer 'what did you call, and how?'."},
-        {"type": "code", "language": "typescript", "code": "// STUB: provides canned data so we can test the consumer's logic\nconst priceRepo = { getPrice: () => 9.99 };           // stub\nexpect(cart.total([{ sku: 'X', qty: 2 }], priceRepo)).toBe(19.98);\n\n// MOCK: we care that an interaction happened, not the return\nconst gateway = { charge: jest.fn() };                 // mock/spy\ncheckout.pay({ amount: 50 }, gateway);\nexpect(gateway.charge).toHaveBeenCalledWith(50);       // behavior verification\n\n// FAKE: a real, simplified implementation usable as a drop-in\nclass InMemoryUserRepo {\n  private users = new Map<string, User>();\n  save(u: User) { this.users.set(u.id, u); }\n  findById(id: string) { return this.users.get(id) ?? null; }\n}"},
-        {"type": "callout", "variant": "info", "text": "Prefer fakes over mocks for stateful collaborators (repositories, caches). A fake exercises real round-trip behavior and does not break when you reorder internal calls, so it couples far less to implementation than a chain of mock expectations."}
+        {
+          "type": "paragraph",
+          "text": "'Test double' is the umbrella term (Gerard Meszaros) for any stand-in you substitute for a real collaborator. The four common kinds differ by what they replace and what you assert against."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Double",
+            "What it does",
+            "You assert on",
+            "Example"
+          ],
+          "rows": [
+            [
+              "Dummy",
+              "Filler passed but never used",
+              "Nothing",
+              "A null logger to satisfy a constructor"
+            ],
+            [
+              "Stub",
+              "Returns canned answers to calls",
+              "State / return value",
+              "repo.findById returns a fixed user"
+            ],
+            [
+              "Fake",
+              "Working but simplified implementation",
+              "State / behavior",
+              "In-memory repository, H2 database"
+            ],
+            [
+              "Spy",
+              "Records how it was called",
+              "Recorded interactions",
+              "Captures emails sent, asserts count"
+            ],
+            [
+              "Mock",
+              "Pre-programmed with expectations",
+              "Interactions (verify)",
+              "verify(gateway).charge(amount)"
+            ]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The crucial distinction in interviews: a STUB enables state-based verification — you drive the system into a state and assert on the result. A MOCK enables behavior verification — you assert that a specific interaction happened. Stubs answer 'what came out?'; mocks answer 'what did you call, and how?'."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// STUB: provides canned data so we can test the consumer's logic\nconst priceRepo = { getPrice: () => 9.99 };           // stub\nexpect(cart.total([{ sku: 'X', qty: 2 }], priceRepo)).toBe(19.98);\n\n// MOCK: we care that an interaction happened, not the return\nconst gateway = { charge: jest.fn() };                 // mock/spy\ncheckout.pay({ amount: 50 }, gateway);\nexpect(gateway.charge).toHaveBeenCalledWith(50);       // behavior verification\n\n// FAKE: a real, simplified implementation usable as a drop-in\nclass InMemoryUserRepo {\n  private users = new Map<string, User>();\n  save(u: User) { this.users.set(u.id, u); }\n  findById(id: string) { return this.users.get(id) ?? null; }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Prefer fakes over mocks for stateful collaborators (repositories, caches). A fake exercises real round-trip behavior and does not break when you reorder internal calls, so it couples far less to implementation than a chain of mock expectations."
+        }
       ]
     },
     {
@@ -99,10 +242,24 @@
       "heading": "Property-Based and Contract Testing",
       "kind": "concept",
       "blocks": [
-        {"type": "paragraph", "text": "Example-based tests check the cases you thought of. Property-based testing checks invariants across hundreds of generated inputs, finding the cases you did not think of and automatically shrinking failures to a minimal counterexample. It excels for pure functions: encoders/decoders, parsers, math, serialization round-trips."},
-        {"type": "code", "language": "typescript", "code": "import fc from 'fast-check';\n\n// Invariant: encode then decode is the identity for all valid inputs\nit('round-trips any string', () => {\n  fc.assert(fc.property(fc.string(), (s) => {\n    expect(decode(encode(s))).toBe(s);\n  }));\n});\n\n// Invariant: reversing twice yields the original array\nit('reverse is its own inverse', () => {\n  fc.assert(fc.property(fc.array(fc.integer()), (xs) => {\n    expect(reverse(reverse(xs))).toEqual(xs);\n  }));\n});"},
-        {"type": "paragraph", "text": "Contract testing (e.g. Pact) solves a different problem: in a microservice world, an e2e test of the whole graph is slow and flaky, yet you still need to know a consumer and provider agree on the API. The consumer records the requests it makes and the responses it expects (the 'contract'); the provider replays those expectations against its real implementation in its own pipeline. Each side tests independently, but the contract guarantees they integrate."},
-        {"type": "callout", "variant": "success", "text": "Contract tests give you most of the safety of cross-service integration testing without standing up the entire system, and they fail in the provider's pipeline — exactly where the breaking change was introduced."}
+        {
+          "type": "paragraph",
+          "text": "Example-based tests check the cases you thought of. Property-based testing checks invariants across hundreds of generated inputs, finding the cases you did not think of and automatically shrinking failures to a minimal counterexample. It excels for pure functions: encoders/decoders, parsers, math, serialization round-trips."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import fc from 'fast-check';\n\n// Invariant: encode then decode is the identity for all valid inputs\nit('round-trips any string', () => {\n  fc.assert(fc.property(fc.string(), (s) => {\n    expect(decode(encode(s))).toBe(s);\n  }));\n});\n\n// Invariant: reversing twice yields the original array\nit('reverse is its own inverse', () => {\n  fc.assert(fc.property(fc.array(fc.integer()), (xs) => {\n    expect(reverse(reverse(xs))).toEqual(xs);\n  }));\n});"
+        },
+        {
+          "type": "paragraph",
+          "text": "Contract testing (e.g. Pact) solves a different problem: in a microservice world, an e2e test of the whole graph is slow and flaky, yet you still need to know a consumer and provider agree on the API. The consumer records the requests it makes and the responses it expects (the 'contract'); the provider replays those expectations against its real implementation in its own pipeline. Each side tests independently, but the contract guarantees they integrate."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Contract tests give you most of the safety of cross-service integration testing without standing up the entire system, and they fail in the provider's pipeline — exactly where the breaking change was introduced."
+        }
       ]
     },
     {
@@ -110,10 +267,24 @@
       "heading": "Production Example: Testcontainers for a Repository",
       "kind": "example",
       "blocks": [
-        {"type": "paragraph", "text": "Scenario: a payments team had repository tests that ran against an in-memory H2 database for speed. The tests were green for months. Then a query using PostgreSQL's ON CONFLICT ... DO UPDATE (upsert) shipped — H2 accepted slightly different syntax, so the suite passed, but the real Postgres in production rejected the statement and a nightly reconciliation job failed silently, leaving duplicate ledger rows. The root cause was a fidelity gap between the test database and production."},
-        {"type": "paragraph", "text": "The fix was to run integration tests against a real PostgreSQL in a disposable container using Testcontainers. The container starts per test class, is migrated with the same Flyway scripts as production, and is torn down afterward. Slower than H2 — but it caught two more dialect bugs in the first week."},
-        {"type": "code", "language": "java", "code": "@Testcontainers\nclass LedgerRepositoryIT {\n\n    @Container\n    static PostgreSQLContainer<?> db =\n        new PostgreSQLContainer<>(\"postgres:16-alpine\");\n\n    static LedgerRepository repo;\n\n    @BeforeAll\n    static void migrate() {\n        Flyway.configure()\n              .dataSource(db.getJdbcUrl(), db.getUsername(), db.getPassword())\n              .load().migrate();                 // same migrations as prod\n        repo = new LedgerRepository(dataSourceFor(db));\n    }\n\n    @Test\n    void upsert_isIdempotent_onDuplicateTxnId() {\n        Entry e = new Entry(\"txn-1\", Money.of(100));\n        repo.upsert(e);\n        repo.upsert(e);                          // real Postgres ON CONFLICT\n        assertThat(repo.countByTxnId(\"txn-1\")).isEqualTo(1);\n    }\n}"},
-        {"type": "callout", "variant": "warning", "text": "Reuse containers across test classes (Testcontainers' reuse flag or a singleton container) and parallelize where safe — otherwise per-class startup can dominate CI time and push teams back toward the lower-fidelity in-memory DB they were trying to escape."}
+        {
+          "type": "paragraph",
+          "text": "Scenario: a payments team had repository tests that ran against an in-memory H2 database for speed. The tests were green for months. Then a query using PostgreSQL's ON CONFLICT ... DO UPDATE (upsert) shipped — H2 accepted slightly different syntax, so the suite passed, but the real Postgres in production rejected the statement and a nightly reconciliation job failed silently, leaving duplicate ledger rows. The root cause was a fidelity gap between the test database and production."
+        },
+        {
+          "type": "paragraph",
+          "text": "The fix was to run integration tests against a real PostgreSQL in a disposable container using Testcontainers. The container starts per test class, is migrated with the same Flyway scripts as production, and is torn down afterward. Slower than H2 — but it caught two more dialect bugs in the first week."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "@Testcontainers\nclass LedgerRepositoryIT {\n\n    @Container\n    static PostgreSQLContainer<?> db =\n        new PostgreSQLContainer<>(\"postgres:16-alpine\");\n\n    static LedgerRepository repo;\n\n    @BeforeAll\n    static void migrate() {\n        Flyway.configure()\n              .dataSource(db.getJdbcUrl(), db.getUsername(), db.getPassword())\n              .load().migrate();                 // same migrations as prod\n        repo = new LedgerRepository(dataSourceFor(db));\n    }\n\n    @Test\n    void upsert_isIdempotent_onDuplicateTxnId() {\n        Entry e = new Entry(\"txn-1\", Money.of(100));\n        repo.upsert(e);\n        repo.upsert(e);                          // real Postgres ON CONFLICT\n        assertThat(repo.countByTxnId(\"txn-1\")).isEqualTo(1);\n    }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Reuse containers across test classes (Testcontainers' reuse flag or a singleton container) and parallelize where safe — otherwise per-class startup can dominate CI time and push teams back toward the lower-fidelity in-memory DB they were trying to escape."
+        }
       ]
     },
     {
@@ -121,21 +292,52 @@
       "heading": "Common Mistakes and Production Incidents",
       "kind": "mistake",
       "blocks": [
-        {"type": "heading", "text": "Over-mocking couples tests to implementation"},
-        {"type": "paragraph", "text": "The most damaging anti-pattern: mocking every collaborator and asserting on the exact sequence of internal calls. The test then verifies HOW the code works rather than WHAT it produces. A legitimate refactor — splitting a method, reordering calls, introducing a cache — turns the suite red even though behavior is unchanged. The team learns to distrust the tests and eventually deletes them."},
-        {"type": "heading", "text": "Testing private methods"},
-        {"type": "paragraph", "text": "Reaching into private methods (via reflection or by making them package-private just for tests) couples tests to internal structure. If a private method is complex enough to want its own test, that is a design signal: extract it into its own class with a public interface and test it there. Otherwise, test it through the public API that calls it."},
-        {"type": "heading", "text": "Flaky tests"},
-        {"type": "paragraph", "text": "A flaky test passes and fails non-deterministically. Common causes: real sleeps and timing assumptions, dependence on system clock or wall-time, test ordering and shared mutable state, real network calls, unseeded randomness, and async work that is asserted before it completes. Flaky tests are worse than no test — they train engineers to hit 'retry' and ignore red, which is exactly when a real regression slips through."},
-        {"type": "list", "items": [
-          "Quarantine flaky tests immediately (skip + ticket) so they cannot erode trust in the whole suite while you fix the root cause.",
-          "Replace sleeps with deterministic awaits (poll a condition with a timeout, or inject a fake clock).",
-          "Inject randomness and time as dependencies so tests can pin them.",
-          "Run the suite in random order in CI to surface hidden inter-test coupling early."
-        ]},
-        {"type": "heading", "text": "Coverage as a goal, not a guide"},
-        {"type": "paragraph", "text": "Mandating 100% line coverage produces assertion-free tests that execute code without checking anything, and tests for trivial getters that add maintenance burden without confidence. Coverage tells you what is definitely NOT tested; it cannot tell you what is WELL tested. Use it to find blind spots, not as a target to game."},
-        {"type": "callout", "variant": "danger", "text": "Incident pattern: a service hit '95% coverage' but a critical error-handling branch had a test that executed it with zero assertions. A null-pointer in that branch reached production despite the line showing as 'covered'. Coverage counted execution, not verification."}
+        {
+          "type": "heading",
+          "text": "Over-mocking couples tests to implementation"
+        },
+        {
+          "type": "paragraph",
+          "text": "The most damaging anti-pattern: mocking every collaborator and asserting on the exact sequence of internal calls. The test then verifies HOW the code works rather than WHAT it produces. A legitimate refactor — splitting a method, reordering calls, introducing a cache — turns the suite red even though behavior is unchanged. The team learns to distrust the tests and eventually deletes them."
+        },
+        {
+          "type": "heading",
+          "text": "Testing private methods"
+        },
+        {
+          "type": "paragraph",
+          "text": "Reaching into private methods (via reflection or by making them package-private just for tests) couples tests to internal structure. If a private method is complex enough to want its own test, that is a design signal: extract it into its own class with a public interface and test it there. Otherwise, test it through the public API that calls it."
+        },
+        {
+          "type": "heading",
+          "text": "Flaky tests"
+        },
+        {
+          "type": "paragraph",
+          "text": "A flaky test passes and fails non-deterministically. Common causes: real sleeps and timing assumptions, dependence on system clock or wall-time, test ordering and shared mutable state, real network calls, unseeded randomness, and async work that is asserted before it completes. Flaky tests are worse than no test — they train engineers to hit 'retry' and ignore red, which is exactly when a real regression slips through."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Quarantine flaky tests immediately (skip + ticket) so they cannot erode trust in the whole suite while you fix the root cause.",
+            "Replace sleeps with deterministic awaits (poll a condition with a timeout, or inject a fake clock).",
+            "Inject randomness and time as dependencies so tests can pin them.",
+            "Run the suite in random order in CI to surface hidden inter-test coupling early."
+          ]
+        },
+        {
+          "type": "heading",
+          "text": "Coverage as a goal, not a guide"
+        },
+        {
+          "type": "paragraph",
+          "text": "Mandating 100% line coverage produces assertion-free tests that execute code without checking anything, and tests for trivial getters that add maintenance burden without confidence. Coverage tells you what is definitely NOT tested; it cannot tell you what is WELL tested. Use it to find blind spots, not as a target to game."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Incident pattern: a service hit '95% coverage' but a critical error-handling branch had a test that executed it with zero assertions. A null-pointer in that branch reached production despite the line showing as 'covered'. Coverage counted execution, not verification."
+        }
       ]
     },
     {
@@ -143,17 +345,24 @@
       "heading": "Best Practices",
       "kind": "bestpractice",
       "blocks": [
-        {"type": "list", "items": [
-          "Test behavior, not implementation. Assert on observable outputs and state changes through the public interface, so the test survives refactoring.",
-          "Name tests as specifications: methodUnderTest_condition_expectedOutcome, or a plain-English 'it ...' sentence describing the behavior.",
-          "One logical assertion per test. Multiple physical asserts are fine if they describe one outcome; multiple unrelated outcomes mean multiple tests.",
-          "Make the test fail first, even outside strict TDD — confirm it can detect the bug before you trust it as a guard.",
-          "Prefer fakes over deep mock chains for stateful dependencies; reserve mocks for verifying side effects you cannot otherwise observe (emails, charges, events).",
-          "Keep unit tests free of I/O. Push the database, clock, network, and filesystem to the integration layer where Testcontainers gives high fidelity.",
-          "Use coverage to find untested branches, not as a pass/fail gate. Pair it with mutation testing if you want to measure assertion quality.",
-          "Treat test code as production code: review it, refactor it, and remove duplication with helpers and builders."
-        ]},
-        {"type": "callout", "variant": "info", "text": "A simple decision rule: if changing the test every time you refactor working code is normal on your team, your tests are coupled to implementation. Push them toward the public boundary."}
+        {
+          "type": "list",
+          "items": [
+            "Test behavior, not implementation. Assert on observable outputs and state changes through the public interface, so the test survives refactoring.",
+            "Name tests as specifications: methodUnderTest_condition_expectedOutcome, or a plain-English 'it ...' sentence describing the behavior.",
+            "One logical assertion per test. Multiple physical asserts are fine if they describe one outcome; multiple unrelated outcomes mean multiple tests.",
+            "Make the test fail first, even outside strict TDD — confirm it can detect the bug before you trust it as a guard.",
+            "Prefer fakes over deep mock chains for stateful dependencies; reserve mocks for verifying side effects you cannot otherwise observe (emails, charges, events).",
+            "Keep unit tests free of I/O. Push the database, clock, network, and filesystem to the integration layer where Testcontainers gives high fidelity.",
+            "Use coverage to find untested branches, not as a pass/fail gate. Pair it with mutation testing if you want to measure assertion quality.",
+            "Treat test code as production code: review it, refactor it, and remove duplication with helpers and builders."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A simple decision rule: if changing the test every time you refactor working code is normal on your team, your tests are coupled to implementation. Push them toward the public boundary."
+        }
       ]
     },
     {
@@ -161,12 +370,18 @@
       "heading": "Note: Choosing Unit vs Integration",
       "kind": "note",
       "blocks": [
-        {"type": "paragraph", "text": "A practical rule of thumb for where a behavior belongs: unit-test the logic that has branching, calculation, and edge cases (pricing rules, state machines, validation); integration-test the parts whose correctness depends on a real collaborator (SQL queries, ORM mappings, serialization, transaction boundaries, framework wiring). E2e-test only the handful of journeys whose failure is a business emergency (login, checkout, payment)."},
-        {"type": "list", "items": [
-          "If a bug would be a logic error reproducible with plain objects -> unit test.",
-          "If a bug would only appear against a real DB, broker, or HTTP boundary -> integration test.",
-          "If a bug would only appear when all services run together end to end -> a small, carefully chosen e2e test."
-        ]}
+        {
+          "type": "paragraph",
+          "text": "A practical rule of thumb for where a behavior belongs: unit-test the logic that has branching, calculation, and edge cases (pricing rules, state machines, validation); integration-test the parts whose correctness depends on a real collaborator (SQL queries, ORM mappings, serialization, transaction boundaries, framework wiring). E2e-test only the handful of journeys whose failure is a business emergency (login, checkout, payment)."
+        },
+        {
+          "type": "list",
+          "items": [
+            "If a bug would be a logic error reproducible with plain objects -> unit test.",
+            "If a bug would only appear against a real DB, broker, or HTTP boundary -> integration test.",
+            "If a bug would only appear when all services run together end to end -> a small, carefully chosen e2e test."
+          ]
+        }
       ]
     }
   ],
@@ -198,8 +413,15 @@
       "difficulty": "mid",
       "category": "Quality",
       "tricky": false,
-      "tags": ["mocks", "stubs", "test-doubles"],
-      "followUps": ["Where does a fake fit in this taxonomy?", "When would you prefer a fake over a mock?"]
+      "tags": [
+        "mocks",
+        "stubs",
+        "test-doubles"
+      ],
+      "followUps": [
+        "Where does a fake fit in this taxonomy?",
+        "When would you prefer a fake over a mock?"
+      ]
     },
     {
       "id": "q-unit-vs-integration",
@@ -208,8 +430,15 @@
       "difficulty": "mid",
       "category": "Quality",
       "tricky": false,
-      "tags": ["test-pyramid", "integration", "unit"],
-      "followUps": ["How do you keep integration tests from dominating CI time?", "What is the testing trophy and how does it differ from the pyramid?"]
+      "tags": [
+        "test-pyramid",
+        "integration",
+        "unit"
+      ],
+      "followUps": [
+        "How do you keep integration tests from dominating CI time?",
+        "What is the testing trophy and how does it differ from the pyramid?"
+      ]
     },
     {
       "id": "q-first",
@@ -218,8 +447,13 @@
       "difficulty": "junior",
       "category": "Quality",
       "tricky": false,
-      "tags": ["first", "principles"],
-      "followUps": ["Which FIRST principle do flaky tests most often violate?"]
+      "tags": [
+        "first",
+        "principles"
+      ],
+      "followUps": [
+        "Which FIRST principle do flaky tests most often violate?"
+      ]
     },
     {
       "id": "q-red-green-refactor",
@@ -228,8 +462,14 @@
       "difficulty": "mid",
       "category": "Quality",
       "tricky": false,
-      "tags": ["tdd", "red-green-refactor"],
-      "followUps": ["What is triangulation in TDD?", "Is it cheating to write multiple tests before any production code?"]
+      "tags": [
+        "tdd",
+        "red-green-refactor"
+      ],
+      "followUps": [
+        "What is triangulation in TDD?",
+        "Is it cheating to write multiple tests before any production code?"
+      ]
     },
     {
       "id": "q-coverage",
@@ -238,8 +478,14 @@
       "difficulty": "mid",
       "category": "Quality",
       "tricky": false,
-      "tags": ["coverage", "mutation-testing"],
-      "followUps": ["How does mutation testing complement coverage?", "Would you ever set a coverage gate in CI?"]
+      "tags": [
+        "coverage",
+        "mutation-testing"
+      ],
+      "followUps": [
+        "How does mutation testing complement coverage?",
+        "Would you ever set a coverage gate in CI?"
+      ]
     },
     {
       "id": "q-flaky",
@@ -248,8 +494,15 @@
       "difficulty": "senior",
       "category": "Quality",
       "tricky": false,
-      "tags": ["flaky-tests", "ci", "determinism"],
-      "followUps": ["Why is automatic retry of failed tests dangerous?", "How would you detect order-dependent tests proactively?"]
+      "tags": [
+        "flaky-tests",
+        "ci",
+        "determinism"
+      ],
+      "followUps": [
+        "Why is automatic retry of failed tests dangerous?",
+        "How would you detect order-dependent tests proactively?"
+      ]
     },
     {
       "id": "q-property-based",
@@ -258,8 +511,14 @@
       "difficulty": "senior",
       "category": "Quality",
       "tricky": false,
-      "tags": ["property-based", "fast-check"],
-      "followUps": ["What makes a good property versus a bad one?", "How does shrinking help debugging?"]
+      "tags": [
+        "property-based",
+        "fast-check"
+      ],
+      "followUps": [
+        "What makes a good property versus a bad one?",
+        "How does shrinking help debugging?"
+      ]
     },
     {
       "id": "q-contract-testing",
@@ -268,8 +527,15 @@
       "difficulty": "senior",
       "category": "Quality",
       "tricky": false,
-      "tags": ["contract-testing", "pact", "microservices"],
-      "followUps": ["What does contract testing NOT verify?", "How do you handle a provider that has many consumers?"]
+      "tags": [
+        "contract-testing",
+        "pact",
+        "microservices"
+      ],
+      "followUps": [
+        "What does contract testing NOT verify?",
+        "How do you handle a provider that has many consumers?"
+      ]
     },
     {
       "id": "q-testcontainers",
@@ -278,8 +544,15 @@
       "difficulty": "mid",
       "category": "Quality",
       "tricky": false,
-      "tags": ["testcontainers", "integration", "database"],
-      "followUps": ["How do you keep Testcontainers from blowing up CI time?", "Would you use them for unit tests?"]
+      "tags": [
+        "testcontainers",
+        "integration",
+        "database"
+      ],
+      "followUps": [
+        "How do you keep Testcontainers from blowing up CI time?",
+        "Would you use them for unit tests?"
+      ]
     },
     {
       "id": "q-over-mocking-tricky",
@@ -288,8 +561,15 @@
       "difficulty": "senior",
       "category": "Quality",
       "tricky": true,
-      "tags": ["over-mocking", "coupling", "refactoring"],
-      "followUps": ["Which interactions ARE legitimate to verify with a mock?", "How would you migrate such a suite incrementally?"]
+      "tags": [
+        "over-mocking",
+        "coupling",
+        "refactoring"
+      ],
+      "followUps": [
+        "Which interactions ARE legitimate to verify with a mock?",
+        "How would you migrate such a suite incrementally?"
+      ]
     },
     {
       "id": "q-private-methods-tricky",
@@ -298,8 +578,15 @@
       "difficulty": "senior",
       "category": "Quality",
       "tricky": true,
-      "tags": ["private-methods", "encapsulation", "design"],
-      "followUps": ["When is testing through the public API insufficient?", "Does this advice change for legacy code with no tests?"]
+      "tags": [
+        "private-methods",
+        "encapsulation",
+        "design"
+      ],
+      "followUps": [
+        "When is testing through the public API insufficient?",
+        "Does this advice change for legacy code with no tests?"
+      ]
     },
     {
       "id": "q-mock-time-tricky",
@@ -308,8 +595,15 @@
       "difficulty": "senior",
       "category": "Quality",
       "tricky": true,
-      "tags": ["flaky-tests", "clock", "determinism"],
-      "followUps": ["How would you enforce that no direct time call sneaks back in?", "How does this relate to testing time-zone handling?"]
+      "tags": [
+        "flaky-tests",
+        "clock",
+        "determinism"
+      ],
+      "followUps": [
+        "How would you enforce that no direct time call sneaks back in?",
+        "How does this relate to testing time-zone handling?"
+      ]
     },
     {
       "id": "q-aaa",
@@ -318,8 +612,156 @@
       "difficulty": "junior",
       "category": "Quality",
       "tricky": false,
-      "tags": ["aaa", "structure"],
-      "followUps": ["Is it ever acceptable to have multiple asserts?", "How does AAA map to Given-When-Then?"]
+      "tags": [
+        "aaa",
+        "structure"
+      ],
+      "followUps": [
+        "Is it ever acceptable to have multiple asserts?",
+        "How does AAA map to Given-When-Then?"
+      ]
+    },
+    {
+      "id": "q-ext-london-vs-chicago",
+      "question": "What is the difference between the London (mockist) and Chicago (classicist) schools of TDD?",
+      "answer": "They differ in how they achieve isolation and how they drive design. The Chicago (classicist / Detroit / state-based) school tests a unit together with its real collaborators, using doubles only for awkward dependencies like the network or the clock, and verifies behavior by asserting on resulting state. The London (mockist / interaction-based) school isolates the unit under test completely by mocking every collaborator, verifying behavior by asserting on the interactions between objects. London-style TDD tends to drive an outside-in design where you discover collaborators' interfaces as you need them, which is powerful for designing object protocols, but it couples tests more tightly to implementation and produces more brittle tests. Classicist tests couple less and survive refactors better, but can produce larger test setups and vaguer failure localization. Most experienced teams blend the two: classicist by default, mockist at genuine architectural seams and for un-observable side effects.",
+      "difficulty": "senior",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": [
+        "london",
+        "chicago",
+        "mockist",
+        "classicist",
+        "tdd"
+      ],
+      "followUps": [
+        "Which school does outside-in TDD belong to?",
+        "How does the choice of school affect test brittleness?"
+      ]
+    },
+    {
+      "id": "q-ext-pyramid-vs-trophy",
+      "question": "The test pyramid says few integration tests; the testing trophy says lean on integration. How do you reconcile them, and when does each fit?",
+      "answer": "They optimize for different unit economics because they assume different things about test cost. The pyramid comes from a world where integration tests were slow and flaky, so it pushes the bulk of tests down to fast, isolated units. The trophy (Kent C. Dodds) applies to application code where modern tools make integration-style tests cheap and where most bugs live in the wiring between modules rather than in pure logic, so it re-weights the middle up and argues integration tests give the best confidence-to-cost ratio. Reconcile them by the code under test: for a library or a rich domain model full of branching logic, the pyramid fits and units dominate; for a typical web app that mostly orchestrates a database, framework, and other services, the trophy fits and you write more integration tests. Both agree on the two things that matter most: keep e2e tests few, and get the bulk of your signal from fast tests. The debate is only about the middle band's weight, not the shape's principle.",
+      "difficulty": "mid",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": [
+        "test-pyramid",
+        "testing-trophy",
+        "strategy"
+      ],
+      "followUps": [
+        "What is the ice-cream cone anti-pattern?",
+        "How does the type of code under test decide the shape?"
+      ]
+    },
+    {
+      "id": "q-ext-when-tdd-not-worth-it",
+      "question": "When is TDD NOT worth doing, and what do you do instead?",
+      "answer": "TDD pays off when you can specify a behavior before you build it, but there are cases where writing the test first is friction with little return. Exploratory or spike work — where you do not yet know the shape of the solution or even whether it is feasible — is better done as a throwaway spike, after which you delete the spike and TDD the real implementation with the knowledge gained. Code with no meaningful logic, like a thin declarative mapping or generated boilerplate, gains little from a first-written test. UI layout and visual work is hard to pin with an example-based test and is better served by snapshot or visual-regression tools. And in a heavily I/O-bound integration where the risk is the collaborator's real behavior, an integration test written after a quick prototype often beats a mock-heavy unit test written first. The honest senior answer is that TDD is a tool, not a religion: the underlying skills — small steps, testability, precise naming — matter more than strict test-first ordering, and you keep those even when you write the test moments after the code.",
+      "difficulty": "senior",
+      "category": "Engineering",
+      "tricky": true,
+      "tags": [
+        "tdd",
+        "spike",
+        "pragmatism"
+      ],
+      "followUps": [
+        "What is a spike and why do you throw it away?",
+        "Does test-after ever give the same design benefits as test-first?"
+      ]
+    },
+    {
+      "id": "q-ext-mutation-testing",
+      "question": "How does mutation testing work and what does it tell you that line coverage cannot?",
+      "answer": "Mutation testing measures the quality of your assertions rather than mere execution. A mutation tool (Stryker, PIT) makes small semantic changes to the production code — flipping a comparison operator, replacing a boolean with true, removing a statement, changing a return value — producing many 'mutants'. It then runs your test suite against each mutant: if a test fails, the mutant is 'killed', meaning your tests actually detect that change; if all tests still pass, the mutant 'survived', meaning your tests execute that code but do not verify its behavior. The mutation score is the fraction of mutants killed. This directly exposes the blind spot in coverage: an assertion-free test that runs a line gives 100% line coverage but kills zero mutants there, so a surviving mutant flags exactly the false confidence coverage hides. The tradeoff is cost — it runs the suite many times — so teams run it on critical modules or in nightly jobs rather than on every commit.",
+      "difficulty": "senior",
+      "category": "Engineering",
+      "tricky": true,
+      "tags": [
+        "mutation-testing",
+        "stryker",
+        "pit",
+        "coverage"
+      ],
+      "followUps": [
+        "What is an equivalent mutant and why is it a problem?",
+        "Where would you run mutation testing in a pipeline?"
+      ]
+    },
+    {
+      "id": "q-ext-snapshot-pitfalls",
+      "question": "What are the pitfalls of snapshot testing, and how do you use it responsibly?",
+      "answer": "Snapshot tests serialize an output and compare future runs against a stored 'golden' file. Their main pitfall is that they assert equality without asserting intent: a huge auto-generated snapshot encodes everything, so any incidental change breaks it, and because the fix is to press 'update', developers rubber-stamp new snapshots without reading the diff — the test then rots into an approval of whatever the code currently does rather than a specification of what it should do. Large snapshots also make review meaningless and hide the one meaningful change among noise. Use them responsibly by keeping snapshots small and targeted (snapshot one component's key output, not an entire rendered page), by preferring explicit assertions for behavior you actually care about, by scrubbing volatile fields like timestamps and IDs so they are deterministic, and by treating a snapshot update in a PR as a real change that must be read, not auto-accepted. Snapshots are best for detecting unexpected drift in stable, structured output, not as a substitute for behavioral assertions.",
+      "difficulty": "mid",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": [
+        "snapshot-testing",
+        "brittleness",
+        "review"
+      ],
+      "followUps": [
+        "Why is pressing 'update snapshot' dangerous?",
+        "How do you keep a snapshot deterministic?"
+      ]
+    },
+    {
+      "id": "q-ext-async-testing",
+      "question": "What goes wrong when testing asynchronous code, and how do you make async tests deterministic?",
+      "answer": "The core failure is asserting on the result before the asynchronous work has actually completed, which produces false passes (the assertion runs against a stale state) or false failures (a race in CI where timing differs from local). Common mistakes are forgetting to await or return the promise so the test framework thinks it passed, using arbitrary sleeps to 'wait long enough' which are both slow and flaky, and not asserting on rejected promises so a thrown error is silently swallowed. The deterministic fixes are: always await or return the async operation so the framework tracks completion; replace fixed sleeps with condition-polling waits that resolve as soon as a state is reached and time out otherwise; use the framework's rejects/expect-throws helpers to assert on failures explicitly; and use fake timers to advance simulated time instantly instead of waiting on real timers. For code driven by timers or intervals, injecting a controllable clock and fake timers removes wall-time from the test entirely, making it fast and repeatable.",
+      "difficulty": "mid",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": [
+        "async",
+        "determinism",
+        "fake-timers",
+        "promises"
+      ],
+      "followUps": [
+        "Why is a forgotten await a false pass rather than a false failure?",
+        "How do fake timers help test setTimeout-based code?"
+      ]
+    },
+    {
+      "id": "q-ext-data-builders",
+      "question": "What are test data builders and the Object Mother pattern, and what problem do they solve?",
+      "answer": "Both patterns tackle the noise and fragility of constructing complex test objects inline. An Object Mother is a factory of named, ready-made example objects (aStandardCustomer(), anExpiredSubscription()) so tests share canonical fixtures. A test data builder goes further with a fluent API that starts from sensible defaults and lets each test override only the one field it cares about: aUser().withEmail('x@y.com').build(). The value is that tests state only what is relevant to the behavior under test, so the reader immediately sees which input drives the assertion, and a change to a constructor signature updates one builder instead of hundreds of call sites. Builders also avoid the Object Mother's tendency to sprawl into dozens of near-duplicate named variants. The key discipline is that defaults must be valid but boring, and each test overrides exactly the field it is exercising, which keeps tests both concise and self-documenting.",
+      "difficulty": "mid",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": [
+        "builders",
+        "object-mother",
+        "fixtures",
+        "maintainability"
+      ],
+      "followUps": [
+        "Why can Object Mothers sprawl where builders scale better?",
+        "How should a builder choose its default values?"
+      ]
+    },
+    {
+      "id": "q-ext-spy-vs-mock",
+      "question": "Tricky: A candidate says 'spy and mock are the same thing.' Where is that wrong, and why does the distinction matter in practice?",
+      "answer": "They overlap but are not the same, and conflating them leads to over-specified tests. A spy records how it was called (arguments, counts, order) so you can assert on the recorded interactions after the fact, and it can optionally wrap a real implementation so the real behavior still runs. A mock is pre-programmed with expectations up front and typically fails the test itself if those expectations are not met exactly, making it stricter and more coupled to a prescribed interaction pattern. In practice the distinction matters because a strict mock that expects a precise sequence of calls turns behavior-preserving refactors red, whereas a spy lets you assert only the one interaction you genuinely care about (an email was sent once) while ignoring incidental calls. Many frameworks blur the terms — jest.fn() is really a spy that people call a mock — so the precise vocabulary matters most when reasoning about how much your test is over-specifying. The senior point: choose the loosest double that still proves the behavior, and a spy is usually looser than a full mock with expectations.",
+      "difficulty": "senior",
+      "category": "Engineering",
+      "tricky": true,
+      "tags": [
+        "spy",
+        "mock",
+        "test-doubles",
+        "over-specification"
+      ],
+      "followUps": [
+        "Why does jest.fn() blur the mock/spy line?",
+        "When would a strict mock with preset expectations be the right choice?"
+      ]
     }
   ],
   "challenges": [
@@ -357,15 +799,70 @@
       "solutionLanguage": "typescript",
       "explanation": "The original test failed on every refactor because it verified the implementation's internal choreography (which repo methods were called, in what order) instead of the behavior the use case promises. The rewrite separates the two kinds of verification correctly. Persistence is STATE, so it is verified with a fake: InMemoryUserRepo is a genuine working implementation, and the test reads the user back through findByEmail exactly as production code would — this assertion does not care whether registerUser calls save once or restructures internally, so it survives refactoring. Sending the welcome email is a genuine SIDE EFFECT with no return value to inspect, so a spy (jest.fn) is the appropriate double; the test verifies it was called exactly once with the right address, and in the duplicate-email path verifies it was NOT called, which is a real behavioral guarantee (you must not email a user whose registration was rejected). Dependency injection of the repo, mailer, and id generator keeps the unit pure and deterministic — no real database, network, or random IDs — satisfying the FIRST principles. The key lesson is the heuristic from the doubles section: prefer fakes for stateful collaborators and reserve mocks/spies for observing effects you genuinely cannot read back as state. This drops implementation coupling while keeping strong behavioral coverage.",
       "relatedTopic": "testing-tdd"
+    },
+    {
+      "id": "ch-ext-fake-clock-poll",
+      "title": "Make a Flaky Async Rate-Limiter Test Deterministic",
+      "difficulty": "senior",
+      "category": "Engineering",
+      "prompt": "You inherit a sliding-window rate limiter allow(key) that permits at most N calls per windowMs and relies on Date.now(). Its test currently does 5 calls, then `await new Promise(r => setTimeout(r, 1000))`, then asserts the window has reset. The test is slow and fails intermittently in CI. Rewrite the limiter to inject a clock so time is controllable, then write a deterministic test using a fake clock that advances simulated time instantly — with no real sleeps. The test must prove: the (N+1)th call in a window is denied, and a call after the window has fully elapsed is allowed again.",
+      "hints": [
+        "The root cause is that the code reads wall-time (Date.now) directly; make time a dependency by injecting a `now: () => number` clock.",
+        "In the test, back the clock with a mutable variable you advance by exact amounts, so no real setTimeout is needed.",
+        "Assert the deny at exactly the boundary (calls at t=0 within the window) and the allow after advancing past windowMs — cover the off-by-one at the edge.",
+        "Keep the limiter pure of I/O so the test is Fast, Isolated, and Repeatable per the FIRST principles."
+      ],
+      "solutionCode": "// rateLimiter.ts — clock injected so time is deterministic\nexport interface Clock { now(): number; }\n\nexport class SlidingWindowRateLimiter {\n  private hits = new Map<string, number[]>();\n\n  constructor(\n    private readonly limit: number,\n    private readonly windowMs: number,\n    private readonly clock: Clock = { now: () => Date.now() },\n  ) {}\n\n  allow(key: string): boolean {\n    const t = this.clock.now();\n    const cutoff = t - this.windowMs;\n    const recent = (this.hits.get(key) ?? []).filter((ts) => ts > cutoff);\n    if (recent.length >= this.limit) {\n      this.hits.set(key, recent); // keep pruned list, reject\n      return false;\n    }\n    recent.push(t);\n    this.hits.set(key, recent);\n    return true;\n  }\n}\n\n// rateLimiter.test.ts — fake clock, no real time\nimport { SlidingWindowRateLimiter, Clock } from './rateLimiter';\n\nclass FakeClock implements Clock {\n  private t = 0;\n  now() { return this.t; }\n  advance(ms: number) { this.t += ms; }\n}\n\ndescribe('SlidingWindowRateLimiter', () => {\n  it('allows up to the limit and denies the next call in the window', () => {\n    const clock = new FakeClock();\n    const limiter = new SlidingWindowRateLimiter(3, 1000, clock);\n\n    expect(limiter.allow('k')).toBe(true);  // 1\n    expect(limiter.allow('k')).toBe(true);  // 2\n    expect(limiter.allow('k')).toBe(true);  // 3\n    expect(limiter.allow('k')).toBe(false); // 4th within window -> denied\n  });\n\n  it('allows again once the window has fully elapsed', () => {\n    const clock = new FakeClock();\n    const limiter = new SlidingWindowRateLimiter(1, 1000, clock);\n\n    expect(limiter.allow('k')).toBe(true);\n    expect(limiter.allow('k')).toBe(false); // still inside the window\n\n    clock.advance(1001);                    // move past windowMs instantly\n    expect(limiter.allow('k')).toBe(true);  // window reset\n  });\n\n  it('tracks keys independently', () => {\n    const clock = new FakeClock();\n    const limiter = new SlidingWindowRateLimiter(1, 1000, clock);\n    expect(limiter.allow('a')).toBe(true);\n    expect(limiter.allow('b')).toBe(true);  // different key, own window\n    expect(limiter.allow('a')).toBe(false);\n  });\n});",
+      "solutionLanguage": "typescript",
+      "explanation": "The original test was flaky for a textbook reason: the production code read wall-clock time directly via Date.now(), and the test tried to control that time with a real setTimeout, so the assertion depended on how fast CI ran between the calls and the sleep. The fix threads a single Clock abstraction through every place the code reads the current time, which is the core lesson of deterministic testing — you cannot pin time you do not own. With time injected, the FakeClock advances simulated milliseconds instantly, so the suite is fast (no waiting a real second), repeatable (identical result every run and environment), and isolated. The tests also improve coverage of intent: one proves the (N+1)th call inside the window is denied, one advances the clock just past the boundary to prove the window resets, and one proves keys are tracked independently, which the original single sleep-and-check never verified. Note the boundary care — advancing by 1001ms crosses windowMs cleanly, avoiding the off-by-one that a `>` versus `>=` cutoff would otherwise hide. Finally, because the limiter is now pure of real I/O, it satisfies the FIRST principles and is a natural candidate for a property-based follow-up that asserts the invariant 'no more than limit calls ever succeed within any windowMs span'.",
+      "relatedTopic": "testing-tdd"
+    },
+    {
+      "id": "ch-ext-builder-refactor",
+      "title": "Introduce a Test Data Builder to Kill Fixture Noise",
+      "difficulty": "mid",
+      "category": "Engineering",
+      "prompt": "A test suite for an isEligibleForDiscount(order) rule constructs a full Order object inline in every test, repeating a dozen irrelevant fields and breaking en masse whenever the Order constructor changes. Design a fluent test data builder that starts from a valid default order and lets each test override only the field its behavior depends on. Then write two tests using the builder — one asserting a loyal, high-value order is eligible, one asserting a brand-new customer is not — so the reader immediately sees which input drives each outcome.",
+      "hints": [
+        "Give the builder sensible, valid-but-boring defaults so an un-customized build() still produces a usable order.",
+        "Each with*() method returns `this` (or a new copy) so calls chain fluently and read like a specification.",
+        "Override exactly one field per test — the field the assertion actually depends on — and leave everything else default.",
+        "When the Order shape changes, only the builder's defaults change, not every test."
+      ],
+      "solutionCode": "// order.ts\nexport interface Order {\n  id: string;\n  customerTenureDays: number;\n  totalCents: number;\n  itemCount: number;\n  country: string;\n  isGift: boolean;\n}\n\nexport function isEligibleForDiscount(order: Order): boolean {\n  const loyal = order.customerTenureDays >= 90;\n  const highValue = order.totalCents >= 10_000;\n  return loyal && highValue;\n}\n\n// orderBuilder.ts — fluent test data builder with valid defaults\nexport class OrderBuilder {\n  private order: Order = {\n    id: 'order-1',\n    customerTenureDays: 365,   // loyal by default\n    totalCents: 20_000,        // high-value by default\n    itemCount: 2,\n    country: 'US',\n    isGift: false,\n  };\n\n  withTenureDays(days: number): this { this.order.customerTenureDays = days; return this; }\n  withTotalCents(cents: number): this { this.order.totalCents = cents; return this; }\n  asGift(): this { this.order.isGift = true; return this; }\n  build(): Order { return { ...this.order }; }\n}\n\nexport const anOrder = () => new OrderBuilder();\n\n// isEligibleForDiscount.test.ts\nimport { isEligibleForDiscount } from './order';\nimport { anOrder } from './orderBuilder';\n\ndescribe('isEligibleForDiscount', () => {\n  it('is eligible for a loyal, high-value order', () => {\n    const order = anOrder()\n      .withTenureDays(120)      // the only fields this behavior cares about\n      .withTotalCents(15_000)\n      .build();\n    expect(isEligibleForDiscount(order)).toBe(true);\n  });\n\n  it('is not eligible for a brand-new customer', () => {\n    const order = anOrder()\n      .withTenureDays(5)        // override only the relevant field\n      .build();                 // total stays high-value by default\n    expect(isEligibleForDiscount(order)).toBe(false);\n  });\n});",
+      "solutionLanguage": "typescript",
+      "explanation": "The original tests suffered from two classic fixture problems: irrelevant-detail noise and constructor coupling. When every test spells out all six Order fields, the reader cannot tell which field actually drives the assertion, and a change to the Order shape forces an edit to every test. The builder solves both. Its defaults are deliberately valid but boring — a loyal, high-value, non-gift order — so a bare anOrder().build() is usable, and each test overrides only the field its behavior depends on, making the test read like a specification: the eligible test visibly sets tenure and total, and the ineligible test visibly sets only a short tenure while relying on the default high total to isolate tenure as the cause. This is the crucial builder discipline: change exactly one relevant variable per test so the assertion's cause is unambiguous. Maintainability improves because a new required field or a constructor change is absorbed in the builder's single defaults block rather than across hundreds of call sites. The fluent with*() methods returning `this` keep the setup terse, and build() returns a copy so tests cannot leak shared mutable state between each other, preserving the Isolated property from FIRST. Compared with an Object Mother of named fixtures, the builder scales better because it composes overrides instead of multiplying near-duplicate named variants.",
+      "relatedTopic": "testing-tdd"
     }
   ],
   "references": [
-    {"label": "Martin Fowler — Mocks Aren't Stubs", "url": "https://martinfowler.com/articles/mocksArentStubs.html"},
-    {"label": "Martin Fowler — Test Pyramid", "url": "https://martinfowler.com/bliki/TestPyramid.html"},
-    {"label": "Kent C. Dodds — The Testing Trophy", "url": "https://kentcdodds.com/blog/the-testing-trophy-and-testing-classifications"},
-    {"label": "Testcontainers Documentation", "url": "https://testcontainers.com/"},
-    {"label": "fast-check — Property-Based Testing for JavaScript", "url": "https://fast-check.dev/"},
-    {"label": "Pact — Consumer-Driven Contract Testing", "url": "https://docs.pact.io/"},
-    {"label": "Gerard Meszaros — xUnit Test Patterns (Test Double taxonomy)", "url": "http://xunitpatterns.com/Test%20Double.html"}
+    {
+      "label": "Martin Fowler — Mocks Aren't Stubs",
+      "url": "https://martinfowler.com/articles/mocksArentStubs.html"
+    },
+    {
+      "label": "Martin Fowler — Test Pyramid",
+      "url": "https://martinfowler.com/bliki/TestPyramid.html"
+    },
+    {
+      "label": "Kent C. Dodds — The Testing Trophy",
+      "url": "https://kentcdodds.com/blog/the-testing-trophy-and-testing-classifications"
+    },
+    {
+      "label": "Testcontainers Documentation",
+      "url": "https://testcontainers.com/"
+    },
+    {
+      "label": "fast-check — Property-Based Testing for JavaScript",
+      "url": "https://fast-check.dev/"
+    },
+    {
+      "label": "Pact — Consumer-Driven Contract Testing",
+      "url": "https://docs.pact.io/"
+    },
+    {
+      "label": "Gerard Meszaros — xUnit Test Patterns (Test Double taxonomy)",
+      "url": "http://xunitpatterns.com/Test%20Double.html"
+    }
   ]
 }
