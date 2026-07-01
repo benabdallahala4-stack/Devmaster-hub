@@ -1,0 +1,625 @@
+{
+  "id": "event-sourcing-cqrs",
+  "title": "Event Sourcing & CQRS",
+  "category": "Architecture",
+  "subcategory": "Patterns",
+  "difficulty": "senior",
+  "tags": [
+    "event-sourcing",
+    "cqrs",
+    "ddd",
+    "eventual-consistency",
+    "projections",
+    "transactional-outbox",
+    "event-versioning",
+    "idempotency"
+  ],
+  "description": "A staff-level treatment of event sourcing (persisting state as an append-only log of immutable domain events) and CQRS (splitting the write and read models), how they combine with DDD aggregates, and the operational realities of eventual consistency, projections, versioning, and idempotency. The central theme: these are two independent patterns whose power and cost must each be justified, not adopted reflexively.",
+  "estReadMinutes": 30,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "What Event Sourcing and CQRS Actually Are",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Event Sourcing (ES) and Command Query Responsibility Segregation (CQRS) are two distinct architectural patterns that are frequently mentioned together but solve different problems. Event Sourcing changes how you persist state: instead of storing the current state of an entity and overwriting it on every change, you store an ordered, append-only sequence of immutable domain events that describe everything that has happened. The current state is a left-fold over that event history. CQRS changes how you model reads and writes: instead of one model serving both, you split the system into a command side that mutates state and a query side that is optimized for reads, often with separate data stores."
+        },
+        {
+          "type": "paragraph",
+          "text": "The most important sentence in this entire topic: CQRS does not require Event Sourcing, and Event Sourcing does not require CQRS. You can do CQRS over a plain relational database with no events at all. You can event-source an aggregate and serve reads from the same event store without a separate query model. They compose well — an event log is a natural feed for building denormalized read models — which is why they travel together, but treating them as a single inseparable pattern is the first conceptual mistake a senior engineer must avoid."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Mental model: Event Sourcing is about the source of truth being a log of facts. CQRS is about not forcing one data model to be good at both writing and reading. They are orthogonal axes, and you should be able to justify each one independently."
+        },
+        {
+          "type": "paragraph",
+          "text": "The killer feature that justifies the complexity in many domains is the complete, immutable audit trail: because you never destroy history, you can answer temporal questions ('what did the balance look like on March 3rd?', 'who changed this and in what order?') that are impossible or expensive to reconstruct from a state-overwriting database. In regulated domains — finance, healthcare, supply chain, ledgers — this is not a nice-to-have, it is the requirement."
+        }
+      ]
+    },
+    {
+      "id": "why",
+      "heading": "Why Reach For These Patterns",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Traditional CRUD systems store only the latest state. Every UPDATE destroys information: the previous value, the intent behind the change, and the temporal ordering relative to other changes. For a large class of systems this loss is acceptable. For another class — anything where 'how did we get here?' matters as much as 'where are we?' — it is a slow-motion disaster that teams paper over with audit tables, history triggers, and soft-delete columns that never quite capture the real story."
+        },
+        {
+          "type": "heading",
+          "text": "Concrete drivers for Event Sourcing"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Auditability and compliance: a tamper-evident log of business facts is the system of record, not a derived afterthought.",
+            "Temporal queries and time-travel: reconstruct the exact state of an aggregate at any past point by folding events up to that moment.",
+            "Debugging and root-cause analysis: replay the exact event sequence that produced a bug instead of guessing from a corrupted final state.",
+            "New read models for free: when a business question emerges later, you can build a brand-new projection from existing history without migrating production data.",
+            "Domain expressiveness: events name what happened in the business language (FundsWithdrawn, OrderShipped), which forces richer modeling than anemic setters."
+          ]
+        },
+        {
+          "type": "heading",
+          "text": "Concrete drivers for CQRS"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Asymmetric load: reads vastly outnumber writes, or vice versa, and you want to scale and tune them independently.",
+            "Divergent shapes: the write model is a normalized consistency boundary (an aggregate), while reads want wide denormalized documents joined across many aggregates.",
+            "Multiple read models: the same data is needed in different shapes (a search index, a dashboard rollup, a mobile summary) from one write side.",
+            "Team and store autonomy: the query side can use a document store, search engine, or cache while the command side stays transactional."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "If none of these drivers apply, you are very likely adding accidental complexity. CRUD with a well-modeled relational schema and a few read replicas is the correct answer for the majority of CRUD-shaped business apps."
+        }
+      ]
+    },
+    {
+      "id": "es-core",
+      "heading": "Event Sourcing: State as a Fold Over Events",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "In an event-sourced aggregate, the only data you persist is the stream of events. State is never written directly; it is a pure function of the event history. Two operations define the model. First, a command handler validates an incoming command against current state and, if valid, produces one or more new events — it never mutates state directly. Second, an apply/evolve function takes a state and an event and returns the next state. Rebuilding an aggregate from storage means starting from an empty state and applying every event in order."
+        },
+        {
+          "type": "paragraph",
+          "text": "This gives two non-obvious but critical invariants. Events are immutable facts in the past tense: once written they are never updated or deleted. And the apply function must be total and deterministic — it cannot perform validation or side effects, because it runs both when handling new commands and when replaying old history. All business rules live in the command handler; the apply function only mutates the in-memory state. Putting a validation check inside apply is a classic bug: it will reject perfectly valid historical events the day you tighten a rule."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Domain events for a BankAccount aggregate. Past-tense facts, immutable.\ninterface DomainEvent { readonly type: string; }\ninterface AccountOpened extends DomainEvent { type: 'AccountOpened'; accountId: string; owner: string; }\ninterface FundsDeposited extends DomainEvent { type: 'FundsDeposited'; amount: number; }\ninterface FundsWithdrawn extends DomainEvent { type: 'FundsWithdrawn'; amount: number; }\ntype AccountEvent = AccountOpened | FundsDeposited | FundsWithdrawn;\n\nclass BankAccount {\n  private id = '';\n  private balance = 0;\n  private opened = false;\n  private changes: AccountEvent[] = []; // uncommitted events\n  version = -1;                         // last persisted stream version\n\n  // Rebuild from history: empty state folded over past events.\n  static fromHistory(history: AccountEvent[]): BankAccount {\n    const acc = new BankAccount();\n    for (const e of history) { acc.apply(e); acc.version++; }\n    return acc;\n  }\n\n  // Command handler: validate, then RAISE an event (do not mutate directly).\n  withdraw(amount: number): void {\n    if (!this.opened) throw new Error('Account not open');\n    if (amount <= 0) throw new Error('Amount must be positive');\n    if (amount > this.balance) throw new Error('Insufficient funds'); // overdraft rejected\n    this.raise({ type: 'FundsWithdrawn', amount });\n  }\n\n  private raise(e: AccountEvent): void { this.apply(e); this.changes.push(e); }\n\n  // apply/evolve: total, deterministic, NO validation, NO side effects.\n  private apply(e: AccountEvent): void {\n    switch (e.type) {\n      case 'AccountOpened':  this.id = e.accountId; this.opened = true; break;\n      case 'FundsDeposited': this.balance += e.amount; break;\n      case 'FundsWithdrawn': this.balance -= e.amount; break;\n    }\n  }\n\n  getUncommittedChanges(): AccountEvent[] { return this.changes; }\n  markCommitted(): void { this.version += this.changes.length; this.changes = []; }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Never put business validation inside apply(). The apply function replays historical events that were valid under the rules of their time. If you tighten a rule, old events must still fold correctly. Validation belongs only in the command handler that produces new events."
+        }
+      ]
+    },
+    {
+      "id": "event-store",
+      "heading": "The Event Store and Optimistic Concurrency",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The event store is the source of truth. Conceptually it is an append-only log partitioned into streams, one stream per aggregate instance. Each event in a stream has a monotonically increasing version (sequence number). The fundamental write operation is 'append these new events to stream S, but only if the current stream version is exactly the version I read.' That expected-version check is how event-sourced systems get optimistic concurrency control without locks: two concurrent commands that both read version 7 will both try to append at version 8, and exactly one wins; the loser gets a concurrency exception and must reload and retry."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- A minimal relational event store. (UUID, BIGINT, JSONB types vary by engine.)\nCREATE TABLE events (\n  stream_id   UUID    NOT NULL,\n  version     BIGINT  NOT NULL,   -- per-stream sequence number, starts at 0\n  event_type  TEXT    NOT NULL,\n  payload     JSONB   NOT NULL,\n  metadata    JSONB   NOT NULL,   -- correlation id, causation id, timestamp, schema version\n  global_seq  BIGSERIAL,          -- total order across all streams, for projections\n  PRIMARY KEY (stream_id, version)\n);\n\n-- Optimistic concurrency: the UNIQUE (stream_id, version) constraint means a\n-- second writer appending at an already-used version fails with a duplicate key,\n-- which the app layer translates into a ConcurrencyException.\nINSERT INTO events (stream_id, version, event_type, payload, metadata)\nVALUES ('a1b2...', 8, 'FundsWithdrawn', '{\"amount\":50}', '{\"schemaVersion\":1}');"
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// Append with optimistic concurrency on the stream version.\npublic class JdbcEventStore {\n\n  public void append(UUID streamId, long expectedVersion, List<EventRecord> newEvents) {\n    try (Connection cx = dataSource.getConnection()) {\n      cx.setAutoCommit(false);\n      long version = expectedVersion; // version of the last event we loaded\n      var ps = cx.prepareStatement(\n        \"INSERT INTO events(stream_id, version, event_type, payload, metadata) VALUES (?,?,?,?,?)\");\n      for (EventRecord e : newEvents) {\n        version++; // next sequential slot\n        ps.setObject(1, streamId);\n        ps.setLong(2, version);\n        ps.setString(3, e.type());\n        ps.setString(4, e.payloadJson());\n        ps.setString(5, e.metadataJson());\n        ps.addBatch();\n      }\n      ps.executeBatch();\n      cx.commit();\n    } catch (SQLException dup) {\n      // PK (stream_id, version) violation => someone else appended first.\n      throw new ConcurrencyException(\n        \"Stream \" + streamId + \" was modified concurrently; reload and retry\", dup);\n    }\n  }\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "The global_seq column gives a total order across all streams. Projections subscribe to this global ordering, processing events in the order they were committed, so that read models are built deterministically. EventStoreDB, Kafka with per-aggregate keys, and relational stores like the one above all provide some flavor of per-stream ordering for concurrency plus a global feed for projections."
+        }
+      ]
+    },
+    {
+      "id": "snapshots",
+      "heading": "Snapshots: Performance Without Sacrificing the Log",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Folding an entire history on every load is fine for streams of tens or hundreds of events. For long-lived aggregates with tens of thousands of events, replay from zero becomes a latency problem. Snapshots are the standard remedy: periodically serialize the current folded state along with the version it represents, and store it separately. To load, fetch the latest snapshot, then fold only the events after the snapshot's version. The event log remains the source of truth; the snapshot is a disposable cache that can always be rebuilt by replay."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Take a snapshot every N events (for example every 100), or on a time/size heuristic — not on every write, which would defeat the purpose.",
+            "A snapshot stores {aggregateId, version, serializedState}. Loading folds events strictly greater than the snapshot version.",
+            "Snapshots are derived, not authoritative: if the snapshot format changes or a snapshot is corrupted, delete it and rebuild from events.",
+            "Snapshot schema versioning matters: a stale snapshot deserialized into a changed state shape will break. Tag snapshots with a schema version and discard incompatible ones."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Reach for snapshots only when a specific aggregate's replay cost is measurably hurting latency. Most aggregates never need them. Premature snapshotting adds a second persistence concern for no benefit."
+        }
+      ]
+    },
+    {
+      "id": "cqrs-core",
+      "heading": "CQRS: Separating the Write and Read Models",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "CQRS splits the system along the command/query line. The command side accepts commands (imperative intentions: PlaceOrder, CancelReservation), runs them through the domain model — typically DDD aggregates that enforce invariants inside a consistency boundary — and persists the result. The query side serves queries from read models that are denormalized, pre-joined, and shaped exactly for specific screens or API responses. Crucially, the read model carries no business logic; it is a cache of answers."
+        },
+        {
+          "type": "table",
+          "headers": ["Aspect", "Write model (command side)", "Read model (query side)"],
+          "rows": [
+            ["Purpose", "Enforce invariants, accept changes", "Answer queries fast"],
+            ["Shape", "Normalized aggregates / consistency boundary", "Denormalized projections / documents"],
+            ["Source of truth", "Yes (or the event store is)", "No — fully derived, disposable"],
+            ["Optimized for", "Correctness and transactions", "Read latency and throughput"],
+            ["Store", "Relational / event store", "Document DB, search index, cache, SQL view"],
+            ["Consistency", "Strong within an aggregate", "Eventually consistent with the write side"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "When CQRS is combined with Event Sourcing, the read models are projections built by subscribing to the event stream. A projection handler receives each event and updates one or more read models. This is where the two patterns reinforce each other: the event log is the perfect, ordered, replayable feed for keeping any number of read models up to date, and you can add a new read model later by replaying history through a new projection."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// A projection handler that maintains a denormalized read model for an account list.\n// The read model is a flat document optimized for a dashboard query.\ninterface AccountSummaryRow { accountId: string; owner: string; balance: number; lastActivity: string; }\n\nclass AccountSummaryProjection {\n  constructor(private readonly db: ReadModelStore<AccountSummaryRow>) {}\n\n  // Called once per event, in global commit order.\n  async handle(streamId: string, event: AccountEvent, occurredAt: string): Promise<void> {\n    switch (event.type) {\n      case 'AccountOpened':\n        await this.db.upsert({ accountId: streamId, owner: event.owner, balance: 0, lastActivity: occurredAt });\n        break;\n      case 'FundsDeposited': {\n        const row = await this.db.get(streamId);\n        await this.db.upsert({ ...row, balance: row.balance + event.amount, lastActivity: occurredAt });\n        break;\n      }\n      case 'FundsWithdrawn': {\n        const row = await this.db.get(streamId);\n        await this.db.upsert({ ...row, balance: row.balance - event.amount, lastActivity: occurredAt });\n        break;\n      }\n    }\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Because read models are fully derived and disposable, a corrupted or buggy projection is a recoverable incident: fix the handler, drop the read model, and replay events from the start to rebuild it. This rebuild-from-source capability is one of the strongest operational advantages of ES + CQRS."
+        }
+      ]
+    },
+    {
+      "id": "eventual-consistency",
+      "heading": "Eventual Consistency and Its UX Consequences",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The moment the read model is updated asynchronously from the write side, there is a window during which a write has committed but the projection has not yet caught up. This is eventual consistency, and it is the single most underestimated operational and UX consequence of CQRS. A user who submits a command and immediately queries the read model may not see their own change — the dreaded read-after-write anomaly. Pretending this window does not exist leads to confusing, seemingly-buggy interfaces."
+        },
+        {
+          "type": "heading",
+          "text": "Strategies to handle the read-after-write gap"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Return the result from the command: the command side already knows the new state, so respond with it (or the new version number) instead of forcing an immediate query round-trip.",
+            "Optimistic UI: update the client-side view immediately from the command result and reconcile when the projection confirms.",
+            "Version tokens / read-your-writes: the command returns the new aggregate version; the client passes it to subsequent queries, which wait until the projection has reached at least that version before responding.",
+            "Poll or subscribe: the UI shows a 'processing' state and uses websockets/SSE or short polling until the projection reflects the change.",
+            "Query the write model for the just-changed entity: for the specific 'show me what I just did' case, read from the strongly consistent command side rather than the eventually consistent projection."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Eventual consistency is a product decision as much as a technical one. Some flows (a bank transfer confirmation) cannot tolerate the user not seeing their action; others (a 'likes' counter) can lag by seconds with no harm. Decide per use case which side to read from."
+        }
+      ]
+    },
+    {
+      "id": "versioning",
+      "heading": "Event Versioning and Upcasting",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Events live forever, which means the code that reads them must understand every version of every event that has ever been written. Business requirements change: a field is added, renamed, split, or its meaning shifts. You cannot rewrite old events in place (they are immutable facts, and rewriting history defeats the entire point). Instead you evolve through versioned event schemas and upcasting — transforming an old event shape into the current shape at load time, before it reaches the aggregate or projection."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Additive changes are easiest: add an optional field with a sensible default; old events simply lack it.",
+            "Renames and structural changes need an upcaster: a function that maps v1 -> v2 of an event type during deserialization.",
+            "Chain upcasters: v1 -> v2 -> v3, so you only ever write the next step, not a combinatorial set of converters.",
+            "Tag every stored event with a schemaVersion in metadata so the upcasting pipeline knows where to start.",
+            "Avoid 'weak schema' drift: prefer explicit versioned types over silently reinterpreting JSON, which causes subtle replay bugs."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Upcasting: transform legacy event shapes into the current shape at load time.\n// v1 had a single 'name' field; v2 splits it into firstName/lastName.\ntype StoredEvent = { type: string; schemaVersion: number; data: any };\n\nfunction upcastAccountOpened(e: StoredEvent): StoredEvent {\n  if (e.type !== 'AccountOpened') return e;\n  let data = e.data;\n  let v = e.schemaVersion;\n  if (v === 1) { // v1 -> v2: split owner name\n    const [first, ...rest] = (data.owner ?? '').split(' ');\n    data = { ...data, firstName: first, lastName: rest.join(' ') };\n    delete data.owner;\n    v = 2;\n  }\n  // future steps chain here: if (v === 2) { ...; v = 3; }\n  return { ...e, schemaVersion: v, data };\n}"
+        }
+      ]
+    },
+    {
+      "id": "idempotency-outbox",
+      "heading": "Idempotency, Deduplication, and the Transactional Outbox",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Distributed event delivery is at-least-once in practice: projections, integration consumers, and message brokers can and will redeliver the same event after a crash or retry. Therefore every event handler must be idempotent — processing the same event twice must produce the same result as processing it once. The standard technique is to track the last processed position (the global sequence number or per-stream version) per projection, and skip any event whose position is less than or equal to what has already been applied. For external side effects (sending an email, charging a card), deduplicate on a stable event id."
+        },
+        {
+          "type": "paragraph",
+          "text": "A subtler problem is the dual-write: when a command both appends to the event store and needs to publish an integration event to a broker, doing those as two separate writes risks one succeeding and the other failing, leaving the system inconsistent. The transactional outbox pattern solves this. The aggregate's events (or messages derived from them) are written to an outbox table in the same database transaction as the state change. A separate relay process reads the outbox and publishes to the broker, marking rows as sent. Because the write and the outbox insert share one transaction, they are atomic; the relay provides at-least-once delivery, which the idempotent consumers tolerate."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- Transactional outbox: events and outbox rows committed atomically.\nBEGIN;\n  INSERT INTO events (stream_id, version, event_type, payload, metadata)\n  VALUES ('a1b2...', 8, 'FundsWithdrawn', '{\"amount\":50}', '{\"eventId\":\"e-901\"}');\n\n  INSERT INTO outbox (id, aggregate_id, event_type, payload, status)\n  VALUES ('e-901', 'a1b2...', 'FundsWithdrawn', '{\"amount\":50}', 'PENDING');\nCOMMIT;\n-- A relay polls: SELECT * FROM outbox WHERE status='PENDING' ORDER BY id;\n-- publish to broker, then UPDATE outbox SET status='SENT' WHERE id=...;\n-- Consumers dedupe on id (eventId) so redelivery is harmless."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Idempotent consumers + transactional outbox is the canonical recipe for reliable event propagation. Together they convert the impossible 'exactly-once delivery' into the achievable 'at-least-once delivery with effectively-once processing'."
+        }
+      ]
+    },
+    {
+      "id": "ddd-aggregates",
+      "heading": "Combining With DDD Aggregates",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Event Sourcing and DDD aggregates are a natural pairing. An aggregate is a cluster of objects treated as a single unit for data changes, with one aggregate root that enforces all invariants. In an event-sourced system, the aggregate is exactly the unit of a stream: one stream per aggregate instance, and the aggregate's invariants are enforced strongly and transactionally within that single stream. The optimistic-concurrency append guarantees that no two commands can produce conflicting events on the same aggregate without one of them being rejected."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Keep aggregates small: the consistency boundary determines transaction scope and concurrency contention. A bloated aggregate becomes a hotspot.",
+            "Cross-aggregate consistency is eventual, achieved with events and process managers/sagas — never by spanning a transaction across two aggregates.",
+            "Commands target exactly one aggregate; reactions that touch other aggregates are driven by the events that aggregate emits.",
+            "The aggregate decides which events to emit; it must never be coupled to the read models or projections that later consume them."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "If you find yourself needing a transaction that spans two aggregates, your aggregate boundaries are probably wrong. Redraw the boundary or accept eventual consistency between them via a saga."
+        }
+      ]
+    },
+    {
+      "id": "example-flow",
+      "heading": "End-to-End Example: A Withdrawal",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Putting the pieces together, here is the full lifecycle of a single Withdraw command flowing through an event-sourced, CQRS system, from HTTP request to read model. This is the concrete shape of what the abstract patterns above produce in practice."
+        },
+        {
+          "type": "list",
+          "items": [
+            "1. A Withdraw command arrives. The command handler loads the BankAccount by replaying its stream (or snapshot + tail).",
+            "2. The aggregate validates: account open, amount positive, sufficient funds. Overdraft is rejected here, in the command handler.",
+            "3. If valid, the aggregate raises a FundsWithdrawn event into its uncommitted changes and applies it to in-memory state.",
+            "4. The store appends the new event at expectedVersion+1; a concurrency exception triggers reload-and-retry.",
+            "5. In the same transaction, an outbox row is written for downstream propagation.",
+            "6. The command responds with the new balance/version so the client need not query the lagging read model.",
+            "7. Asynchronously, the projection handler consumes FundsWithdrawn in global order and updates the AccountSummary read model.",
+            "8. Later queries hit the denormalized read model and return instantly, eventually consistent with step 4."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Command handler tying the aggregate to the store with retry on conflict.\nasync function handleWithdraw(store: EventStore, cmd: { accountId: string; amount: number }) {\n  for (let attempt = 0; attempt < 3; attempt++) {\n    const history = await store.readStream(cmd.accountId);   // events (or snapshot + tail)\n    const account = BankAccount.fromHistory(history);        // fold to current state\n    account.withdraw(cmd.amount);                            // validate + raise event\n    try {\n      await store.append(cmd.accountId, account.version, account.getUncommittedChanges());\n      account.markCommitted();\n      return { ok: true, version: account.version };          // return result, avoid read-after-write\n    } catch (e) {\n      if (e instanceof ConcurrencyException) continue;        // reload and retry\n      throw e;\n    }\n  }\n  throw new Error('Too much contention on account ' + cmd.accountId);\n}"
+        }
+      ]
+    },
+    {
+      "id": "mistakes",
+      "heading": "Common Mistakes and Anti-Patterns",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "These patterns have a high ceiling and a high floor. The following mistakes recur in teams adopting ES/CQRS, and most of them stem from importing the patterns without importing the discipline they require."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Treating CQRS and ES as one inseparable pattern, and adopting both when only one (or neither) is needed.",
+            "Putting validation or side effects in the apply/evolve function, breaking deterministic replay of old events.",
+            "Designing events as CRUD-style state dumps (AccountUpdated with the whole row) instead of meaningful domain facts.",
+            "Ignoring eventual consistency in the UX, producing interfaces where users do not see their own just-submitted changes.",
+            "Dual-writing to the event store and a broker without a transactional outbox, creating lost or phantom integration events.",
+            "Non-idempotent projection handlers that double-apply on redelivery, corrupting balances and counters.",
+            "Making aggregates too large, turning a single stream into a global contention hotspot.",
+            "No plan for event schema evolution, so the first rename to a production event becomes a crisis.",
+            "Mutating or deleting historical events to 'fix' data, destroying the audit guarantee that justified the pattern."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The deadliest mistake is adopting ES/CQRS for a CRUD-shaped domain because it is fashionable. You inherit eventual consistency, projection management, versioning, and operational complexity in exchange for benefits the domain does not need."
+        }
+      ]
+    },
+    {
+      "id": "bestpractice",
+      "heading": "Best Practices and When It Is Overkill",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The senior judgment call is not 'how do I implement event sourcing?' but 'should this bounded context use it at all?' Apply the patterns surgically, per bounded context, where the domain pays for the complexity. A single system commonly has an event-sourced core (the ledger, the order lifecycle) and plain CRUD elsewhere (user preferences, reference data)."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Justify each pattern independently. Ask: do I need an audit log of facts (ES)? Do my reads and writes truly diverge (CQRS)? If not, do not adopt it.",
+            "Model events as immutable, past-tense domain facts in ubiquitous language; keep them small and intention-revealing.",
+            "Keep aggregates small and the apply function pure; put all rules in command handlers.",
+            "Make every consumer idempotent and use a transactional outbox for cross-boundary propagation.",
+            "Plan event versioning from day one with schemaVersion metadata and an upcasting pipeline.",
+            "Treat read models as disposable caches; build tooling to drop and replay them.",
+            "Surface eventual consistency deliberately in the UX (return command results, version tokens, optimistic UI).",
+            "Use snapshots only when replay latency is a measured problem."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": ["Signal", "Likely overkill", "Likely worth it"],
+          "rows": [
+            ["Audit requirement", "Nice-to-have", "Regulatory / legal mandate"],
+            ["Temporal queries", "Never asked for", "Core to the business"],
+            ["Read/write divergence", "One model fits both", "Many denormalized read shapes"],
+            ["Team maturity", "New to distributed systems", "Comfortable with async consistency"],
+            ["Domain volatility", "Simple, stable CRUD", "Rich, evolving domain logic"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "A healthy default: start CRUD, extract a CQRS read model when reads demand it, and introduce event sourcing only in the specific bounded contexts where the audit/temporal value is real. Complexity should follow demonstrated need, not anticipation."
+        }
+      ]
+    },
+    {
+      "id": "note-terminology",
+      "heading": "Terminology Note: Orthogonality Recap",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Because the conflation is so common, it bears repeating in isolation. There are four valid quadrants, and all four exist in real systems."
+        },
+        {
+          "type": "table",
+          "headers": ["Combination", "What it looks like"],
+          "rows": [
+            ["CRUD, no CQRS, no ES", "Classic single-model app over a relational DB"],
+            ["CQRS, no ES", "Separate read models (e.g. SQL views or a search index) over a state-stored write model"],
+            ["ES, no CQRS", "Event-sourced aggregates whose reads are served by replaying/snapshotting the same store"],
+            ["ES + CQRS", "Event-sourced write side feeding asynchronous projections into separate read models"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "If an interviewer says 'event sourcing requires CQRS' or 'CQRS means you have an event store', that is the cue to gently correct the conflation — it is one of the clearest signals of senior-level understanding."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "command-to-read-flow",
+      "title": "Command to Read Model Flow (ES + CQRS)",
+      "type": "mermaid",
+      "content": "flowchart LR\n  C[Command] --> H[Command Handler]\n  H --> A[Aggregate validates and raises events]\n  A --> ES[(Event Store append with expected version)]\n  ES --> P[Projection Handlers]\n  P --> RM[(Denormalized Read Models)]\n  Q[Query] --> RM\n  ES -.audit and replay.-> P"
+    },
+    {
+      "id": "write-then-read-sequence",
+      "title": "Write Then Eventually-Consistent Read",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n  participant U as User\n  participant CMD as Command Side\n  participant STORE as Event Store\n  participant PROJ as Projection\n  participant RM as Read Model\n  U->>CMD: Withdraw(amount)\n  CMD->>STORE: append FundsWithdrawn at v8\n  STORE-->>CMD: ok v8\n  CMD-->>U: result balance and version 8\n  STORE-->>PROJ: deliver event v8 async\n  PROJ->>RM: update summary row\n  U->>RM: query later\n  RM-->>U: eventually consistent view"
+    },
+    {
+      "id": "snapshot-replay-ascii",
+      "title": "Loading an Aggregate With a Snapshot",
+      "type": "ascii",
+      "content": "stream: [e0 e1 e2 ... e99 | SNAPSHOT@v99 | e100 e101 e102]\n                                  |              \\\n                          load latest snapshot   fold only e100..e102\n                                  |              /\n                          state@v99  ---fold-->  current state@v102\n\nfull replay path (fallback): empty -> fold e0..e102 -> current state"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-cqrs-requires-es",
+      "question": "Does CQRS require Event Sourcing, or vice versa?",
+      "answer": "No, neither requires the other; they are orthogonal patterns. CQRS is about separating the model used for writes from the model used for reads, and you can implement it over a plain state-stored relational database using SQL views or a separately maintained read table with no events at all. Event Sourcing is about persisting state as an append-only log of immutable events and is the source of truth, regardless of whether reads use a separate model. They compose well because an event log is an ideal feed for building read-model projections, which is why they are frequently used together. But you can have CQRS without ES, ES without CQRS, both, or neither. Conflating them is the most common conceptual error in this space and correcting it is a strong senior signal.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["cqrs", "event-sourcing", "fundamentals"],
+      "followUps": ["Give an example of CQRS without event sourcing.", "Why do they pair so naturally?"]
+    },
+    {
+      "id": "q-read-after-write",
+      "question": "A user updates a record then immediately queries it and doesn't see the change. What's happening and how do you fix it?",
+      "answer": "This is the read-after-write anomaly caused by eventual consistency between the write side and an asynchronously updated read model. The command committed successfully, but the projection that maintains the read model has not yet processed the event, so the query returns stale data. There are several mitigations. Return the new state or version directly from the command response so the client need not query the lagging projection. Use a version token (read-your-writes): the command returns the new version and queries wait until the projection has caught up to at least that version. Use optimistic UI to render the change immediately and reconcile later, or read the just-changed entity from the strongly consistent write model for that specific case. The right choice is a product decision per flow based on how much staleness the UX can tolerate.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["eventual-consistency", "cqrs", "ux"],
+      "followUps": ["How would a version token actually be threaded through the client?", "When is it acceptable to just let the read lag?"]
+    },
+    {
+      "id": "q-event-evolution",
+      "question": "How do you evolve an event's schema when events are immutable and live forever?",
+      "answer": "You never rewrite stored events; instead you introduce a new version of the event type and upcast old events into the current shape at load time. Additive changes are simplest: add an optional field with a default, and old events simply lack it. For renames or structural changes you write an upcaster, a pure function mapping v1 to v2 of that event type during deserialization, and you chain upcasters (v1 to v2 to v3) so each release only adds the next step. Every stored event carries a schemaVersion in its metadata so the upcasting pipeline knows where to begin. This keeps the immutable log intact while allowing the domain model to evolve, and it means the deserialization layer, not the aggregate, owns backward compatibility.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["event-versioning", "upcasting", "schema-evolution"],
+      "followUps": ["What about an event type that should be split into two?", "How do you test upcasters against historical data?"]
+    },
+    {
+      "id": "q-gdpr-delete",
+      "question": "How do you delete a user's personal data (GDPR right to erasure) from an immutable, append-only event log?",
+      "answer": "This is a genuine tension: append-only immutability versus a legal requirement to erase. The standard technique is crypto-shredding: encrypt personal data in events with a per-subject key, and to erase the subject, destroy that key, rendering the encrypted payloads permanently unreadable while leaving the event structure and non-personal facts intact. Alternatives include storing personal data outside the event store (events hold a reference, and the referenced record is deletable) or rewriting/compacting the affected streams in a controlled, audited migration that replaces events with redacted versions. Each has trade-offs: crypto-shredding preserves the log's shape and ordering but requires key management discipline; external storage weakens the single-source-of-truth property; stream rewriting violates strict immutability and must be exceptional and logged. You design for erasure up front because retrofitting it is painful.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["gdpr", "event-sourcing", "data-privacy"],
+      "followUps": ["What are the operational risks of crypto-shredding?", "How does deletion interact with already-built projections?"]
+    },
+    {
+      "id": "q-what-is-es",
+      "question": "What is Event Sourcing in one precise definition?",
+      "answer": "Event Sourcing is a persistence pattern where the source of truth for an entity is an ordered, append-only sequence of immutable domain events describing everything that has happened to it, rather than its current state. Current state is derived on demand by folding (left-reducing) those events through an apply function. Nothing is ever updated or deleted in place; new facts are only appended. Because the full history is retained, you can reconstruct the state at any past point in time and audit exactly how the current state came to be. The trade-off is added complexity in querying, schema evolution, and consistency, paid in exchange for a complete temporal record.",
+      "difficulty": "junior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["event-sourcing", "fundamentals"],
+      "followUps": ["How is current state computed from events?", "Why must events be immutable?"]
+    },
+    {
+      "id": "q-optimistic-concurrency",
+      "question": "How does an event-sourced system handle two concurrent commands on the same aggregate?",
+      "answer": "Through optimistic concurrency control on the stream version. When a command loads an aggregate, it records the version of the last event it read. When it appends new events, it asserts the expected version, and the event store accepts the append only if the stream is still at that version, typically enforced by a unique constraint on (stream_id, version) or a compare-and-set. If two commands both read version 7 and both attempt to append at version 8, exactly one succeeds; the other gets a concurrency exception. The losing command must reload the now-updated stream, re-validate its business rule against fresh state, and retry. This gives lock-free serialization of writes per aggregate, which is why keeping aggregates appropriately small matters for contention.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["concurrency", "event-store", "aggregates"],
+      "followUps": ["Why retry rather than just fail?", "How does aggregate size affect contention?"]
+    },
+    {
+      "id": "q-snapshots",
+      "question": "What are snapshots and when should you use them?",
+      "answer": "A snapshot is a serialized copy of an aggregate's current folded state together with the version it represents, stored separately from the event log as a performance optimization. To load an aggregate you fetch the latest snapshot, then fold only the events after the snapshot's version, avoiding a full replay from the beginning. Snapshots are derived and disposable: the event log remains the source of truth and a snapshot can always be discarded and rebuilt by replay. You should introduce them only when a specific aggregate's replay cost is measurably hurting load latency, typically for long-lived streams with many thousands of events, and you take them periodically (every N events) rather than on every write. Snapshots also need their own schema versioning so a stale serialization format does not break loading.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["snapshots", "performance", "event-sourcing"],
+      "followUps": ["How often should you snapshot?", "What happens if a snapshot's format changes?"]
+    },
+    {
+      "id": "q-projection-rebuild",
+      "question": "How do you fix a bug in a read model, and why is this an advantage of ES + CQRS?",
+      "answer": "Because read models are fully derived from the event log and carry no authoritative data, you fix the projection handler's code, drop or truncate the affected read model, and replay the events from the beginning (or from a checkpoint) to rebuild it correctly. No data migration of the source of truth is needed because the truth is the immutable event log, which was never wrong. This rebuild-from-source capability also lets you introduce entirely new read models later by replaying existing history through a new projection, answering business questions that did not exist when the data was first written. It turns what would be a risky production data migration in a CRUD system into a routine, repeatable operation, which is one of the strongest practical arguments for the combined pattern.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["projections", "read-model", "operations"],
+      "followUps": ["How do you rebuild without downtime?", "How do you checkpoint a projection's progress?"]
+    },
+    {
+      "id": "q-idempotency",
+      "question": "Why must projection handlers be idempotent, and how do you achieve it?",
+      "answer": "Event delivery in distributed systems is at-least-once: after a crash, retry, or broker redelivery, the same event can be delivered to a handler more than once. If the handler is not idempotent, double-processing corrupts the read model, for example double-incrementing a balance or a counter. To achieve idempotency, track the last processed position per projection, the global sequence number or per-stream version, and skip any event whose position is less than or equal to what has already been applied. For external side effects like sending an email or charging a card, deduplicate on a stable event id stored in a processed-ids table. Designing handlers to be idempotent is what lets you tolerate at-least-once delivery and still get effectively-once processing.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["idempotency", "deduplication", "projections"],
+      "followUps": ["What's the difference between deduplicating reads vs side effects?", "How do you store the processed position atomically with the update?"]
+    },
+    {
+      "id": "q-outbox",
+      "question": "What problem does the transactional outbox solve in an event-sourced system?",
+      "answer": "It solves the dual-write problem: when a command must both persist its events and publish an integration message to a broker, doing those as two independent writes risks one succeeding and the other failing, leaving the system inconsistent (a committed state change with no published event, or vice versa). The outbox pattern writes the outgoing messages to an outbox table within the same database transaction as the state change, so they commit atomically. A separate relay process then reads the outbox and publishes to the broker, marking rows as sent, providing at-least-once delivery. Combined with idempotent consumers that deduplicate on event id, this yields reliable propagation without requiring distributed transactions across the database and the broker, which are operationally fragile and often unsupported.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["transactional-outbox", "messaging", "consistency"],
+      "followUps": ["Why not use a distributed two-phase commit instead?", "How does change-data-capture relate to the outbox?"]
+    },
+    {
+      "id": "q-aggregate-boundary",
+      "question": "How do DDD aggregate boundaries relate to event streams and consistency?",
+      "answer": "In an event-sourced system the aggregate is the unit of a stream: one stream per aggregate instance, and the aggregate root enforces all invariants strongly and transactionally within that single stream via optimistic-concurrency appends. Consistency is strong inside an aggregate boundary and only eventual across aggregate boundaries. This means a single command should target exactly one aggregate, and any reaction that must change another aggregate is driven asynchronously by the events the first aggregate emits, coordinated by a saga or process manager. If you find yourself wanting a transaction spanning two aggregates, your boundaries are likely drawn wrong. Aggregate size is also a performance concern: a large aggregate becomes a contention hotspot because all commands on it serialize through one stream's version.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["ddd", "aggregates", "consistency"],
+      "followUps": ["How do sagas coordinate across aggregates?", "What signals an aggregate is too big?"]
+    },
+    {
+      "id": "q-overkill",
+      "question": "When are Event Sourcing and CQRS overkill, and what would you do instead?",
+      "answer": "They are overkill for CRUD-shaped domains where there is no real demand for an audit trail, temporal queries, or divergent read and write models, which describes the majority of business applications. Adopting them there imports eventual consistency, projection management, event versioning, idempotency, and operational tooling in exchange for benefits the domain never uses, slowing the team and adding bug surface. Instead, start with CRUD over a well-modeled relational schema and read replicas. Extract a CQRS read model only when reads genuinely demand a different shape or scale, which you can do without any events. Introduce event sourcing only in the specific bounded contexts where the audit or temporal value is concrete, such as a financial ledger or an order lifecycle, while keeping the rest of the system CRUD. Complexity should follow demonstrated need, not architectural fashion.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["trade-offs", "architecture", "pragmatism"],
+      "followUps": ["How do you mix ES and CRUD in one system cleanly?", "What's the cheapest first step toward CQRS?"]
+    },
+    {
+      "id": "q-event-design",
+      "question": "What distinguishes a well-designed domain event from a poorly designed one?",
+      "answer": "A well-designed event is an immutable, past-tense fact named in the business's ubiquitous language that captures intent, such as FundsWithdrawn or OrderShipped, and contains exactly the data needed to describe what happened. A poorly designed event is a CRUD-style state dump like AccountUpdated carrying the entire row, which loses the meaning of the change, couples consumers to the full schema, and makes projections and audits harder to reason about. Good events are fine-grained enough to express distinct business outcomes but not so granular that they leak implementation detail. They should be self-describing, versioned for evolution, and free of references to read models or downstream consumers, since the aggregate that emits them must not know who will read them. The litmus test is whether a domain expert would recognize the event as something meaningful that occurred.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["event-design", "ddd", "modeling"],
+      "followUps": ["Why is AccountUpdated an anti-pattern?", "How granular should events be?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-bankaccount-aggregate",
+      "title": "Implement an Event-Sourced BankAccount Aggregate",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "prompt": "Implement an event-sourced BankAccount aggregate. It must support opening an account, depositing, and withdrawing funds. Withdrawals that would overdraw the account must be rejected by the command handler (not by the apply function). The aggregate must be rebuildable purely from its event history via a fold, expose its uncommitted events for the store to persist, and track its stream version for optimistic concurrency. Keep the apply function pure and deterministic with no validation or side effects.",
+      "hints": [
+        "Separate command methods (validate, then raise an event) from the apply/evolve method (mutate in-memory state only).",
+        "Provide a static fromHistory(events) that starts from an empty aggregate and folds every event, incrementing version per event.",
+        "Track uncommitted changes in a list; the event store will append them and you then clear the list and advance the version."
+      ],
+      "solutionCode": "type DomainEvent =\n  | { type: 'AccountOpened'; accountId: string; owner: string }\n  | { type: 'FundsDeposited'; amount: number }\n  | { type: 'FundsWithdrawn'; amount: number };\n\nclass BankAccount {\n  private accountId = '';\n  private owner = '';\n  private balance = 0;\n  private opened = false;\n  private changes: DomainEvent[] = [];\n  version = -1; // -1 means no events yet persisted\n\n  // --- Reconstruction from history (pure fold) ---\n  static fromHistory(history: DomainEvent[]): BankAccount {\n    const acc = new BankAccount();\n    for (const e of history) {\n      acc.apply(e);\n      acc.version++;\n    }\n    return acc;\n  }\n\n  // --- Command handlers: validate, then raise events ---\n  static open(accountId: string, owner: string): BankAccount {\n    if (!accountId) throw new Error('accountId required');\n    if (!owner) throw new Error('owner required');\n    const acc = new BankAccount();\n    acc.raise({ type: 'AccountOpened', accountId, owner });\n    return acc;\n  }\n\n  deposit(amount: number): void {\n    if (!this.opened) throw new Error('Account not open');\n    if (amount <= 0) throw new Error('Amount must be positive');\n    this.raise({ type: 'FundsDeposited', amount });\n  }\n\n  withdraw(amount: number): void {\n    if (!this.opened) throw new Error('Account not open');\n    if (amount <= 0) throw new Error('Amount must be positive');\n    if (amount > this.balance) throw new Error('Insufficient funds'); // overdraft rejected here\n    this.raise({ type: 'FundsWithdrawn', amount });\n  }\n\n  // --- Event raising and applying ---\n  private raise(e: DomainEvent): void {\n    this.apply(e);\n    this.changes.push(e);\n  }\n\n  // Pure, total, deterministic. No validation, no side effects.\n  private apply(e: DomainEvent): void {\n    switch (e.type) {\n      case 'AccountOpened':\n        this.accountId = e.accountId;\n        this.owner = e.owner;\n        this.opened = true;\n        break;\n      case 'FundsDeposited':\n        this.balance += e.amount;\n        break;\n      case 'FundsWithdrawn':\n        this.balance -= e.amount;\n        break;\n    }\n  }\n\n  // --- Persistence support ---\n  getUncommittedChanges(): DomainEvent[] {\n    return [...this.changes];\n  }\n\n  markChangesAsCommitted(): void {\n    this.version += this.changes.length;\n    this.changes = [];\n  }\n\n  getBalance(): number {\n    return this.balance;\n  }\n}\n\n// --- Example usage ---\nconst account = BankAccount.open('acc-1', 'Ada Lovelace');\naccount.deposit(100);\naccount.withdraw(30);\nconsole.log(account.getBalance()); // 70\n// Rebuild from history reproduces identical state:\nconst rebuilt = BankAccount.fromHistory(account.getUncommittedChanges());\nconsole.log(rebuilt.getBalance()); // 70",
+      "solutionLanguage": "typescript",
+      "explanation": "The solution cleanly separates the two responsibilities of an event-sourced aggregate. Command methods (open, deposit, withdraw) contain all business validation and, when valid, call raise to record a new event; the static open is a factory because the AccountOpened event creates the aggregate. The private apply method is the evolve function: it is pure, total, and deterministic, mutating only in-memory state with no validation or side effects, which is essential because it runs both for new commands and when replaying historical events during fromHistory. The overdraft rule lives exclusively in withdraw, never in apply, so tightening or relaxing the rule later cannot retroactively break the fold of old events. The version field starts at -1 and is incremented per applied event during reconstruction, giving the store a value to assert for optimistic concurrency on the next append; getUncommittedChanges exposes the new events for persistence and markChangesAsCommitted advances the version and clears the buffer once the store confirms the append. The example demonstrates the core invariant of event sourcing: folding the event history reproduces exactly the same state as executing the original commands, proving state is a deterministic function of events.",
+      "relatedTopic": "event-sourcing-cqrs"
+    },
+    {
+      "id": "ch-projection-readmodel",
+      "title": "Build a Read Model From an Event Stream",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "prompt": "Implement an idempotent projection that builds a denormalized AccountSummary read model by consuming a stream of account events delivered in global commit order. Each summary row holds accountId, owner, balance, and the last processed global sequence number. The projection must be safe against at-least-once redelivery: re-processing an already-applied event must not corrupt the balance. Provide a rebuild capability that drops the read model and replays the full event stream from scratch.",
+      "hints": [
+        "Store the last processed global sequence number on each row (or in a checkpoint) and skip any event whose seq is not greater than it.",
+        "Make handle(seq, streamId, event) the only mutation path; upsert the row and advance its checkpoint together.",
+        "Rebuild = clear the store, then feed every historical event through the same handle method in order."
+      ],
+      "solutionCode": "interface AccountSummary {\n  accountId: string;\n  owner: string;\n  balance: number;\n  lastSeq: number; // highest global seq applied to this row\n}\n\ntype AccountEvent =\n  | { type: 'AccountOpened'; accountId: string; owner: string }\n  | { type: 'FundsDeposited'; amount: number }\n  | { type: 'FundsWithdrawn'; amount: number };\n\ninterface StoredEvent { seq: number; streamId: string; event: AccountEvent; }\n\n// Simple in-memory read-model store (swap for a document DB in production).\nclass ReadModelStore {\n  private rows = new Map<string, AccountSummary>();\n  get(id: string): AccountSummary | undefined { return this.rows.get(id); }\n  put(row: AccountSummary): void { this.rows.set(row.accountId, row); }\n  all(): AccountSummary[] { return [...this.rows.values()]; }\n  clear(): void { this.rows.clear(); }\n}\n\nclass AccountSummaryProjection {\n  constructor(private readonly store: ReadModelStore) {}\n\n  // Idempotent: skip events already applied to this row.\n  handle(seq: number, streamId: string, event: AccountEvent): void {\n    const existing = this.store.get(streamId);\n    if (existing && seq <= existing.lastSeq) {\n      return; // duplicate / redelivery -> no-op\n    }\n    switch (event.type) {\n      case 'AccountOpened':\n        this.store.put({ accountId: streamId, owner: event.owner, balance: 0, lastSeq: seq });\n        break;\n      case 'FundsDeposited': {\n        const row = this.require(existing, streamId);\n        this.store.put({ ...row, balance: row.balance + event.amount, lastSeq: seq });\n        break;\n      }\n      case 'FundsWithdrawn': {\n        const row = this.require(existing, streamId);\n        this.store.put({ ...row, balance: row.balance - event.amount, lastSeq: seq });\n        break;\n      }\n    }\n  }\n\n  private require(row: AccountSummary | undefined, id: string): AccountSummary {\n    if (!row) throw new Error('Event for unknown account ' + id + ' (stream out of order?)');\n    return row;\n  }\n\n  // Rebuild from scratch: disposable read model replayed from the log.\n  rebuild(allEvents: StoredEvent[]): void {\n    this.store.clear();\n    for (const e of allEvents.sort((a, b) => a.seq - b.seq)) {\n      this.handle(e.seq, e.streamId, e.event);\n    }\n  }\n}\n\n// --- Example usage ---\nconst store = new ReadModelStore();\nconst projection = new AccountSummaryProjection(store);\nconst stream: StoredEvent[] = [\n  { seq: 1, streamId: 'acc-1', event: { type: 'AccountOpened', accountId: 'acc-1', owner: 'Ada' } },\n  { seq: 2, streamId: 'acc-1', event: { type: 'FundsDeposited', amount: 100 } },\n  { seq: 3, streamId: 'acc-1', event: { type: 'FundsWithdrawn', amount: 30 } },\n];\nfor (const e of stream) projection.handle(e.seq, e.streamId, e.event);\nprojection.handle(2, 'acc-1', { type: 'FundsDeposited', amount: 100 }); // redelivery: ignored\nconsole.log(store.get('acc-1')); // { accountId:'acc-1', owner:'Ada', balance:70, lastSeq:3 }\nprojection.rebuild(stream);\nconsole.log(store.get('acc-1')?.balance); // 70 (identical after rebuild)",
+      "solutionLanguage": "typescript",
+      "explanation": "This projection demonstrates the core mechanics of the CQRS read side built from an event log. The AccountSummary row is a denormalized document shaped for queries, carrying no business logic and treated as a disposable cache rather than a source of truth. Idempotency is achieved by storing the highest applied global sequence number (lastSeq) on each row and short-circuiting any event whose seq is not strictly greater, so at-least-once redelivery of an already-processed event becomes a harmless no-op, which the example proves by replaying seq 2 without double-counting the deposit. The handle method is the single mutation path and advances the checkpoint together with the balance update, keeping progress tracking and state change consistent. The rebuild method embodies the operational superpower of ES plus CQRS: because the read model is fully derived, you can clear it and replay the entire ordered history through the same handler to reconstruct it deterministically, which is how you recover from a projection bug or introduce a brand-new read model from existing data. Sorting by seq before replay enforces the global ordering projections rely on, and the require guard surfaces out-of-order or missing-parent events rather than silently corrupting state.",
+      "relatedTopic": "event-sourcing-cqrs"
+    }
+  ],
+  "references": [
+    { "label": "Martin Fowler — Event Sourcing", "url": "https://martinfowler.com/eaaDev/EventSourcing.html" },
+    { "label": "Martin Fowler — CQRS", "url": "https://martinfowler.com/bliki/CQRS.html" },
+    { "label": "Greg Young — CQRS Documents (PDF)", "url": "https://cqrs.files.wordpress.com/2010/11/cqrs_documents.pdf" },
+    { "label": "microservices.io — Event Sourcing pattern", "url": "https://microservices.io/patterns/data/event-sourcing.html" },
+    { "label": "EventStoreDB Documentation", "url": "https://developers.eventstore.com/" },
+    { "label": "Microsoft — CQRS pattern (Azure Architecture Center)", "url": "https://learn.microsoft.com/en-us/azure/architecture/patterns/cqrs" }
+  ]
+}

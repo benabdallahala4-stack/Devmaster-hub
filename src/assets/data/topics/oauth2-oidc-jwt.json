@@ -1,0 +1,599 @@
+{
+  "id": "oauth2-oidc-jwt",
+  "title": "OAuth 2.0, OIDC & JWT",
+  "category": "Backend",
+  "subcategory": "AuthN/AuthZ",
+  "difficulty": "senior",
+  "tags": [
+    "oauth2",
+    "oidc",
+    "jwt",
+    "pkce",
+    "authentication",
+    "authorization",
+    "jwks",
+    "token-security"
+  ],
+  "description": "A staff-level treatment of delegated authorization (OAuth 2.0), federated authentication (OIDC), and the JWT token format that ties them together, with an emphasis on grant selection, rigorous token validation, and the vulnerability classes that defeat naive implementations.",
+  "estReadMinutes": 30,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction: three specs that solve three problems",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "OAuth 2.0, OpenID Connect (OIDC), and JWT are routinely conflated, but they answer different questions. OAuth 2.0 is an authorization framework: it lets a user delegate scoped access to their resources to a third-party application without sharing a password. OIDC is a thin identity layer on top of OAuth 2.0 that answers 'who is this user?' by adding an id_token and a /userinfo endpoint. JWT is merely a compact, signed token format that both specs frequently use to carry claims."
+        },
+        {
+          "type": "paragraph",
+          "text": "Getting the boundaries right matters because each layer has its own threat model. Treat an OAuth access_token as proof of identity and you build an account-takeover bug. Skip the audience check on a JWT and you accept tokens minted for a different service. Store tokens in the wrong place and you trade an XSS bug for full session theft. This topic walks the full stack from grant selection down to byte-level token validation."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Mental model: OAuth = 'what can this client do on the user's behalf' (authorization). OIDC = 'who logged in' (authentication). JWT = 'how the answer is encoded and signed'."
+        }
+      ]
+    },
+    {
+      "id": "why",
+      "heading": "Why delegated authorization exists",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Before OAuth, sharing data between applications meant handing over your password. If a calendar app wanted to read your email contacts, you gave it your Google password, and it could then do anything your account could do, forever, with no way to scope or revoke that access short of changing the password everywhere."
+        },
+        {
+          "type": "paragraph",
+          "text": "OAuth 2.0 replaces that anti-pattern with delegated, scoped, revocable, time-limited access. The user authenticates directly with the authorization server (never the client), and the client receives a narrow access token instead of credentials. The token can be limited to specific scopes (read-only contacts), expires quickly, and can be revoked centrally without touching the user's password."
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "Scoped: a token can grant 'read contacts' without granting 'send mail'.",
+            "Revocable: the authorization server can invalidate a grant centrally.",
+            "Time-limited: access tokens are short-lived; a leak has a small blast radius.",
+            "Auditable: each client and grant is a distinct, traceable entity.",
+            "Password isolation: the client never sees or stores the user's credentials."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The core security win is credential isolation: the resource owner authenticates with the authorization server, and the client only ever holds tokens."
+        }
+      ]
+    },
+    {
+      "id": "roles",
+      "heading": "The four OAuth 2.0 roles",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Every OAuth flow is a conversation between four roles. Mislabeling them is the most common source of confused designs, so it is worth fixing them precisely."
+        },
+        {
+          "type": "table",
+          "headers": ["Role", "Definition", "Concrete example"],
+          "rows": [
+            ["Resource Owner", "The entity (usually a human) that owns the protected data and can grant access to it.", "An end user with a Google account."],
+            ["Client", "The application requesting access on the resource owner's behalf. May be confidential (can keep a secret) or public (cannot).", "A web SPA, a mobile app, a backend service."],
+            ["Authorization Server (AS)", "Authenticates the resource owner and issues tokens after consent. Owns /authorize, /token, JWKS, discovery.", "Google's accounts service, Auth0, Keycloak, Okta."],
+            ["Resource Server (RS)", "Hosts the protected APIs and accepts access tokens, validating them before serving data.", "The Gmail API, your own REST backend."]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "A subtle but important point: 'confidential' vs 'public' client is not about platform, it is about whether the client can store a secret that an attacker cannot extract. A server-side web app is confidential. A SPA running in the browser and a native mobile app are public — their code ships to the user, so any embedded secret is recoverable. This distinction drives grant selection."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "A SPA is a public client even if you put a 'secret' in its config. Anyone can open DevTools and read it. Public clients must use Authorization Code + PKCE, never embed long-lived secrets."
+        }
+      ]
+    },
+    {
+      "id": "grants",
+      "heading": "Grant types and how to choose",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A grant type is the mechanism by which a client obtains a token. The modern guidance (OAuth 2.1 / Security BCP) has collapsed the original menu down to a small set of safe choices."
+        },
+        {
+          "type": "table",
+          "headers": ["Grant", "Use case", "Client type", "Status"],
+          "rows": [
+            ["Authorization Code + PKCE", "Interactive user login for web apps, SPAs, and mobile.", "Public or confidential", "Recommended default"],
+            ["Client Credentials", "Machine-to-machine; no user present. The client IS the resource owner.", "Confidential only", "Recommended for M2M"],
+            ["Refresh Token", "Obtain a new access token without re-prompting the user.", "Public (rotated) or confidential", "Recommended with rotation"],
+            ["Implicit", "Legacy SPA flow returning tokens in the URL fragment.", "Public", "Deprecated"],
+            ["Resource Owner Password (ROPC)", "Client collects the user's username/password directly.", "Confidential", "Deprecated"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Implicit is deprecated because it returns the access token in the URL fragment, where it leaks via browser history, the Referer header, and proxy logs, and it cannot be bound to the requesting client via PKCE. Resource Owner Password is deprecated because it forces the client to handle raw credentials — destroying the credential-isolation property that justifies OAuth in the first place, and making MFA and federated login impossible. The Authorization Code grant with PKCE replaces both."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "If a design proposes Implicit or Password grant in 2026, treat it as a red flag. The only modern answer for user login is Authorization Code + PKCE."
+        }
+      ]
+    },
+    {
+      "id": "pkce",
+      "heading": "Authorization Code + PKCE in detail",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "PKCE (Proof Key for Code Exchange, RFC 7636) hardens the Authorization Code flow against authorization-code interception. The client generates a random code_verifier, hashes it with SHA-256 to form a code_challenge, and sends the challenge on the /authorize request. When it later exchanges the code at /token, it presents the original verifier. The AS recomputes the hash and rejects the exchange unless they match, so a stolen authorization code is useless without the verifier."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "# 1. Client generates a high-entropy code_verifier (43-128 chars, base64url)\ncode_verifier=$(openssl rand -base64 64 | tr -d '\\n=+/' | cut -c1-64)\n\n# 2. Derive code_challenge = BASE64URL(SHA256(code_verifier))\ncode_challenge=$(printf '%s' \"$code_verifier\" \\\n  | openssl dgst -binary -sha256 \\\n  | openssl base64 | tr '+/' '-_' | tr -d '=')\n\n# 3. Browser redirect to the authorization endpoint\n# GET https://as.example.com/authorize?\n#   response_type=code&\n#   client_id=spa-web&\n#   redirect_uri=https://app.example.com/callback&\n#   scope=openid%20profile%20api.read&\n#   state=xyz789&            # CSRF protection, echoed back\n#   code_challenge=$code_challenge&\n#   code_challenge_method=S256"
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "# 4. AS redirects back with a one-time code (and the same state)\n# https://app.example.com/callback?code=AUTH_CODE_123&state=xyz789\n\n# 5. Client exchanges the code at the token endpoint, proving possession\n#    of the verifier. A public SPA sends NO client_secret here.\ncurl -X POST https://as.example.com/token \\\n  -H 'Content-Type: application/x-www-form-urlencoded' \\\n  -d 'grant_type=authorization_code' \\\n  -d 'code=AUTH_CODE_123' \\\n  -d 'redirect_uri=https://app.example.com/callback' \\\n  -d 'client_id=spa-web' \\\n  -d \"code_verifier=$code_verifier\"\n\n# 6. Successful token response\n# {\n#   \"access_token\": \"eyJhbGci...\",\n#   \"token_type\": \"Bearer\",\n#   \"expires_in\": 300,\n#   \"refresh_token\": \"v1.Me7...\",\n#   \"id_token\": \"eyJhbGci...\",        # present because scope included openid\n#   \"scope\": \"openid profile api.read\"\n# }"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "state defends against CSRF on the redirect; PKCE defends against code interception. They are complementary — you need both. nonce (an OIDC field) separately binds the id_token to the request."
+        }
+      ]
+    },
+    {
+      "id": "oidc",
+      "heading": "OIDC: adding identity on top of OAuth",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "OAuth alone tells you nothing reliable about who the user is. OIDC fixes that. When a client includes the openid scope, the token response gains an id_token: a JWT whose claims describe the authentication event and the user (sub, iss, aud, iat, exp, auth_time, nonce, and optionally profile claims like name and email). The id_token is for the client to consume; it is proof that authentication happened."
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "openid — required scope that turns an OAuth flow into an OIDC flow and yields an id_token.",
+            "profile — requests profile claims: name, family_name, picture, locale, and similar.",
+            "email — requests email and email_verified claims.",
+            "/userinfo — an OAuth-protected endpoint returning fresh claims when presented an access token.",
+            "Discovery — /.well-known/openid-configuration advertises endpoints, supported algorithms, and the jwks_uri."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "code": "{\n  \"issuer\": \"https://as.example.com\",\n  \"authorization_endpoint\": \"https://as.example.com/authorize\",\n  \"token_endpoint\": \"https://as.example.com/token\",\n  \"userinfo_endpoint\": \"https://as.example.com/userinfo\",\n  \"jwks_uri\": \"https://as.example.com/.well-known/jwks.json\",\n  \"response_types_supported\": [\"code\"],\n  \"subject_types_supported\": [\"public\"],\n  \"id_token_signing_alg_values_supported\": [\"RS256\"],\n  \"scopes_supported\": [\"openid\", \"profile\", \"email\", \"api.read\"],\n  \"code_challenge_methods_supported\": [\"S256\"]\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The id_token's audience (aud) is the client. The access_token's audience is the resource server. Sending an id_token to your API as a bearer credential is a category error — the API is not the intended audience."
+        }
+      ]
+    },
+    {
+      "id": "jwt-anatomy",
+      "heading": "JWT anatomy: header, payload, signature",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A JWS-form JWT is three base64url segments joined by dots: header.payload.signature. base64url is critical — it is NOT base64. It uses '-' and '_' instead of '+' and '/' and drops padding, so it is URL- and header-safe. The header and payload are merely encoded, not encrypted, so anyone can read them. Confidentiality, if needed, comes from JWE (encrypted), not JWS (signed)."
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "code": "// Decoded header (first segment)\n{\n  \"alg\": \"RS256\",\n  \"typ\": \"JWT\",\n  \"kid\": \"2024-rotation-key-7\"\n}\n\n// Decoded payload / claims (second segment)\n{\n  \"iss\": \"https://as.example.com\",\n  \"sub\": \"user-8a31f0\",\n  \"aud\": \"https://api.example.com\",\n  \"exp\": 1893456000,\n  \"nbf\": 1893455700,\n  \"iat\": 1893455700,\n  \"jti\": \"f1d2c3b4-aaaa-bbbb-cccc-ddddeeeeffff\",\n  \"scope\": \"api.read api.write\",\n  \"roles\": [\"editor\"]\n}"
+        },
+        {
+          "type": "table",
+          "headers": ["Term", "Meaning"],
+          "rows": [
+            ["JWS", "JSON Web Signature: signed, integrity-protected, but readable. The common case."],
+            ["JWE", "JSON Web Encryption: encrypted payload for confidentiality. Five segments, not three."],
+            ["RS256", "RSA + SHA-256, asymmetric. Private key signs; public key (via JWKS) verifies. Preferred for tokens shared across services."],
+            ["HS256", "HMAC + SHA-256, symmetric. One shared secret both signs and verifies. Only safe when the same trust boundary owns both ends."]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Never put secrets in a JWT payload expecting privacy. JWS is signed, not encrypted — the payload is one base64url decode away from plaintext."
+        }
+      ]
+    },
+    {
+      "id": "validation",
+      "heading": "Validating a JWT correctly",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A resource server must treat an incoming token as hostile until proven otherwise. Correct validation is a fixed sequence of checks; skipping any one of them is a known vulnerability. The signature proves the token was minted by the trusted AS; the claim checks prove it was minted FOR this service and is still valid NOW."
+        },
+        {
+          "type": "list",
+          "ordered": true,
+          "items": [
+            "Parse the header and read alg and kid — but never trust alg to choose the verification method blindly (see alg confusion).",
+            "Pin the expected algorithm (e.g. RS256) and reject anything else, including 'none'.",
+            "Fetch the matching public key from the AS's JWKS endpoint by kid (cache with rotation support).",
+            "Verify the signature against that key.",
+            "Check iss equals the exact expected issuer string.",
+            "Check aud contains this resource server's identifier.",
+            "Check exp (not expired), nbf (already valid), and optionally iat with a small clock-skew leeway.",
+            "Only then trust the claims (sub, scope, roles) for authorization decisions."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// Server-side validation with Nimbus JOSE + JWT. Algorithm is PINNED to\n// RS256 and keys are sourced from the AS's JWKS — both critical defenses.\nimport com.nimbusds.jose.JWSAlgorithm;\nimport com.nimbusds.jose.jwk.source.*;\nimport com.nimbusds.jose.proc.*;\nimport com.nimbusds.jwt.*;\nimport com.nimbusds.jwt.proc.*;\nimport java.net.URL;\nimport java.util.Set;\n\npublic final class TokenValidator {\n  private final ConfigurableJWTProcessor<SecurityContext> processor;\n  private static final String ISSUER = \"https://as.example.com\";\n  private static final String AUDIENCE = \"https://api.example.com\";\n\n  public TokenValidator(URL jwksUri) throws Exception {\n    JWKSource<SecurityContext> keys =\n        JWKSourceBuilder.create(jwksUri).build(); // caches + handles rotation\n    var p = new DefaultJWTProcessor<SecurityContext>();\n    // PIN RS256 only. This single line defeats alg:none and HS256 confusion.\n    p.setJWSKeySelector(\n        new JWSVerificationKeySelector<>(JWSAlgorithm.RS256, keys));\n    p.setJWTClaimsSetVerifier(new DefaultJWTClaimsVerifier<>(\n        AUDIENCE,                                 // require exact aud\n        new JWTClaimsSet.Builder().issuer(ISSUER).build(), // require exact iss\n        Set.of(\"sub\", \"exp\", \"iat\")));            // require these claims exist\n    this.processor = p;\n  }\n\n  /** Returns verified claims or throws if any check fails (exp/nbf included). */\n  public JWTClaimsSet validate(String bearer) throws Exception {\n    return processor.process(bearer, null); // verifies sig, iss, aud, exp, nbf\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The single most important defensive line is pinning the expected algorithm to RS256 before verifying. It simultaneously kills alg:none and RS256/HS256 key-confusion attacks."
+        }
+      ]
+    },
+    {
+      "id": "token-types",
+      "heading": "Access vs ID vs Refresh tokens",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Three token types, three audiences, three purposes. Using one where another is expected is a recurring source of bugs and vulnerabilities."
+        },
+        {
+          "type": "table",
+          "headers": ["Property", "Access token", "ID token", "Refresh token"],
+          "rows": [
+            ["Purpose", "Authorize API calls", "Convey authentication / who logged in", "Obtain new access tokens"],
+            ["Audience (aud)", "The resource server / API", "The client application", "The authorization server"],
+            ["Consumed by", "Resource server", "Client", "Authorization server"],
+            ["Format", "JWT or opaque", "Always a JWT (OIDC)", "Usually opaque, server-side"],
+            ["Lifetime", "Short (minutes)", "Short (login session)", "Long, but rotated"],
+            ["Sent to APIs?", "Yes, as Bearer", "No — never", "No — only to /token"]
+          ]
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "# Refresh flow: exchange a refresh_token for a fresh access_token.\n# Note: only sent to the AS /token endpoint, never to a resource server.\ncurl -X POST https://as.example.com/token \\\n  -H 'Content-Type: application/x-www-form-urlencoded' \\\n  -d 'grant_type=refresh_token' \\\n  -d 'refresh_token=v1.Me7...' \\\n  -d 'client_id=spa-web'\n\n# Response with REFRESH TOKEN ROTATION: a new refresh_token is issued and\n# the old one is invalidated. Reuse of the old token signals theft and\n# the AS revokes the whole token family.\n# {\n#   \"access_token\": \"eyJhbGci...new...\",\n#   \"token_type\": \"Bearer\",\n#   \"expires_in\": 300,\n#   \"refresh_token\": \"v1.NEW8x...\"     # old one now dead\n# }"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Authorizing API access with an id_token (because it 'has the user in it') is a classic mistake. The id_token's aud is the client, not your API — your API must reject it and require an access_token whose aud is the API."
+        }
+      ]
+    },
+    {
+      "id": "storage",
+      "heading": "Token storage trade-offs in the browser",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Where a browser keeps tokens is a genuine trade-off, not a solved problem. The two failure modes are XSS (script reads the token) and CSRF (the browser auto-attaches a credential). No single client-side store is immune to both, which is why the strongest pattern moves the token out of JavaScript entirely."
+        },
+        {
+          "type": "table",
+          "headers": ["Storage", "XSS exposure", "CSRF exposure", "Notes"],
+          "rows": [
+            ["localStorage", "High — any injected script can read it", "None (not auto-sent)", "Convenient but a single XSS = full token theft"],
+            ["In-memory (JS variable)", "Medium — readable while page is live, gone on reload", "None", "Better than localStorage; needs silent re-auth on reload"],
+            ["httpOnly Secure cookie", "Low — script cannot read it", "High unless mitigated", "Pair with SameSite + CSRF tokens"],
+            ["BFF (cookie + server proxy)", "Low — token never reaches the browser", "Managed at the BFF", "Recommended for sensitive apps"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The current best practice for sensitive web apps is the Backend-For-Frontend (BFF) pattern: the SPA talks to a same-origin backend over an httpOnly, Secure, SameSite cookie session; the backend holds the real OAuth tokens and proxies API calls. JavaScript never touches a token, so XSS cannot exfiltrate it, and SameSite plus a CSRF token closes the cookie's CSRF exposure."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Rule of thumb: if XSS would let an attacker call your APIs as the user anyway, the marginal cost of httpOnly cookies is low and the marginal benefit (no exfiltratable bearer token) is high. Prefer cookies/BFF over localStorage for anything sensitive."
+        }
+      ]
+    },
+    {
+      "id": "revocation",
+      "heading": "Revocation, short lifetimes, and rotation",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The tension at the heart of stateless JWTs: a self-contained, signature-verified access token needs no database lookup, which is exactly why it cannot be revoked before it expires. The resource server has no list to check against. The mitigations are a layered strategy, not a single switch."
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "Keep access tokens short-lived (often 5-15 minutes) so revocation latency is bounded by expiry.",
+            "Push the long-lived state into refresh tokens, which are typically opaque and checked server-side on every use — and therefore instantly revocable.",
+            "Rotate refresh tokens on every use and detect reuse of a retired token as a theft signal, revoking the whole token family.",
+            "For genuine instant revocation of access tokens, either use opaque tokens with introspection (RFC 7662) or maintain a deny-list keyed on jti for the token's short remaining life.",
+            "Expose a revocation endpoint (RFC 7009) so clients can proactively kill tokens on logout."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Short access-token TTL + revocable rotated refresh tokens gives you most of the benefits of stateless verification while keeping the worst-case exposure window small. This is the standard production posture."
+        }
+      ]
+    },
+    {
+      "id": "scopes-claims-roles",
+      "heading": "Scopes vs claims vs roles",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "These three are easy to blur but model different things. Scopes describe what the client was authorized to attempt. Claims are statements inside the token (who the subject is, when it was issued). Roles are an authorization concept about what the user is permitted to do, often carried as a claim."
+        },
+        {
+          "type": "table",
+          "headers": ["Concept", "Answers", "Granted to / about", "Example"],
+          "rows": [
+            ["Scope", "What may the client request?", "The client, at consent time", "api.read, openid, email"],
+            ["Claim", "What does the token assert?", "A fact about the subject/token", "sub, email, iat, exp"],
+            ["Role", "What may the user do?", "The user's permissions", "editor, admin (often a claim)"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "A practical consequence: a token can carry the scope api.write yet the user's role may still forbid the specific action. Scopes gate the client's reach; roles and fine-grained permissions gate the user's authority. Robust systems check both — scope at the edge, role/permission at the business rule."
+        }
+      ]
+    },
+    {
+      "id": "vulnerabilities",
+      "heading": "Common vulnerabilities and how they bite",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Most JWT/OAuth breaches are not novel cryptography failures; they are skipped checks and misconfigurations. Each item below has produced real CVEs and bug-bounty payouts."
+        },
+        {
+          "type": "table",
+          "headers": ["Vulnerability", "Mechanism", "Defense"],
+          "rows": [
+            ["alg: none", "Attacker sets header alg to 'none' and strips the signature; naive libraries accept it.", "Pin allowed algorithms; never honor 'none'."],
+            ["RS256/HS256 key confusion", "Attacker switches alg to HS256 and signs with the PUBLIC RSA key as the HMAC secret; a library that picks the verifier from the header accepts it.", "Pin RS256; select the verifier by config, not by the token header."],
+            ["Missing aud check", "A token minted for service A is replayed against service B.", "Require aud to equal this service's identifier."],
+            ["Weak HMAC secret", "HS256 with a short/guessable secret is brute-forced offline.", "Use long random secrets, or prefer RS256/ES256."],
+            ["Token in URL", "Access token in a query string leaks via logs, history, and Referer.", "Send tokens in the Authorization header or a cookie, never the URL."],
+            ["No PKCE", "Intercepted authorization code is exchanged by an attacker.", "Require PKCE (S256) for all authorization-code flows."],
+            ["Mix-up attack", "With multiple ASs, a client sends the code/token to the wrong AS.", "Validate iss on the response; use AS-specific redirect URIs."]
+          ]
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "code": "// The alg:none attack token — header claims no signature is needed.\n// A correct validator pinned to RS256 rejects this outright.\n{\n  \"alg\": \"none\",\n  \"typ\": \"JWT\"\n}\n// ...followed by an attacker-chosen payload and an EMPTY signature segment:\n// eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJhZG1pbiJ9.\n//                                                          ^ no signature"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The unifying lesson: never let the attacker-controlled token header decide how you verify. Pin the algorithm and the issuer in server config, and validate aud every time."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "auth-code-pkce-seq",
+      "title": "Authorization Code + PKCE flow",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n    participant U as User Browser\n    participant C as Client (SPA)\n    participant AS as Authorization Server\n    participant RS as Resource Server\n    C->>C: Generate code_verifier and code_challenge (S256)\n    U->>AS: GET /authorize (code_challenge, state, scope)\n    AS->>U: Prompt login and consent\n    U->>AS: Authenticate and approve\n    AS->>U: Redirect to callback with code and state\n    U->>C: Deliver code and state\n    C->>AS: POST /token (code, code_verifier)\n    AS->>AS: Recompute hash and verify it matches code_challenge\n    AS->>C: access_token, id_token, refresh_token\n    C->>RS: GET /api with Bearer access_token\n    RS->>AS: Fetch JWKS public key by kid\n    RS->>RS: Verify signature, iss, aud, exp\n    RS->>C: Protected resource"
+    },
+    {
+      "id": "jwt-structure",
+      "title": "JWT structure breakdown",
+      "type": "mermaid",
+      "content": "flowchart LR\n    JWT[JWT String] --> H[Header base64url]\n    JWT --> P[Payload base64url]\n    JWT --> S[Signature base64url]\n    H --> HC[alg RS256, typ JWT, kid]\n    P --> PC[iss, sub, aud, exp, nbf, iat, scope]\n    S --> SC[Sign over header.payload with private key]\n    SC --> V[Verify with JWKS public key by kid]"
+    },
+    {
+      "id": "jwt-ascii",
+      "title": "JWT segments as raw bytes",
+      "type": "ascii",
+      "content": "  header                payload               signature\n+----------------+   +----------------+   +----------------+\n| eyJhbGciOiJSUz | . | eyJpc3MiOiJodH | . | SflKxwRJSMeKKF |\n| I1NiIsInR5cCI6 |   | RwczovL2FzLmV4 |   | 2QT4fwpMeJf36P |\n| IkpXVCJ9       |   | YW1wbGUuY29tIn |   | Ok6yJV_adQssw5 |\n+----------------+   +----------------+   +----------------+\n  base64url(JSON)      base64url(JSON)      base64url(bytes)\n        |                    |                     |\n     readable             readable          proves integrity\n   (NOT secret)         (NOT secret)        (needs the key)\n\nVerification: recompute HMAC/RSA over (header '.' payload)\nand compare against the signature segment."
+    }
+  ],
+  "questions": [
+    {
+      "id": "q1",
+      "question": "What is the precise difference between OAuth 2.0 and OIDC, and why does conflating them cause security bugs?",
+      "answer": "OAuth 2.0 is an authorization framework: it lets a user delegate scoped access to their resources to a client, producing an access token meant for a resource server. OIDC is an identity layer on top of OAuth 2.0 that answers who the user is, producing an id_token meant for the client and exposing a /userinfo endpoint. The key distinction is authorization (what a client may do) versus authentication (who logged in). Conflating them leads to using an access token as proof of identity, or worse, treating the presence of any OAuth token as a successful login, which enables account confusion and token-substitution attacks. Because the two token types have different intended audiences, mixing them breaks the audience contract that validation relies on. Correct designs keep the id_token at the client and the access_token at the API.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["oauth2", "oidc"],
+      "followUps": ["What claim distinguishes the intended audience of each token?", "Why is /userinfo preferred over reading the access token for profile data?"]
+    },
+    {
+      "id": "q2",
+      "question": "Name the four OAuth 2.0 roles and explain why a SPA is a public client.",
+      "answer": "The four roles are the resource owner (the user who owns the data), the client (the app requesting access), the authorization server (which authenticates the user and issues tokens), and the resource server (which hosts the protected APIs). A client is confidential if it can store a secret an attacker cannot extract, and public otherwise. A SPA ships all of its code to the browser, so any embedded secret is readable through DevTools or the network tab and therefore cannot be kept confidential. The same logic applies to native mobile apps, whose binaries can be decompiled. Because public clients cannot authenticate with a secret, they must rely on Authorization Code + PKCE, where possession of the code_verifier substitutes for a secret. Mislabeling a SPA as confidential and shipping a secret is a common and serious mistake.",
+      "difficulty": "easy",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["oauth2", "pkce"],
+      "followUps": ["How does PKCE compensate for the lack of a client secret?", "Is a server-rendered web app confidential or public?"]
+    },
+    {
+      "id": "q3",
+      "question": "Why are the Implicit and Resource Owner Password grants deprecated?",
+      "answer": "The Implicit grant returns tokens directly in the URL fragment, where they leak through browser history, the Referer header, and intermediary logs, and it cannot be bound to the requesting client with PKCE, leaving it open to token injection. The Resource Owner Password grant has the client collect the user's raw username and password, which destroys the credential-isolation property that justifies OAuth, prevents federated login, and makes MFA effectively impossible. Both are replaced by Authorization Code with PKCE, which keeps tokens out of the URL, isolates credentials at the authorization server, and binds the code exchange to the originating client. The OAuth 2.1 effort formalizes these deprecations. Seeing either grant proposed today is a strong signal of an outdated or unsafe design.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["oauth2", "pkce"],
+      "followUps": ["What specifically replaces Implicit for SPAs?", "Why can't ROPC support MFA?"]
+    },
+    {
+      "id": "q4",
+      "question": "Explain the alg:none attack and how a correct validator defeats it.",
+      "answer": "JWT libraries historically read the alg field from the attacker-controllable header to decide how to verify the signature. In the alg:none attack, the attacker sets alg to 'none', supplies any payload they like, and leaves the signature segment empty. A naive library interprets 'none' as 'no signature required' and accepts the forged token, granting the attacker whatever the payload claims, such as an admin subject. The defense is to never let the token header choose the verification path: pin the accepted algorithm (for example RS256) in server configuration and reject every token whose alg differs, including 'none'. A validator that pins RS256 will refuse to even attempt verification of a 'none' token. This is why production code should always allowlist algorithms rather than trust the header.",
+      "difficulty": "hard",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["jwt", "token-security"],
+      "followUps": ["How is this related to the RS256/HS256 confusion attack?", "Where exactly should the allowed algorithm be configured?"]
+    },
+    {
+      "id": "q5",
+      "question": "Describe the RS256/HS256 key-confusion attack.",
+      "answer": "RS256 is asymmetric: the authorization server signs with a private key and resource servers verify with the corresponding public key, which is freely published via JWKS. HS256 is symmetric: the same secret both signs and verifies. In the confusion attack, the attacker takes the well-known public RSA key, switches the token's alg header to HS256, and signs the forged token using that public key as if it were the HMAC secret. A vulnerable resource server, picking its verification method from the header, computes an HMAC using the public key it already trusts, and the signature matches, so the forgery is accepted. The defense is to pin the expected algorithm to RS256 and select the verification key and method from configuration, never from the incoming token's header. Treating the public key strictly as an RSA verification key, never as an HMAC secret, closes the hole.",
+      "difficulty": "hard",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["jwt", "token-security"],
+      "followUps": ["Why does publishing the RSA public key not weaken RS256 itself?", "What single configuration choice prevents both alg:none and this attack?"]
+    },
+    {
+      "id": "q6",
+      "question": "If a confidential client already has a client secret, why does it still need PKCE?",
+      "answer": "The client secret authenticates the client to the token endpoint, but it does nothing to protect the authorization code on its way back through the user's browser. PKCE defends a different segment of the flow: it binds the authorization code to the specific code_verifier held only by the instance that started the flow, so an intercepted code cannot be redeemed by anyone else. This matters because authorization codes travel through the front channel (redirects), which is far more exposed than the back-channel token request. The OAuth Security BCP therefore recommends PKCE for all clients, confidential included, as defense in depth against code interception and injection. A secret protects the token exchange; PKCE protects the code. They guard distinct attack surfaces, so having one is not a substitute for the other.",
+      "difficulty": "hard",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["pkce", "oauth2"],
+      "followUps": ["Which channel does the authorization code travel through?", "What does state protect that PKCE does not?"]
+    },
+    {
+      "id": "q7",
+      "question": "Why must a resource server validate the aud claim, and what happens if it doesn't?",
+      "answer": "The aud (audience) claim names the intended recipient of a token. If a resource server skips the audience check, it will accept any validly signed token from the trusted issuer, including tokens minted for a completely different service. An attacker who can obtain a token for a low-value service (perhaps one they legitimately use) can then replay it against a high-value API that shares the same issuer, escalating their access. Because the signature is genuine, signature verification alone does not catch this; only the audience check does. The correct behavior is to require that aud equals or contains this specific resource server's identifier and reject everything else. This single check is what scopes a token to one service in a multi-service ecosystem.",
+      "difficulty": "hard",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["jwt", "token-security"],
+      "followUps": ["How does this enable lateral movement between microservices?", "Should aud be a string or an array?"]
+    },
+    {
+      "id": "q8",
+      "question": "What goes wrong when a developer uses an id_token to authorize API calls?",
+      "answer": "The id_token is an OIDC artifact whose audience is the client application; it is proof to the client that authentication occurred and carries identity claims. Its audience is not the API, so an API that accepts it is violating the audience contract. Practically, id_tokens are often longer-lived than access tokens, may lack the scopes the API needs for authorization decisions, and are designed for client consumption rather than as a bearer credential. If the API accepts id_tokens, it loses the scope-based authorization that access tokens provide and may accept tokens never intended for it. The correct pattern is for the client to send the access_token (aud = API) to the resource server and keep the id_token to itself. The API should reject any token whose audience is the client.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["oidc", "jwt"],
+      "followUps": ["What is the correct audience of an access token?", "Why might an id_token lack the scopes an API needs?"]
+    },
+    {
+      "id": "q9",
+      "question": "JWTs are 'stateless' — so how do you revoke one before it expires?",
+      "answer": "A self-contained JWT is verified purely from its signature and claims, with no server lookup, which is exactly why it cannot be revoked mid-life: there is no central list the resource server consults. The standard mitigation is a layered strategy rather than a single mechanism. First, keep access tokens short-lived so the revocation window is bounded by expiry. Second, push long-lived authority into opaque refresh tokens that are checked server-side on every use and can be revoked instantly, optionally with rotation and reuse detection. Third, for true instant revocation of access tokens, either switch to opaque tokens validated by introspection or maintain a short-lived deny-list keyed on jti. The pragmatic production posture is short access TTLs plus revocable rotated refresh tokens, accepting a small revocation latency in exchange for stateless verification.",
+      "difficulty": "hard",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["jwt", "token-security"],
+      "followUps": ["How does refresh-token rotation detect theft?", "When would you choose introspection over local JWT verification?"]
+    },
+    {
+      "id": "q10",
+      "question": "Compare storing tokens in localStorage versus an httpOnly cookie.",
+      "answer": "localStorage is readable by any JavaScript on the page, so a single XSS vulnerability lets an attacker exfiltrate the token and impersonate the user from anywhere; however, localStorage is never auto-attached to requests, so it carries no CSRF risk. An httpOnly Secure cookie cannot be read by JavaScript, so XSS cannot exfiltrate the raw token, but because the browser attaches cookies automatically, it introduces CSRF risk that must be mitigated with SameSite and CSRF tokens. Neither is free of trade-offs, which is why the strongest pattern is a Backend-For-Frontend: the token lives server-side and the browser holds only an httpOnly session cookie, so JavaScript never touches a bearer token at all. For sensitive applications, prefer cookies or a BFF over localStorage. The decision hinges on whether you would rather defend against XSS exfiltration or CSRF, and modern guidance leans toward keeping tokens out of JavaScript.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["token-security", "oauth2"],
+      "followUps": ["How does the BFF pattern eliminate token exfiltration?", "Which cookie attributes mitigate CSRF?"]
+    },
+    {
+      "id": "q11",
+      "question": "Walk through the steps to validate an incoming JWT on a resource server.",
+      "answer": "First, parse the header to read kid, but pin the accepted algorithm in configuration rather than trusting the header's alg. Second, fetch the public key matching the kid from the authorization server's JWKS endpoint, caching it with rotation support. Third, verify the signature against that key using the pinned algorithm, rejecting 'none' and any non-allowlisted algorithm. Fourth, check that iss exactly equals the expected issuer and that aud contains this service's identifier. Fifth, check the time claims: exp must be in the future, nbf in the past, and iat reasonable, all with a small clock-skew leeway. Only after every check passes should the claims like sub, scope, and roles be trusted for authorization. Skipping any single step corresponds to a named vulnerability, so the sequence must be complete.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["jwt", "jwks"],
+      "followUps": ["Why cache JWKS, and how do you handle key rotation?", "What clock-skew leeway is reasonable?"]
+    },
+    {
+      "id": "q12",
+      "question": "What is the difference between JWS and JWE, and what does that imply for putting data in a JWT?",
+      "answer": "JWS (JSON Web Signature) is a signed token: it guarantees integrity and authenticity, but the header and payload are only base64url-encoded, so anyone can decode and read them. JWE (JSON Web Encryption) actually encrypts the payload, providing confidentiality, and has five segments rather than three. The common bearer JWT is a JWS, which means its claims are effectively public to anyone holding the token. The implication is that you must never place secrets, passwords, or sensitive PII in a JWS payload expecting privacy, because it is one base64url decode away from plaintext. If confidentiality is required, use JWE or simply keep sensitive data server-side and reference it by an opaque identifier. Treat a signed JWT as tamper-evident, not secret.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["jwt", "token-security"],
+      "followUps": ["How many segments does a JWE have?", "What is a safe alternative to embedding PII in a token?"]
+    },
+    {
+      "id": "q13",
+      "question": "What is the Client Credentials grant for, and why must it never be used by a public client?",
+      "answer": "The Client Credentials grant is for machine-to-machine scenarios where no user is present and the client acts on its own behalf — the client is effectively the resource owner. A backend service calling another backend API uses it by authenticating with its own client_id and client_secret to obtain an access token directly from the token endpoint, with no authorization or redirect step. It must never be used by a public client because it depends entirely on the secrecy of the client secret; a public client cannot keep a secret, so embedding one would let any attacker who extracts it mint tokens at will. There is also no user identity in this flow, so it must never be used to model user login. Used correctly, it is the standard, safe choice for service-to-service authorization with confidential clients.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["oauth2", "token-security"],
+      "followUps": ["Why is there no id_token in a Client Credentials flow?", "How do you scope a machine-to-machine token?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch1",
+      "title": "Implement a secure RS256 JWT validator",
+      "difficulty": "hard",
+      "category": "Backend",
+      "prompt": "Implement a resource-server JWT validator in TypeScript that fetches signing keys from the authorization server's JWKS endpoint, verifies the signature using RS256 only, and checks iss, aud, and exp. It must reject tokens with alg 'none', tokens signed with HS256, tokens with the wrong issuer or audience, and expired tokens. Assume a JWKS-capable library is available.",
+      "hints": [
+        "Pin the algorithm to RS256 in the verify options — do not read alg from the token header to choose the method.",
+        "Use a JWKS client that selects the key by the token's kid and caches keys with rotation support.",
+        "Pass explicit issuer and audience options so the library enforces iss and aud; exp is enforced by default."
+      ],
+      "solutionCode": "import { createRemoteJWKSet, jwtVerify, JWTPayload } from 'jose';\n\nconst ISSUER = 'https://as.example.com';\nconst AUDIENCE = 'https://api.example.com';\n\n// Remote JWKS with built-in caching, cooldown, and key rotation support.\nconst JWKS = createRemoteJWKSet(\n  new URL('https://as.example.com/.well-known/jwks.json'),\n);\n\nexport async function validateAccessToken(token: string): Promise<JWTPayload> {\n  const { payload, protectedHeader } = await jwtVerify(token, JWKS, {\n    // PIN RS256: this rejects alg:none AND the HS256 key-confusion attack,\n    // because the library refuses any algorithm not in this allowlist.\n    algorithms: ['RS256'],\n    issuer: ISSUER,      // enforces exact iss match\n    audience: AUDIENCE,  // enforces this API is in aud\n    // exp and nbf are validated automatically; add leeway for clock skew:\n    clockTolerance: '30s',\n  });\n\n  // Defense in depth: assert the resolved header algorithm one more time.\n  if (protectedHeader.alg !== 'RS256') {\n    throw new Error('Unexpected signing algorithm: ' + protectedHeader.alg);\n  }\n  if (!payload.sub) {\n    throw new Error('Token missing required sub claim');\n  }\n  return payload; // safe to use sub, scope, roles for authorization now\n}\n\n// Example usage in middleware:\nexport async function requireAuth(authHeader?: string): Promise<JWTPayload> {\n  if (!authHeader?.startsWith('Bearer ')) {\n    throw new Error('Missing or malformed Authorization header');\n  }\n  const token = authHeader.slice('Bearer '.length).trim();\n  return validateAccessToken(token); // throws on any failed check\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "The solution centers on a single decisive control: pinning algorithms to RS256 in the jwtVerify options. Because the library will only accept tokens whose signature matches an RS256 key from the JWKS, both the alg:none attack and the RS256/HS256 key-confusion attack are defeated at once — a 'none' token has no valid RS256 signature, and an HS256-forged token is rejected before its HMAC is ever computed. The createRemoteJWKSet helper selects the correct public key by the token's kid and transparently caches keys while supporting rotation, so the validator keeps working across key rollovers without manual intervention. Passing explicit issuer and audience options makes the library enforce that the token was minted by the expected authorization server and intended for this specific API, closing the missing-aud and wrong-issuer holes that enable token replay across services. The clockTolerance setting allows a small skew so that exp and nbf checks do not spuriously fail across machines with slightly different clocks. Finally, the explicit post-verification assertions on alg and sub are defense in depth, and the requireAuth wrapper shows the correct extraction of a Bearer token so that only fully validated claims are ever used for authorization decisions.",
+      "relatedTopic": "oauth2-oidc-jwt"
+    },
+    {
+      "id": "ch2",
+      "title": "Generate a PKCE code_verifier and code_challenge",
+      "difficulty": "medium",
+      "category": "Backend",
+      "prompt": "Implement PKCE parameter generation in TypeScript for a public client. Produce a cryptographically random code_verifier of valid length (43-128 unreserved characters) and derive the corresponding code_challenge as BASE64URL(SHA256(code_verifier)) with method S256. Use the Web Crypto API and avoid any non-cryptographic randomness.",
+      "hints": [
+        "Use crypto.getRandomValues for entropy, never Math.random.",
+        "base64url is base64 with + -> -, / -> _, and '=' padding removed.",
+        "The challenge is the base64url encoding of the raw SHA-256 digest bytes, not of a hex string."
+      ],
+      "solutionCode": "// Browser / Web Crypto implementation of RFC 7636 PKCE (S256).\n\nfunction base64UrlEncode(bytes: Uint8Array): string {\n  let binary = '';\n  for (const b of bytes) binary += String.fromCharCode(b);\n  return btoa(binary)\n    .replace(/\\+/g, '-')\n    .replace(/\\//g, '_')\n    .replace(/=+$/, '');\n}\n\n/** Generate a high-entropy code_verifier (RFC 7636: 43-128 chars). */\nexport function generateCodeVerifier(): string {\n  const random = new Uint8Array(32);          // 32 bytes -> 43 base64url chars\n  crypto.getRandomValues(random);             // cryptographically secure\n  return base64UrlEncode(random);             // unreserved char set, no padding\n}\n\n/** Derive code_challenge = BASE64URL(SHA256(code_verifier)). */\nexport async function generateCodeChallenge(verifier: string): Promise<string> {\n  const data = new TextEncoder().encode(verifier);\n  const digest = await crypto.subtle.digest('SHA-256', data); // raw 32 bytes\n  return base64UrlEncode(new Uint8Array(digest));\n}\n\nexport async function createPkcePair() {\n  const codeVerifier = generateCodeVerifier();\n  const codeChallenge = await generateCodeChallenge(codeVerifier);\n  return {\n    codeVerifier,                 // keep secret in memory; send at /token\n    codeChallenge,                // send on /authorize\n    codeChallengeMethod: 'S256',  // never 'plain'\n  };\n}\n\n// Usage: store codeVerifier (e.g. in sessionStorage tied to the flow), put\n// codeChallenge + S256 on the /authorize request, then send codeVerifier\n// (and NOT the challenge) on the /token exchange.",
+      "solutionLanguage": "typescript",
+      "explanation": "The generator draws 32 bytes of entropy from crypto.getRandomValues, the cryptographically secure source, which is critical because a predictable verifier would let an attacker reconstruct it and defeat PKCE entirely; Math.random must never be used here. Encoding those 32 bytes as base64url yields a 43-character verifier that sits comfortably inside the RFC 7636 length bounds of 43 to 128 characters and uses only unreserved characters, so it is safe to transmit. The challenge derivation hashes the verifier's UTF-8 bytes with SHA-256 via crypto.subtle.digest and base64url-encodes the raw digest bytes — a common bug is to base64url a hex string of the digest instead of the digest bytes, which produces a challenge the authorization server will reject. The base64UrlEncode helper performs the three transformations that distinguish base64url from standard base64: substituting plus and slash and stripping padding, ensuring the values are URL- and header-safe. The method is fixed to S256 because the 'plain' method offers no protection against an attacker who can read the challenge. In use, the client keeps the verifier private in memory, sends only the challenge on the front-channel /authorize request, and later proves possession by presenting the verifier on the back-channel /token exchange, which is what binds the authorization code to this specific client instance.",
+      "relatedTopic": "oauth2-oidc-jwt"
+    }
+  ],
+  "references": [
+    { "label": "RFC 6749 — The OAuth 2.0 Authorization Framework", "url": "https://datatracker.ietf.org/doc/html/rfc6749" },
+    { "label": "RFC 7636 — Proof Key for Code Exchange (PKCE)", "url": "https://datatracker.ietf.org/doc/html/rfc7636" },
+    { "label": "OpenID Connect Core 1.0", "url": "https://openid.net/specs/openid-connect-core-1_0.html" },
+    { "label": "RFC 7519 — JSON Web Token (JWT)", "url": "https://datatracker.ietf.org/doc/html/rfc7519" },
+    { "label": "OAuth.net — OAuth 2.0", "url": "https://oauth.net/2/" },
+    { "label": "OWASP JSON Web Token Cheat Sheet", "url": "https://cheatsheetseries.owasp.org/cheatsheets/JSON_Web_Token_for_Java_Cheat_Sheet.html" }
+  ]
+}
