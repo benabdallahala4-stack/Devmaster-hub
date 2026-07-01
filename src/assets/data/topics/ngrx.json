@@ -1,0 +1,663 @@
+{
+  "id": "ngrx",
+  "title": "NgRx & State Management",
+  "category": "Frontend",
+  "subcategory": "State Management",
+  "difficulty": "senior",
+  "tags": [
+    "ngrx",
+    "state-management",
+    "redux",
+    "effects",
+    "selectors",
+    "entity-adapter",
+    "signal-store",
+    "rxjs"
+  ],
+  "description": "A staff-level tour of NgRx: the Redux pattern and unidirectional data flow, Store/actions/reducers/selectors, Effects for side effects, the Entity adapter, the newer SignalStore, and — crucially — when NOT to reach for NgRx at all. Includes a production HTTP CRUD feature slice plus testing strategy.",
+  "estReadMinutes": 32,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction: What NgRx Actually Buys You",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "NgRx is a family of libraries that brings the Redux pattern to Angular, backed by RxJS. At its core it is a single, immutable, in-memory state tree that you never mutate directly; instead you dispatch actions (facts describing what happened), pure reducers fold those actions into a new state, and selectors project slices of that state as memoized observables that your components subscribe to. Side effects — HTTP calls, router navigation, local storage, WebSocket streams — live in Effects, cleanly separated from the pure state transitions."
+        },
+        {
+          "type": "paragraph",
+          "text": "The value proposition is predictability at scale. When many components read and write overlapping state, when you need time-travel debugging, when derived state must stay consistent, or when several teams touch the same domain, a single source of truth with a strict, auditable update protocol pays for its ceremony. The cost is real boilerplate and a learning curve, which is exactly why a senior engineer must also know when to say no to it."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "NgRx is not one library. @ngrx/store is the state container, @ngrx/effects handles side effects, @ngrx/entity manages collections, @ngrx/component-store and the newer @ngrx/signals (SignalStore) offer lighter-weight local alternatives. You mix and match; you rarely need all of them."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Store — the immutable state tree exposed as an Observable.",
+            "Actions — plain, serializable events describing something that happened.",
+            "Reducers — pure functions (state, action) => state that never mutate.",
+            "Selectors — memoized, composable queries over the state.",
+            "Effects — isolated handlers for asynchronous side effects.",
+            "Entity — an adapter for normalized collections with prebuilt selectors.",
+            "SignalStore — a signals-first store for local or feature state."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "why",
+      "heading": "Why Unidirectional Data Flow",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Two-way binding and shared mutable services feel fast at first, but they scale poorly: any component can mutate any state at any time, so tracing why a value changed becomes an archaeology exercise. The Redux pattern imposes a single direction — data flows down into components, and events flow up as actions. The only way to change state is to dispatch an action, and the only place state changes is inside a pure reducer. This makes every state transition explicit, replayable, and testable in isolation."
+        },
+        {
+          "type": "paragraph",
+          "text": "Because reducers are pure and state is immutable, you get referential equality as a change signal. A selector can compare the previous and next slice by reference; if the reference did not change, nothing downstream recomputes. Combined with Angular's OnPush change detection, this yields a system where updates are cheap and deterministic. The DevTools extension can record every action and let you step backward and forward through time, which is impossible with ad-hoc mutation."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The mental model: state is a value, not a place. You do not edit the state; you produce a new state value from the old one plus an action. Everything else — memoization, time travel, testability — falls out of that constraint."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Traceability — every change is an action visible in DevTools.",
+            "Testability — reducers and selectors are pure functions with no I/O.",
+            "Consistency — derived state is computed, never stored twice.",
+            "Performance — reference equality + OnPush avoid needless recomputation.",
+            "Decoupling — components dispatch events and read selectors; they do not orchestrate."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "actions",
+      "heading": "Concept: Actions — Events, Not Commands",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "An action is a plain object with a required type string and an optional payload. You create them with createAction, which produces a typed action creator. The single most important discipline in NgRx is action hygiene: model actions as events that describe something that already happened, not as commands telling a reducer what to do. Name them with a source-and-event convention — '[Source] Event' — so DevTools reads like a narrative of what the user and system did."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { createAction, props } from '@ngrx/store';\nimport { Todo } from './todo.model';\n\n// Good: events, grouped by source, described in the past tense.\nexport const enterTodosPage = createAction('[Todos Page] Entered');\n\nexport const addTodo = createAction(\n  '[Todos Page] Add Todo Clicked',\n  props<{ title: string }>()\n);\n\nexport const toggleTodo = createAction(\n  '[Todos List] Todo Toggled',\n  props<{ id: string }>()\n);\n\n// API result actions live under their own source.\nexport const loadTodosSuccess = createAction(\n  '[Todos API] Load Todos Succeeded',\n  props<{ todos: Todo[] }>()\n);\n\nexport const loadTodosFailure = createAction(\n  '[Todos API] Load Todos Failed',\n  props<{ error: string }>()\n);"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Avoid generic, reused actions like 'setTodos' dispatched from ten places. Reused actions couple unrelated flows and turn DevTools into noise. Prefer one specific action per unique event, even if two of them ultimately trigger the same reducer logic."
+        },
+        {
+          "type": "paragraph",
+          "text": "Actions must be serializable — no class instances, no functions, no Dates as live objects if you can avoid it. Serializability is what enables persistence, replay, and the runtime meta-reducer checks. Group action creators for a feature with createActionGroup in newer NgRx to reduce boilerplate while keeping the naming convention consistent."
+        }
+      ]
+    },
+    {
+      "id": "reducers",
+      "heading": "Concept: Reducers — Pure and Immutable",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A reducer is a pure function that takes the current state and an action and returns the next state. It must never mutate its inputs, perform I/O, call Math.random or Date.now, or dispatch. You build one with createReducer plus on handlers, each of which maps a specific action to an immutable state update using spread syntax or a structural sharing helper. Every field you change gets a fresh object; every field you leave alone keeps its identity, which is what powers selector memoization."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { createReducer, on } from '@ngrx/store';\nimport * as TodosActions from './todos.actions';\nimport { Todo } from './todo.model';\n\nexport interface TodosState {\n  items: Todo[];\n  loading: boolean;\n  error: string | null;\n}\n\nexport const initialState: TodosState = {\n  items: [],\n  loading: false,\n  error: null,\n};\n\nexport const todosReducer = createReducer(\n  initialState,\n  on(TodosActions.enterTodosPage, (state) => ({\n    ...state,\n    loading: true,\n    error: null,\n  })),\n  on(TodosActions.loadTodosSuccess, (state, { todos }) => ({\n    ...state,\n    items: todos,\n    loading: false,\n  })),\n  on(TodosActions.loadTodosFailure, (state, { error }) => ({\n    ...state,\n    loading: false,\n    error,\n  })),\n  // Immutable nested update: replace the toggled item, keep the rest by reference.\n  on(TodosActions.toggleTodo, (state, { id }) => ({\n    ...state,\n    items: state.items.map((t) =>\n      t.id === id ? { ...t, done: !t.done } : t\n    ),\n  }))\n);"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The number one reducer bug is accidental mutation: state.items.push(todo) then returning state. The array reference is unchanged, so selectors will not fire and OnPush components will not update. Always produce new references for changed collections. Enable the strictStateImmutability and strictActionImmutability runtime checks to catch this in development."
+        },
+        {
+          "type": "paragraph",
+          "text": "Keep reducers dumb. They should contain only shape transformations, never business decisions that require calling a server or reading other state. If a transition needs asynchronous data, the reducer waits for a success/failure action produced by an effect. This separation is what keeps reducers trivially unit-testable: call the reducer with a state and an action, assert on the returned value, no mocks required."
+        }
+      ]
+    },
+    {
+      "id": "selectors",
+      "heading": "Concept: Selectors — Memoized Composition",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Selectors are pure functions that read from the state tree. createSelector composes them and, critically, memoizes: it caches the last input references and the last output, and only recomputes when an input reference actually changes. This means expensive derivations — filtering, sorting, joining — run once per real change, not on every emission, and every subscriber shares the same computed reference. That shared reference is what lets OnPush components skip work."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { createFeatureSelector, createSelector } from '@ngrx/store';\nimport { TodosState } from './todos.reducer';\n\n// Root selector for the feature slice.\nexport const selectTodosState =\n  createFeatureSelector<TodosState>('todos');\n\n// Field selectors compose off the feature selector.\nexport const selectAllTodos = createSelector(\n  selectTodosState,\n  (s) => s.items\n);\nexport const selectLoading = createSelector(\n  selectTodosState,\n  (s) => s.loading\n);\n\n// Derived selector: memoized, so the filter runs only when items change.\nexport const selectActiveTodos = createSelector(\n  selectAllTodos,\n  (items) => items.filter((t) => !t.done)\n);\n\n// Composed selector combining multiple inputs.\nexport const selectTodoStats = createSelector(\n  selectAllTodos,\n  selectActiveTodos,\n  (all, active) => ({\n    total: all.length,\n    active: active.length,\n    done: all.length - active.length,\n  })\n);"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The memoization cache has size one. If you call selectTodoById with a different id on each cycle, or return a fresh object literal from a projector that ignores its inputs, you defeat memoization and recompute every time. For parameterized selectors, use a selector factory that closes over the argument, and never build new arrays/objects from constants inside a projector."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Parameterized selector via a factory — one memoized instance per id.\nexport const selectTodoById = (id: string) =>\n  createSelector(selectAllTodos, (items) =>\n    items.find((t) => t.id === id)\n  );\n\n// In a component (Angular 17+ signal interop):\n// count = this.store.selectSignal(selectTodoStats);\n// todo  = this.store.selectSignal(selectTodoById(this.id));"
+        },
+        {
+          "type": "paragraph",
+          "text": "Selectors are the read API of your store. Components should never dig into state shape directly; they should only consume selectors. This decouples the component from the internal structure of the state, so you can refactor the shape freely as long as the selectors keep their contract. Prefer store.selectSignal in modern Angular to get a Signal that integrates with the template and OnPush automatically."
+        }
+      ]
+    },
+    {
+      "id": "effects",
+      "heading": "Concept: Effects — Side Effects Done Right",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Effects listen to the action stream, perform side effects, and (usually) dispatch new actions with the results. createEffect wraps an observable pipeline that starts from the injected Actions stream, filters with ofType, runs the side effect in a flattening operator, and maps the outcome to success or failure actions. The reducer then folds those result actions back into state. This closes the loop: action in, effect runs, result action out, reducer updates, selectors emit, view updates."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { inject } from '@angular/core';\nimport { Actions, createEffect, ofType } from '@ngrx/effects';\nimport { catchError, map, of, switchMap } from 'rxjs';\nimport { TodosService } from './todos.service';\nimport * as TodosActions from './todos.actions';\n\nexport const loadTodos$ = createEffect(\n  (actions$ = inject(Actions), api = inject(TodosService)) =>\n    actions$.pipe(\n      ofType(TodosActions.enterTodosPage),\n      switchMap(() =>\n        api.getAll().pipe(\n          map((todos) => TodosActions.loadTodosSuccess({ todos })),\n          // catchError INSIDE the inner pipe: only this request fails,\n          // the outer effect stream stays alive for the next action.\n          catchError((err) =>\n            of(TodosActions.loadTodosFailure({ error: err.message }))\n          )\n        )\n      )\n    ),\n  { functional: true }\n);"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The classic effect killer: putting catchError on the OUTER stream instead of inside the switchMap. When the outer observable errors it completes, and the effect stops listening forever — one failed request and the feature is dead until reload. Always catchError inside the inner (per-request) observable so a failure becomes a failure action rather than a terminated stream."
+        },
+        {
+          "type": "table",
+          "columns": ["Operator", "Concurrency behavior", "Use for"],
+          "rows": [
+            ["switchMap", "Cancels the previous inner request when a new action arrives", "Reads/searches where only the latest matters (load, typeahead)"],
+            ["concatMap", "Queues requests, runs them one at a time in order", "Writes that must not reorder (sequential saves, ordered mutations)"],
+            ["mergeMap", "Runs all inner requests concurrently, no ordering", "Independent parallel side effects with no ordering constraint"],
+            ["exhaustMap", "Ignores new actions while one is in flight", "Idempotent triggers like login submit or refresh to prevent double-fire"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Choosing the operator is a correctness decision, not a style one. For a save that must persist in order, switchMap would cancel in-flight writes and lose data — use concatMap. For a login button the user may double-click, exhaustMap ignores the second click. For a typeahead, switchMap cancels stale requests so you never render an old result over a new one. Some effects do not dispatch at all (analytics, logging); mark those with { dispatch: false }."
+        }
+      ]
+    },
+    {
+      "id": "entity",
+      "heading": "Concept: Entity Adapter — Normalized Collections",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "@ngrx/entity solves the pain of managing arrays of records. Instead of storing a plain array and re-scanning it for every update, the adapter keeps a normalized shape: an ids array for order and an entities dictionary keyed by id for O(1) lookup. createEntityAdapter gives you type-safe CRUD helpers (addOne, upsertMany, updateOne, removeOne, setAll) plus a getSelectors bundle that hands you selectAll, selectEntities, selectIds, and selectTotal for free."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { createEntityAdapter, EntityState } from '@ngrx/entity';\nimport { createReducer, on } from '@ngrx/store';\nimport { Todo } from './todo.model';\nimport * as TodosActions from './todos.actions';\n\nexport interface TodosState extends EntityState<Todo> {\n  loading: boolean;\n  error: string | null;\n}\n\nexport const adapter = createEntityAdapter<Todo>({\n  selectId: (todo) => todo.id,\n  sortComparer: (a, b) => a.createdAt.localeCompare(b.createdAt),\n});\n\nexport const initialState: TodosState = adapter.getInitialState({\n  loading: false,\n  error: null,\n});\n\nexport const todosReducer = createReducer(\n  initialState,\n  on(TodosActions.loadTodosSuccess, (state, { todos }) =>\n    adapter.setAll(todos, { ...state, loading: false })\n  ),\n  on(TodosActions.addTodoSuccess, (state, { todo }) =>\n    adapter.addOne(todo, state)\n  ),\n  on(TodosActions.toggleTodoSuccess, (state, { todo }) =>\n    adapter.upsertOne(todo, state)\n  ),\n  on(TodosActions.deleteTodoSuccess, (state, { id }) =>\n    adapter.removeOne(id, state)\n  )\n);\n\n// Prebuilt, memoized selectors from the adapter.\nimport { createFeatureSelector, createSelector } from '@ngrx/store';\nconst selectState = createFeatureSelector<TodosState>('todos');\nconst { selectAll, selectEntities, selectTotal } = adapter.getSelectors();\nexport const selectAllTodos = createSelector(selectState, selectAll);\nexport const selectTodoEntities = createSelector(selectState, selectEntities);\nexport const selectTodoCount = createSelector(selectState, selectTotal);"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The entity adapter eliminates the most error-prone reducer code you would otherwise hand-write: immutable insert/update/remove into a keyed collection. Fewer chances to accidentally mutate, O(1) lookups, and consistent selectors across every feature that uses it."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Constant-time reads by id via the entities dictionary.",
+            "Ordering preserved (and optionally sorted) via the ids array.",
+            "CRUD helpers guarantee immutable updates — no manual spreading.",
+            "Prebuilt selectAll/selectEntities/selectIds/selectTotal, all memoized.",
+            "Uniform state shape across features simplifies tooling and reasoning."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "feature-lazy",
+      "heading": "Concept: Feature State & Lazy Loading",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "In standalone Angular you register the root store once and then attach feature slices lazily where they are needed. provideStore() at the application root sets up the store and DevTools; provideState() and provideEffects() in a lazy route's providers register that feature's reducer and effects only when the route loads. This keeps the initial bundle small and the state tree modular — the todos slice does not exist until the user visits todos."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// main.ts — root wiring\nimport { bootstrapApplication } from '@angular/platform-browser';\nimport { provideStore } from '@ngrx/store';\nimport { provideEffects } from '@ngrx/effects';\nimport { provideStoreDevtools } from '@ngrx/store-devtools';\nimport { isDevMode } from '@angular/core';\n\nbootstrapApplication(AppComponent, {\n  providers: [\n    provideStore(),\n    provideEffects(),\n    provideStoreDevtools({ maxAge: 25, logOnly: !isDevMode() }),\n  ],\n});\n\n// todos.routes.ts — lazy feature registration\nimport { Routes } from '@angular/router';\nimport { provideState } from '@ngrx/store';\nimport { provideEffects } from '@ngrx/effects';\nimport { todosReducer } from './todos.reducer';\nimport * as todosEffects from './todos.effects';\n\nexport const TODOS_ROUTES: Routes = [\n  {\n    path: '',\n    providers: [\n      provideState('todos', todosReducer),\n      provideEffects(todosEffects),\n    ],\n    loadComponent: () =>\n      import('./todos-page.component').then((m) => m.TodosPageComponent),\n  },\n];"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Enable runtime checks at the root during development: strictStateImmutability, strictActionImmutability, strictStateSerializability, and strictActionSerializability. They catch mutation and non-serializable payloads at the exact dispatch that caused them, turning subtle bugs into loud failures."
+        }
+      ]
+    },
+    {
+      "id": "signalstore",
+      "heading": "Concept: SignalStore — Signals-First State",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "@ngrx/signals introduces signalStore, a lightweight, signals-based store that fits Angular's reactivity model without the full Redux ceremony. You compose it from features: withState for the state signals, withComputed for derived signals (the memoized equivalent of selectors), withMethods for updater functions and async operations, and withEntities for the entity adapter reimagined over signals. There are no separate action/reducer files — state, derivations, and methods live together."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { computed, inject } from '@angular/core';\nimport {\n  signalStore, withState, withComputed, withMethods, patchState,\n} from '@ngrx/signals';\nimport { withEntities, setAllEntities } from '@ngrx/signals/entities';\nimport { rxMethod } from '@ngrx/signals/rxjs-interop';\nimport { pipe, switchMap, tap } from 'rxjs';\nimport { tapResponse } from '@ngrx/operators';\nimport { Todo } from './todo.model';\nimport { TodosService } from './todos.service';\n\nexport const TodosStore = signalStore(\n  { providedIn: 'root' },\n  withState({ loading: false, error: null as string | null }),\n  withEntities<Todo>(),\n  withComputed((store) => ({\n    activeCount: computed(\n      () => store.entities().filter((t) => !t.done).length\n    ),\n  })),\n  withMethods((store, api = inject(TodosService)) => ({\n    loadAll: rxMethod<void>(\n      pipe(\n        tap(() => patchState(store, { loading: true, error: null })),\n        switchMap(() =>\n          api.getAll().pipe(\n            tapResponse({\n              next: (todos) =>\n                patchState(store, setAllEntities(todos), { loading: false }),\n              error: (e: Error) =>\n                patchState(store, { error: e.message, loading: false }),\n            })\n          )\n        )\n      )\n    ),\n  }))\n);"
+        },
+        {
+          "type": "paragraph",
+          "text": "SignalStore shines for feature-local or component-scoped state where you want signals-native ergonomics, less boilerplate, and direct template consumption (store.entities(), store.activeCount()). Provide it in a component's providers for a lifecycle-scoped instance, or providedIn root for a shared one. It still supports entities and rxMethod for RxJS-powered async, so you keep switchMap/exhaustMap semantics where they matter."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Prefer SignalStore when the audience is a single feature or component tree and you value low ceremony. Prefer the classic Store when you need global action-driven coordination across many features, full DevTools time travel of a serialized action log, or an established large-app convention. They can coexist in one app."
+        }
+      ]
+    },
+    {
+      "id": "when-not",
+      "heading": "Best Practice: When NOT to Use NgRx",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The most senior thing you can say about NgRx is when to skip it. If state is local to one component, a signal or a small set of signals is enough. If a handful of components share modest state, a service holding signals (or a BehaviorSubject) is simpler, faster to write, and easier to test than a full Redux slice. Reach for the classic Store only when the coordination problem is genuinely large: many writers, cross-feature consistency, auditability, or time-travel needs."
+        },
+        {
+          "type": "table",
+          "columns": ["Approach", "Best for", "State scope", "Cost / notes"],
+          "rows": [
+            ["NgRx Store + Effects", "Large apps, cross-feature coordination, audit/time-travel, many writers", "Global, normalized", "High boilerplate; strong tooling & discipline"],
+            ["NgRx SignalStore", "Feature/component state wanting signals ergonomics and low ceremony", "Feature or component", "Low boilerplate; entities + rxMethod available"],
+            ["Service + signals", "Modest shared state across a few components", "Feature/shared", "Minimal setup; use computed() for derivations"],
+            ["Service + BehaviorSubject", "Legacy or stream-first shared state, RxJS-heavy flows", "Feature/shared", "Manual subscription mgmt; consider migrating to signals"],
+            ["Component signals only", "Purely local UI state (open/closed, form draft)", "Single component", "Zero infra; no cross-component sharing"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Adding NgRx 'because it's the standard' to a small app is a common anti-pattern. You pay the boilerplate tax on day one and rarely recoup it. Start with signals and services; graduate to SignalStore when a feature grows; adopt the full Store only when a concrete scaling pain demands it."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Local UI state (toggles, drafts) -> component signals.",
+            "Small shared state -> service with signals + computed.",
+            "Growing feature with async and entities -> SignalStore.",
+            "Global, multi-feature, audited, time-travel -> classic Store + Effects."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Example: A Production HTTP CRUD Feature Slice",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "This is a complete todos slice wired for HTTP CRUD with the entity adapter and effects. It shows action groups, the service, the reducer using adapter helpers, effects with the right flattening operator per operation, and a component consuming selectors as signals. Note switchMap for the read, concatMap for writes that must stay ordered, and catchError inside each request."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// todos.actions.ts\nimport { createActionGroup, emptyProps, props } from '@ngrx/store';\nimport { Todo } from './todo.model';\n\nexport const TodosActions = createActionGroup({\n  source: 'Todos',\n  events: {\n    'Page Entered': emptyProps(),\n    'Add Clicked': props<{ title: string }>(),\n    'Toggle Clicked': props<{ id: string }>(),\n    'Delete Clicked': props<{ id: string }>(),\n  },\n});\n\nexport const TodosApiActions = createActionGroup({\n  source: 'Todos API',\n  events: {\n    'Load Succeeded': props<{ todos: Todo[] }>(),\n    'Load Failed': props<{ error: string }>(),\n    'Add Succeeded': props<{ todo: Todo }>(),\n    'Toggle Succeeded': props<{ todo: Todo }>(),\n    'Delete Succeeded': props<{ id: string }>(),\n    'Write Failed': props<{ error: string }>(),\n  },\n});"
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// todos.service.ts\nimport { HttpClient } from '@angular/common/http';\nimport { Injectable, inject } from '@angular/core';\nimport { Observable } from 'rxjs';\nimport { Todo } from './todo.model';\n\n@Injectable({ providedIn: 'root' })\nexport class TodosService {\n  private http = inject(HttpClient);\n  private base = '/api/todos';\n\n  getAll(): Observable<Todo[]> {\n    return this.http.get<Todo[]>(this.base);\n  }\n  create(title: string): Observable<Todo> {\n    return this.http.post<Todo>(this.base, { title, done: false });\n  }\n  update(todo: Todo): Observable<Todo> {\n    return this.http.put<Todo>(`${this.base}/${todo.id}`, todo);\n  }\n  remove(id: string): Observable<void> {\n    return this.http.delete<void>(`${this.base}/${id}`);\n  }\n}"
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// todos.effects.ts\nimport { inject } from '@angular/core';\nimport { Actions, createEffect, ofType } from '@ngrx/effects';\nimport { catchError, concatMap, map, of, switchMap, withLatestFrom } from 'rxjs';\nimport { Store } from '@ngrx/store';\nimport { TodosService } from './todos.service';\nimport { TodosActions, TodosApiActions } from './todos.actions';\nimport { selectTodoEntities } from './todos.selectors';\n\nexport const load$ = createEffect(\n  (actions$ = inject(Actions), api = inject(TodosService)) =>\n    actions$.pipe(\n      ofType(TodosActions.pageEntered),\n      switchMap(() =>\n        api.getAll().pipe(\n          map((todos) => TodosApiActions.loadSucceeded({ todos })),\n          catchError((e) =>\n            of(TodosApiActions.loadFailed({ error: e.message }))\n          )\n        )\n      )\n    ),\n  { functional: true }\n);\n\n// concatMap: writes must persist in order and must not be cancelled.\nexport const add$ = createEffect(\n  (actions$ = inject(Actions), api = inject(TodosService)) =>\n    actions$.pipe(\n      ofType(TodosActions.addClicked),\n      concatMap(({ title }) =>\n        api.create(title).pipe(\n          map((todo) => TodosApiActions.addSucceeded({ todo })),\n          catchError((e) =>\n            of(TodosApiActions.writeFailed({ error: e.message }))\n          )\n        )\n      )\n    ),\n  { functional: true }\n);\n\nexport const toggle$ = createEffect(\n  (\n    actions$ = inject(Actions),\n    api = inject(TodosService),\n    store = inject(Store)\n  ) =>\n    actions$.pipe(\n      ofType(TodosActions.toggleClicked),\n      withLatestFrom(store.select(selectTodoEntities)),\n      concatMap(([{ id }, entities]) => {\n        const current = entities[id]!;\n        return api.update({ ...current, done: !current.done }).pipe(\n          map((todo) => TodosApiActions.toggleSucceeded({ todo })),\n          catchError((e) =>\n            of(TodosApiActions.writeFailed({ error: e.message }))\n          )\n        );\n      })\n    ),\n  { functional: true }\n);"
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// todos-page.component.ts\nimport { ChangeDetectionStrategy, Component, OnInit, inject } from '@angular/core';\nimport { Store } from '@ngrx/store';\nimport { TodosActions } from './todos.actions';\nimport {\n  selectAllTodos, selectLoading, selectTodoStats,\n} from './todos.selectors';\n\n@Component({\n  selector: 'app-todos-page',\n  standalone: true,\n  changeDetection: ChangeDetectionStrategy.OnPush,\n  template: `\n    @if (loading()) { <p>Loading...</p> }\n    <ul>\n      @for (todo of todos(); track todo.id) {\n        <li (click)=\"toggle(todo.id)\">{{ todo.title }}</li>\n      }\n    </ul>\n    <p>Active: {{ stats().active }} / {{ stats().total }}</p>\n  `,\n})\nexport class TodosPageComponent implements OnInit {\n  private store = inject(Store);\n  todos = this.store.selectSignal(selectAllTodos);\n  loading = this.store.selectSignal(selectLoading);\n  stats = this.store.selectSignal(selectTodoStats);\n\n  ngOnInit() {\n    this.store.dispatch(TodosActions.pageEntered());\n  }\n  toggle(id: string) {\n    this.store.dispatch(TodosActions.toggleClicked({ id }));\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Notice the shape of the loop: the component dispatches an intent action, an effect performs HTTP and emits an API result action, the reducer folds it via the entity adapter, and the component re-renders from selectSignal. No component ever touches HTTP or mutates state."
+        }
+      ]
+    },
+    {
+      "id": "testing",
+      "heading": "Best Practice: Testing Reducers, Selectors & Effects",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The purity of NgRx makes most tests trivial. Reducers are pure functions: call them with a state and an action and assert on the result — no TestBed, no mocks. Selectors expose projector(), so you can test the derivation logic directly by passing inputs, bypassing the store entirely. Effects are the only piece that needs a bit of scaffolding because they involve the Actions stream and injected services."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Reducer test — pure, no framework.\nit('marks loading on page enter', () => {\n  const next = todosReducer(initialState, TodosActions.pageEntered());\n  expect(next.loading).toBe(true);\n  expect(next.error).toBeNull();\n});\n\n// Selector test — use the projector directly.\nit('computes stats', () => {\n  const result = selectTodoStats.projector(\n    [{ id: '1', done: true }, { id: '2', done: false }] as any,\n    [{ id: '2', done: false }] as any\n  );\n  expect(result).toEqual({ total: 2, active: 1, done: 1 });\n});"
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Effect test with provideMockActions + a hot actions stream.\nimport { TestBed } from '@angular/core/testing';\nimport { provideMockActions } from '@ngrx/effects/testing';\nimport { Observable, of, throwError } from 'rxjs';\nimport { Actions } from '@ngrx/effects';\n\nit('maps load success to loadSucceeded', (done) => {\n  const actions$ = of(TodosActions.pageEntered());\n  TestBed.configureTestingModule({\n    providers: [\n      provideMockActions(() => actions$),\n      { provide: TodosService, useValue: { getAll: () => of([{ id: '1' }]) } },\n    ],\n  });\n  TestBed.runInInjectionContext(() => {\n    load$.subscribe((action) => {\n      expect(action.type).toBe('[Todos API] Load Succeeded');\n      done();\n    });\n  });\n});"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "For components, prefer provideMockStore from @ngrx/store/testing and overrideSelector to feed deterministic values without wiring the full state tree. This isolates the component from reducers and effects so you test rendering and dispatch in isolation."
+        },
+        {
+          "type": "paragraph",
+          "text": "The key insight is coverage-by-construction: because state logic is pure and side effects are quarantined in effects, you can achieve very high confidence with fast, framework-free unit tests for reducers and selectors, and reserve marble/TestBed tests for the small surface of effects. This is a major reason NgRx scales in large teams."
+        }
+      ]
+    },
+    {
+      "id": "common-mistake",
+      "heading": "Mistake: Storing Derived State & Fat Reducers",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A frequent design error is storing derived data in the state tree — for example keeping both items and activeCount as separate fields. Now every mutation must update two places, and they will drift. Derived data belongs in selectors, computed once, memoized, always consistent. The state tree should hold only the minimal source of truth."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Anti-pattern: duplicated, drift-prone derived state.\ninterface BadState { items: Todo[]; activeCount: number; }\n\n// Better: store only the source of truth, derive the rest.\ninterface GoodState { items: Todo[]; }\nexport const selectActiveCount = createSelector(\n  selectAllTodos,\n  (items) => items.filter((t) => !t.done).length\n);"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Other recurring mistakes: business logic inside reducers (they must stay pure and dumb), subscribing to the store manually and forgetting to unsubscribe (use selectSignal or the async pipe), and dispatching from a reducer (impossible and a sign the logic belongs in an effect)."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Do not store what a selector can compute.",
+            "Do not put HTTP or conditionals-with-side-effects in reducers.",
+            "Do not reuse one generic action across unrelated flows.",
+            "Do not place catchError on the outer effect stream.",
+            "Do not manually subscribe when selectSignal or async pipe will do."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "note-devtools",
+      "heading": "Note: DevTools, Meta-Reducers & Persistence",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The Redux DevTools integration (provideStoreDevtools) is one of NgRx's biggest practical wins: a live, time-ordered log of every action with state diffs, jump-to-state, and action replay. Because actions are serializable events, this history is meaningful and reproducible. Set logOnly in production to keep the log without the heavier debugging machinery."
+        },
+        {
+          "type": "paragraph",
+          "text": "Meta-reducers wrap the root reducer to run cross-cutting logic on every action — rehydrating state from localStorage on init, logging, or resetting state on logout. They are the idiomatic place for concerns that span all features. Keep them small and pure; a meta-reducer that performs I/O belongs as an effect instead."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "For persistence, a common pattern is a meta-reducer that hydrates from storage on the INIT action plus an effect (or the meta-reducer) that writes selected slices back on change. Persist only what you need; never persist transient UI or loading flags."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "unidirectional-flow",
+      "title": "NgRx Unidirectional Data Flow",
+      "type": "mermaid",
+      "content": "graph LR\n  C[Component] -->|dispatch| A[Action]\n  A --> R[Reducer]\n  R --> S[Store State]\n  S --> SEL[Selector]\n  SEL -->|observable/signal| C\n  A --> E[Effect]\n  E -->|HTTP| SVC[Service/API]\n  SVC --> E\n  E -->|success/failure action| A"
+    },
+    {
+      "id": "http-load-sequence",
+      "title": "HTTP Load Through an Effect",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n  participant C as Component\n  participant St as Store\n  participant Ef as Effect\n  participant Api as API\n  participant Rd as Reducer\n  C->>St: dispatch(pageEntered)\n  St->>Ef: action stream\n  Ef->>Api: getAll()\n  Api-->>Ef: Todo[]\n  Ef->>St: dispatch(loadSucceeded)\n  St->>Rd: reduce(state, loadSucceeded)\n  Rd-->>St: new state\n  St-->>C: selector emits todos"
+    },
+    {
+      "id": "entity-shape",
+      "title": "Entity State Shape",
+      "type": "ascii",
+      "content": "TodosState (EntityState<Todo> + extras)\n+---------------------------------------------+\n| ids:      ['a', 'b', 'c']    (order)        |\n| entities: {                                 |\n|   a: { id: 'a', title: '...', done: false },|\n|   b: { id: 'b', title: '...', done: true  },|\n|   c: { id: 'c', title: '...', done: false } |\n| }                                           |\n| loading: false                              |\n| error:   null                               |\n+---------------------------------------------+\nselectAll -> [entities[id] for id in ids]"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q1",
+      "question": "Explain the Redux pattern and unidirectional data flow as NgRx implements it.",
+      "answer": "State is a single immutable tree held in the Store. Components dispatch actions, which are plain events describing something that happened. Pure reducers take the current state and an action and return a new state without mutation. Selectors read slices of that state as memoized observables or signals that components consume. Side effects live in Effects, which listen to actions, do asynchronous work, and dispatch result actions. Data flows one way: down into components via selectors, and up out of components via dispatched actions, so every change is explicit and traceable.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["redux", "data-flow", "architecture"],
+      "followUps": ["What does immutability buy you here?", "Where do side effects fit?"]
+    },
+    {
+      "id": "q2",
+      "question": "Why are NgRx selectors memoized, and what breaks if you defeat the memoization?",
+      "answer": "createSelector caches the last input references and last output, recomputing only when an input reference actually changes. This lets expensive derivations run once per real change and lets every subscriber share the same output reference, which in turn allows OnPush components to skip work when nothing changed. The cache has size one, so it breaks if you call a parameterized selector with different arguments each cycle or if a projector returns a new object literal that ignores its inputs — then it recomputes on every emission. To keep memoization for parameterized queries, use a selector factory that closes over the argument. Defeating memoization means unnecessary recomputation and can trigger OnPush churn because the output reference changes each time.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["selectors", "memoization", "performance"],
+      "followUps": ["How do you write a parameterized selector correctly?", "How does this interact with OnPush?"]
+    },
+    {
+      "id": "q3",
+      "question": "Why does an effect stream die if catchError is at the wrong level, and where should it go?",
+      "answer": "An effect is a long-lived observable that listens to the Actions stream. If catchError is placed on the outer stream and any inner error propagates to it, the outer observable completes after emitting the fallback, so the effect stops listening to actions forever — one failed request kills the feature until reload. The fix is to place catchError inside the inner, per-request observable (inside the switchMap/concatMap projection) so a failure is converted into a failure action that flows out, while the outer stream keeps subscribing to future actions. In short: catch at the per-request level so failures become actions, not stream terminations. This is one of the most common production NgRx bugs.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["effects", "rxjs", "error-handling"],
+      "followUps": ["How would you test this behavior?", "What if you want a global error effect too?"]
+    },
+    {
+      "id": "q4",
+      "question": "switchMap vs concatMap vs exhaustMap in effects — how do you choose?",
+      "answer": "The operator determines concurrency and is a correctness decision. switchMap cancels the previous inner request when a new action arrives, so it fits reads and typeaheads where only the latest result matters and stale responses must be discarded. concatMap queues and runs requests one at a time in order, so it fits writes that must persist sequentially and must never be cancelled or reordered. exhaustMap ignores new actions while one is in flight, which is ideal for idempotent triggers like a login submit or refresh where double-clicks should be dropped. mergeMap runs everything concurrently with no ordering. Choosing switchMap for a save would cancel in-flight writes and lose data, so the operator is not a style choice.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["effects", "rxjs", "operators"],
+      "followUps": ["Give a concrete bug from using switchMap on saves.", "When is mergeMap appropriate?"]
+    },
+    {
+      "id": "q5",
+      "question": "What does 'actions are events, not commands' mean, and why does action hygiene matter?",
+      "answer": "It means you should model actions as facts describing something that already happened from a specific source, like '[Todos Page] Add Clicked', rather than imperative commands like 'setTodos' that tell a reducer what to do. Event-style actions let multiple reducers and effects react independently to the same fact without coupling, and they make the DevTools log read like a narrative of user and system behavior. Reusing one generic action from many places couples unrelated flows and turns the log into noise, and it obscures intent. Good naming uses the '[Source] Event' convention and prefers one specific action per unique event even if two lead to similar reducer logic. Action hygiene is what keeps a large NgRx codebase debuggable.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["actions", "hygiene", "naming"],
+      "followUps": ["How do createActionGroup and props help?", "Why must actions be serializable?"]
+    },
+    {
+      "id": "q6",
+      "question": "When is NgRx overkill, and what would you use instead?",
+      "answer": "NgRx is overkill when the coordination problem is small. Purely local UI state such as a toggle or a form draft belongs in component signals with zero infrastructure. Modest state shared across a few components is better served by a service holding signals with computed derivations, or a BehaviorSubject in RxJS-heavy code. A growing feature with async and collections can use SignalStore for signals ergonomics and low boilerplate. You reserve the full Store plus Effects for genuinely large problems: many writers, cross-feature consistency, auditability, and time-travel needs. Adding NgRx by default to a small app pays a boilerplate tax you rarely recoup, so start simple and graduate only when a concrete scaling pain appears.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["architecture", "signals", "trade-offs"],
+      "followUps": ["How do you migrate a service+signals feature to SignalStore?", "What signals that it's time for the full Store?"]
+    },
+    {
+      "id": "q7",
+      "question": "What problems does the Entity adapter solve, and what does its state shape look like?",
+      "answer": "@ngrx/entity manages normalized collections so you avoid hand-writing error-prone immutable insert/update/remove logic over arrays. Its shape keeps an ids array for order and an entities dictionary keyed by id for O(1) lookups, which is far faster than re-scanning an array. createEntityAdapter provides type-safe CRUD helpers like addOne, upsertMany, updateOne, removeOne, and setAll, all guaranteeing immutable updates. It also gives you prebuilt memoized selectors — selectAll, selectEntities, selectIds, selectTotal — via getSelectors, and an optional sortComparer to keep ids sorted. The result is less reducer code, fewer mutation bugs, constant-time reads, and a uniform state shape across features.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["entity", "collections", "performance"],
+      "followUps": ["How does selectId customize the key?", "How do you handle server-driven ordering?"]
+    },
+    {
+      "id": "q8",
+      "question": "How do createAction, createReducer, and on work together?",
+      "answer": "createAction produces a typed action creator, optionally with a payload described by props<T>(). createReducer takes an initial state and a series of on handlers. Each on binds one or more action creators to a reducer function that receives the current state and the action's payload and returns a new immutable state. When an action is dispatched, the store runs it through the reducer, which finds the matching on handler and applies it, or returns the state unchanged if none matches. The whole thing is a pure fold: the reducer is a pure function of state and action with no side effects, which makes it directly unit-testable by calling it with inputs and asserting the output.",
+      "difficulty": "easy",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["actions", "reducers", "api"],
+      "followUps": ["How do you update nested state immutably?", "Can one action be handled by multiple reducers?"]
+    },
+    {
+      "id": "q9",
+      "question": "How do you register feature state and effects lazily in a standalone Angular app?",
+      "answer": "At the application root you call provideStore() and provideEffects() (plus provideStoreDevtools) in the bootstrap providers. For a lazy feature, you put provideState('featureKey', featureReducer) and provideEffects(featureEffects) inside the providers array of that feature's route. Because those providers are scoped to the lazily loaded route, the feature's reducer and effects only register when the route is actually visited, keeping the initial bundle small and the state tree modular. This replaces the older StoreModule.forRoot/forFeature NgModule APIs. The feature key you pass to provideState is the same key createFeatureSelector uses to locate the slice.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["feature-state", "lazy-loading", "standalone"],
+      "followUps": ["What happens if two features use the same key?", "How do runtime checks help here?"]
+    },
+    {
+      "id": "q10",
+      "question": "What is the NgRx SignalStore and when would you prefer it over the classic Store?",
+      "answer": "signalStore from @ngrx/signals is a signals-first store composed from features: withState defines state signals, withComputed defines memoized derived signals, withMethods defines updaters and async operations (often via rxMethod for RxJS interop), and withEntities brings the entity adapter to signals. It has no separate action/reducer files — state, derivations, and methods live together, greatly reducing boilerplate, and components read values by calling the signals directly. Prefer it for feature-local or component-scoped state where you want low ceremony and native signal ergonomics. Prefer the classic Store when you need global action-driven coordination across many features, a serialized action log with full DevTools time travel, or an established large-app convention. The two can coexist in one application.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["signal-store", "signals", "trade-offs"],
+      "followUps": ["How does rxMethod preserve switchMap semantics?", "How do you scope a SignalStore to a component?"]
+    },
+    {
+      "id": "q11",
+      "question": "Why should derived state not be stored in the state tree?",
+      "answer": "Storing derived data such as a count alongside its source array means every mutation has to update both, and sooner or later they drift out of sync, producing subtle bugs. Selectors solve this by computing derived values on demand, memoized so they only recompute when inputs change, and always consistent because they are a pure function of the source. Keeping only the minimal source of truth in the state tree also makes reducers simpler and reduces the surface for mutation bugs. The rule of thumb is: if a selector can compute it, do not store it. This keeps the state tree lean and the derivations authoritative.",
+      "difficulty": "easy",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["selectors", "state-design", "best-practice"],
+      "followUps": ["When is caching derived state justified?", "How do memoized selectors help performance?"]
+    },
+    {
+      "id": "q12",
+      "question": "How do you test reducers, selectors, and effects in NgRx?",
+      "answer": "Reducers are pure, so you test them by calling the reducer with a state and an action and asserting on the returned state — no TestBed or mocks needed. Selectors expose a projector() method, so you test the derivation by passing inputs directly and asserting the output, bypassing the store. Effects need light scaffolding: use provideMockActions to supply an actions stream, provide a fake service, and assert that the effect emits the expected result action; marble testing helps for timing-sensitive cases. For components, use provideMockStore with overrideSelector to feed deterministic selector values so you test rendering and dispatch in isolation. The purity of the architecture means most coverage comes from fast, framework-free unit tests.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["testing", "effects", "selectors"],
+      "followUps": ["When do you need marble tests?", "How does overrideSelector help component tests?"]
+    },
+    {
+      "id": "q13",
+      "question": "What are meta-reducers and where do they fit?",
+      "answer": "A meta-reducer is a higher-order reducer that wraps the root reducer and runs on every dispatched action, letting you apply cross-cutting logic across all features. Common uses include logging every action, rehydrating persisted state from localStorage on the INIT action, or resetting the entire state on logout. They must stay small and pure; if a meta-reducer needs to perform I/O such as writing to storage on every change, that side effect belongs in an effect instead, or at least should be carefully isolated. Meta-reducers run before feature reducers in the chain, so they can transform the action or short-circuit state. They are the idiomatic home for concerns that genuinely span the whole store.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["meta-reducers", "persistence", "architecture"],
+      "followUps": ["How would you implement logout reset?", "Why keep persistence writes in an effect?"]
+    },
+    {
+      "id": "q14",
+      "question": "How does the Store integrate with Angular signals and OnPush change detection?",
+      "answer": "The Store is an Observable, and modern NgRx also exposes store.selectSignal(selector), which returns a Signal backed by a memoized selector. Because the selector output keeps its reference when inputs are unchanged, both the async pipe and selectSignal give OnPush components a stable reference to compare, so change detection runs only when the selected slice actually changes. Using selectSignal removes manual subscription management entirely and integrates cleanly with signal-based templates and computed(). This combination — immutable state, memoized selectors, reference equality, and OnPush — is what makes NgRx efficient at scale. Prefer selectSignal or the async pipe over manual subscribe/unsubscribe to avoid leaks.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["signals", "change-detection", "onpush"],
+      "followUps": ["Why avoid manual subscriptions?", "How does selectSignal handle initial values?"]
+    },
+    {
+      "id": "q15",
+      "question": "What are the NgRx runtime checks and why enable them?",
+      "answer": "NgRx offers development-time runtime checks configured on the store: strictStateImmutability and strictActionImmutability freeze state and actions so any accidental mutation throws immediately, strictStateSerializability and strictActionSerializability flag non-serializable values that would break persistence and time travel, and strictActionWithinNgZone catches actions dispatched outside Angular's zone. Enabling them turns silent, hard-to-trace bugs — like a reducer mutating an array so selectors never fire — into loud failures at the exact dispatch that caused them. They add overhead so you run them only in development. They are a cheap, high-value safeguard that enforces the discipline the whole pattern depends on.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["runtime-checks", "immutability", "debugging"],
+      "followUps": ["Which check catches a push() mutation?", "Why disable them in production?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "c1",
+      "title": "Build a Full Todos Feature Slice with the Entity Adapter",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "prompt": "Implement a todos feature slice for HTTP CRUD: define an action group for page-enter/add/toggle/delete plus an API action group for success/failure, a reducer using createEntityAdapter for setAll/addOne/upsertOne/removeOne, prebuilt selectors, and effects that load with switchMap and write with concatMap, each with catchError inside the request. Wire it for lazy registration.",
+      "hints": [
+        "Extend EntityState<Todo> with loading and error fields, and seed with adapter.getInitialState.",
+        "Put catchError inside each inner request observable so a failure becomes a failure action, not a dead stream.",
+        "Use switchMap for the read and concatMap for writes so saves stay ordered and are not cancelled."
+      ],
+      "solutionCode": "// todos.actions.ts\nimport { createActionGroup, emptyProps, props } from '@ngrx/store';\nimport { Todo } from './todo.model';\n\nexport const TodosActions = createActionGroup({\n  source: 'Todos',\n  events: {\n    'Page Entered': emptyProps(),\n    'Add Clicked': props<{ title: string }>(),\n    'Toggle Clicked': props<{ id: string }>(),\n    'Delete Clicked': props<{ id: string }>(),\n  },\n});\nexport const TodosApiActions = createActionGroup({\n  source: 'Todos API',\n  events: {\n    'Load Succeeded': props<{ todos: Todo[] }>(),\n    'Load Failed': props<{ error: string }>(),\n    'Add Succeeded': props<{ todo: Todo }>(),\n    'Toggle Succeeded': props<{ todo: Todo }>(),\n    'Delete Succeeded': props<{ id: string }>(),\n    'Write Failed': props<{ error: string }>(),\n  },\n});\n\n// todos.reducer.ts\nimport { createEntityAdapter, EntityState } from '@ngrx/entity';\nimport { createReducer, on } from '@ngrx/store';\n\nexport interface TodosState extends EntityState<Todo> {\n  loading: boolean;\n  error: string | null;\n}\nexport const adapter = createEntityAdapter<Todo>({\n  selectId: (t) => t.id,\n});\nexport const initialState: TodosState = adapter.getInitialState({\n  loading: false,\n  error: null,\n});\nexport const todosReducer = createReducer(\n  initialState,\n  on(TodosActions.pageEntered, (s) => ({ ...s, loading: true, error: null })),\n  on(TodosApiActions.loadSucceeded, (s, { todos }) =>\n    adapter.setAll(todos, { ...s, loading: false })),\n  on(TodosApiActions.loadFailed, (s, { error }) =>\n    ({ ...s, loading: false, error })),\n  on(TodosApiActions.addSucceeded, (s, { todo }) => adapter.addOne(todo, s)),\n  on(TodosApiActions.toggleSucceeded, (s, { todo }) => adapter.upsertOne(todo, s)),\n  on(TodosApiActions.deleteSucceeded, (s, { id }) => adapter.removeOne(id, s)),\n  on(TodosApiActions.writeFailed, (s, { error }) => ({ ...s, error }))\n);\n\n// todos.selectors.ts\nimport { createFeatureSelector, createSelector } from '@ngrx/store';\nconst selectState = createFeatureSelector<TodosState>('todos');\nconst { selectAll, selectEntities, selectTotal } = adapter.getSelectors();\nexport const selectAllTodos = createSelector(selectState, selectAll);\nexport const selectTodoEntities = createSelector(selectState, selectEntities);\nexport const selectTodoCount = createSelector(selectState, selectTotal);\nexport const selectLoading = createSelector(selectState, (s) => s.loading);\n\n// todos.effects.ts\nimport { inject } from '@angular/core';\nimport { Actions, createEffect, ofType } from '@ngrx/effects';\nimport { catchError, concatMap, map, of, switchMap, withLatestFrom } from 'rxjs';\nimport { Store } from '@ngrx/store';\n\nexport const load$ = createEffect(\n  (actions$ = inject(Actions), api = inject(TodosService)) =>\n    actions$.pipe(\n      ofType(TodosActions.pageEntered),\n      switchMap(() =>\n        api.getAll().pipe(\n          map((todos) => TodosApiActions.loadSucceeded({ todos })),\n          catchError((e) => of(TodosApiActions.loadFailed({ error: e.message })))\n        )\n      )\n    ),\n  { functional: true }\n);\nexport const add$ = createEffect(\n  (actions$ = inject(Actions), api = inject(TodosService)) =>\n    actions$.pipe(\n      ofType(TodosActions.addClicked),\n      concatMap(({ title }) =>\n        api.create(title).pipe(\n          map((todo) => TodosApiActions.addSucceeded({ todo })),\n          catchError((e) => of(TodosApiActions.writeFailed({ error: e.message })))\n        )\n      )\n    ),\n  { functional: true }\n);\n\n// todos.routes.ts — lazy registration\nimport { Routes } from '@angular/router';\nimport { provideState } from '@ngrx/store';\nimport { provideEffects } from '@ngrx/effects';\nexport const TODOS_ROUTES: Routes = [{\n  path: '',\n  providers: [\n    provideState('todos', todosReducer),\n    provideEffects({ load$, add$ }),\n  ],\n  loadComponent: () => import('./todos-page.component').then((m) => m.TodosPageComponent),\n}];",
+      "solutionLanguage": "typescript",
+      "explanation": "This slice demonstrates every core NgRx piece working together. The action groups separate user-intent events ('[Todos] ...') from API-result events ('[Todos API] ...'), preserving action hygiene and making the DevTools log readable. The reducer extends EntityState so the adapter can manage a normalized {ids, entities} shape, and every CRUD transition uses an adapter helper (setAll, addOne, upsertOne, removeOne) that guarantees an immutable update, eliminating hand-written spread bugs. Selectors are built off getSelectors so selectAll, selectEntities, and selectTotal are memoized for free. The load effect uses switchMap because only the latest fetch matters, while the add effect uses concatMap so writes persist in order and are never cancelled, and both place catchError inside the inner request so a failure emits a failure action instead of killing the effect stream. Finally, provideState and provideEffects in the route providers register the slice lazily so it only loads when the todos route is visited, keeping the initial bundle lean.",
+      "relatedTopic": "ngrx"
+    },
+    {
+      "id": "c2",
+      "title": "Write a Memoized, Composed Selector",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "prompt": "Given a todos slice with items plus a UI filter (all/active/done) and a search string, write composed, memoized selectors: selectFilteredTodos that combines the item list, the filter, and the search term, and a parameterized selectTodoById factory. Ensure memoization is preserved.",
+      "hints": [
+        "Build small field selectors first, then compose them with createSelector so each recomputes independently.",
+        "For selectTodoById, return a factory createSelector rather than filtering by argument inside a single shared selector.",
+        "Do not construct new arrays from constants inside a projector, and keep the projector a pure function of its inputs."
+      ],
+      "solutionCode": "import { createFeatureSelector, createSelector } from '@ngrx/store';\nimport { Todo } from './todo.model';\n\nexport interface TodosState {\n  items: Todo[];\n  filter: 'all' | 'active' | 'done';\n  search: string;\n}\n\nconst selectState = createFeatureSelector<TodosState>('todos');\nexport const selectItems = createSelector(selectState, (s) => s.items);\nexport const selectFilter = createSelector(selectState, (s) => s.filter);\nexport const selectSearch = createSelector(selectState, (s) => s.search);\n\n// Composed & memoized: recomputes only when items, filter, or search change.\nexport const selectFilteredTodos = createSelector(\n  selectItems,\n  selectFilter,\n  selectSearch,\n  (items, filter, search) => {\n    const term = search.trim().toLowerCase();\n    return items.filter((t) => {\n      const matchesFilter =\n        filter === 'all' ||\n        (filter === 'active' && !t.done) ||\n        (filter === 'done' && t.done);\n      const matchesSearch =\n        term === '' || t.title.toLowerCase().includes(term);\n      return matchesFilter && matchesSearch;\n    });\n  }\n);\n\n// Parameterized selector via a factory: one memoized instance per id.\nexport const selectTodoById = (id: string) =>\n  createSelector(selectItems, (items) => items.find((t) => t.id === id));\n\n// Stats derived off the filtered result, still memoized.\nexport const selectFilteredCount = createSelector(\n  selectFilteredTodos,\n  (todos) => todos.length\n);",
+      "solutionLanguage": "typescript",
+      "explanation": "This solution shows correct selector composition and memoization. Small field selectors (selectItems, selectFilter, selectSearch) each read one piece of state and recompute only when that reference changes. selectFilteredTodos composes all three via createSelector, so its filtering projector runs only when items, filter, or search actually change — not on every store emission — and every subscriber receives the same computed array reference, which keeps OnPush components efficient. Because the projector is a pure function of its inputs and never fabricates arrays from constants, memoization stays intact. The parameterized selectTodoById is implemented as a factory that returns a fresh createSelector closing over the id, which is the idiomatic way to avoid the size-one memoization cache being thrashed by different arguments. selectFilteredCount derives further off the memoized filtered list, demonstrating that selectors compose into layers where each layer only recomputes when its own inputs change.",
+      "relatedTopic": "ngrx"
+    },
+    {
+      "id": "c3",
+      "title": "Convert a Small NgRx Feature to SignalStore",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "prompt": "Take a simple counter/todos feature currently expressed as actions + reducer + selectors + an effect, and reimplement it as a single @ngrx/signals SignalStore using withState, withComputed, withMethods, withEntities, and rxMethod for the async load. Preserve switchMap semantics for the load.",
+      "hints": [
+        "Compose the store from features: withState for flags, withEntities for the collection, withComputed for derivations.",
+        "Use rxMethod with a piped switchMap so the load keeps cancel-latest semantics.",
+        "Use patchState with setAllEntities inside tapResponse to update state immutably on success."
+      ],
+      "solutionCode": "import { computed, inject } from '@angular/core';\nimport {\n  signalStore, withState, withComputed, withMethods, patchState,\n} from '@ngrx/signals';\nimport { withEntities, setAllEntities } from '@ngrx/signals/entities';\nimport { rxMethod } from '@ngrx/signals/rxjs-interop';\nimport { tapResponse } from '@ngrx/operators';\nimport { pipe, switchMap, tap } from 'rxjs';\nimport { Todo } from './todo.model';\nimport { TodosService } from './todos.service';\n\nexport const TodosStore = signalStore(\n  { providedIn: 'root' },\n  withState({ loading: false, error: null as string | null }),\n  withEntities<Todo>(),\n  withComputed((store) => ({\n    total: computed(() => store.entities().length),\n    activeCount: computed(\n      () => store.entities().filter((t) => !t.done).length\n    ),\n  })),\n  withMethods((store, api = inject(TodosService)) => ({\n    // switchMap preserves cancel-latest semantics from the original effect.\n    load: rxMethod<void>(\n      pipe(\n        tap(() => patchState(store, { loading: true, error: null })),\n        switchMap(() =>\n          api.getAll().pipe(\n            tapResponse({\n              next: (todos) =>\n                patchState(store, setAllEntities(todos), { loading: false }),\n              error: (e: Error) =>\n                patchState(store, { error: e.message, loading: false }),\n            })\n          )\n        )\n      )\n    ),\n    toggle(id: string) {\n      const current = store.entities().find((t) => t.id === id);\n      if (!current) return;\n      patchState(store, setAllEntities(\n        store.entities().map((t) =>\n          t.id === id ? { ...t, done: !t.done } : t\n        )\n      ));\n    },\n  }))\n);\n\n// Component usage:\n// store = inject(TodosStore);\n// ngOnInit() { this.store.load(); }\n// template: @if (store.loading()) {...} @for (t of store.entities(); track t.id) {...}\n//           Active: {{ store.activeCount() }}",
+      "solutionLanguage": "typescript",
+      "explanation": "This converts a multi-file Redux feature into one cohesive SignalStore. withState replaces the loading/error fields of the reducer state, withEntities brings the same normalized {ids, entities} collection the entity adapter provided, and withComputed replaces the memoized selectors with derived signals like total and activeCount that recompute only when entities change. withMethods holds the behavior: load is an rxMethod whose piped switchMap preserves the exact cancel-latest semantics of the original effect, so a new load cancels an in-flight one just as switchMap did in createEffect. tapResponse cleanly splits success and error branches, and patchState with setAllEntities performs the immutable update, matching what adapter.setAll did in the reducer. The toggle method shows a synchronous immutable update without any action/reducer indirection. The net effect is far less boilerplate — no action creators, no reducer file, no separate selector file — while retaining entities, memoized derivations, and correct async concurrency, which is exactly when SignalStore is the better fit for a feature-scoped slice.",
+      "relatedTopic": "ngrx"
+    }
+  ],
+  "references": [
+    { "label": "NgRx Store — Official Docs", "url": "https://ngrx.io/guide/store" },
+    { "label": "NgRx Effects — Official Docs", "url": "https://ngrx.io/guide/effects" },
+    { "label": "NgRx Entity — Official Docs", "url": "https://ngrx.io/guide/entity" },
+    { "label": "NgRx SignalStore — Official Docs", "url": "https://ngrx.io/guide/signals/signal-store" },
+    { "label": "NgRx Selectors — Official Docs", "url": "https://ngrx.io/guide/store/selectors" },
+    { "label": "Angular Blog — NgRx SignalStore Deep Dive", "url": "https://blog.angular-university.io/ngrx-signal-store/" }
+  ]
+}

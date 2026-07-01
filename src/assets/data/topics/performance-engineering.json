@@ -1,0 +1,681 @@
+{
+  "id": "performance-engineering",
+  "title": "Performance Engineering",
+  "category": "Engineering",
+  "subcategory": "Performance",
+  "difficulty": "senior",
+  "tags": [
+    "performance",
+    "profiling",
+    "latency",
+    "caching",
+    "database-tuning",
+    "load-testing",
+    "core-web-vitals",
+    "backpressure"
+  ],
+  "description": "A staff-level methodology for performance engineering: measure before you optimize, profile to find the proven hotspot, reason in percentiles and tail latency, then apply targeted fixes across caching, databases, async I/O, and the frontend. Emphasizes disciplined single-variable experiments over folklore-driven micro-optimizations.",
+  "estReadMinutes": 31,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "What Performance Engineering Actually Is",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Performance engineering is not the art of writing clever fast code. It is a disciplined, empirical loop: define what 'fast enough' means as a number, measure the current reality, locate the single dominant bottleneck with evidence, change exactly one thing, and re-measure to confirm the change helped and did not regress something else. Most engineers skip straight to the change; senior engineers spend most of their time on measurement and attribution, because a fix aimed at the wrong place is worse than no fix at all."
+        },
+        {
+          "type": "paragraph",
+          "text": "The reason this matters at staff level is that performance work is where intuition fails most reliably. The line of code you 'know' is slow is usually not the bottleneck; the loop you rewrote in a fit of cleverness often changes p99 by a rounding error while a forgotten index or an N+1 query dominates. Discipline beats instinct here more than almost anywhere else in software."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The prime directive: measure first, optimize the proven hotspot, change one variable at a time, and re-measure. Everything else in this topic is mechanics in service of that loop."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Performance is a distribution, not a single number. Reason in p50/p95/p99, never averages alone.",
+            "A profiler tells you where time actually goes; a hunch tells you where you fear it goes.",
+            "The cheapest fix is often not writing the code at all: caching, an index, or removing work beats optimizing it."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why It Matters: Latency, Money, and Correctness",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Latency is a product feature. Study after study ties added page latency to lost conversion and engagement, and tail latency compounds: a service that fans out to ten backends and waits for all of them sees a p99 dominated by the slowest of the ten, so even a rare slow call becomes the common user experience. At scale, the tail is the story."
+        },
+        {
+          "type": "paragraph",
+          "text": "Performance is also cost. Throughput per machine determines your fleet size and your cloud bill directly. Halving CPU per request either halves the servers or doubles the headroom for growth. And it is a reliability concern: systems near saturation exhibit nonlinear latency growth, where a small traffic increase pushes queues past their knee and latency explodes. Understanding that knee is the difference between a graceful system and a cascading outage."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Tail latency is not an edge case you can ignore. If p99 is 2 seconds, that is not 1% of users occasionally annoyed; it is roughly 1% of every request, which for a logged-in user making dozens of requests per session means most sessions hit the tail at least once."
+        },
+        {
+          "type": "paragraph",
+          "text": "Finally, premature optimization is a real tax. Optimized code is usually harder to read, harder to change, and more bug-prone. Spending that complexity budget on code that is not on the hot path is pure loss. The methodology exists precisely to route your effort to the places where the complexity is worth it."
+        }
+      ]
+    },
+    {
+      "id": "the-optimize-loop",
+      "heading": "Concept: The Optimize Loop and Percentiles",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Every serious performance effort runs the same loop. First, set a target: 'p99 of GET /cart under 200ms at 500 RPS'. A target without a percentile and a load level is not a target. Second, measure the current state under representative load. Third, profile to form a hypothesis about the dominant cost. Fourth, change one thing. Fifth, re-measure against the same target and load. If it did not move the needle, revert and pick the next hypothesis."
+        },
+        {
+          "type": "heading",
+          "level": 3,
+          "text": "Why averages lie"
+        },
+        {
+          "type": "paragraph",
+          "text": "An average blends fast and slow requests into a number that describes no one. A service can have a 40ms mean and a 900ms p99 simultaneously; the mean hides the pain. Worse, averages are dominated by volume, not by the users suffering. Percentiles answer the real question: 'what does the request at the 99th slowest position experience?' Track p50 for typical experience, p95 and p99 for the tail, and watch the ratio p99/p50 as a spread indicator."
+        },
+        {
+          "type": "table",
+          "columns": ["Metric", "What it tells you", "Typical trap", "Why it matters"],
+          "rows": [
+            ["Average (mean)", "Total time / count", "Hidden by a few fast requests; a single 10s outlier barely moves it", "Useful for capacity math, misleading for user experience"],
+            ["p50 (median)", "The typical request", "Looks great while the tail is on fire", "Baseline for 'normal' experience"],
+            ["p95", "Bad-but-not-rare", "Often where SLOs live", "Captures the frustrated-but-frequent user"],
+            ["p99", "The tail", "Dominated by GC pauses, lock contention, cold caches", "Fan-out multiplies it into the common case"],
+            ["p99.9 / max", "Worst case", "Noisy; single events", "Matters for critical paths and SLAs with penalties"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Never average percentiles across servers or time windows. The average of two p99s is not a p99. Aggregate raw histograms (e.g. HDR histograms) and compute the percentile over the merged data."
+        }
+      ]
+    },
+    {
+      "id": "profiling",
+      "heading": "Concept: Profiling and Flame Graphs",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A profiler attributes resource consumption to code. CPU profilers sample the call stack at a fixed frequency; the function on top of the stack most often is where CPU time concentrates. Allocation and heap profilers attribute memory and GC pressure. Off-CPU / wall-clock profilers reveal time spent blocked on I/O, locks, or sleeps, which a pure CPU profiler misses entirely. Distributed tracing (APM) attributes latency across service and network boundaries, showing you which span in a request dominates."
+        },
+        {
+          "type": "heading",
+          "level": 3,
+          "text": "Reading a flame graph"
+        },
+        {
+          "type": "paragraph",
+          "text": "A flame graph plots stacks as stacked rectangles. The x-axis is NOT time; it is the proportion of samples (population), sorted alphabetically, not chronologically. The y-axis is stack depth: callers below, callees above. The width of a box is the fraction of samples in which that function was on the stack. Wide boxes are where the resource went. You read it top-down looking for wide plateaus at the top (leaf functions burning CPU) and bottom-up to see which entry paths lead there."
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "Reading a CPU flame graph (widths = % of samples):\n\n| all (100%) ................................................. |\n|  handleRequest (92%) ...................|  gcSweep (8%)      |\n|   serializeJSON (61%) ......|  queryDB (28%) |\n|    reflectMarshal (58%) ..|  parseRows(24%)|\n|     mapAccess (40%) ....|\n\nDiagnosis walkthrough:\n1. Widest plateau at the top-left: reflectMarshal -> mapAccess (~58% of CPU).\n   Interpretation: JSON serialization via reflection dominates. That is the hotspot.\n2. queryDB is only 28% and parseRows 24% of it -> DB is secondary, not the target yet.\n3. gcSweep at 8% hints at allocation pressure, likely from the same serialization path.\n\nHypothesis: replace reflection-based JSON with a precompiled/codegen encoder\nfor this hot response type. Expected: cut the 58% plateau and reduce GC (8%).\nThen re-measure p99 under the same load before touching queryDB."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A differential flame graph (before-vs-after, red = grew, blue = shrank) is the fastest way to confirm a change did what you intended and did not shift cost elsewhere."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "CPU-bound symptom: high CPU, wide leaf plateaus, adding threads helps until cores saturate.",
+            "I/O-bound symptom: low CPU, threads blocked in read/await; profile must be off-CPU/wall-clock to see it.",
+            "Lock-bound symptom: threads parked in futex/monitor; more threads make it worse, not better."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "latency-throughput",
+      "heading": "Concept: Latency, Throughput, and Little's Law",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Latency is how long one request takes. Throughput is how many complete per unit time. They are related but not the same, and optimizing one can hurt the other: batching improves throughput by amortizing fixed costs but adds latency by making requests wait for a batch. You must know which you are optimizing for before you start."
+        },
+        {
+          "type": "paragraph",
+          "text": "Little's Law ties them together: L = λ × W, where L is the average number of concurrent requests in the system, λ is the arrival/throughput rate, and W is the average time in system (latency). The intuition is powerful. If you serve 500 RPS at 200ms latency, you have on average 100 requests in flight (500 × 0.2). That number sets your concurrency needs: your connection pool, thread pool, and downstream capacity must comfortably hold ~100 in-flight, or you queue and W balloons."
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "Little's Law sizing example:\n\n  Target throughput  λ = 500 requests/second\n  Measured latency   W = 0.2 seconds (200ms)\n  Concurrency        L = λ * W = 500 * 0.2 = 100 concurrent requests\n\nImplications:\n  - Need ~100 usable connections/threads to avoid queuing at this point.\n  - If latency degrades to 400ms, L jumps to 200 for the SAME throughput.\n    -> Slower requests need MORE concurrency to hold the line; a pool sized\n       for the happy path saturates during a latency spike and requests queue,\n       which raises W further -> a feedback loop toward collapse."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The lesson from Little's Law: latency regressions and capacity are coupled. A downstream slowdown consumes your concurrency budget and can cause a queue-driven meltdown even though CPU looks idle. This is why timeouts, bounded pools, and load shedding are not optional."
+        }
+      ]
+    },
+    {
+      "id": "caching",
+      "heading": "Concept: Caching Layers and Invalidation",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Caching is the highest-leverage performance tool because the fastest work is work you never do. But it introduces the hardest problem in the field: invalidation, keeping cached data consistent enough with the source of truth. You cache at multiple layers, each with different TTLs and invalidation strategies, and you must be deliberate about which data is safe to serve stale."
+        },
+        {
+          "type": "table",
+          "columns": ["Layer", "Where", "Typical TTL", "Invalidation", "Best for"],
+          "rows": [
+            ["Browser / client", "User device", "seconds to hours", "Cache-Control max-age, ETag revalidation", "Static assets, per-user immutable data"],
+            ["CDN / edge", "PoP near user", "minutes to days", "Surrogate keys, purge API, stale-while-revalidate", "Public assets, cacheable API GETs"],
+            ["HTTP (shared proxy)", "Reverse proxy", "seconds to minutes", "Cache-Control, Vary, explicit purge", "Anonymous, non-personalized responses"],
+            ["Application (in-process)", "Service memory", "seconds", "Short TTL, event-based eviction", "Hot config, small hot keys, per-node dedupe"],
+            ["Distributed (Redis)", "Shared cache tier", "seconds to minutes", "Cache-aside on write, TTL, pub/sub invalidation", "Cross-node shared reads, session, computed views"],
+            ["Database / buffer pool", "DB engine", "engine-managed", "Automatic on write", "Hot pages, query result cache"]
+          ]
+        },
+        {
+          "type": "heading",
+          "level": 3,
+          "text": "Cache-aside vs write-through"
+        },
+        {
+          "type": "paragraph",
+          "text": "Cache-aside (lazy): the application reads the cache; on a miss it loads from the DB and populates the cache. On writes it updates the DB and deletes (not updates) the cache key so the next read repopulates. It is simple and resilient — a cache outage degrades to DB reads — but the first read after a write is a miss. Write-through: writes go through the cache, which synchronously writes to the DB, keeping cache and DB in lockstep at the cost of write latency and complexity. Write-behind defers the DB write for throughput at the risk of data loss on crash."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Cache-aside read + write with correct invalidation (delete, don't update).\n// Includes single-flight to prevent a thundering herd on cache miss.\n\nimport type Redis from \"ioredis\";\n\nconst TTL_SECONDS = 60; // short: bounds staleness even if an invalidation is missed\nconst inFlight = new Map<string, Promise<Product | null>>();\n\nasync function getProduct(redis: Redis, db: Db, id: string): Promise<Product | null> {\n  const key = `product:${id}`;\n\n  const cached = await redis.get(key);\n  if (cached !== null) {\n    return cached === \"__MISS__\" ? null : JSON.parse(cached); // cache negatives too\n  }\n\n  // Single-flight: collapse concurrent misses into one DB load per process.\n  if (inFlight.has(key)) return inFlight.get(key)!;\n\n  const load = (async () => {\n    const row = await db.products.findById(id);\n    // SET NX-style with jitter avoids synchronized expiry (avalanche).\n    const ttl = TTL_SECONDS + Math.floor(Math.random() * 10);\n    await redis.set(key, row ? JSON.stringify(row) : \"__MISS__\", \"EX\", ttl);\n    return row;\n  })().finally(() => inFlight.delete(key));\n\n  inFlight.set(key, load);\n  return load;\n}\n\nasync function updateProduct(redis: Redis, db: Db, id: string, patch: Partial<Product>) {\n  await db.products.update(id, patch);   // 1. source of truth first\n  await redis.del(`product:${id}`);       // 2. invalidate: next read repopulates\n  // Do NOT redis.set(new value) here: a concurrent read could have just written\n  // an older snapshot, leaving a stale value that outlives this write. Deleting\n  // is safe because the next miss reloads the committed row."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The two hard cache failures: the thundering herd (many misses hammer the DB simultaneously — fix with single-flight and TTL jitter) and stale-write races (updating the cache with a value instead of deleting it can resurrect stale data). Always invalidate by deletion on write, and always set a bounded TTL as a backstop against missed invalidations."
+        }
+      ]
+    },
+    {
+      "id": "database-performance",
+      "heading": "Concept: Database Performance",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The database is the most common home of the real bottleneck, and the good news is that its cost is highly measurable via execution plans. The dominant issues are: missing or unusable indexes, N+1 query patterns, unbounded result sets, connection pool exhaustion, and non-sargable predicates that prevent index use. For deeper indexing mechanics, cross-link to the databases-sql and database-indexing topics; here we focus on the performance methodology."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Read the EXPLAIN/EXPLAIN ANALYZE plan. A Seq Scan on a large table in a selective query is a red flag; look for Index Scan or Index Only Scan.",
+            "Avoid SELECT *: it defeats covering indexes, moves bytes you discard, and breaks when schemas change.",
+            "Keep predicates sargable: WHERE date >= '2026-01-01' uses an index; WHERE YEAR(date) = 2026 does not, because the function hides the column from the optimizer.",
+            "Paginate with keyset/seek pagination (WHERE id > :last ORDER BY id LIMIT n), not OFFSET, which scans and discards rows.",
+            "Bound your connection pool. More connections is not more throughput; past the DB's core count you add context-switching and lock contention."
+          ]
+        },
+        {
+          "type": "heading",
+          "level": 3,
+          "text": "EXPLAIN before and after: fixing a sequential scan"
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- BEFORE: a selective query with no supporting index.\nEXPLAIN ANALYZE\nSELECT id, total_cents, created_at\nFROM orders\nWHERE customer_id = 4815 AND status = 'paid'\nORDER BY created_at DESC\nLIMIT 20;\n\n-- Plan (abridged):\n-- Limit  (cost=48210.5..48210.6 rows=20)\n--   ->  Sort  (actual time=612.4..612.4 rows=20)\n--         Sort Key: created_at DESC\n--         ->  Seq Scan on orders  (actual time=0.1..598.2 rows=1877 loops=1)\n--               Filter: (customer_id = 4815 AND status = 'paid')\n--               Rows Removed by Filter: 3_998_123\n-- Planning Time: 0.2 ms   Execution Time: 613.0 ms   <-- scans ~4M rows\n\n-- FIX: a composite index matching the equality + sort columns.\nCREATE INDEX CONCURRENTLY idx_orders_customer_status_created\n  ON orders (customer_id, status, created_at DESC);\n\n-- AFTER: same query, re-run EXPLAIN ANALYZE.\n-- Limit  (cost=0.56..8.61 rows=20)\n--   ->  Index Scan using idx_orders_customer_status_created on orders\n--         Index Cond: (customer_id = 4815 AND status = 'paid')\n--         (ORDER BY satisfied by index -> no Sort node)\n-- Planning Time: 0.2 ms   Execution Time: 0.9 ms    <-- 680x faster\n\n-- Note the column order: equality columns (customer_id, status) first, then the\n-- range/sort column (created_at). This lets the index satisfy the WHERE and the\n-- ORDER BY together, eliminating the separate Sort."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The N+1 pattern hides in ORMs: iterating a list of parents and lazily loading each child issues 1 + N queries. Fix with a JOIN or a batched IN (...) load (dataloader pattern). It rarely shows in a single-query EXPLAIN — you find it in the trace/query log by counting near-identical statements."
+        }
+      ]
+    },
+    {
+      "id": "async-parallelism",
+      "heading": "Concept: Async, Parallelism, and Backpressure",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The first question for any workload is: CPU-bound or I/O-bound? A CPU-bound task (compression, serialization, math) is limited by cores; parallelism helps up to the core count, then hurts. An I/O-bound task (DB calls, HTTP, disk) spends most of its time waiting; non-blocking async lets one thread serve many in-flight waits, and adding threads to a blocking model helps only until you exhaust the pool. Diagnosing wrong here wastes enormous effort — you cannot thread your way out of a CPU limit, and you cannot compute your way out of an I/O wait."
+        },
+        {
+          "type": "paragraph",
+          "text": "Thread-pool starvation is the classic async failure: blocking calls (a synchronous DB driver, a lock, Thread.sleep) inside an async/event-loop model or a shared pool consume workers that never yield, so unrelated requests queue behind them even though CPU is idle. The fix is to keep blocking work off the async path — dedicated bounded pools for blocking calls, and never block the event loop."
+        },
+        {
+          "type": "paragraph",
+          "text": "Backpressure and load shedding are how a system stays alive under overload. Backpressure propagates 'slow down' upstream by bounding queues; when a bounded queue is full, the system must shed load — reject with 429/503 fast rather than accept work it cannot finish. Accepting unbounded work is how latency collapses: requests pile up, each waits longer, timeouts fire, clients retry, and the retry storm finishes the job. A fast rejection is a feature."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// Bounded pool with load shedding beats an unbounded queue under overload.\n// AbortPolicy rejects immediately when saturated -> fail fast, don't melt down.\n\nExecutorService pool = new ThreadPoolExecutor(\n    16,                                  // core threads\n    16,                                  // max threads (sized ~= CPU cores for CPU-bound)\n    30, TimeUnit.SECONDS,\n    new ArrayBlockingQueue<>(200),       // BOUNDED queue: the backpressure signal\n    new ThreadPoolExecutor.AbortPolicy() // shed load: throw RejectedExecutionException\n);\n\ntry {\n    pool.submit(task);\n} catch (RejectedExecutionException e) {\n    // Translate to a fast 503 with Retry-After. This protects tail latency for\n    // the requests already in flight instead of degrading everyone equally.\n    return Response.status(503).header(\"Retry-After\", \"1\").build();\n}\n\n// Anti-pattern: new LinkedBlockingQueue<>() (unbounded). Under overload it hides\n// the problem by accepting everything, memory and latency grow without limit,\n// and Little's Law guarantees in-flight count -> infinity until OOM."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Parallelism can make things slower: for small workloads the fork/join and coordination overhead exceeds the work; for CPU-bound work beyond core count you add context switches and cache thrash; and false sharing on adjacent cache lines can make more threads net-negative. Always measure the parallel version against the serial one at realistic sizes."
+        }
+      ]
+    },
+    {
+      "id": "frontend-performance",
+      "heading": "Concept: Frontend Performance and Core Web Vitals",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Frontend performance splits into load performance (getting bytes and pixels to the user) and runtime performance (staying responsive). Core Web Vitals are Google's user-centric metrics: LCP (Largest Contentful Paint, loading — target < 2.5s), CLS (Cumulative Layout Shift, visual stability — target < 0.1), and INP (Interaction to Next Paint, responsiveness — target < 200ms). INP replaced FID in 2024 and measures the full latency of interactions, not just the first input delay."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Bundle size: code-split by route and lazy-load below-the-fold or rarely-used chunks so the initial payload is minimal. Ship less JavaScript — parse/execute is often costlier than transfer.",
+            "Virtualization: render only the visible rows of a long list (windowing) instead of thousands of DOM nodes; the DOM is the bottleneck, not the data.",
+            "Debounce/throttle expensive handlers (search-as-you-type, scroll, resize) so you do work at human cadence, not per keystroke or per scroll frame.",
+            "Image optimization: correct dimensions, modern formats (AVIF/WebP), lazy loading, and explicit width/height to prevent layout shift (protects CLS).",
+            "Protect INP: break long tasks, yield to the main thread, and move heavy compute to a Web Worker so interactions aren't blocked behind rendering work."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Debounce: run the expensive work only after input has settled.\n// Used for search-as-you-type to cut request volume and main-thread work.\nfunction debounce(fn, waitMs) {\n  let timer = null;\n  const debounced = (...args) => {\n    clearTimeout(timer);\n    timer = setTimeout(() => fn(...args), waitMs);\n  };\n  debounced.cancel = () => clearTimeout(timer);\n  return debounced;\n}\n\n// 300ms is a good default for search: fast enough to feel live, slow enough that\n// a typist's burst collapses to ONE request instead of one per keystroke.\nconst onSearch = debounce((q) => fetchResults(q), 300);\nsearchInput.addEventListener(\"input\", (e) => onSearch(e.target.value));\n\n// Throttle (contrast): guarantees at most one call per interval, for continuous\n// streams like scroll/resize where you want steady updates, not a final one.\nfunction throttle(fn, intervalMs) {\n  let last = 0;\n  return (...args) => {\n    const now = Date.now();\n    if (now - last >= intervalMs) { last = now; fn(...args); }\n  };\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Lab vs field: Lighthouse gives lab data (one controlled run) useful for debugging; CrUX/RUM gives field data (real users, real devices, real networks) which is what CWV is actually scored on. Optimize against field percentiles, not a single fast-laptop lab run."
+        }
+      ]
+    },
+    {
+      "id": "load-testing",
+      "heading": "Example: A Load Test and Benchmarking Pitfalls",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "You cannot know your system's behavior under load without generating load. Tools like k6 and JMeter drive concurrent virtual users and report latency percentiles and throughput. The goal is not a single number but a curve: how latency degrades as you approach and pass the saturation knee. Write thresholds into the test so it fails CI when p95 regresses."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// k6 load test with a ramp profile and percentile thresholds.\n// Run: k6 run cart-load.js\nimport http from \"k6/http\";\nimport { check, sleep } from \"k6\";\n\nexport const options = {\n  stages: [\n    { duration: \"30s\", target: 50 },   // warm-up ramp (let caches/JIT settle)\n    { duration: \"2m\",  target: 500 },  // ramp to target load\n    { duration: \"3m\",  target: 500 },  // steady state -> read percentiles HERE\n    { duration: \"30s\", target: 0 },    // ramp down\n  ],\n  thresholds: {\n    http_req_duration: [\"p(95)<200\", \"p(99)<500\"], // SLO as a gate\n    http_req_failed: [\"rate<0.01\"],                 // <1% errors\n  },\n};\n\nexport default function () {\n  const res = http.get(\"https://staging.example.com/api/cart\", {\n    headers: { Authorization: `Bearer ${__ENV.TOKEN}` },\n  });\n  check(res, { \"status 200\": (r) => r.status === 200 });\n  sleep(1); // model think-time so you measure realistic concurrency\n}"
+        },
+        {
+          "type": "heading",
+          "level": 3,
+          "text": "Benchmarking pitfalls"
+        },
+        {
+          "type": "list",
+          "style": "ordered",
+          "items": [
+            "Cold start: JIT compilers (JVM, V8) run interpreted first and optimize hot paths after thousands of iterations; GC has not warmed up; caches are empty. Always include a warm-up phase and discard it before reading numbers.",
+            "GC noise: a benchmark that ignores allocation reports steady-state times that a GC pause blows up in production. Measure percentiles, not means, to see GC in the tail.",
+            "Dead-code elimination: microbenchmarks whose results are unused get optimized away entirely, reporting impossibly fast times. Consume the result (JMH Blackhole equivalent).",
+            "Coordinated omission: if the load generator waits for a slow response before sending the next request, it under-counts the tail. Use an open model / constant arrival rate to avoid this.",
+            "Testing on an unrepresentative environment: laptop vs prod hardware, empty DB vs production data volume, no network latency. Benchmark on prod-like infrastructure with prod-like data."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Coordinated omission is the most insidious pitfall: it systematically hides exactly the tail latency you care about. If your load tool backs off when the server is slow, the requests that would have measured the pain are never sent. Prefer tools/modes that maintain a fixed arrival rate independent of responses."
+        }
+      ]
+    },
+    {
+      "id": "walkthrough",
+      "heading": "Example: Making a Slow Endpoint Fast",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A real walkthrough of the loop. The endpoint GET /api/dashboard is reported slow: p99 is 2.3s at 300 RPS; the SLO is p99 < 300ms. We resist the urge to guess and run the loop."
+        },
+        {
+          "type": "list",
+          "style": "ordered",
+          "items": [
+            "Set target: p99 < 300ms at 300 RPS, measured on staging with prod-like data.",
+            "Measure: k6 confirms p50 = 180ms, p95 = 1.1s, p99 = 2.3s. Huge spread -> the mean (260ms) lied; the tail is the problem.",
+            "Profile with the APM trace: a single /dashboard request shows 47 near-identical SELECT queries against team_members, each ~4ms. Classic N+1: we loop over teams and lazily load members per team.",
+            "Hypothesize: eliminate the N+1 with a batched load. Expected: 47 round-trips collapse to 1, removing ~40ms of serial DB latency, but the tail suggests something else too.",
+            "Change ONE thing: replace the per-team lazy load with a single IN-list query. Re-measure: p99 drops from 2.3s to 900ms. Better, but not there — and the tail is still wide.",
+            "Profile again: with N+1 gone, the trace now shows one query dominating at p99 — a members lookup doing a Seq Scan (no index on team_id) that is fast on warm cache (p50) but slow when the page is cold (p99).",
+            "Change ONE more thing: add index on team_members(team_id). Re-measure: p99 = 210ms. Under SLO. Add a 60s cache-aside layer on the assembled dashboard for hot teams to protect against future load growth."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// BEFORE: N+1 -> one query per team.\nasync function loadDashboard(userId: string) {\n  const teams = await db.teams.findByUser(userId);      // 1 query\n  for (const team of teams) {\n    team.members = await db.members.findByTeam(team.id); // N queries (the N+1)\n  }\n  return assemble(teams);\n}\n\n// AFTER: batched load -> two queries total, regardless of team count.\nasync function loadDashboard(userId: string) {\n  const teams = await db.teams.findByUser(userId);       // 1 query\n  const ids = teams.map((t) => t.id);\n  const members = await db.members.findByTeams(ids);     // 1 query: WHERE team_id IN (...)\n  const byTeam = groupBy(members, (m) => m.teamId);\n  for (const team of teams) team.members = byTeam.get(team.id) ?? [];\n  return assemble(teams);\n}\n// Combined with CREATE INDEX ON team_members(team_id) and a 60s cache-aside\n// layer, p99 went 2.3s -> 210ms. Each change was measured independently so we\n// know the N+1 fix bought ~1.4s and the index bought ~0.7s."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Notice the discipline: three distinct improvements, each measured on its own. Had we bundled the N+1 fix, the index, and the cache into one deploy, we would not know which mattered — and if p99 had regressed, we would not know which change to revert."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Optimizing without measuring: rewriting code you 'know' is slow. The profiler almost always disagrees; you burn effort off the hot path.",
+            "Reasoning in averages: a healthy mean hides a burning tail. Always look at p95/p99 and the p99/p50 spread.",
+            "Changing multiple things at once: you lose attribution and cannot revert cleanly. One variable per experiment.",
+            "Micro-optimizing a cold path: turning a 0.1%-of-time function into 0.05% while the DB dominates 60%.",
+            "Caching without an invalidation plan: serving stale data indefinitely, or updating the cache with a value in a race and resurrecting stale reads.",
+            "Ignoring warm-up in benchmarks: reporting cold-JIT, cold-cache, cold-GC numbers that don't reflect steady state.",
+            "Unbounded queues and pools: hiding overload until memory and latency explode instead of shedding load fast.",
+            "Treating parallelism as free speed: adding threads to an I/O-wait or already-saturated-core problem and making it slower."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The meta-mistake is confidence without evidence. In performance work, the correct default posture is 'I don't know where the time goes until I've profiled it.' Every senior engineer has been humbled by a profiler contradicting a strongly-held belief."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "style": "ordered",
+          "items": [
+            "Set a numeric, percentile-based target under a stated load before touching code. No target, no optimization.",
+            "Profile to locate the proven hotspot; let the flame graph or trace, not intuition, choose the target.",
+            "Change one variable at a time and re-measure against the same target and load; keep an experiment log.",
+            "Prefer removing work (caching, indexing, batching, deleting features) over speeding it up.",
+            "Reason in distributions: track p50/p95/p99 and watch the tail; aggregate histograms, never average percentiles.",
+            "Bound everything: connection pools, thread pools, queues, and timeouts; add backpressure and load shedding.",
+            "Cache deliberately: pick a layer, set a bounded TTL with jitter, invalidate by deletion on write, and protect against thundering herds.",
+            "Benchmark honestly: warm up, use prod-like data and hardware, avoid coordinated omission, and gate CI on p95/p99 thresholds."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The compounding habit: instrument first. Systems with good metrics, tracing, and continuous profiling let you skip most of the guessing — the hotspot is often visible in a dashboard before you ever attach a profiler."
+        }
+      ]
+    },
+    {
+      "id": "practical-notes",
+      "heading": "Note: When Not to Optimize",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Not every slow thing is worth fixing. If a code path runs once at startup, or serves 3 requests a day, its latency is irrelevant no matter how ugly the number. Optimization spends two budgets: engineering time and code complexity. Spend them where they change a metric users or the bill actually feel."
+        },
+        {
+          "type": "paragraph",
+          "text": "Knuth's full quote is instructive: 'premature optimization is the root of all evil' is followed by 'yet we should not pass up our opportunities in that critical 3%.' The discipline is not 'never optimize' — it is 'optimize the measured critical fraction, and leave the rest readable.' The methodology in this topic exists to tell you which 3% is critical."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A useful gate before any performance ticket: 'What number will this move, by how much, and who feels it?' If you can't answer with a measurement, the first task is to measure, not to code."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "optimize-loop",
+      "title": "The Optimize Loop",
+      "type": "mermaid",
+      "content": "flowchart TD\n  A[Set target: p99 under load] --> B[Measure current state]\n  B --> C[Profile: find the hotspot]\n  C --> D[Form one hypothesis]\n  D --> E[Change ONE thing]\n  E --> F[Re-measure vs target]\n  F -->|Target met| G[Stop / document]\n  F -->|Not met| H{Did it help?}\n  H -->|Yes, keep| C\n  H -->|No, revert| C"
+    },
+    {
+      "id": "caching-layers",
+      "title": "Caching Layers on the Request Path",
+      "type": "mermaid",
+      "content": "flowchart LR\n  Client[Client / Browser cache] --> CDN[CDN / Edge]\n  CDN --> App[App server]\n  App --> Cache[Distributed cache Redis]\n  Cache -->|hit| App\n  Cache -->|miss| DB[(Database)]\n  DB --> Cache\n  App --> Client"
+    },
+    {
+      "id": "latency-knee",
+      "title": "Latency vs Load: The Saturation Knee",
+      "type": "ascii",
+      "content": "latency\n  ^\n  |                                  *  <- collapse (queues unbounded)\n  |                               *\n  |                            *\n  |                         *  <- the knee (approaching saturation)\n  |                     *\n  |   * * * * * * * *      <- flat: plenty of headroom\n  +--------------------------------------> throughput (RPS)\n\nGoal: keep operating LEFT of the knee. Little's Law: past the knee,\nrising W raises in-flight L for the same lambda, feeding the collapse."
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-averages-lie",
+      "question": "Why do averages lie about latency, and what should you use instead?",
+      "answer": "An average blends fast and slow requests into a single number that describes no actual user, and it is dominated by request volume rather than by the users who are suffering. A service can have a 40ms mean while its p99 is 900ms, so the mean looks healthy while 1% of every request is painfully slow. Because averages hide the tail, they mask exactly the events — GC pauses, lock contention, cold caches — that hurt users most. You should reason in percentiles: p50 for the typical experience, p95 and p99 for the tail, and the p99/p50 ratio as a spread indicator. Critically, percentiles must be computed from aggregated histograms; averaging two servers' p99s does not give a valid p99. Fan-out amplifies the tail: a request waiting on ten backends inherits the slowest, turning a rare tail into the common case.",
+      "difficulty": "medium",
+      "category": "Engineering",
+      "tricky": true,
+      "tags": ["percentiles", "latency", "tail-latency"],
+      "followUps": ["Why can't you average percentiles across servers?", "How does fan-out turn p99 into the common experience?"]
+    },
+    {
+      "id": "q-premature-optimization",
+      "question": "What does 'premature optimization is the root of all evil' actually mean, and when is optimization not premature?",
+      "answer": "The phrase warns against optimizing code before you have evidence it is on the critical path, because optimized code costs readability, maintainability, and correctness — budgets wasted if the code isn't a hotspot. Knuth's full quote continues that we should not pass up opportunities in the critical 3%, so it is not a blanket 'never optimize.' Optimization is not premature once you have measured, profiled, and proven a specific piece of code dominates a metric that users or costs actually feel. The discipline is to measure first and spend complexity only where it moves a real number. A code path that runs once at startup or serves a handful of requests a day is never worth optimizing regardless of how slow it looks. So the test is: what number will this move, by how much, and who feels it?",
+      "difficulty": "medium",
+      "category": "Engineering",
+      "tricky": true,
+      "tags": ["methodology", "premature-optimization"],
+      "followUps": ["How do you decide which 3% is critical?", "What are the hidden costs of optimized code?"]
+    },
+    {
+      "id": "q-flame-graph",
+      "question": "How do you read a flame graph, and what does the x-axis represent?",
+      "answer": "A flame graph stacks call frames as rectangles: the y-axis is stack depth with callers below and callees above, and the width of each box is the fraction of samples in which that function was on the stack. The x-axis is NOT time — it is the proportion of the sampled population, sorted alphabetically rather than chronologically, so you cannot read execution order from it. You look for wide plateaus, especially at the top (leaf functions burning the resource), because width equals cost. Reading bottom-up shows which entry paths lead into an expensive subtree. A CPU flame graph attributes CPU samples; an off-CPU or allocation flame graph attributes blocked time or memory. A differential flame graph colors what grew and shrank between two profiles, which is the fastest way to confirm a change did what you intended.",
+      "difficulty": "medium",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["profiling", "flame-graph"],
+      "followUps": ["What is an off-CPU flame graph good for?", "How does a differential flame graph help verify a fix?"]
+    },
+    {
+      "id": "q-littles-law",
+      "question": "State Little's Law and explain what it tells you about capacity.",
+      "answer": "Little's Law is L = λ × W: the average number of items in a system equals the arrival rate times the average time each spends in the system. In service terms, concurrent in-flight requests equal throughput times latency. If you serve 500 RPS at 200ms, you have on average 100 requests in flight, which sizes your connection pool, thread pool, and downstream capacity. The crucial insight is coupling: if latency degrades to 400ms at the same 500 RPS, in-flight jumps to 200, so a slowdown consumes concurrency budget you sized for the happy path. When the pool saturates, requests queue, W rises further, and you get a feedback loop toward collapse. This is why bounded pools, timeouts, and load shedding are not optional — they cap L before the loop runs away.",
+      "difficulty": "hard",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["littles-law", "capacity", "concurrency"],
+      "followUps": ["How does a latency spike cause a queue-driven meltdown?", "How do you size a connection pool with Little's Law?"]
+    },
+    {
+      "id": "q-cache-aside-writethrough",
+      "question": "Compare cache-aside and write-through caching. When would you choose each?",
+      "answer": "In cache-aside (lazy loading) the application reads the cache, and on a miss loads from the database and populates the cache; on writes it updates the database and invalidates the cache key. It is simple and resilient — a cache outage degrades to slower DB reads — but the first read after a write is a miss. In write-through, writes go through the cache which synchronously persists to the database, keeping the two in lockstep at the cost of higher write latency and more complexity. Write-behind defers the DB write for throughput but risks data loss on crash. Choose cache-aside as the default for read-heavy workloads where occasional misses are fine; choose write-through when you need the cache always consistent with the DB and can absorb the write cost. Regardless of strategy, use a bounded TTL as a backstop against missed invalidations.",
+      "difficulty": "medium",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["caching", "cache-aside", "write-through"],
+      "followUps": ["Why invalidate by deletion rather than updating the cache?", "What is write-behind and what is its risk?"]
+    },
+    {
+      "id": "q-invalidation-hard",
+      "question": "Why is cache invalidation considered one of the hardest problems, and how do you make it manageable?",
+      "answer": "Invalidation is hard because it is a distributed consistency problem: the cached copy and the source of truth can diverge, and coordinating updates across many cache nodes, layers, and concurrent writers invites races. A common bug is updating the cache with a computed value on write — a concurrent read can interleave and write an older snapshot afterward, resurrecting stale data that outlives your write. You make it manageable by invalidating through deletion on write so the next read reloads the committed row, and by always setting a bounded TTL as a backstop so any missed invalidation self-heals within a known window. For multi-node caches, propagate invalidations via pub/sub or surrogate/cache keys. You also defend against the thundering herd (many simultaneous misses) with single-flight and against synchronized expiry (avalanche) with TTL jitter. The overarching principle is to bound staleness explicitly rather than hope for perfect consistency.",
+      "difficulty": "hard",
+      "category": "Engineering",
+      "tricky": true,
+      "tags": ["caching", "invalidation", "consistency"],
+      "followUps": ["What is a thundering herd and how do you prevent it?", "Why add jitter to cache TTLs?"]
+    },
+    {
+      "id": "q-n-plus-one",
+      "question": "What is the N+1 query problem, why is it easy to miss, and how do you fix it?",
+      "answer": "The N+1 pattern is issuing one query to fetch a list of parents and then one additional query per parent to load its children, for 1 + N queries total. Each query may be individually fast (a few milliseconds), so it hides in a single EXPLAIN — the problem is the count and the serial round-trip latency, not any one statement. It is easy to miss because ORMs trigger it implicitly through lazy loading when you iterate a collection and touch a relationship. You find it by counting near-identical statements in the query log or a distributed trace, where dozens of identical SELECTs appear. The fix is to batch: a JOIN, or a single IN-list query (the dataloader pattern) that loads all children at once, then group them in memory by parent. This collapses 1 + N round-trips to a constant, typically two queries, and often removes hundreds of milliseconds of serial latency.",
+      "difficulty": "medium",
+      "category": "Engineering",
+      "tricky": true,
+      "tags": ["database-tuning", "n-plus-one", "orm"],
+      "followUps": ["Why doesn't a single EXPLAIN reveal an N+1?", "How does the dataloader/batch pattern work?"]
+    },
+    {
+      "id": "q-thread-pool-starvation",
+      "question": "What is thread-pool starvation and how does it arise in async systems?",
+      "answer": "Thread-pool starvation occurs when blocking operations consume the workers in a pool (or block an event loop) so that unrelated tasks queue behind them even while CPU sits idle. In an async or event-loop model, a synchronous database driver, a lock wait, or Thread.sleep on the async path holds a worker that never yields, so throughput collapses despite low CPU utilization — the symptom that confuses people. It arises when blocking work is mixed onto the non-blocking path, or when a shared pool is sized for CPU work but used for long I/O waits. The fix is to keep blocking calls off the async path: use non-blocking drivers, or dispatch blocking work to a dedicated, bounded pool sized for that I/O, and never block the event loop. Diagnosing it requires an off-CPU or wall-clock profile, because a CPU profiler shows an idle process and hides the blocked threads.",
+      "difficulty": "hard",
+      "category": "Engineering",
+      "tricky": true,
+      "tags": ["async", "thread-pool", "concurrency"],
+      "followUps": ["Why does a CPU profiler miss thread-pool starvation?", "How do you isolate blocking work from an event loop?"]
+    },
+    {
+      "id": "q-cpu-vs-io",
+      "question": "How do you tell whether a workload is CPU-bound or I/O-bound, and why does it matter?",
+      "answer": "A CPU-bound workload keeps cores busy doing computation — serialization, compression, math — and shows high CPU utilization with wide leaf plateaus in a CPU flame graph. An I/O-bound workload spends most of its time waiting on the database, network, or disk, shows low CPU, and appears as threads blocked in read/await, which only an off-CPU or wall-clock profile reveals. It matters because the correct remedy is opposite for each. For CPU-bound work, parallelism helps up to the core count and then hurts; you speed it up by doing less work or using more cores. For I/O-bound work, non-blocking async lets one thread serve many in-flight waits, and adding threads helps only until the pool is exhausted; you speed it up by reducing round-trips, batching, or caching. Misdiagnosing wastes effort — you cannot thread your way out of a CPU limit, nor compute your way out of a wait.",
+      "difficulty": "medium",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["async", "cpu-bound", "io-bound"],
+      "followUps": ["Why does parallelism stop helping past the core count?", "What profiling reveals I/O wait?"]
+    },
+    {
+      "id": "q-backpressure-load-shedding",
+      "question": "What are backpressure and load shedding, and why is fast rejection a feature?",
+      "answer": "Backpressure is the mechanism by which a system signals upstream to slow down, typically by bounding its internal queues so producers cannot outrun consumers. Load shedding is what happens when a bounded queue is full: the system rejects new work quickly — a fast 429 or 503 with Retry-After — instead of accepting work it cannot finish. Fast rejection is a feature because accepting unbounded work is how systems collapse: requests pile up, each waits longer, timeouts fire, clients retry, and the retry storm finishes the system off. By shedding load, you protect the latency of the requests already in flight rather than degrading everyone equally into failure. Little's Law explains why: without a bound, a slowdown drives in-flight count toward infinity until memory or timeouts give out. A bounded queue with a reject policy caps that growth and keeps the healthy majority fast.",
+      "difficulty": "hard",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["backpressure", "load-shedding", "reliability"],
+      "followUps": ["Why is an unbounded queue dangerous under overload?", "How does load shedding protect tail latency?"]
+    },
+    {
+      "id": "q-sargable",
+      "question": "What does 'sargable' mean, and give an example of a predicate that defeats an index.",
+      "answer": "Sargable (Search ARGument ABLE) describes a predicate the query optimizer can satisfy with an index seek rather than a full scan. A predicate is sargable when the indexed column appears bare on one side compared against a constant or parameter, so the engine can navigate the B-tree directly. Wrapping the column in a function or expression hides it from the optimizer and forces a scan. For example, WHERE created_at >= '2026-01-01' is sargable and can use an index on created_at, but WHERE YEAR(created_at) = 2026 is not, because the function must be evaluated per row. Similarly, leading-wildcard LIKE '%term' and implicit type casts on the column defeat index use. The fix is to rewrite the predicate to expose the raw column — use a range instead of a function, or precompute/index the expression. Reading the EXPLAIN plan confirms whether an Index Scan or a Seq Scan resulted.",
+      "difficulty": "medium",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["database-tuning", "sargable", "indexing"],
+      "followUps": ["How would you make YEAR(created_at)=2026 index-friendly?", "Why does a leading wildcard defeat an index?"]
+    },
+    {
+      "id": "q-cold-jit-gc",
+      "question": "Why can benchmarks that ignore JIT warm-up and GC produce misleading results?",
+      "answer": "Managed runtimes like the JVM and V8 start by interpreting bytecode and only compile hot methods to optimized native code after they have executed thousands of times, so an early measurement captures slow, un-optimized code that never runs in steady state. Garbage collection also has not warmed up, and caches are cold, so cold numbers overstate real latency. Conversely, a microbenchmark whose result is unused can be entirely eliminated by dead-code elimination, reporting impossibly fast times. GC is especially deceptive if you measure only the mean: a stop-the-world pause shows up in the tail, so a benchmark reporting averages hides the very pauses that hurt production p99. The remedy is to include a warm-up phase and discard it, measure percentiles rather than means, consume results to defeat dead-code elimination, and run long enough to observe steady-state GC behavior. Using prod-like data and hardware completes the picture.",
+      "difficulty": "hard",
+      "category": "Engineering",
+      "tricky": true,
+      "tags": ["benchmarking", "jit", "garbage-collection"],
+      "followUps": ["Why measure percentiles rather than means for GC?", "What is dead-code elimination in a microbenchmark?"]
+    },
+    {
+      "id": "q-coordinated-omission",
+      "question": "What is coordinated omission in load testing and why is it dangerous?",
+      "answer": "Coordinated omission occurs when a load generator waits for a slow response before sending its next request, so during a period of high latency it simply sends fewer requests. The effect is that the requests which would have measured the pain are never sent, and the tool systematically under-reports exactly the tail latency you care about. It is dangerous because it produces optimistic p99 numbers that give false confidence; the real user experience under load is far worse than the test shows. The root cause is a closed-loop model where request rate is coupled to server responsiveness. The fix is an open model or constant arrival rate: the generator sends requests on a fixed schedule regardless of when prior responses return, so slow responses accumulate and the measured latency reflects reality. Some tools also correct after the fact by back-filling the missing samples based on the intended schedule.",
+      "difficulty": "hard",
+      "category": "Engineering",
+      "tricky": true,
+      "tags": ["load-testing", "coordinated-omission", "tail-latency"],
+      "followUps": ["How does an open-model load generator avoid it?", "Why does closed-loop testing hide the tail?"]
+    },
+    {
+      "id": "q-core-web-vitals",
+      "question": "What are the three Core Web Vitals, their targets, and one lever for each?",
+      "answer": "The three Core Web Vitals are LCP (Largest Contentful Paint), CLS (Cumulative Layout Shift), and INP (Interaction to Next Paint). LCP measures loading — the time until the largest content element renders — with a good target under 2.5 seconds; you improve it by optimizing the critical rendering path, prioritizing the hero image, and reducing render-blocking resources. CLS measures visual stability — how much the layout unexpectedly shifts — with a target under 0.1; you improve it by reserving space with explicit width/height on images and avoiding content injected above existing content. INP measures responsiveness — the latency from an interaction to the next paint — replacing FID in 2024, with a target under 200 milliseconds; you improve it by breaking up long tasks, yielding to the main thread, and offloading heavy compute to a Web Worker. Importantly, these are scored on field data from real users (CrUX/RUM), so you optimize against field percentiles, not a single fast-laptop Lighthouse run.",
+      "difficulty": "medium",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["frontend", "core-web-vitals", "inp"],
+      "followUps": ["Why did INP replace FID?", "What is the difference between lab and field data?"]
+    },
+    {
+      "id": "q-debounce-throttle",
+      "question": "What is the difference between debounce and throttle, and when do you use each?",
+      "answer": "Debounce delays running a function until a burst of events has stopped for a specified quiet period, so rapid triggers collapse into a single trailing call. Throttle guarantees the function runs at most once per interval no matter how many events fire, producing steady periodic execution. You use debounce for search-as-you-type or a resize handler where you only care about the final state after activity settles — a typist's burst becomes one request instead of one per keystroke, around 300ms being a good default. You use throttle for continuous streams like scroll position updates or progress reporting where you want regular updates during the activity, not just at the end, capping the work rate to protect the main thread. Both reduce work and improve responsiveness (protecting INP), but debounce optimizes for 'act when it's over' while throttle optimizes for 'act at a steady cadence.' Choosing wrong feels laggy (debounce where you needed live updates) or wasteful (no limiting at all).",
+      "difficulty": "easy",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["frontend", "debounce", "throttle"],
+      "followUps": ["Which would you use for a scroll-position indicator?", "How does debouncing protect INP?"]
+    },
+    {
+      "id": "q-select-star",
+      "question": "Why is SELECT * a performance concern beyond just style?",
+      "answer": "SELECT * fetches every column, which moves bytes you may immediately discard across the network and into memory, wasting I/O and buffer space for large or wide rows. More importantly it defeats covering indexes: if a query needs only two columns that are both in an index, the engine can answer from the index alone (Index Only Scan), but SELECT * forces a lookup back to the heap for the remaining columns, adding random I/O. It also makes queries fragile — adding a column silently changes the result shape and payload — and can break assumptions in code that maps rows positionally. In ORMs it can also hydrate unnecessarily large objects. The fix is to select exactly the columns you need, which both shrinks the transfer and opens the door to covering-index optimizations that can turn a slow query into an index-only read.",
+      "difficulty": "easy",
+      "category": "Engineering",
+      "tricky": false,
+      "tags": ["database-tuning", "select-star", "covering-index"],
+      "followUps": ["What is a covering index / Index Only Scan?", "How does column selection interact with index design?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "chal-diagnose-slow-endpoint",
+      "title": "Diagnose and Fix a Slow Endpoint from a Profile",
+      "difficulty": "hard",
+      "category": "Engineering",
+      "prompt": "GET /api/reports/team-activity has p99 = 1.8s at 200 RPS; the SLO is p99 < 250ms. An APM trace of one request shows: a query fetching 40 teams (5ms), then 40 near-identical SELECT statements against activity_events filtered by team_id (each ~6ms, total ~240ms serial), then JSON serialization (30ms). The activity_events table has 20M rows and an index only on its primary key. Using the optimize loop, identify the dominant bottleneck, propose a fix that changes ONE thing first, and implement it. State what you expect to happen and what you would measure next.",
+      "hints": [
+        "40 near-identical queries triggered per-parent is a signature pattern — count the statements, don't just time one.",
+        "The per-query time is small but the round-trips are serial; collapsing them to one query removes both the count and the serial latency.",
+        "After the batch fix, the single remaining query filters activity_events by team_id on a 20M-row table with no supporting index — check what scan it does next."
+      ],
+      "solutionCode": "-- STEP 1 (change one thing): eliminate the N+1 with a batched IN-list query.\n-- BEFORE (pseudo): for each team -> SELECT ... FROM activity_events WHERE team_id = ?\n-- AFTER: one query for all teams.\nSELECT team_id, event_type, occurred_at\nFROM activity_events\nWHERE team_id IN (:teamIds)          -- 40 ids in one round-trip\n  AND occurred_at >= :since\nORDER BY team_id, occurred_at DESC;\n\n-- Expected after step 1: 40 serial round-trips (~240ms) collapse to ~1 query.\n-- p99 should drop substantially, but on a 20M-row table with only a PK index,\n-- this query will Seq Scan. Re-measure -> tail still wide because of the scan.\n\n-- STEP 2 (change one thing): add the supporting composite index.\nEXPLAIN ANALYZE\nSELECT team_id, event_type, occurred_at FROM activity_events\nWHERE team_id IN (1,2,3) AND occurred_at >= '2026-06-01'\nORDER BY team_id, occurred_at DESC;\n-- Before index: Seq Scan on activity_events, Rows Removed by Filter: ~20M.\n\nCREATE INDEX CONCURRENTLY idx_activity_team_time\n  ON activity_events (team_id, occurred_at DESC);\n\n-- After index: Index Scan using idx_activity_team_time; ORDER BY satisfied by\n-- the index (no Sort). Execution time drops from hundreds of ms to single-digit.\n\n-- STEP 3 (optional, protect for growth): cache-aside the assembled report per\n-- team for 30-60s, since activity dashboards tolerate slight staleness.",
+      "solutionLanguage": "sql",
+      "explanation": "The optimize loop demands attribution before action, so we read the trace as evidence: the 40 near-identical per-team queries are the classic N+1 signature, and their ~240ms of serial round-trips dominate the 30ms serialization and 5ms parent query. We change exactly one thing first — batching the 40 queries into a single IN-list query — because that removes both the query count and the serial latency, and we can measure its effect in isolation. Re-measuring reveals the next bottleneck: on a 20M-row table indexed only on the primary key, the batched query forces a sequential scan, which is fast on a warm buffer pool (hiding in p50) but slow when cold, keeping p99 wide. So the second single change is a composite index on (team_id, occurred_at DESC), which turns the Seq Scan into an Index Scan and, because the sort column is included, also eliminates the separate Sort node. Each change is measured independently so we know the N+1 fix and the index each contributed, and could revert cleanly if p99 regressed. Finally, a short-TTL cache-aside layer protects the hot path against future traffic growth without risking meaningful staleness for an activity report. The key discipline is that no change is made on intuition — the trace and the EXPLAIN plan drive every decision.",
+      "relatedTopic": "performance-engineering"
+    },
+    {
+      "id": "chal-cache-aside-hot-path",
+      "title": "Add a Correct Cache-Aside Layer to a Hot Read Path",
+      "difficulty": "medium",
+      "category": "Engineering",
+      "prompt": "A pricing service exposes getPrice(sku) that hits the database on every call; it is read 5000 times per second, prices change a few times per day, and reads currently dominate DB CPU. Add a distributed cache-aside layer with a correct TTL, correct invalidation on price updates, protection against the thundering herd on a cache miss, and a defense against synchronized expiry. Implement the read and write paths and justify your TTL and invalidation choices.",
+      "hints": [
+        "Reads vastly outnumber writes and staleness of a few seconds is acceptable — pick a short bounded TTL and cache misses too.",
+        "On a write, deleting the key is safer than overwriting it with the new value because of read/write interleaving races.",
+        "Collapse concurrent misses for the same key into a single DB load, and add jitter to the TTL so keys don't all expire at the same instant."
+      ],
+      "solutionCode": "import type Redis from \"ioredis\";\n\nconst BASE_TTL = 30;                 // seconds: prices change rarely; 30s bounds staleness\nconst inFlight = new Map<string, Promise<Price | null>>();\n\nexport async function getPrice(redis: Redis, db: Db, sku: string): Promise<Price | null> {\n  const key = `price:${sku}`;\n  const cached = await redis.get(key);\n  if (cached !== null) {\n    return cached === \"__MISS__\" ? null : JSON.parse(cached); // cache negatives to stop DB probing\n  }\n\n  // Single-flight: one DB load per key per process, even under 5000 rps of misses.\n  const existing = inFlight.get(key);\n  if (existing) return existing;\n\n  const load = (async () => {\n    const row = await db.prices.findBySku(sku);\n    const ttl = BASE_TTL + Math.floor(Math.random() * 10); // jitter: avoid synchronized expiry\n    await redis.set(key, row ? JSON.stringify(row) : \"__MISS__\", \"EX\", ttl);\n    return row;\n  })().finally(() => inFlight.delete(key));\n\n  inFlight.set(key, load);\n  return load;\n}\n\nexport async function updatePrice(redis: Redis, db: Db, sku: string, price: Price): Promise<void> {\n  await db.prices.upsert(sku, price);   // 1. write source of truth first\n  await redis.del(`price:${sku}`);       // 2. INVALIDATE by deletion (not overwrite)\n  // Optional: publish an invalidation event so in-process/local caches on other\n  // nodes drop the key too: await redis.publish(\"price-invalidate\", sku);\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "Because reads outnumber writes by orders of magnitude and prices change only a few times a day, a short bounded TTL of about 30 seconds is the right call: it removes essentially all read load from the database while keeping worst-case staleness tiny and self-healing even if an invalidation is somehow missed. The write path updates the database first and then invalidates by deleting the key rather than overwriting it, because an overwrite can race with a concurrent read that just repopulated an older snapshot, resurrecting stale data that outlives the write; deletion guarantees the next read reloads the committed row. Under 5000 reads per second a naive miss would let hundreds of requests stampede the database simultaneously, so single-flight collapses concurrent misses for the same key into one DB load per process, and caching negative results with a sentinel stops repeated probing for missing SKUs. TTL jitter prevents synchronized expiry, where many keys created together would otherwise expire in the same instant and cause a correlated miss avalanche. An optional pub/sub invalidation propagates deletions to any per-node in-process caches so no stale local copy survives. The result is a hot read path served almost entirely from cache, correct within a bounded staleness window, and resilient to both herds and avalanches.",
+      "relatedTopic": "performance-engineering"
+    }
+  ],
+  "references": [
+    { "label": "Brendan Gregg — Flame Graphs", "url": "https://www.brendangregg.com/flamegraphs.html" },
+    { "label": "Brendan Gregg — Systems Performance (methodology & USE method)", "url": "https://www.brendangregg.com/systems-performance-2nd-edition-book.html" },
+    { "label": "web.dev — Core Web Vitals (LCP, CLS, INP)", "url": "https://web.dev/articles/vitals" },
+    { "label": "k6 Documentation — Load testing", "url": "https://grafana.com/docs/k6/latest/" },
+    { "label": "AWS — Caching strategies (cache-aside, write-through, TTL)", "url": "https://docs.aws.amazon.com/whitepapers/latest/database-caching-strategies-using-redis/caching-patterns.html" },
+    { "label": "Use The Index, Luke — SQL indexing and tuning", "url": "https://use-the-index-luke.com/" }
+  ]
+}

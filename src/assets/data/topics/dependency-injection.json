@@ -1,0 +1,719 @@
+{
+  "id": "dependency-injection",
+  "title": "Dependency Injection & IoC",
+  "category": "Architecture",
+  "subcategory": "Design Principles",
+  "difficulty": "senior",
+  "tags": ["dependency-injection", "inversion-of-control", "solid", "di-container", "lifetimes", "testability", "captive-dependency", "service-locator"],
+  "description": "A staff-level treatment of Inversion of Control and Dependency Injection: injection styles, container lifetimes and the captive-dependency trap, injection tokens, resolving multiple implementations, and how DI works across Spring, .NET, and Angular. Emphasizes testability, the service-locator anti-pattern, and circular-dependency resolution.",
+  "estReadMinutes": 30,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction: Who Wires the Graph?",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Every non-trivial system is a graph of objects that collaborate. The central question of composition is: who is responsible for creating those objects and connecting them? When a class constructs its own collaborators with 'new', it hard-codes the graph and buries the wiring inside business logic. Inversion of Control (IoC) flips that responsibility outward — the class declares what it needs and something else supplies it. Dependency Injection (DI) is the most common concrete form of IoC."
+        },
+        {
+          "type": "paragraph",
+          "text": "At senior level, DI is not about frameworks or annotations. It is a design stance: depend on abstractions, let the composition root assemble the graph, and keep every class ignorant of how its collaborators are built. The frameworks (Spring, .NET's built-in container, Angular's injector) are merely automations of a discipline you could apply by hand."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Mental model: DI is 'give me my dependencies' (passing them in). Service Location is 'let me go get my dependencies' (pulling them from a global registry). Both invert construction, but only DI keeps dependencies explicit and honest."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "IoC — the broad principle: a framework or container controls object creation and lifecycle, not your code.",
+            "DI — one implementation of IoC: dependencies are supplied to an object from the outside (usually via its constructor).",
+            "DIP — the SOLID principle DI operationalizes: high-level modules and low-level modules both depend on abstractions."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "why-di",
+      "heading": "Why Dependency Injection",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The value of DI is not indirection for its own sake — it is the properties that fall out of decoupling construction from use. The four that matter most at scale are testability, single responsibility, flexibility of composition, and honest dependency surfaces."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Testability: a class that receives its collaborators can be handed fakes, stubs, or mocks in a unit test without touching global state, networks, or databases.",
+            "Single Responsibility: a class that no longer builds its dependencies is left with only its actual job. Object construction is a responsibility, and DI moves it out.",
+            "Decoupling / DIP: depending on an interface rather than a concrete type lets you swap implementations (in-memory vs SQL repository, real vs sandbox payment gateway) without editing consumers.",
+            "Explicit dependencies: constructor injection makes the full set of collaborators visible in one signature. A class that needs ten things is honestly ugly — and that ugliness is a design signal, not a nuisance to hide."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The Dependency Inversion Principle states that high-level policy should not depend on low-level detail; both should depend on abstractions. DI is the mechanism that delivers DIP at runtime: your OrderService depends on an IPaymentGateway interface, and the container decides at composition time whether to inject a Stripe adapter or a test double."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "A good heuristic: if you cannot unit test a class without spinning up infrastructure, its dependencies are probably concrete and self-constructed. DI is the fix, and testability is the canary."
+        }
+      ]
+    },
+    {
+      "id": "ioc-vs-di",
+      "heading": "IoC vs DI: A Precise Distinction",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "These terms are used interchangeably in casual conversation, but a staff engineer should keep them distinct. Inversion of Control is the umbrella: any time a framework calls your code rather than your code calling the framework, control has been inverted. Template methods, event callbacks, the Hollywood Principle ('don't call us, we'll call you'), and DI are all forms of IoC."
+        },
+        {
+          "type": "paragraph",
+          "text": "Dependency Injection narrows this to one specific concern: how a component obtains the objects it depends on. Instead of looking them up or constructing them, they are injected. Martin Fowler coined 'Dependency Injection' precisely because 'Inversion of Control' was too broad to describe the pattern people meant when they discussed containers like Spring."
+        },
+        {
+          "type": "table",
+          "headers": ["Concern", "Inversion of Control", "Dependency Injection"],
+          "rows": [
+            ["Scope", "Broad principle over control flow", "Specific technique for supplying dependencies"],
+            ["Examples", "Callbacks, template method, event loops, DI", "Constructor / setter / field injection"],
+            ["Question answered", "Who drives the flow?", "Who provides the collaborators?"],
+            ["Relationship", "Superset", "One concrete form of IoC"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Say it crisply in an interview: 'DI is a form of IoC. All DI is IoC, but not all IoC is DI — an event-driven callback inverts control without injecting any dependency.'"
+        }
+      ]
+    },
+    {
+      "id": "injection-types",
+      "heading": "Types of Injection: Constructor, Setter, Field",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "There are three mechanical ways to inject a dependency. They are not equivalent — the choice has real consequences for immutability, testability, and how honest a class is about what it needs."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Constructor injection (preferred): dependencies are passed to the constructor and stored in final/readonly fields. The object is fully initialized and immutable once built; its dependencies are impossible to miss.",
+            "Setter (property) injection: dependencies are set via public setters after construction. Useful for genuinely optional dependencies, but leaves a window where the object exists in a partially-wired, invalid state.",
+            "Field injection: the container reflectively writes into private fields (Spring's @Autowired on a field, older Angular patterns). Concise, but it hides dependencies, defeats immutability, and cannot be exercised in a plain unit test without reflection or a container."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// Field injection — concise but harmful\n@Service\nclass OrderService {\n    @Autowired private PaymentGateway gateway;   // hidden, mutable, hard to test\n    @Autowired private OrderRepository repository;\n}\n\n// Constructor injection — preferred: explicit, immutable, testable\n@Service\nclass OrderService {\n    private final PaymentGateway gateway;\n    private final OrderRepository repository;\n\n    // Since Spring 4.3 a single constructor needs no @Autowired\n    OrderService(PaymentGateway gateway, OrderRepository repository) {\n        this.gateway = gateway;\n        this.repository = repository;\n    }\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Why constructor injection wins: the fields can be final, so the object is immutable and thread-safe once constructed; a plain 'new OrderService(mockGateway, mockRepo)' works in a test with no framework at all; and a bloated constructor visibly signals that a class has too many responsibilities. Field injection actively hides that smell, which is exactly why teams that overuse it accumulate god objects unnoticed."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Field injection's worst property is that it lies. A class with eight @Autowired fields looks as clean as one with two. The pain of a wide constructor is a feature — it is the SRP violation becoming visible."
+        }
+      ]
+    },
+    {
+      "id": "container-resolution",
+      "heading": "The DI Container and the Resolution Graph",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A DI container is a registry plus a factory. You register bindings (this abstraction maps to that implementation, built with this lifetime); at runtime you ask for a root type and the container recursively resolves the entire dependency graph, constructing each node exactly as its lifetime dictates. The place where you register everything and resolve the root is the composition root — ideally the only place in the application that references the container directly."
+        },
+        {
+          "type": "paragraph",
+          "text": "Resolution is a graph traversal. To build OrderController the container needs OrderService, which needs a PaymentGateway and an OrderRepository, which in turn needs a DbConnection. The container topologically walks these edges, instantiating leaves first and wiring upward. If it discovers a cycle (A needs B needs A), it fails fast rather than looping forever."
+        },
+        {
+          "type": "code",
+          "language": "csharp",
+          "code": "// Composition root in .NET — the ONE place the container is configured\nvar builder = WebApplication.CreateBuilder(args);\n\nbuilder.Services.AddScoped<IOrderRepository, SqlOrderRepository>();\nbuilder.Services.AddScoped<IPaymentGateway, StripePaymentGateway>();\nbuilder.Services.AddScoped<OrderService>();\nbuilder.Services.AddSingleton<IClock, SystemClock>();\n\nvar app = builder.Build();\n// From here on, controllers receive OrderService via constructor injection.\n// The container resolves OrderService -> repo + gateway -> their deps."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A single composition root keeps the container out of your domain code. If 'container.Resolve<T>()' appears scattered through business classes, you have drifted from DI into Service Location."
+        }
+      ]
+    },
+    {
+      "id": "lifetimes",
+      "heading": "Lifetimes and Scopes",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A binding's lifetime controls how often the container creates a new instance and how long it lives. Getting lifetimes right is where most subtle DI bugs live. The three canonical lifetimes are singleton, scoped, and transient."
+        },
+        {
+          "type": "table",
+          "headers": ["Lifetime", "Meaning", "Typical use", "Pitfalls"],
+          "rows": [
+            ["Singleton", "One instance for the whole application lifetime", "Stateless services, config, caches, clocks, connection pools", "Must be thread-safe; must NOT capture shorter-lived deps; mutable state becomes global state"],
+            ["Scoped", "One instance per logical scope (per HTTP request in web apps)", "Unit-of-work objects, DbContext / EF context, request-correlated services", "Never inject into a singleton (captive dependency); resolving outside a scope throws or leaks"],
+            ["Transient", "A fresh instance every time it is requested", "Lightweight, stateful, or non-shareable helpers", "Cheap-but-frequent allocation; a transient holding a disposable resource may not be disposed as you expect"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The rule that prevents most disasters: a component may only depend on services with an equal-or-longer lifetime than itself. A transient may depend on a scoped or singleton; a scoped may depend on a singleton; but a singleton must never depend on a scoped or transient, because it would freeze that shorter-lived instance in place for the life of the process. That failure mode is the captive dependency."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Spring's default scope is singleton. Angular services provided in root are singletons. .NET has no default — you choose AddSingleton / AddScoped / AddTransient explicitly. Know each framework's default before you reason about lifetimes."
+        }
+      ]
+    },
+    {
+      "id": "captive-dependency",
+      "heading": "The Captive Dependency Trap",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A captive dependency occurs when a longer-lived service holds a reference to a shorter-lived one. The classic case: a singleton is constructed once, at first resolution, capturing whatever scoped or transient instance it received at that moment — and then keeps that single instance forever, across every subsequent request. The shorter-lived object is effectively promoted to a singleton, silently."
+        },
+        {
+          "type": "code",
+          "language": "csharp",
+          "code": "// BUG: scoped DbContext captured by a singleton\nbuilder.Services.AddDbContext<AppDbContext>();          // scoped by default\nbuilder.Services.AddSingleton<OrderCache>();            // lives forever\n\npublic class OrderCache               // registered as SINGLETON\n{\n    private readonly AppDbContext _db; // <-- SCOPED, now captive!\n    public OrderCache(AppDbContext db) => _db = db;\n\n    // _db was created during the FIRST request and is reused forever.\n    // EF's change tracker accumulates entities across all requests,\n    // the underlying connection may be disposed, and reads/writes\n    // become non-thread-safe. Symptoms: 'A second operation started\n    // on this context...', stale data, and ObjectDisposedException.\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "The fixes, in order of preference: (1) do not make the outer service a singleton if it truly needs per-request state — make it scoped. (2) If it must be a singleton, inject a factory (IServiceScopeFactory in .NET, ObjectProvider/Provider in Spring) and create a fresh scoped instance per operation. (3) Inject the abstraction that lets you resolve on demand rather than holding the instance."
+        },
+        {
+          "type": "code",
+          "language": "csharp",
+          "code": "// FIX: singleton resolves a fresh scoped context per operation\npublic class OrderCache\n{\n    private readonly IServiceScopeFactory _scopeFactory;\n    public OrderCache(IServiceScopeFactory scopeFactory)\n        => _scopeFactory = scopeFactory;\n\n    public async Task<Order?> Load(int id)\n    {\n        using var scope = _scopeFactory.CreateScope();\n        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();\n        return await db.Orders.FindAsync(id);   // disposed with the scope\n    }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The .NET container detects some captive dependencies at build time when scope validation is enabled (on by default in Development), throwing 'Cannot consume scoped service X from singleton Y.' In Production this validation is off for performance — so the bug ships silently. Never rely solely on the runtime check."
+        }
+      ]
+    },
+    {
+      "id": "injection-tokens",
+      "heading": "Injecting Non-Class Values: Injection Tokens",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Containers key their bindings by type. That works for classes and interfaces, but breaks down for values that have no unique type: a connection-string 'string', a numeric timeout, a plain config object, or an interface for which multiple implementations exist. You cannot register two different 'string' values and expect the container to know which to inject. Injection tokens solve this by providing a unique, resolvable key that is distinct from the raw type."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Angular: an InjectionToken carries a unique identity for a non-class value\nimport { InjectionToken, inject } from '@angular/core';\n\nexport interface AppConfig { apiUrl: string; retries: number; }\n\nexport const APP_CONFIG = new InjectionToken<AppConfig>('app.config');\n\n// Provide a concrete value for that token\n// providers: [{ provide: APP_CONFIG, useValue: { apiUrl: '/api', retries: 3 } }]\n\n@Injectable({ providedIn: 'root' })\nexport class ApiClient {\n  private readonly config = inject(APP_CONFIG);   // resolved by token\n  get baseUrl() { return this.config.apiUrl; }\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "The same need appears in every framework. In Spring you inject values with @Value(\"${app.api-url}\") or bind a typed @ConfigurationProperties object; you disambiguate beans with @Qualifier. In .NET you register named/keyed services or bind configuration to a typed options class via IOptions<T>. The token concept is universal: give the non-class dependency a name the container can resolve by."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "You need a token whenever the type alone is ambiguous: primitives, strings, config maps, or one interface with several implementations. If the container cannot answer 'which one?' from the type, add a name."
+        }
+      ]
+    },
+    {
+      "id": "multiple-implementations",
+      "heading": "Multiple Implementations of One Interface",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A common design has several implementations behind one interface — multiple Notifier strategies (email, SMS, push), or several validators. Two resolution styles apply: select one specific implementation by name/qualifier/key, or inject the entire collection and iterate."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// Spring: qualify one bean by name\ninterface Notifier { void send(String to, String msg); }\n\n@Component(\"email\") class EmailNotifier implements Notifier { /* ... */ }\n@Component(\"sms\")   class SmsNotifier   implements Notifier { /* ... */ }\n\n@Service\nclass AlertService {\n    private final Notifier notifier;\n    AlertService(@Qualifier(\"sms\") Notifier notifier) {  // pick one\n        this.notifier = notifier;\n    }\n}\n\n// Or inject ALL implementations as a collection\n@Service\nclass Broadcaster {\n    private final List<Notifier> notifiers;   // Spring injects every bean\n    Broadcaster(List<Notifier> notifiers) { this.notifiers = notifiers; }\n    void broadcast(String to, String msg) {\n        notifiers.forEach(n -> n.send(to, msg));\n    }\n}"
+        },
+        {
+          "type": "code",
+          "language": "csharp",
+          "code": "// .NET 8+: keyed services select one; collection injection gets all\nbuilder.Services.AddKeyedScoped<INotifier, EmailNotifier>(\"email\");\nbuilder.Services.AddKeyedScoped<INotifier, SmsNotifier>(\"sms\");\n\npublic class AlertService\n{\n    private readonly INotifier _notifier;\n    public AlertService([FromKeyedServices(\"sms\")] INotifier notifier)\n        => _notifier = notifier;               // one by key\n}\n\n// Register the same interface multiple times, inject them all:\n// builder.Services.AddScoped<INotifier, EmailNotifier>();\n// builder.Services.AddScoped<INotifier, SmsNotifier>();\npublic class Broadcaster\n{\n    public Broadcaster(IEnumerable<INotifier> notifiers) { /* iterate all */ }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Collection injection (List<T> in Spring, IEnumerable<T> in .NET, multi-provider tokens in Angular) is the clean way to implement the Strategy and Chain-of-Responsibility patterns: adding a new implementation requires zero edits to the consumer."
+        }
+      ]
+    },
+    {
+      "id": "service-locator",
+      "heading": "The Service Locator Anti-Pattern",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Service Location looks like a cousin of DI but is its opposite in spirit. Instead of receiving dependencies, a class reaches into a global registry and pulls them out: 'var repo = ServiceLocator.Get<IOrderRepository>();'. Control is still inverted (the locator owns construction), but the dependency is now hidden inside the method body rather than declared in the signature."
+        },
+        {
+          "type": "code",
+          "language": "csharp",
+          "code": "// ANTI-PATTERN: service locator hides the real dependencies\npublic class OrderService\n{\n    public void Place(Order o)\n    {\n        // Nothing in this class's public surface reveals these needs.\n        var repo = ServiceLocator.Current.Get<IOrderRepository>();\n        var gw   = ServiceLocator.Current.Get<IPaymentGateway>();\n        gw.Charge(o.Total);\n        repo.Save(o);\n    }\n}\n// To unit test this you must configure a global locator, and the\n// class's true dependencies are invisible to any reader or tool."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Hidden dependencies: the constructor no longer tells the truth about what the class needs; you must read every method body to know.",
+            "Harder testing: tests must set up and tear down a global registry instead of just passing constructor arguments; parallel tests can collide on shared global state.",
+            "Runtime failures: a missing binding fails deep inside a method at call time, not at composition time where it belongs.",
+            "Tight coupling to the locator: every class now depends on the locator infrastructure itself."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Fowler's rule of thumb: prefer DI over Service Location because DI makes dependencies explicit. The one defensible use of a locator-like pattern is inside framework glue at the composition root — never in domain code."
+        }
+      ]
+    },
+    {
+      "id": "circular-deps",
+      "heading": "Circular Dependencies: Detection and Fixes",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A circular dependency arises when A's construction needs B and B's construction needs A. With pure constructor injection this is unsatisfiable — neither can be built first — and a good container detects the cycle during resolution and throws (Spring: BeanCurrentlyInCreationException; .NET: 'A circular dependency was detected'). This is a design smell, not merely a wiring bug."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Extract a third component: pull the shared logic that both A and B need into a new class C that both depend on, breaking the cycle by inverting the direction.",
+            "Introduce an interface / event: if A calls back into B, have A raise an event or accept a callback interface rather than the whole B, so the dependency points one way.",
+            "Lazy resolution: inject a lazy proxy (Spring @Lazy, .NET Lazy<T> or a factory, Angular forwardRef) so one side is resolved on first use rather than at construction — a bandage, not a cure.",
+            "Merge or re-slice: two classes that mutually depend often belong together, or the responsibilities are drawn along the wrong boundary."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Angular: forwardRef breaks a construction-time cycle (use sparingly)\nimport { Injectable, Inject, forwardRef } from '@angular/core';\n\n@Injectable({ providedIn: 'root' })\nexport class AService {\n  constructor(@Inject(forwardRef(() => BService)) private b: BService) {}\n}\n\n@Injectable({ providedIn: 'root' })\nexport class BService {\n  constructor(private a: AService) {}\n}\n// Prefer redesigning: forwardRef silences the symptom, not the coupling."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Treat a cycle as feedback about your boundaries. The lazy/forwardRef escape hatches keep the app booting but preserve the coupling that will bite you again. Extract-a-collaborator is almost always the right long-term fix."
+        }
+      ]
+    },
+    {
+      "id": "cross-framework",
+      "heading": "DI Across Frameworks: Spring, .NET, Angular",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The concepts are universal; the vocabulary differs. Spring uses stereotype annotations and an application context; .NET uses IServiceCollection and a built-in provider; Angular uses @Injectable and a hierarchical tree of injectors. Understanding the mapping lets you reason about any of them."
+        },
+        {
+          "type": "table",
+          "headers": ["Concept", "Spring", ".NET (MS.DI)", "Angular"],
+          "rows": [
+            ["Mark injectable", "@Component / @Service / @Bean", "Register in IServiceCollection", "@Injectable({ providedIn })"],
+            ["Preferred injection", "Constructor (implicit since 4.3)", "Constructor", "constructor or inject()"],
+            ["Default lifetime", "Singleton (per context)", "None — must choose", "Singleton when providedIn:'root'"],
+            ["Lifetimes", "singleton / prototype / request / session", "Singleton / Scoped / Transient", "root / platform / per-component"],
+            ["Disambiguate", "@Qualifier / @Primary", "Keyed services / [FromKeyedServices]", "InjectionToken / multi providers"],
+            ["Non-class value", "@Value / @ConfigurationProperties", "IOptions<T> / keyed", "InjectionToken + useValue"],
+            ["Optional dep", "@Autowired(required=false)", "IServiceProvider.GetService (nullable)", "@Optional() / inject(T,{optional:true})"],
+            ["Scope walk", "Single context (mostly flat)", "Root + per-request child scope", "Hierarchical: @Self/@SkipSelf/@Host"]
+          ]
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Angular: hierarchical injector modifiers control the resolution walk\nimport { Injectable, Optional, Self, SkipSelf, Host, inject } from '@angular/core';\n\n@Injectable()\nexport class WidgetService {\n  // @Self      -> only look in THIS injector, do not walk up\n  // @SkipSelf  -> skip this injector, start at the parent\n  // @Host      -> stop the upward walk at the host component\n  // @Optional  -> return null instead of throwing if not found\n  private logger = inject(LoggerService, { optional: true, skipSelf: true });\n}\n\n// Angular resolves a token by walking element injectors up to the\n// root (module/environment) injector; the FIRST provider found wins,\n// which is how a component can override a service just for its subtree."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Angular is the odd one out: its injector tree mirrors the component tree, so where a service is provided determines who shares an instance. Spring and .NET containers are essentially flat (with .NET adding per-request child scopes)."
+        }
+      ]
+    },
+    {
+      "id": "spring-example",
+      "heading": "Example: Spring Constructor Injection with Qualifiers",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A complete, idiomatic Spring slice: an interface with two implementations, a service that qualifies which one it wants and depends on a repository abstraction, all wired by constructor injection and defaulting to singleton scope."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "public interface PaymentGateway { PaymentResult charge(Money amount); }\n\n@Component(\"stripe\")\nclass StripeGateway implements PaymentGateway {\n    public PaymentResult charge(Money amount) { /* call Stripe */ return PaymentResult.ok(); }\n}\n\n@Component(\"paypal\")\nclass PaypalGateway implements PaymentGateway {\n    public PaymentResult charge(Money amount) { /* call PayPal */ return PaymentResult.ok(); }\n}\n\npublic interface OrderRepository { void save(Order o); }\n\n@Service\nclass OrderService {\n    private final PaymentGateway gateway;\n    private final OrderRepository repository;\n\n    // constructor injection; @Qualifier disambiguates the two gateways\n    OrderService(@Qualifier(\"stripe\") PaymentGateway gateway,\n                 OrderRepository repository) {\n        this.gateway = gateway;\n        this.repository = repository;\n    }\n\n    public void placeOrder(Order order) {\n        PaymentResult result = gateway.charge(order.total());\n        if (result.isSuccessful()) {\n            repository.save(order);\n        } else {\n            throw new PaymentDeclinedException(order.id());\n        }\n    }\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Because both fields are final and populated in the constructor, OrderService is immutable and can be instantiated directly in a test. The @Qualifier resolves the ambiguity that two PaymentGateway beans would otherwise cause; without it Spring would throw NoUniqueBeanDefinitionException. Marking one bean @Primary is the alternative when there is a sensible default."
+        }
+      ]
+    },
+    {
+      "id": "test-example",
+      "heading": "Example: Swapping a Repository for a Mock in Tests",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The payoff of constructor injection is that unit tests never touch the container. You construct the service under test directly, passing in test doubles for its collaborators. Below the real StripeGateway and SQL repository are replaced by Mockito mocks, so the test runs in microseconds against no infrastructure."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "import static org.mockito.Mockito.*;\nimport static org.junit.jupiter.api.Assertions.*;\nimport org.junit.jupiter.api.Test;\n\nclass OrderServiceTest {\n\n    @Test\n    void savesOrder_whenPaymentSucceeds() {\n        // Arrange: fakes injected via the constructor, no Spring context\n        PaymentGateway gateway = mock(PaymentGateway.class);\n        OrderRepository repository = mock(OrderRepository.class);\n        when(gateway.charge(any())).thenReturn(PaymentResult.ok());\n\n        OrderService service = new OrderService(gateway, repository);\n        Order order = new Order(\"A-1\", Money.usd(4200));\n\n        // Act\n        service.placeOrder(order);\n\n        // Assert: repository was asked to persist exactly once\n        verify(repository, times(1)).save(order);\n    }\n\n    @Test\n    void doesNotSave_whenPaymentDeclined() {\n        PaymentGateway gateway = mock(PaymentGateway.class);\n        OrderRepository repository = mock(OrderRepository.class);\n        when(gateway.charge(any())).thenReturn(PaymentResult.declined());\n\n        OrderService service = new OrderService(gateway, repository);\n\n        assertThrows(PaymentDeclinedException.class,\n            () -> service.placeOrder(new Order(\"A-2\", Money.usd(999))));\n        verify(repository, never()).save(any());   // no persistence on failure\n    }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "No @SpringBootTest, no application context, no database. This is the concrete meaning of 'DI improves testability': the seam DI creates is the exact seam a mock plugs into."
+        }
+      ]
+    },
+    {
+      "id": "captive-incident",
+      "heading": "Incident: The Singleton That Ate a DbContext",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A production postmortem that recurs across teams. A .NET service registered a caching component as a singleton for performance and, for convenience, injected the EF Core AppDbContext (scoped by default) into its constructor. In Development the app booted fine because scope validation is on but the offending path wasn't always exercised on startup; the build passed, and it shipped."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Symptom 1: intermittent 'A second operation was started on this context before a previous operation completed' under concurrent requests — the single captured DbContext is not thread-safe and multiple requests hit it at once.",
+            "Symptom 2: gradually rising memory — the EF change tracker in the captured context accumulated every entity it had ever loaded, across all requests, because the context was never disposed.",
+            "Symptom 3: after the first request's scope was disposed, later reads threw ObjectDisposedException against the underlying connection.",
+            "Root cause: a scoped dependency was made captive by a singleton, promoting a per-request object to process-wide lifetime."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Resolution: the cache was changed to inject IServiceScopeFactory and create a fresh scope (and thus a fresh DbContext) per data-access operation, disposing it immediately. The team also enabled ValidateScopes and ValidateOnBuild in all environments so the container throws at startup rather than failing deep in production. Post-fix, memory flattened and the concurrency errors vanished."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Lesson: 'make it a singleton for performance' is a decision about the whole transitive dependency graph, not just one class. Before promoting anything to singleton, verify that everything it captures is safe to live forever."
+        }
+      ]
+    },
+    {
+      "id": "bestpractices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Prefer constructor injection; reserve setter injection for genuinely optional dependencies and avoid field injection outside quick spikes.",
+            "Depend on abstractions (interfaces) for anything you might swap or mock — repositories, gateways, clocks, message buses.",
+            "Keep a single composition root; do not reference the container from domain code (that is Service Location in disguise).",
+            "Choose lifetimes deliberately and enforce the lifetime rule: never inject a shorter-lived service into a longer-lived one.",
+            "Turn on the container's scope/graph validation in every environment, not just Development, so captive dependencies fail at startup.",
+            "Use qualifiers/keys/tokens to disambiguate; use collection injection to implement Strategy without editing consumers.",
+            "Treat a circular dependency as a design signal — extract a collaborator rather than reaching for @Lazy / forwardRef.",
+            "Keep constructors honest: a large constructor is a real signal of an over-large class, not a reason to switch to field injection."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "If you can unit test every class by constructing it with mocks and no framework, your DI is healthy. That single property subsumes most of the rules above."
+        }
+      ]
+    },
+    {
+      "id": "note-manual-di",
+      "heading": "Note: DI Without a Container",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "DI is a pattern, not a library. 'Pure DI' (Mark Seemann's term) means wiring the graph by hand in the composition root with plain 'new' calls and no container at all. For small services this is clearer, fully compile-checked, and free of reflection surprises. A container earns its keep only when the graph is large enough that manual wiring becomes tedious or when you need runtime-configurable lifetimes and scoping."
+        },
+        {
+          "type": "code",
+          "language": "csharp",
+          "code": "// Pure DI: the whole graph wired by hand, no container\nIClock clock            = new SystemClock();\nIOrderRepository repo   = new SqlOrderRepository(connectionString);\nIPaymentGateway gateway = new StripeGateway(apiKey, clock);\nvar orderService        = new OrderService(gateway, repo);\n// Explicit, compile-time-verified, trivially testable."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Interview-worthy nuance: reaching for a DI container should be a considered choice, not a reflex. The pattern (inject dependencies) is always valuable; the container is an optional convenience."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "resolution-graph",
+      "title": "Dependency Resolution Graph the Container Builds",
+      "type": "mermaid",
+      "content": "graph TD\n  Controller[OrderController]\n  Service[OrderService]\n  Gateway[IPaymentGateway - StripeGateway]\n  Repo[IOrderRepository - SqlOrderRepository]\n  Conn[DbConnection]\n  Clock[IClock - SystemClock]\n  Controller --> Service\n  Service --> Gateway\n  Service --> Repo\n  Gateway --> Clock\n  Repo --> Conn"
+    },
+    {
+      "id": "hierarchical-injector",
+      "title": "Hierarchical Injector Resolution Walking Up the Tree",
+      "type": "mermaid",
+      "content": "graph TD\n  Root[Root Injector - providedIn root]\n  Feature[Feature Injector]\n  Parent[Parent Component Injector]\n  Child[Child Component Injector - request starts here]\n  Child -->|not found, walk up| Parent\n  Parent -->|not found, walk up| Feature\n  Feature -->|not found, walk up| Root\n  Root -->|first provider wins| Resolved[Instance returned]"
+    },
+    {
+      "id": "captive-dependency-ascii",
+      "title": "Captive Dependency: Singleton Freezes a Scoped Instance",
+      "type": "ascii",
+      "content": "Request 1        Request 2        Request 3\n   |                |                |\n   v                v                v\n[Scope A]        [Scope B]        [Scope C]\n   |                |                |\n new DbContext    (should be)      (should be)\n   |             new DbContext    new DbContext\n   v                x                x\n +----------------------------------------+\n | SINGLETON OrderCache (built ONCE)      |\n |   holds --> DbContext from Scope A     |\n |   ...still Scope A's ctx forever...    |\n +----------------------------------------+\n Result: one scoped ctx is CAPTIVE for the\n whole process; Scope A is disposed but the\n singleton keeps using it -> errors + leaks."
+    },
+    {
+      "id": "lifetime-flow",
+      "title": "Allowed Dependency Direction by Lifetime",
+      "type": "mermaid",
+      "content": "graph LR\n  Transient[Transient] -->|may depend on| Scoped[Scoped]\n  Scoped -->|may depend on| Singleton[Singleton]\n  Transient -->|may depend on| Singleton\n  Singleton -.->|MUST NOT depend on| Scoped\n  Singleton -.->|MUST NOT depend on| Transient"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-ioc-vs-di",
+      "question": "What is the difference between Inversion of Control and Dependency Injection?",
+      "answer": "Inversion of Control is the broad principle that a framework or runtime controls the flow and object lifecycle instead of your code — callbacks, event loops, template methods, and DI are all forms of it. Dependency Injection is one specific technique for achieving IoC: a component's dependencies are supplied from outside rather than constructed or looked up internally. So all DI is IoC, but not all IoC is DI. Martin Fowler introduced the term 'Dependency Injection' precisely because 'IoC' was too general to name the container pattern people were discussing. A concrete example of IoC that is not DI is an event handler you register: control is inverted (the framework calls you) but no dependency is injected. Keeping the two distinct signals precision to an interviewer.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["ioc", "dependency-injection", "terminology"],
+      "followUps": ["Which SOLID principle does DI operationalize?", "Give an IoC example that is not DI."]
+    },
+    {
+      "id": "q-constructor-vs-field",
+      "question": "Why is constructor injection preferred over field injection?",
+      "answer": "Constructor injection makes dependencies explicit: the full set of collaborators is visible in the constructor signature, so no reader or tool can miss them. It allows the fields to be final/readonly, making the object immutable and thread-safe once built. It requires no framework to instantiate the class, so plain unit tests can construct it with mocks directly. Crucially, a bloated constructor is an honest signal that a class has too many responsibilities, prompting a refactor. Field injection, by contrast, hides dependencies behind reflection, prevents immutability, cannot be exercised without a container or reflection in tests, and disguises the SRP smell by making a class with ten dependencies look as clean as one with two. That concealment is the real danger — the design problem becomes invisible.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["constructor-injection", "field-injection", "testability", "immutability"],
+      "followUps": ["When is setter injection appropriate?", "How does field injection hurt unit testing specifically?"]
+    },
+    {
+      "id": "q-captive-dependency",
+      "question": "What is a captive dependency and how does it happen with a singleton holding a scoped service?",
+      "answer": "A captive dependency occurs when a longer-lived service holds a reference to a shorter-lived one, effectively promoting the shorter-lived instance to the longer lifetime. The classic case is a singleton that receives a scoped service in its constructor: the singleton is built once at first resolution, capturing whatever scoped instance existed at that moment, and then reuses that one instance forever across all requests. With something like an EF Core DbContext this is catastrophic — the context is not thread-safe so concurrent requests collide, its change tracker accumulates entities across all requests causing a memory leak, and after the original scope is disposed the captured context throws ObjectDisposedException. The fix is either to not make the outer service a singleton, or to inject a scope factory and create a fresh scoped instance per operation. The .NET container catches some cases with scope validation, but that validation is off in Production by default, so the bug can ship silently.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["captive-dependency", "lifetimes", "singleton", "scoped", "dbcontext"],
+      "followUps": ["How do you fix a captive dependency in .NET?", "Why is Development scope validation not enough?"]
+    },
+    {
+      "id": "q-lifetimes",
+      "question": "Explain singleton, scoped, and transient lifetimes and when to use each.",
+      "answer": "A singleton is created once and shared for the whole application lifetime; use it for stateless services, caches, configuration, and connection pools, but it must be thread-safe and must not capture shorter-lived dependencies. A scoped service is created once per logical scope — typically one per HTTP request in a web app — and is ideal for unit-of-work objects like a DbContext that should be shared within a request but not across requests. A transient service is created fresh every time it is requested, suitable for lightweight or non-shareable helpers, at the cost of more frequent allocation. The governing rule is that a component may only depend on services with an equal-or-longer lifetime: transient can depend on scoped or singleton, scoped on singleton, but a singleton must never depend on scoped or transient. Violating that rule creates a captive dependency. Note the defaults differ by framework: Spring defaults to singleton, Angular root providers are singletons, and .NET forces an explicit choice.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["lifetimes", "singleton", "scoped", "transient"],
+      "followUps": ["What is the lifetime-direction rule?", "What is Spring's default scope?"]
+    },
+    {
+      "id": "q-service-locator",
+      "question": "Why is the Service Locator considered an anti-pattern?",
+      "answer": "Service Location has a class pull its dependencies from a global registry (locator.Get<T>()) rather than receiving them. Although control is still inverted, the dependencies are now hidden inside method bodies instead of declared in the constructor, so the class's public surface lies about what it actually needs. This makes tests harder because you must configure and tear down a shared global registry rather than just passing constructor arguments, and parallel tests can collide on that global state. Missing bindings fail deep inside a method at call time instead of at composition time where they belong. Every consumer also becomes coupled to the locator infrastructure itself. Fowler's guidance is to prefer DI because it keeps dependencies explicit; the only defensible use of a locator is framework glue at the composition root, never in domain code.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["service-locator", "anti-pattern", "testability", "coupling"],
+      "followUps": ["How is Service Location still a form of IoC?", "Where, if anywhere, is a locator acceptable?"]
+    },
+    {
+      "id": "q-injection-token",
+      "question": "When do you need an injection token, and what problem does it solve?",
+      "answer": "Containers key their bindings by type, which works for classes and interfaces but fails for values that lack a unique type — a connection-string, a numeric timeout, a plain config object, or an interface with multiple implementations. You cannot register two different string values and expect the container to know which to inject. An injection token provides a unique, resolvable key distinct from the raw type, so the container can answer 'which one?' In Angular this is InjectionToken paired with useValue; in Spring you use @Value or @ConfigurationProperties for config and @Qualifier to disambiguate beans; in .NET you bind config via IOptions<T> or register keyed services. The universal rule is: whenever the type alone is ambiguous, give the dependency a name the container can resolve by.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["injection-token", "configuration", "angular", "qualifiers"],
+      "followUps": ["How does Angular's InjectionToken differ from a class provider?", "How do you inject a primitive in Spring?"]
+    },
+    {
+      "id": "q-multiple-impls",
+      "question": "How do you resolve multiple implementations of the same interface?",
+      "answer": "There are two idioms: select one specific implementation by name, or inject the whole collection and iterate. To select one, use @Qualifier in Spring, [FromKeyedServices] with keyed registrations in .NET 8+, or a distinct InjectionToken in Angular; marking one implementation @Primary provides a default. To use all of them, inject a collection — List<T> in Spring, IEnumerable<T> in .NET, a multi-provider token in Angular — and iterate, which cleanly implements Strategy or Chain-of-Responsibility because adding a new implementation needs zero edits to the consumer. Without disambiguation, a container faced with two beans of one type throws (Spring's NoUniqueBeanDefinitionException). Choosing between the two idioms depends on whether the consumer needs one behavior chosen at wiring time or wants to fan out across all available behaviors.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["qualifiers", "keyed-services", "collection-injection", "strategy-pattern"],
+      "followUps": ["How does @Primary interact with @Qualifier?", "How does collection injection support the Strategy pattern?"]
+    },
+    {
+      "id": "q-circular",
+      "question": "How do you detect and fix a circular dependency in DI?",
+      "answer": "A circular dependency is when A's construction needs B and B's needs A. With pure constructor injection this is unsatisfiable — neither can be built first — and a good container detects the cycle during resolution and throws (Spring's BeanCurrentlyInCreationException, .NET's 'circular dependency was detected'). The best fix is to treat it as a design smell and break it structurally: extract the shared logic both classes need into a third component both depend on, or invert one direction using an event or callback interface so the dependency points one way. Merging two mutually dependent classes, or re-slicing the responsibilities, is often correct because the boundary was drawn wrong. Escape hatches like Spring's @Lazy, a .NET Lazy<T>/factory, or Angular's forwardRef defer one side's resolution and let the app boot, but they preserve the coupling and only mask the symptom, so they should be a last resort.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": true,
+      "tags": ["circular-dependency", "lazy", "forwardref", "refactoring"],
+      "followUps": ["Why does constructor injection surface cycles that field injection can hide?", "When is @Lazy justified?"]
+    },
+    {
+      "id": "q-testability",
+      "question": "How exactly does dependency injection improve testability?",
+      "answer": "DI creates a seam at every dependency boundary. Because a class receives its collaborators through its constructor rather than constructing them, a unit test can pass in test doubles — mocks, stubs, or fakes — with no framework, no container, and no infrastructure involved. You simply write 'new OrderService(mockGateway, mockRepo)' and drive the behavior, verifying interactions like 'repository.save was called exactly once.' This isolates the unit under test from databases, networks, and clocks, making tests fast, deterministic, and parallelizable. The exact seam DI creates is the exact seam a mock plugs into, which is why a healthy DI design lets you unit test every class by constructing it with fakes. Conversely, if a class cannot be tested without spinning up infrastructure, its dependencies are probably concrete and self-constructed — testability is the canary for DI health.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["testability", "mocks", "unit-testing", "seams"],
+      "followUps": ["Why can you avoid @SpringBootTest for these unit tests?", "What does a hard-to-test class reveal about its dependencies?"]
+    },
+    {
+      "id": "q-dip",
+      "question": "How does DI relate to the Dependency Inversion Principle?",
+      "answer": "The Dependency Inversion Principle (the D in SOLID) states that high-level policy modules should not depend on low-level detail modules; both should depend on abstractions, and abstractions should not depend on details. DI is the runtime mechanism that delivers DIP: your high-level OrderService depends on an IPaymentGateway interface rather than a concrete StripeGateway, and the container decides at composition time which implementation to inject. This inverts the traditional compile-time dependency direction — the detail (Stripe adapter) now depends on the abstraction owned by the policy, not the other way around. DIP is the principle (depend on abstractions); DI is the technique that supplies those abstractions' implementations. They are distinct but complementary: you can follow DIP by hand-wiring, and DI is how you avoid doing that manually at scale.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["dip", "solid", "abstractions", "decoupling"],
+      "followUps": ["Is DIP the same as DI?", "How does depending on an interface invert the dependency direction?"]
+    },
+    {
+      "id": "q-angular-hierarchical",
+      "question": "How do Angular's hierarchical injectors resolve a dependency?",
+      "answer": "Angular maintains a tree of injectors that mirrors the component tree, rooted at the environment/root injector. When a component requests a token, Angular starts at that component's own injector and walks up the tree until it finds the first provider for that token; the first match wins and its instance is returned. This is why providing a service at a component provides a separate instance shared only within that component's subtree, letting a component override a service for its children. Resolution modifiers tune the walk: @Self restricts the lookup to the current injector, @SkipSelf starts at the parent, @Host stops the upward walk at the host component, and @Optional returns null instead of throwing when nothing is found. Providing a service with providedIn:'root' places it in the root injector as an app-wide singleton. This hierarchy is Angular's distinguishing feature; Spring and .NET containers are essentially flat by comparison.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["angular", "hierarchical-injector", "self", "skipself", "host"],
+      "followUps": ["What does @SkipSelf change about resolution?", "How does providing a service at a component affect instance sharing?"]
+    },
+    {
+      "id": "q-dotnet-keyed",
+      "question": "What are keyed services in .NET and when would you use them?",
+      "answer": "Keyed services, introduced in .NET 8, let you register multiple implementations of the same interface under distinct string or object keys — AddKeyedScoped<INotifier, SmsNotifier>(\"sms\") — and then select a specific one at injection with the [FromKeyedServices(\"sms\")] attribute. Before this feature, resolving one of several implementations required workarounds like a factory delegate or injecting IEnumerable<T> and filtering. Use keyed services when a consumer needs one particular implementation chosen by name, such as picking the SMS notifier versus the email notifier, or selecting a specific cache backend. If instead the consumer wants all implementations, inject IEnumerable<INotifier> and iterate. Keyed services are .NET's answer to Spring's @Qualifier and Angular's distinct InjectionToken.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["dotnet", "keyed-services", "qualifiers"],
+      "followUps": ["What was the pre-.NET-8 alternative?", "How do keyed services compare to Spring @Qualifier?"]
+    },
+    {
+      "id": "q-composition-root",
+      "question": "What is a composition root and why should it be the only place that touches the container?",
+      "answer": "The composition root is the single location in an application — typically near the entry point, like Program.cs or a Spring configuration class — where all bindings are registered and the object graph is resolved. Concentrating wiring there keeps the container out of domain code, so business classes remain framework-agnostic and depend only on their injected collaborators. If container.Resolve<T>() calls are scattered through the codebase, you have slid from DI into Service Location, reintroducing hidden dependencies and coupling to the container. A single composition root also makes the whole graph auditable in one place and simplifies swapping implementations for different environments. The principle is: resolve once at the root, inject everywhere else.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["composition-root", "service-locator", "architecture"],
+      "followUps": ["How does violating this slide into Service Location?", "Where is the composition root in a .NET web app?"]
+    },
+    {
+      "id": "q-pure-di",
+      "question": "Do you always need a DI container to do dependency injection?",
+      "answer": "No. Dependency Injection is a design pattern, not a library — you can practice 'pure DI' by wiring the entire object graph by hand in the composition root using plain constructor calls and no container at all. For small services this is often clearer: it is fully compile-time-checked, free of reflection surprises, and trivially navigable. A container earns its keep only when the graph grows large enough that manual wiring becomes tedious, or when you need runtime-configurable lifetimes, scoping, or open-generic registrations. The pattern of injecting dependencies is always valuable; the container is an optional convenience layered on top. A thoughtful engineer treats adopting a container as a deliberate trade-off rather than an automatic default.",
+      "difficulty": "senior",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["pure-di", "container", "trade-offs"],
+      "followUps": ["When does a container start to pay off?", "What are the downsides of container-based DI?"]
+    },
+    {
+      "id": "q-spring-default-scope",
+      "question": "What is Spring's default bean scope, and why does it matter for correctness?",
+      "answer": "Spring beans are singleton-scoped by default — one instance per application context, shared across all injections. This matters because a singleton bean must be stateless and thread-safe, and it must not hold a shorter-lived dependency (such as a request-scoped bean), or you create the Spring equivalent of a captive dependency. If a singleton genuinely needs a request- or prototype-scoped collaborator, you inject a provider (ObjectProvider or a lookup method / @Lookup) so a fresh instance is obtained per use rather than captured once. Because the default is invisible, engineers sometimes add mutable fields to a @Service without realizing the instance is shared across all threads, causing race conditions. Knowing the default is a prerequisite for reasoning about lifetimes; contrast this with .NET, which forces you to choose a lifetime explicitly.",
+      "difficulty": "mid",
+      "category": "Architecture",
+      "tricky": false,
+      "tags": ["spring", "singleton", "scope", "thread-safety"],
+      "followUps": ["How does Spring inject a scoped bean into a singleton safely?", "Why is mutable state on a @Service risky?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-refactor-to-di",
+      "title": "Refactor a Self-Constructing Class to Constructor Injection + Unit Test",
+      "difficulty": "medium",
+      "category": "Architecture",
+      "prompt": "The ReportGenerator below news-up all of its dependencies internally, so it cannot be unit tested without hitting a real database and SMTP server. Refactor it to constructor injection against interfaces, then write a unit test that verifies an email is sent exactly once when a report is generated — using mocks, with no infrastructure.",
+      "hints": [
+        "Introduce interfaces (IReportRepository, IEmailSender) and depend on those, not the concrete SqlReportRepository / SmtpEmailSender.",
+        "Store the injected dependencies in readonly fields set only in the constructor so the object is immutable.",
+        "In the test, pass Moq mocks into the constructor and assert with sender.Verify(x => x.Send(...), Times.Once())."
+      ],
+      "solutionCode": "// BEFORE: untestable, dependencies hard-coded\npublic class ReportGeneratorBefore\n{\n    public void Generate(int userId)\n    {\n        var repo = new SqlReportRepository(\"Server=prod;...\"); // real DB\n        var sender = new SmtpEmailSender(\"smtp.corp.local\");    // real SMTP\n        var data = repo.LoadFor(userId);\n        sender.Send(data.Email, \"Your report\", Render(data));\n    }\n    private string Render(ReportData d) => $\"Report for {d.Name}\";\n}\n\n// AFTER: constructor injection against abstractions\npublic interface IReportRepository { ReportData LoadFor(int userId); }\npublic interface IEmailSender { void Send(string to, string subject, string body); }\n\npublic class ReportGenerator\n{\n    private readonly IReportRepository _repo;\n    private readonly IEmailSender _sender;\n\n    public ReportGenerator(IReportRepository repo, IEmailSender sender)\n    {\n        _repo = repo;\n        _sender = sender;\n    }\n\n    public void Generate(int userId)\n    {\n        var data = _repo.LoadFor(userId);\n        _sender.Send(data.Email, \"Your report\", Render(data));\n    }\n\n    private string Render(ReportData d) => $\"Report for {d.Name}\";\n}\n\n// Composition root registers the real implementations:\n// services.AddScoped<IReportRepository, SqlReportRepository>();\n// services.AddScoped<IEmailSender, SmtpEmailSender>();\n// services.AddScoped<ReportGenerator>();\n\n// UNIT TEST: no DB, no SMTP, pure mocks\nusing Moq;\nusing Xunit;\n\npublic class ReportGeneratorTests\n{\n    [Fact]\n    public void Generate_SendsExactlyOneEmail()\n    {\n        var repo = new Mock<IReportRepository>();\n        var sender = new Mock<IEmailSender>();\n        repo.Setup(r => r.LoadFor(42))\n            .Returns(new ReportData { Name = \"Ada\", Email = \"ada@x.io\" });\n\n        var sut = new ReportGenerator(repo.Object, sender.Object);\n\n        sut.Generate(42);\n\n        sender.Verify(s => s.Send(\"ada@x.io\", \"Your report\", \"Report for Ada\"),\n                      Times.Once());\n    }\n}",
+      "solutionLanguage": "csharp",
+      "explanation": "The original class violates the Dependency Inversion Principle by constructing concrete infrastructure (a SQL repository with a production connection string and an SMTP sender) inside its own method, which makes it impossible to test without real systems and impossible to reconfigure per environment. The refactor extracts two interfaces and injects them through the constructor into readonly fields, so the class now depends only on abstractions and is immutable once built. Construction of the concrete implementations moves to the composition root, which is the single place that knows about SqlReportRepository and SmtpEmailSender. This creates a seam at each dependency boundary that the unit test exploits: the test passes Moq doubles into the constructor with no container involved, stubs the repository to return fixed data, and verifies the email sender was invoked exactly once with the expected arguments. The result is a fast, deterministic, infrastructure-free test that runs in milliseconds. The refactor simultaneously improves testability, honors SRP by removing object-construction responsibility from the generator, and follows DIP by inverting the dependency toward interfaces owned by the policy.",
+      "relatedTopic": "dependency-injection"
+    },
+    {
+      "id": "ch-fix-captive",
+      "title": "Find and Fix a Captive Dependency (Scoped Injected into Singleton)",
+      "difficulty": "hard",
+      "category": "Architecture",
+      "prompt": "The registration and class below produce intermittent 'second operation started on this context' errors, rising memory, and occasional ObjectDisposedException in production, even though the app runs fine locally. Identify the root cause and fix it so the DbContext is used correctly per operation, and explain why the local build did not catch it.",
+      "hints": [
+        "Compare the lifetime of PricingCache with the lifetime of the AppDbContext it receives.",
+        "A singleton is built once and keeps whatever it captured for the whole process lifetime.",
+        "Inject IServiceScopeFactory and create a fresh scope (and thus a fresh DbContext) per operation, disposing it when done; also enable scope validation everywhere."
+      ],
+      "solutionCode": "// BUG: scoped DbContext captured by a singleton\nbuilder.Services.AddDbContext<AppDbContext>();      // SCOPED by default\nbuilder.Services.AddSingleton<PricingCache>();      // SINGLETON\n\npublic class PricingCacheBefore\n{\n    private readonly AppDbContext _db;              // <-- captive scoped dep!\n    public PricingCacheBefore(AppDbContext db) => _db = db;\n\n    public async Task<decimal> GetPrice(int sku)\n    {\n        // _db is the SAME instance created during the first request,\n        // reused across every request and thread thereafter.\n        var p = await _db.Prices.FindAsync(sku);\n        return p?.Amount ?? 0m;\n    }\n}\n\n// ---------------------------------------------------------------\n// FIX: singleton resolves a fresh scoped DbContext per operation\nbuilder.Services.AddDbContext<AppDbContext>();\nbuilder.Services.AddSingleton<PricingCache>();\n\npublic class PricingCache\n{\n    private readonly IServiceScopeFactory _scopeFactory;\n    public PricingCache(IServiceScopeFactory scopeFactory)\n        => _scopeFactory = scopeFactory;            // safe: factory is singleton-friendly\n\n    public async Task<decimal> GetPrice(int sku)\n    {\n        using var scope = _scopeFactory.CreateScope();\n        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();\n        var p = await db.Prices.FindAsync(sku);\n        return p?.Amount ?? 0m;                      // db disposed with the scope\n    }\n}\n\n// Make the container fail fast in EVERY environment, not just Development:\nvar app = builder.Build();  // internally uses:\n// new ServiceProviderOptions { ValidateScopes = true, ValidateOnBuild = true }\n// configured via builder.Host.UseDefaultServiceProvider((ctx, o) => {\n//     o.ValidateScopes = true; o.ValidateOnBuild = true; });",
+      "solutionLanguage": "csharp",
+      "explanation": "The root cause is a captive dependency: PricingCache is registered as a singleton but its constructor accepts an AppDbContext, which the AddDbContext helper registers as scoped. Because the singleton is instantiated only once — during the first request that resolves it — it captures that request's DbContext and holds it for the entire process lifetime. That single context is then shared across every subsequent request and thread, which produces three failure modes: EF Core's DbContext is not thread-safe, so concurrent requests trigger 'a second operation was started on this context' errors; its change tracker accumulates every entity it ever loads, causing memory to climb steadily; and once the original request's scope is disposed, the captured context throws ObjectDisposedException on later use. The fix injects IServiceScopeFactory (which is safe to hold in a singleton) and creates a fresh scope per operation, resolving a new DbContext that is disposed when the scope's using block ends, restoring correct per-operation lifetime. The local build did not catch it because .NET's ValidateScopes check is enabled only in the Development environment by default and only fails when the offending path is actually resolved during startup; in Production that validation is off for performance, so the misconfiguration ships silently. Enabling ValidateScopes and ValidateOnBuild in all environments makes the container throw at build time, converting a subtle production incident into an immediate, obvious startup failure.",
+      "relatedTopic": "dependency-injection"
+    }
+  ],
+  "references": [
+    {
+      "label": "Martin Fowler — Inversion of Control Containers and the Dependency Injection Pattern",
+      "url": "https://martinfowler.com/articles/injection.html"
+    },
+    {
+      "label": ".NET — Dependency Injection and Service Lifetimes",
+      "url": "https://learn.microsoft.com/en-us/dotnet/core/extensions/dependency-injection"
+    },
+    {
+      "label": ".NET — Keyed Services (dependency injection guidelines)",
+      "url": "https://learn.microsoft.com/en-us/dotnet/core/extensions/dependency-injection-guidelines"
+    },
+    {
+      "label": "Spring Framework — The IoC Container and Dependency Injection",
+      "url": "https://docs.spring.io/spring-framework/reference/core/beans/dependencies/factory-collaborators.html"
+    },
+    {
+      "label": "Angular — Dependency Injection and Hierarchical Injectors",
+      "url": "https://angular.dev/guide/di/hierarchical-dependency-injection"
+    }
+  ]
+}

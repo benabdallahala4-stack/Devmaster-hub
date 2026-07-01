@@ -1,0 +1,674 @@
+{
+  "id": "auth-sessions-sso",
+  "title": "Authentication, Sessions & SSO",
+  "category": "Backend",
+  "subcategory": "AuthN/AuthZ",
+  "difficulty": "senior",
+  "tags": [
+    "authentication",
+    "sessions",
+    "cookies",
+    "sso",
+    "saml",
+    "oidc",
+    "keycloak",
+    "csrf"
+  ],
+  "description": "A staff-level tour of browser session management: server-side sessions versus stateless tokens, cookie security attributes, CSRF/XSS defenses, and enterprise Single Sign-On with SAML, OIDC, and Keycloak. Covers refresh-token rotation, Single Log-Out, and the Backend-for-Frontend pattern that keeps tokens off the browser.",
+  "estReadMinutes": 31,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Authentication vs Authorization",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Authentication (AuthN) answers \"who are you?\" — it verifies identity via a password, passkey, or federated login. Authorization (AuthZ) answers \"what may you do?\" — it evaluates whether the already-identified principal can perform an action on a resource. These are distinct concerns with distinct failure modes: a broken AuthN lets an attacker become someone else; a broken AuthZ lets an authenticated user reach data they should never see. Conflating them is one of the most common senior-interview red flags."
+        },
+        {
+          "type": "paragraph",
+          "text": "This topic focuses on how identity is established in a browser and carried across requests — sessions, cookies, and enterprise SSO — rather than the token internals themselves. The mechanics of OAuth2 grants and JWT signing/validation live in the companion \"oauth2-oidc-jwt\" topic; here we assume those primitives and reason about the session lifecycle built on top of them."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Rule of thumb: authentication happens once (or on refresh); authorization happens on every request. If you find yourself re-authenticating on each call, you have almost certainly conflated the two concerns."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why Session Design Is a Staff-Level Concern",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Session and cookie design sits at the exact intersection of security, scalability, and operability — three axes that pull in different directions. A stateless JWT scales horizontally with zero shared state but cannot be revoked before expiry. A server-side session is instantly revocable but adds a store on the hot path. The choice ripples into logout semantics, incident response (can we kill all sessions in a breach?), compliance (can we prove a session was terminated?), and even latency budgets."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Security: XSS and CSRF are still the two dominant browser attack classes, and both are governed by how you store and transmit credentials.",
+            "Revocation: the ability to log a user out — or force-logout everyone — is a business and regulatory requirement, not a nicety.",
+            "Enterprise readiness: B2B customers demand SAML or OIDC SSO, SCIM provisioning, and Single Log-Out before they sign a contract.",
+            "Blast radius: a leaked long-lived token is a very different incident from a leaked HttpOnly session id that expires in an hour."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Interviewers probe this area because it exposes whether a candidate reasons about trade-offs or just reaches for whatever library default they last used."
+        }
+      ]
+    },
+    {
+      "id": "server-sessions",
+      "heading": "Server-Side Sessions vs Stateless Tokens",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "In a server-side session model, the browser holds only an opaque, high-entropy session identifier in a cookie. All the real state — user id, roles, CSRF secret, last-seen timestamp — lives in a server store such as Redis, keyed by that id. Each request looks up the session, so revocation is trivial: delete the key and the session is dead on the next request. The cost is a store lookup on every authenticated request and the need to run that store with high availability."
+        },
+        {
+          "type": "paragraph",
+          "text": "In a stateless model, the cookie (or Authorization header) carries a signed token — typically a JWT — that encodes the claims directly. The server validates the signature and trusts the payload without any lookup. This scales beautifully and removes a dependency, but the token is valid until it expires; you cannot un-issue it. Revocation requires bolting on a denylist (which reintroduces state) or accepting a revocation window equal to the token lifetime."
+        },
+        {
+          "type": "table",
+          "columns": ["Dimension", "Server-side session", "Stateless JWT"],
+          "rows": [
+            ["What the browser holds", "Opaque session id", "Signed claims (self-contained)"],
+            ["Server state", "Required (Redis/DB)", "None (validate signature only)"],
+            ["Revocation", "Instant (delete key)", "Hard — needs denylist or short TTL"],
+            ["Logout", "Delete server record", "Cannot truly invalidate before expiry"],
+            ["Horizontal scaling", "Needs shared/replicated store", "Trivial, no shared state"],
+            ["Per-request cost", "Store lookup", "Signature verification (CPU)"],
+            ["Size on the wire", "Tiny id", "Larger token (claims + signature)"],
+            ["Best fit", "First-party web apps, need revocation", "Service-to-service, short-lived access"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A common hybrid: short-lived stateless access tokens (minutes) for API calls plus a stateful refresh mechanism (rotation + server record) so you keep scalability and still control the session lifecycle."
+        }
+      ]
+    },
+    {
+      "id": "cookies-deep",
+      "heading": "Cookies In Depth: Set-Cookie and Its Attributes",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The cookie is set by the server via the Set-Cookie response header and echoed back by the browser on matching requests via the Cookie header. Every security property of a cookie-based session comes from getting the attributes right. A session cookie without HttpOnly is readable by JavaScript and therefore stealable by any XSS; without Secure it can leak over plaintext HTTP; without a correct SameSite it is a CSRF vector."
+        },
+        {
+          "type": "code",
+          "language": "http",
+          "code": "HTTP/1.1 200 OK\nSet-Cookie: sid=8f4b1c2e9a7d...; Max-Age=3600; Path=/; Domain=app.example.com; Secure; HttpOnly; SameSite=Lax\n\n# Attribute-by-attribute:\n#   sid=...     opaque high-entropy session id (>=128 bits), never a raw user id\n#   Max-Age     lifetime in seconds; prefer over Expires (no clock-skew issues)\n#   Path=/      scope to whole app; narrow it to reduce exposure where possible\n#   Domain      omit for host-only (safest); set only to share across subdomains\n#   Secure      only sent over HTTPS\n#   HttpOnly    invisible to document.cookie -> not stealable via XSS\n#   SameSite    Lax/Strict/None controls cross-site sending (CSRF defense)"
+        },
+        {
+          "type": "table",
+          "columns": ["Attribute", "What it does", "Primary threat it mitigates"],
+          "rows": [
+            ["HttpOnly", "Hides cookie from document.cookie / JS", "XSS token theft"],
+            ["Secure", "Sends cookie only over HTTPS", "Network sniffing / MITM downgrade"],
+            ["SameSite=Lax", "Blocks cross-site sends except top-level GET nav", "Most CSRF"],
+            ["SameSite=Strict", "Blocks all cross-site sends", "CSRF (at cost of UX on inbound links)"],
+            ["SameSite=None", "Allows cross-site sends (requires Secure)", "Nothing — needed for legit 3rd-party contexts"],
+            ["Domain (omit)", "Host-only cookie, not shared to subdomains", "Subdomain leakage / takeover blast radius"],
+            ["__Host- prefix", "Forces Secure, Path=/, no Domain", "Cookie fixation via weaker subdomain"],
+            ["Max-Age", "Bounds session lifetime", "Long-lived stolen session reuse"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "For a first-party session cookie, the strong default is: __Host-sid, Secure, HttpOnly, SameSite=Lax, Path=/, no Domain, short Max-Age with server-side sliding expiry."
+        }
+      ]
+    },
+    {
+      "id": "cookie-vs-localstorage",
+      "heading": "Cookie vs localStorage for Auth Tokens",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A frequent design question is where to keep the credential in a SPA. Putting a token in localStorage (or a JS-accessible variable) makes it trivially readable by any script running on the page — so a single XSS flaw, including one in a third-party dependency, exfiltrates the token. Putting the credential in an HttpOnly cookie makes it unreadable to JavaScript, so XSS can still abuse the session while the page is open but cannot steal a long-lived bearer token to replay elsewhere."
+        },
+        {
+          "type": "paragraph",
+          "text": "The trade-off is that cookies are sent automatically by the browser, which is exactly what enables CSRF — so a cookie-based design must add CSRF protection. localStorage tokens sent in an Authorization header are immune to CSRF (the browser never attaches them automatically) but exposed to XSS. The senior consensus: prefer HttpOnly cookies plus CSRF defenses, because XSS token theft is generally the more catastrophic and less recoverable failure. Better still, keep tokens entirely server-side with a BFF (covered later)."
+        },
+        {
+          "type": "table",
+          "columns": ["Storage", "XSS exposure", "CSRF exposure", "Sent automatically?"],
+          "rows": [
+            ["localStorage / JS var", "High (readable by any script)", "None (manual header)", "No"],
+            ["HttpOnly cookie", "Low (not readable)", "Yes — needs mitigation", "Yes"],
+            ["BFF session cookie (no token in browser)", "Low", "Yes — needs mitigation", "Yes"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "\"Just store the JWT in localStorage, it's fine\" is a classic wrong answer. It trades a fixable CSRF concern for an unfixable XSS-exfiltration concern that hands an attacker a portable bearer token."
+        }
+      ]
+    },
+    {
+      "id": "csrf-vs-xss",
+      "heading": "CSRF vs XSS and How to Defend",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Cross-Site Request Forgery (CSRF) abuses the browser's automatic attachment of cookies: a malicious page makes the victim's browser issue an authenticated request to your site. The attacker cannot read the response, but the side effect (transfer money, change email) still executes. Cross-Site Scripting (XSS) is fundamentally worse — the attacker runs script inside your origin, so they can read anything the page can, forge requests with correct tokens, and defeat most CSRF defenses. XSS is a broken-origin problem; CSRF is a confused-deputy problem."
+        },
+        {
+          "type": "paragraph",
+          "text": "SameSite cookies are the first line of CSRF defense: SameSite=Lax stops the cross-site POST/AJAX vectors while allowing normal top-level navigation. But SameSite is a defense-in-depth layer, not a complete guarantee — older browsers, same-site-but-different-origin subdomains, and certain navigation cases mean you still want an explicit CSRF token for state-changing endpoints. The two common token patterns are the synchronizer token (stored in the server session) and the double-submit cookie (a random value placed in both a cookie and a request header, compared server-side)."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Double-submit CSRF: value lives in a non-HttpOnly cookie AND is echoed in a header.\n// The server checks the two match. An attacker on another origin cannot read the\n// cookie value to forge the header (same-origin policy blocks reading it).\n\nimport crypto from 'node:crypto';\nimport type { Request, Response, NextFunction } from 'express';\n\nexport function issueCsrfToken(_req: Request, res: Response, next: NextFunction) {\n  const token = crypto.randomBytes(32).toString('base64url');\n  // Readable by JS so the SPA can copy it into the X-CSRF-Token header.\n  // NOT HttpOnly on purpose; the *session* cookie stays HttpOnly.\n  res.cookie('csrf', token, { secure: true, sameSite: 'lax', path: '/' });\n  next();\n}\n\nexport function verifyCsrf(req: Request, res: Response, next: NextFunction) {\n  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();\n  const cookieToken = req.cookies['csrf'];\n  const headerToken = req.get('X-CSRF-Token');\n  if (\n    !cookieToken ||\n    !headerToken ||\n    cookieToken.length !== headerToken.length ||\n    !crypto.timingSafeEqual(Buffer.from(cookieToken), Buffer.from(headerToken))\n  ) {\n    return res.status(403).json({ error: 'csrf_failed' });\n  }\n  next();\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "CSRF tokens do NOT protect against XSS. If an attacker runs script in your origin, they simply read the CSRF cookie and craft a valid header. Fix XSS at the source (output encoding, CSP); CSRF tokens are only meaningful once XSS is controlled."
+        }
+      ]
+    },
+    {
+      "id": "session-middleware",
+      "heading": "Example: Session-Check Middleware with Redis",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A production session-check middleware looks up the opaque id in Redis, rejects unknown or expired sessions, refreshes a sliding expiry, and attaches the resolved principal to the request. Keeping the store authoritative is what makes instant revocation possible: logout deletes the key, and an admin can delete all keys for a user to force-logout everywhere."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import type { Request, Response, NextFunction } from 'express';\nimport { redis } from './redis';\n\nconst SESSION_TTL_SECONDS = 60 * 30; // 30 min sliding window\n\nexport interface SessionData {\n  userId: string;\n  roles: string[];\n  createdAt: number;\n}\n\nexport async function requireSession(req: Request, res: Response, next: NextFunction) {\n  const sid = req.cookies['__Host-sid'];\n  if (!sid) return res.status(401).json({ error: 'no_session' });\n\n  const key = `sess:${sid}`;\n  const raw = await redis.get(key);\n  if (!raw) return res.status(401).json({ error: 'session_expired' });\n\n  const session = JSON.parse(raw) as SessionData;\n\n  // Sliding expiry: renew TTL on activity so active users stay logged in.\n  await redis.expire(key, SESSION_TTL_SECONDS);\n\n  // Attach principal; downstream authorization uses this, not the cookie.\n  (req as Request & { user: SessionData }).user = session;\n  next();\n}\n\n// Logout: single line, instantly effective on the next request.\nexport async function destroySession(sid: string) {\n  await redis.del(`sess:${sid}`);\n}\n\n// Force-logout a user everywhere: track sids per user in a set.\nexport async function destroyAllForUser(userId: string) {\n  const sids = await redis.smembers(`user-sessions:${userId}`);\n  if (sids.length) await redis.del(...sids.map((s) => `sess:${s}`));\n  await redis.del(`user-sessions:${userId}`);\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Maintaining a user-sessions:<id> set alongside each session is the small piece of bookkeeping that turns \"log this user out everywhere\" from impossible into a two-line operation — essential for breach response."
+        }
+      ]
+    },
+    {
+      "id": "sso-concepts",
+      "heading": "Single Sign-On Concepts",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Single Sign-On (SSO) lets a user authenticate once at a central Identity Provider (IdP) and access many Service Providers (SPs, also called Relying Parties or clients) without re-entering credentials. The key insight is that the IdP maintains its own session — the IdP session — usually via its own cookie on the IdP's domain. When an SP redirects the user to the IdP and the IdP session already exists, the IdP can immediately assert the user's identity back to the SP without prompting, which is what makes the second, third, and fourth logins feel seamless."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "SP-initiated flow: the user starts at the application; the app redirects to the IdP to authenticate, then the IdP redirects back with an assertion/token. This is the common case.",
+            "IdP-initiated flow: the user starts at the IdP portal (e.g. an app launcher) and clicks an app tile; the IdP pushes an assertion to the SP. Convenient but more prone to certain replay/login-CSRF issues, so many teams disable it.",
+            "IdP session vs SP session: after federation, the SP typically mints its own local session so it does not hit the IdP on every request. This means logout must consider both sessions (see Single Log-Out)."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The IdP session is why SSO feels magical: your second app never shows a login form because the IdP already recognizes the browser and silently issues a fresh assertion."
+        }
+      ]
+    },
+    {
+      "id": "saml-vs-oidc",
+      "heading": "SAML vs OIDC",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "SAML 2.0 and OpenID Connect (OIDC) are the two dominant federation protocols. SAML is an older, XML-based standard: the IdP returns a signed XML Assertion, usually via an HTTP-POST of a form to the SP's Assertion Consumer Service, or via redirect binding. It is deeply entrenched in enterprise IT and is often the only option a legacy customer's IdP supports. OIDC is a modern identity layer built on top of OAuth2: it uses JSON and JWTs (the ID Token), works cleanly with mobile and SPAs, and reuses the OAuth2 authorization-code flow. The detailed mechanics of the OAuth2 code flow and JWT validation are covered in the oauth2-oidc-jwt topic."
+        },
+        {
+          "type": "table",
+          "columns": ["Aspect", "SAML 2.0", "OIDC"],
+          "rows": [
+            ["Data format", "XML assertions", "JSON / JWT (ID Token)"],
+            ["Transport", "HTTP-POST / Redirect binding", "OAuth2 authorization-code (redirects)"],
+            ["Built on", "Standalone standard", "OAuth2 authorization framework"],
+            ["Token consumed", "Signed XML assertion", "ID Token (JWT) + access token"],
+            ["Best for", "Enterprise / legacy IdPs, B2B", "Modern web, SPA, mobile, APIs"],
+            ["Client type fit", "Server-side web apps", "SPAs, native apps, microservices"],
+            ["Logout", "SAML SLO (front/back-channel)", "OIDC RP-Initiated + back-channel logout"],
+            ["Typical verbosity", "Heavy XML, canonicalization pitfalls", "Compact, JWT-based"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Practical guidance: offer OIDC as the default for anything you build new, and support SAML because large enterprise buyers frequently mandate it. A federation gateway like Keycloak can broker both — accepting SAML from a customer's IdP while presenting OIDC to your own applications — so you write your apps against one protocol and let the broker translate."
+        }
+      ]
+    },
+    {
+      "id": "keycloak",
+      "heading": "Keycloak Concepts",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Keycloak is an open-source identity and access management server. Its top-level isolation boundary is the realm: a realm owns its own users, roles, clients, and keys, and realms do not share state — a natural fit for multi-tenant separation (though not the only way to model tenants). Inside a realm, a client represents an application that wants to authenticate users (an SPA, an API, a mobile app). Clients can be public (no secret, e.g. SPAs) or confidential (hold a secret, e.g. a BFF)."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Client scopes: reusable bundles of protocol mappers and role scope that shape what ends up in tokens; attach them to clients to control claims consistently.",
+            "Protocol mappers: rules that map user attributes, roles, or group membership into token/assertion claims (e.g. put groups into a groups claim, or a department attribute into a custom claim).",
+            "Realm roles vs client roles: realm roles are global to the realm and shared across all clients; client roles are namespaced to a single client. Use realm roles for cross-cutting concepts (admin, employee) and client roles for app-specific permissions (invoices:approve on the billing client).",
+            "Identity brokering / social login: Keycloak can delegate authentication to an external IdP — a corporate SAML IdP, Google, GitHub — and normalize the result, giving your apps one consistent OIDC surface.",
+            "Admin console vs Account console: the admin console manages the realm (operators); the account console lets end users manage their own profile, sessions, and credentials."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "code": "{\n  \"realm\": \"acme\",\n  \"enabled\": true,\n  \"sslRequired\": \"external\",\n  \"loginWithEmailAllowed\": true,\n  \"roles\": {\n    \"realm\": [{ \"name\": \"employee\" }, { \"name\": \"admin\" }]\n  },\n  \"clients\": [\n    {\n      \"clientId\": \"acme-bff\",\n      \"protocol\": \"openid-connect\",\n      \"publicClient\": false,\n      \"secret\": \"__set_via_env__\",\n      \"standardFlowEnabled\": true,\n      \"directAccessGrantsEnabled\": false,\n      \"redirectUris\": [\"https://app.acme.com/bff/callback\"],\n      \"webOrigins\": [\"https://app.acme.com\"],\n      \"attributes\": {\n        \"pkce.code.challenge.method\": \"S256\",\n        \"backchannel.logout.session.required\": \"true\",\n        \"backchannel.logout.url\": \"https://app.acme.com/bff/backchannel-logout\"\n      },\n      \"defaultClientScopes\": [\"openid\", \"profile\", \"email\", \"roles\"],\n      \"protocolMappers\": [\n        {\n          \"name\": \"groups\",\n          \"protocol\": \"openid-connect\",\n          \"protocolMapper\": \"oidc-group-membership-mapper\",\n          \"config\": {\n            \"claim.name\": \"groups\",\n            \"full.path\": \"false\",\n            \"access.token.claim\": \"true\",\n            \"id.token.claim\": \"true\"\n          }\n        }\n      ]\n    }\n  ]\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Note the client is confidential (publicClient: false) with PKCE (S256) and a back-channel logout URL — exactly what a BFF needs: it holds the secret, uses the code flow with PKCE, and can be told by Keycloak when the IdP session ends."
+        }
+      ]
+    },
+    {
+      "id": "refresh-rotation",
+      "heading": "Refresh Token Rotation & Reuse Detection",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Refresh tokens are long-lived credentials that exchange for fresh short-lived access tokens. Because they are long-lived, theft is dangerous — so modern practice is rotation: every time a refresh token is used, the authorization server issues a new refresh token and invalidates the old one. This bounds the useful lifetime of any single token to a single use. The security payoff comes from reuse detection: if an already-consumed refresh token is presented again, the server treats it as evidence of theft (the legitimate client and an attacker both hold a copy of the same token) and revokes the entire token family, forcing re-authentication."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Refresh rotation with reuse detection (server side).\n// Each refresh token belongs to a 'family'; consuming one issues the next.\n\ninterface RefreshRecord {\n  tokenHash: string;   // store only a hash, never the raw token\n  familyId: string;\n  used: boolean;\n  expiresAt: number;\n}\n\nasync function rotateRefreshToken(presentedRaw: string) {\n  const hash = sha256(presentedRaw);\n  const rec = await store.findByHash(hash);\n\n  if (!rec || rec.expiresAt < Date.now()) {\n    throw new AuthError('invalid_grant');\n  }\n\n  // Reuse detection: an already-used token means the family is compromised.\n  if (rec.used) {\n    await store.revokeFamily(rec.familyId); // kill every token in the chain\n    throw new AuthError('token_reuse_detected'); // force full re-login\n  }\n\n  // Normal path: mark old as used, mint a fresh pair in the same family.\n  await store.markUsed(rec.tokenHash);\n  const newRefreshRaw = randomToken();\n  await store.save({\n    tokenHash: sha256(newRefreshRaw),\n    familyId: rec.familyId,\n    used: false,\n    expiresAt: Date.now() + REFRESH_TTL_MS,\n  });\n\n  return { accessToken: mintAccessToken(rec), refreshToken: newRefreshRaw };\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Rotation + reuse detection turns a stolen refresh token from a persistent backdoor into a self-limiting event: the moment either party reuses a spent token, the whole family dies and the real user is forced to log in again."
+        }
+      ]
+    },
+    {
+      "id": "slo",
+      "heading": "Session Invalidation & Single Log-Out",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Logout is deceptively hard in SSO because there are multiple sessions: the IdP session and one local session per SP. Single Log-Out (SLO) coordinates terminating them all. Front-channel logout uses the browser: the IdP loads hidden iframes or sequential redirects to each SP's logout endpoint so each SP can clear its own cookie. It is simple but fragile — it depends on the browser reaching every SP, and third-party cookie restrictions increasingly break it. Back-channel logout is server-to-server: the IdP calls each SP's registered logout endpoint directly (in OIDC, delivering a logout token), which is more reliable and not subject to browser cookie policies."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Local logout: clear only the current app's session — the user is still logged in at the IdP and other apps.",
+            "RP-initiated logout (OIDC): the app sends the user to the IdP's end-session endpoint, which clears the IdP session and can propagate to other RPs.",
+            "Back-channel logout: the IdP POSTs a logout token to each RP's back-channel endpoint; the RP maps it to the local session and destroys it server-side.",
+            "For stateless tokens, 'logout' really means: delete the refresh token/session record and let the short-lived access token expire — you cannot revoke an already-issued access JWT without a denylist."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "If your app only does local logout, a user who clicks \"log out\" is still authenticated at the IdP — the next visit silently logs them straight back in. For shared-computer scenarios this is a real security gap; wire up RP-initiated or back-channel logout."
+        }
+      ]
+    },
+    {
+      "id": "bff-pattern",
+      "heading": "The Backend-for-Frontend (BFF) Pattern",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The Backend-for-Frontend pattern is the current best-practice answer to \"where do SPA tokens live?\": nowhere in the browser. A small server component owned by the frontend team performs the OAuth2/OIDC code flow (with PKCE), receives and stores the access and refresh tokens server-side, and exposes only an HttpOnly, Secure, SameSite session cookie to the SPA. The browser never sees a token; it just sends its cookie, and the BFF attaches the real access token when proxying calls to downstream APIs."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Tokens stay server-side, so XSS cannot exfiltrate a portable bearer token.",
+            "The browser credential is an opaque, revocable HttpOnly cookie — revocation and logout are trivial and instant.",
+            "Refresh-token rotation happens entirely inside the BFF, invisible to the SPA.",
+            "Because the credential is a cookie, add CSRF protection (SameSite + double-submit/synchronizer token) to the BFF's state-changing routes."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "BFF collapses the cookie-vs-localStorage debate: you get the CSRF-manageable, XSS-resistant properties of an HttpOnly cookie while keeping powerful tokens completely off the client."
+        }
+      ]
+    },
+    {
+      "id": "mfa-stepup",
+      "heading": "MFA and Step-Up Authentication",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Multi-Factor Authentication (MFA) requires more than one factor: something you know (password), something you have (TOTP app, passkey/WebAuthn, hardware key), or something you are (biometric). Step-up authentication is the pattern of requiring additional or stronger factors only for sensitive actions — a user browses with a normal session but must re-verify (e.g. a passkey tap) before transferring money or changing security settings. This is typically expressed via the Authentication Context Class Reference (acr) and Authentication Methods References (amr) claims, and enforced by checking the achieved assurance level on the specific request."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Step-up keeps the everyday experience frictionless while raising the bar exactly where the blast radius is highest. Keycloak models this with authentication flows and required-action / conditional executions keyed on the requested acr."
+        }
+      ]
+    },
+    {
+      "id": "prod-example",
+      "heading": "Production Example: SPA + BFF + Keycloak",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A concrete, defensible production setup: a React SPA talks only to a BFF (a confidential OIDC client in a Keycloak realm). The BFF runs the authorization-code + PKCE flow, stores tokens in Redis keyed by an opaque session id, and hands the SPA a __Host- HttpOnly cookie. It also registers a back-channel logout endpoint so IdP-side logout kills the local session, and issues a double-submit CSRF token for mutating routes."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// BFF login start + callback (simplified). Tokens never touch the browser.\nimport express from 'express';\nimport { redis } from './redis';\nimport { oidc } from './oidc'; // configured against Keycloak realm 'acme'\nimport crypto from 'node:crypto';\n\nconst app = express();\n\napp.get('/bff/login', async (req, res) => {\n  const { url, codeVerifier, state } = await oidc.buildAuthUrl(); // PKCE S256\n  await redis.set(`pkce:${state}`, codeVerifier, 'EX', 300);\n  res.redirect(url); // -> Keycloak /auth\n});\n\napp.get('/bff/callback', async (req, res) => {\n  const { code, state } = req.query as { code: string; state: string };\n  const codeVerifier = await redis.get(`pkce:${state}`);\n  if (!codeVerifier) return res.status(400).send('bad_state');\n\n  const tokens = await oidc.exchangeCode(code, codeVerifier); // access + refresh + id\n  const sid = crypto.randomBytes(32).toString('base64url');\n  await redis.set(`sess:${sid}`, JSON.stringify(tokens), 'EX', 1800);\n  // Track sid under the subject so back-channel logout can find it.\n  await redis.sadd(`kc-sub:${tokens.claims.sub}`, sid);\n\n  res.cookie('__Host-sid', sid, {\n    httpOnly: true, secure: true, sameSite: 'lax', path: '/',\n  });\n  res.redirect('/');\n});\n\n// Keycloak calls this directly (server-to-server) when the IdP session ends.\napp.post('/bff/backchannel-logout', express.urlencoded({ extended: false }), async (req, res) => {\n  const sub = await oidc.validateLogoutToken(req.body.logout_token); // verify signature + claims\n  const sids = await redis.smembers(`kc-sub:${sub}`);\n  if (sids.length) await redis.del(...sids.map((s) => `sess:${s}`));\n  await redis.del(`kc-sub:${sub}`);\n  res.sendStatus(200);\n});"
+        },
+        {
+          "type": "paragraph",
+          "text": "The SPA now performs authenticated calls simply by hitting BFF routes with its cookie; the BFF looks up the session, refreshes the access token via rotation when needed, and proxies to downstream APIs with a proper Authorization header. Nothing exploitable by XSS ever reaches the browser, logout is coordinated through Keycloak's back-channel, and revocation is a Redis delete."
+        }
+      ]
+    },
+    {
+      "id": "mistakes",
+      "heading": "Common Mistakes",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Storing JWTs in localStorage and calling it secure — it converts any XSS into full token theft.",
+            "Believing SameSite alone fully stops CSRF; it is defense-in-depth, not a substitute for CSRF tokens on state-changing endpoints.",
+            "Claiming a stateless JWT can be 'logged out' by deleting it client-side — the token stays valid at the API until it expires unless you maintain a denylist.",
+            "Setting SameSite=None without Secure (rejected by browsers) or using None when Lax would do, needlessly widening CSRF surface.",
+            "Using a raw user id or predictable value as the session id instead of a high-entropy opaque token.",
+            "Only doing local logout in an SSO app, so the IdP session silently re-authenticates the user on the next visit.",
+            "Confusing realm roles with client roles in Keycloak and granting app-specific permissions realm-wide.",
+            "Skipping refresh-token rotation, leaving a single long-lived token as a persistent backdoor if stolen."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The single most dangerous mistake is treating XSS as 'the frontend team's problem.' Once script runs in your origin, every session and CSRF defense collapses — XSS is an authentication problem too."
+        }
+      ]
+    },
+    {
+      "id": "bestpractices",
+      "heading": "Best Practices Checklist",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "style": "ordered",
+          "items": [
+            "Use HttpOnly, Secure, SameSite cookies with the __Host- prefix for first-party sessions; never put bearer tokens in localStorage.",
+            "Prefer a BFF for SPAs so tokens stay server-side and the browser only holds an opaque session cookie.",
+            "Add explicit CSRF protection (SameSite + synchronizer or double-submit token) on every state-changing endpoint.",
+            "Keep access tokens short-lived and rotate refresh tokens with reuse detection that revokes the whole family on replay.",
+            "Make sessions server-authoritative enough to support instant revocation and force-logout-everywhere for incident response.",
+            "Offer OIDC by default and support SAML for enterprise buyers; broker both through an IdP like Keycloak when possible.",
+            "Model authorization with realm roles for cross-cutting concepts and client roles for app-specific permissions.",
+            "Wire up RP-initiated and back-channel Single Log-Out so logout terminates the IdP session, not just the local one.",
+            "Apply step-up MFA for high-risk actions rather than forcing heavy factors on every login.",
+            "Fix XSS at the source (contextual output encoding + a strict Content-Security-Policy) — it underpins every other defense."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "If you can answer 'how do we log everyone out in a breach?', 'where do our SPA tokens live?', and 'what stops CSRF here?' with specifics, your session design is at staff level."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "sso-two-apps",
+      "title": "SSO across two apps via a central IdP",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n    participant U as User Browser\n    participant A1 as App One (SP)\n    participant IdP as Central IdP\n    participant A2 as App Two (SP)\n    U->>A1: Open App One\n    A1->>U: Redirect to IdP (no local session)\n    U->>IdP: Authenticate (login form)\n    IdP->>IdP: Create IdP session cookie\n    IdP->>U: Redirect back with assertion\n    U->>A1: Deliver assertion\n    A1->>U: Set App One session\n    U->>A2: Open App Two\n    A2->>U: Redirect to IdP\n    U->>IdP: Request (IdP session already exists)\n    IdP->>U: Silent assertion (no prompt)\n    U->>A2: Deliver assertion\n    A2->>U: Set App Two session"
+    },
+    {
+      "id": "oidc-keycloak-login",
+      "title": "SP-initiated OIDC login through Keycloak (with BFF + PKCE)",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n    participant SPA as SPA\n    participant BFF as BFF (confidential client)\n    participant KC as Keycloak\n    participant API as Downstream API\n    SPA->>BFF: GET /bff/login\n    BFF->>KC: Redirect to /auth (code flow + PKCE S256)\n    KC->>BFF: Prompt user, then redirect with code\n    BFF->>KC: Exchange code + verifier for tokens\n    KC->>BFF: access + refresh + id token\n    BFF->>BFF: Store tokens in Redis by sid\n    BFF->>SPA: Set HttpOnly __Host-sid cookie\n    SPA->>BFF: GET /bff/api/orders (cookie)\n    BFF->>API: Call with Bearer access token\n    API->>BFF: Data\n    BFF->>SPA: Data (no token exposed)"
+    },
+    {
+      "id": "cookie-vs-storage-ascii",
+      "title": "Where the credential lives and what threatens it",
+      "type": "ascii",
+      "content": "  Storage choice        XSS steals it?   CSRF risk?\n  ------------------     --------------   ---------\n  localStorage / JS      YES (readable)   no\n  HttpOnly cookie        no               YES -> add CSRF token\n  BFF (token server-side) no              YES -> add CSRF token\n\n  Browser only ever holds:  [ __Host-sid ]  (opaque, HttpOnly)\n  Real tokens live here:    [   BFF + Redis  ]  (never on client)"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-authn-authz",
+      "question": "What is the difference between authentication and authorization, and why keep them separate?",
+      "answer": "Authentication establishes who the caller is by verifying a credential such as a password, passkey, or federated assertion. Authorization decides what that already-identified principal is allowed to do against a specific resource. Authentication typically happens once per session (plus refresh), while authorization is evaluated on every request. Keeping them separate matters because their failure modes differ: a broken authentication lets an attacker impersonate someone, whereas a broken authorization lets a legitimate user escalate or reach data they should not. Mixing them — for example re-checking a password on each call, or trusting an authenticated user without a permission check — leads to both performance and security problems. Clean systems resolve identity into a principal once, then run authorization checks against that principal everywhere.",
+      "difficulty": "easy",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["authentication", "authorization"],
+      "followUps": ["Where should authorization checks live in a microservice architecture?", "How do acr/amr claims relate to authentication strength?"]
+    },
+    {
+      "id": "q-session-vs-jwt",
+      "question": "Compare server-side sessions with stateless JWTs. When would you choose each?",
+      "answer": "A server-side session stores state in a server store (e.g. Redis) and puts only an opaque id in the cookie, so the server looks up the session on each request. A stateless JWT encodes claims into a signed token the server validates without any lookup. Sessions give instant revocation and easy logout but require a highly-available shared store and a lookup per request. JWTs scale horizontally with no shared state and no lookup, but you cannot revoke one before it expires without adding a denylist, which reintroduces state. Choose server-side sessions for first-party web apps where revocation and precise session control matter. Choose stateless tokens for service-to-service calls and short-lived access where scale and statelessness dominate. A common hybrid uses short-lived stateless access tokens plus a stateful, rotating refresh mechanism.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["sessions", "jwt", "scalability"],
+      "followUps": ["How would you add revocation to a stateless JWT system?", "What's the per-request cost difference at scale?"]
+    },
+    {
+      "id": "q-cookie-vs-localstorage",
+      "question": "Should you store auth tokens in a cookie or localStorage, and why?",
+      "answer": "For auth credentials, an HttpOnly cookie is generally safer than localStorage, and best of all is keeping tokens server-side via a BFF. localStorage is readable by any JavaScript on the page, so a single XSS flaw — including one in a third-party dependency — exfiltrates the token, handing the attacker a portable bearer credential they can replay from anywhere. An HttpOnly cookie is invisible to document.cookie, so XSS can abuse the live session while the page is open but cannot steal a long-lived token to reuse elsewhere. The trade-off is that cookies are sent automatically, which enables CSRF, so a cookie design must add CSRF protection. The senior consensus prefers HttpOnly cookies because CSRF is a fixable, well-understood problem while XSS token exfiltration is catastrophic and hard to recover from. This is the classic wrong answer to avoid: 'just put the JWT in localStorage.'",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["cookies", "localstorage", "xss", "csrf"],
+      "followUps": ["How does a BFF remove this trade-off entirely?", "What CSP settings reduce XSS impact regardless of storage?"]
+    },
+    {
+      "id": "q-samesite-vs-csrf-token",
+      "question": "If SameSite cookies exist, why do we still need CSRF tokens?",
+      "answer": "SameSite is powerful defense-in-depth but not a complete CSRF solution. SameSite=Lax blocks cross-site AJAX and cross-site POSTs while still allowing top-level navigation, which stops the most common CSRF vectors. However, it has gaps: older or non-conforming browsers may ignore it, requests from a different origin on the same registrable site can still be considered same-site, and some navigation cases slip through. Because the cookie is same-site, an attacker who controls a sibling subdomain may be able to leverage that. A CSRF token — a synchronizer token tied to the session, or a double-submit value compared server-side — adds an independent check that the request came from your own application code, which an off-origin attacker cannot forge. Relying on SameSite alone is a common overconfident answer; layer both on state-changing endpoints.",
+      "difficulty": "hard",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["csrf", "samesite", "cookies"],
+      "followUps": ["How does double-submit differ from the synchronizer token pattern?", "Why does a CSRF token not help against XSS?"]
+    },
+    {
+      "id": "q-logout-jwt",
+      "question": "How do you 'log out' a user who holds a stateless JWT?",
+      "answer": "You cannot truly invalidate an already-issued stateless JWT before it expires, because the API validates it purely by signature with no server lookup. Deleting it from the client only prevents that client from sending it; a copy an attacker already stole still works until expiry. Practical logout therefore means several things: delete the refresh token or session record on the server so no new access tokens can be minted, clear the token from the client, and let the short-lived access token expire on its own. If you need immediate revocation, you must introduce state — a denylist of revoked token ids (jti) checked on each request, or switch to opaque tokens with server lookup. This is why access tokens are kept short-lived: the revocation window equals the token lifetime. Claiming a JWT is 'logged out' by client-side deletion is a classic misconception.",
+      "difficulty": "hard",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["jwt", "logout", "revocation"],
+      "followUps": ["What is a token denylist and what does it cost?", "How does refresh-token revocation bound the damage?"]
+    },
+    {
+      "id": "q-saml-vs-oidc",
+      "question": "When would you choose SAML over OIDC, or vice versa?",
+      "answer": "OIDC is the modern default and SAML is the enterprise-compatibility choice. OIDC is a JSON/JWT identity layer on top of OAuth2, uses the authorization-code flow, and works cleanly for SPAs, mobile apps, and APIs, so pick it for anything new. SAML 2.0 is an older XML-based standard where the IdP returns a signed XML assertion, typically via HTTP-POST; it is deeply entrenched in enterprise IT and is often the only protocol a large customer's IdP supports. So the pragmatic answer is: build your apps on OIDC, but support SAML because B2B buyers frequently mandate it. A broker such as Keycloak can accept SAML from a customer IdP and expose OIDC to your applications, letting you standardize internally while meeting the customer where they are. Answering 'always OIDC' ignores real enterprise procurement constraints.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["saml", "oidc", "sso"],
+      "followUps": ["How does identity brokering translate between the two?", "What are the assertion-signing pitfalls in SAML?"]
+    },
+    {
+      "id": "q-keycloak-roles",
+      "question": "In Keycloak, what is the difference between realm roles and client roles?",
+      "answer": "Realm roles are defined at the realm level and are global across every client in that realm, making them ideal for cross-cutting concepts like employee, admin, or manager. Client roles are namespaced to a single client and represent permissions meaningful only to that application, such as invoices:approve on a billing client. The distinction matters for least privilege: granting an app-specific permission as a realm role leaks it across every application in the realm, over-authorizing users. Realm roles can be composited from client roles, and users receive roles directly or via group membership; protocol mappers then place the relevant roles into token claims. A common mistake is modeling everything as realm roles, which flattens your authorization model and violates separation between applications. Use realm roles for shared identity concepts and client roles for per-application permissions.",
+      "difficulty": "hard",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["keycloak", "roles", "authorization"],
+      "followUps": ["How do groups and composite roles interact?", "How do protocol mappers get roles into the access token?"]
+    },
+    {
+      "id": "q-refresh-rotation",
+      "question": "Explain refresh-token rotation and reuse detection.",
+      "answer": "Refresh-token rotation issues a brand-new refresh token every time the current one is exchanged for a fresh access token, invalidating the previous refresh token immediately. This bounds any single refresh token to essentially one use, shrinking the value of a stolen token. Reuse detection is the security payoff: the server tracks a token family, and if a refresh token that was already consumed is presented again, that means two parties hold the same token — the legitimate client and an attacker. The server treats this as theft and revokes the entire family, forcing a full re-authentication. So rotation plus reuse detection turns a stolen long-lived credential from a persistent backdoor into a self-limiting event that trips an alarm the moment it is replayed. Implementations store only hashes of refresh tokens and mark each as used on consumption.",
+      "difficulty": "hard",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["refresh-token", "rotation", "reuse-detection"],
+      "followUps": ["What happens to the legitimate user when reuse is detected?", "Why store only a hash of the refresh token?"]
+    },
+    {
+      "id": "q-csrf-mechanics",
+      "question": "How does a CSRF attack actually work, and what is the double-submit cookie defense?",
+      "answer": "CSRF exploits the browser's habit of automatically attaching cookies to requests toward a site. A malicious page the victim visits triggers a request to your application — via a form auto-submit, an image tag, or fetch — and the browser includes the victim's session cookie, so the request executes with the victim's authority. The attacker cannot read the response due to the same-origin policy, but the side effect still happens. The double-submit cookie defense places a random token in both a readable cookie and a request header set by your own JavaScript; the server verifies the two match. An off-origin attacker cannot read the cookie value (same-origin policy blocks reading cross-site responses/cookies), so they cannot populate the matching header. Combined with SameSite cookies, this reliably blocks CSRF on state-changing endpoints.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["csrf", "double-submit", "cookies"],
+      "followUps": ["Why compare tokens with a timing-safe equality check?", "How does the synchronizer token pattern differ?"]
+    },
+    {
+      "id": "q-bff",
+      "question": "What is the Backend-for-Frontend (BFF) pattern and what problem does it solve for SPA auth?",
+      "answer": "A BFF is a small server component, owned by the frontend, that runs the OAuth2/OIDC code flow with PKCE, stores the access and refresh tokens server-side, and exposes only an HttpOnly session cookie to the SPA. It solves the fundamental SPA problem of where to keep tokens: with a BFF, the browser never holds a token at all, so XSS cannot exfiltrate a portable bearer credential. The browser credential is an opaque, revocable HttpOnly cookie, making logout and revocation instant. Refresh-token rotation happens invisibly inside the BFF. Because the credential is a cookie, you add CSRF protection to the BFF's mutating routes. In effect the BFF gives you the XSS-resistance of server-side tokens and the manageable CSRF surface of cookies, collapsing the cookie-versus-localStorage debate. It also becomes a natural place to aggregate and shape downstream API calls for that specific frontend.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["bff", "spa", "oidc"],
+      "followUps": ["How does the BFF proxy calls to downstream APIs?", "Where does the BFF fit with a microservices gateway?"]
+    },
+    {
+      "id": "q-samesite-values",
+      "question": "Explain the SameSite cookie values Lax, Strict, and None and their implications.",
+      "answer": "SameSite controls whether a cookie is attached to cross-site requests. Strict never sends the cookie on any cross-site request, including when a user clicks an inbound link from another site — maximally safe against CSRF but harmful to UX because the user can appear logged out after following a link in. Lax sends the cookie on top-level navigations using safe methods (like clicking a link) but not on cross-site subresource requests or cross-site POSTs, which blocks most CSRF while preserving normal navigation; it is the common default. None sends the cookie on all cross-site requests and is required for legitimate third-party contexts such as embedded widgets, but it must be paired with Secure or browsers reject it. Setting None without Secure is a common bug. For a first-party session cookie, Lax is usually the right balance.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["samesite", "cookies", "csrf"],
+      "followUps": ["Why does SameSite=None require Secure?", "When would you actually need SameSite=None?"]
+    },
+    {
+      "id": "q-idp-session",
+      "question": "What is the IdP session, and how does it enable seamless SSO across apps?",
+      "answer": "The IdP session is the authentication session the Identity Provider maintains for the user, usually via its own cookie on the IdP's domain, independent of any individual application's session. When a user first logs in, the IdP establishes this session. When a second application later redirects the browser to the IdP for authentication, the IdP recognizes the existing session and can immediately issue a fresh assertion or token without prompting for credentials again — which is what makes the second and subsequent logins feel instantaneous. Each service provider typically mints its own local session after federation so it does not consult the IdP on every request. This dual-session model is why logout is subtle: clearing only the local app session leaves the IdP session intact, so the user is silently re-authenticated on their next visit, which is exactly the problem Single Log-Out addresses.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["sso", "idp", "sessions"],
+      "followUps": ["What is the difference between SP-initiated and IdP-initiated flows?", "How does the local SP session relate to the IdP session?"]
+    },
+    {
+      "id": "q-slo",
+      "question": "Compare front-channel and back-channel Single Log-Out.",
+      "answer": "Single Log-Out coordinates terminating the IdP session and every service-provider session. Front-channel logout drives the browser: the IdP loads hidden iframes or a sequence of redirects to each SP's logout endpoint so each SP clears its own cookie. It is simple but fragile because it depends on the browser successfully reaching every SP, and increasing third-party-cookie restrictions frequently break it. Back-channel logout is server-to-server: the IdP calls each SP's registered logout endpoint directly — in OIDC by delivering a signed logout token — so the SP can destroy the local session on its backend without relying on the browser. Back-channel is more reliable and immune to browser cookie policies, at the cost of requiring each SP to expose and secure a logout endpoint and correctly map the logout token to the local session. Robust systems prefer back-channel and use front-channel only as a fallback.",
+      "difficulty": "hard",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["slo", "logout", "sso"],
+      "followUps": ["How does an SP map a logout token back to its local session?", "What breaks front-channel logout in modern browsers?"]
+    },
+    {
+      "id": "q-httponly-secure",
+      "question": "Why must a session cookie be HttpOnly and Secure, and what does the __Host- prefix add?",
+      "answer": "HttpOnly makes the cookie invisible to document.cookie, so JavaScript — including malicious script injected via XSS — cannot read it, preventing session-id theft through client-side script. Secure ensures the cookie is only ever transmitted over HTTPS, so it cannot leak over plaintext HTTP or be captured during a protocol downgrade. The __Host- name prefix is a browser-enforced hardening: a cookie so named must be Secure, must have Path=/, and must not set a Domain attribute, which makes it host-only and blocks a weaker or compromised subdomain from setting or overwriting it (cookie fixation). Together these give a first-party session cookie strong properties: unreadable by script, never sent in the clear, and scoped tightly to the exact host. Adding SameSite=Lax and a bounded Max-Age completes the recommended baseline.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["cookies", "httponly", "secure"],
+      "followUps": ["What does the __Secure- prefix guarantee versus __Host-?", "How does a bounded Max-Age limit stolen-session reuse?"]
+    },
+    {
+      "id": "q-stepup",
+      "question": "What is step-up authentication and how is it expressed in OIDC?",
+      "answer": "Step-up authentication requires additional or stronger factors only for sensitive operations, rather than forcing heavy authentication on every login. A user might browse with an ordinary password-backed session but be prompted to re-verify with a passkey or hardware key before transferring money or changing security settings. In OIDC this is expressed through the acr (Authentication Context Class Reference) and amr (Authentication Methods References) claims: a relying party can request a specific acr, and the IdP performs whatever additional authentication is needed to satisfy it, then reports the achieved level back in the token. The application enforces step-up by checking that the request that reaches a sensitive endpoint carries a sufficient acr, prompting for more if not. This keeps everyday usage frictionless while raising assurance precisely where the blast radius is highest.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["mfa", "step-up", "oidc"],
+      "followUps": ["How does Keycloak model step-up via authentication flows?", "What is the difference between acr and amr?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-secure-session-csrf",
+      "title": "Implement a secure session cookie with CSRF double-submit protection",
+      "difficulty": "medium",
+      "category": "Backend",
+      "prompt": "Build Express middleware for a first-party app that (1) creates a server-side session on login, setting an HttpOnly, Secure, SameSite=Lax __Host-sid cookie backed by Redis, (2) issues a non-HttpOnly CSRF token cookie the SPA can read, and (3) protects all non-GET routes by comparing the CSRF cookie against an X-CSRF-Token header using a timing-safe check. Include instant logout.",
+      "hints": [
+        "The session id must be high-entropy and opaque; store real state in Redis keyed by it, never in the cookie.",
+        "The CSRF cookie is deliberately readable by JS so the SPA can copy it into a header; the session cookie stays HttpOnly.",
+        "Use crypto.timingSafeEqual over equal-length buffers, and skip the check for safe methods (GET/HEAD/OPTIONS)."
+      ],
+      "solutionCode": "import express, { Request, Response, NextFunction } from 'express';\nimport cookieParser from 'cookie-parser';\nimport crypto from 'node:crypto';\nimport { redis } from './redis';\n\nconst app = express();\napp.use(cookieParser());\napp.use(express.json());\n\nconst SESSION_TTL = 60 * 30; // 30 min\ntype Session = { userId: string; roles: string[] };\n\nfunction newToken() {\n  return crypto.randomBytes(32).toString('base64url');\n}\n\n// --- Login: create session + set cookies ---\napp.post('/login', async (req: Request, res: Response) => {\n  const user = await authenticate(req.body.username, req.body.password);\n  if (!user) return res.status(401).json({ error: 'bad_credentials' });\n\n  const sid = newToken();\n  const session: Session = { userId: user.id, roles: user.roles };\n  await redis.set(`sess:${sid}`, JSON.stringify(session), 'EX', SESSION_TTL);\n  await redis.sadd(`user-sessions:${user.id}`, sid);\n\n  const csrf = newToken();\n  await redis.set(`csrf:${sid}`, csrf, 'EX', SESSION_TTL);\n\n  res.cookie('__Host-sid', sid, {\n    httpOnly: true, secure: true, sameSite: 'lax', path: '/',\n  });\n  // Readable by the SPA on purpose so it can echo it in a header.\n  res.cookie('csrf', csrf, { secure: true, sameSite: 'lax', path: '/' });\n  res.json({ ok: true });\n});\n\n// --- Require an authenticated session ---\nasync function requireSession(req: Request, res: Response, next: NextFunction) {\n  const sid = req.cookies['__Host-sid'];\n  if (!sid) return res.status(401).json({ error: 'no_session' });\n  const raw = await redis.get(`sess:${sid}`);\n  if (!raw) return res.status(401).json({ error: 'expired' });\n  await redis.expire(`sess:${sid}`, SESSION_TTL); // sliding window\n  (req as any).sid = sid;\n  (req as any).user = JSON.parse(raw) as Session;\n  next();\n}\n\n// --- CSRF double-submit check on state-changing methods ---\nasync function verifyCsrf(req: Request, res: Response, next: NextFunction) {\n  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();\n  const sid = (req as any).sid as string;\n  const expected = await redis.get(`csrf:${sid}`);\n  const cookieTok = req.cookies['csrf'];\n  const headerTok = req.get('X-CSRF-Token');\n  if (\n    !expected || !cookieTok || !headerTok ||\n    cookieTok !== expected ||\n    headerTok.length !== cookieTok.length ||\n    !crypto.timingSafeEqual(Buffer.from(headerTok), Buffer.from(cookieTok))\n  ) {\n    return res.status(403).json({ error: 'csrf_failed' });\n  }\n  next();\n}\n\napp.use(requireSession, verifyCsrf);\n\n// --- Instant logout ---\napp.post('/logout', async (req: Request, res: Response) => {\n  const sid = (req as any).sid as string;\n  const user = (req as any).user as Session;\n  await redis.del(`sess:${sid}`, `csrf:${sid}`);\n  await redis.srem(`user-sessions:${user.userId}`, sid);\n  res.clearCookie('__Host-sid', { path: '/' });\n  res.clearCookie('csrf', { path: '/' });\n  res.json({ ok: true });\n});\n\ndeclare function authenticate(u: string, p: string): Promise<{ id: string; roles: string[] } | null>;\nexport default app;",
+      "solutionLanguage": "typescript",
+      "explanation": "The design keeps the session id opaque and server-authoritative: the cookie carries only a random 256-bit id while all real state lives in Redis, which makes revocation a single DEL and enables force-logout-everywhere via the user-sessions set. The session cookie is HttpOnly, Secure, SameSite=Lax and uses the __Host- prefix, so it is unreadable by script, never sent in the clear, host-scoped, and resistant to subdomain fixation. CSRF protection uses double-submit: a separate, JS-readable csrf cookie must match both the value stored server-side for that session and the X-CSRF-Token header the SPA sends, so an off-origin attacker who cannot read the cookie cannot forge the header. The comparison is timing-safe and only runs on state-changing methods, leaving safe idempotent reads unblocked. Sliding expiry renews the TTL on activity so active users stay logged in while idle sessions die. Logout deletes both the session and CSRF records and clears the cookies, so the credential is instantly and completely invalidated. The one subtlety to note is that binding the CSRF token to the server-side session (not just comparing cookie to header) strengthens the naive double-submit pattern against cookie-injection variants.",
+      "relatedTopic": "auth-sessions-sso"
+    },
+    {
+      "id": "ch-bff-tokens",
+      "title": "Design a BFF that keeps tokens server-side and exposes only an HttpOnly session cookie",
+      "difficulty": "hard",
+      "category": "Backend",
+      "prompt": "Implement the core of a BFF that performs the OIDC authorization-code flow with PKCE against Keycloak, stores the resulting access/refresh tokens in Redis keyed by an opaque session id, hands the SPA only an HttpOnly __Host-sid cookie, and transparently refreshes the access token (with rotation) when proxying a call to a downstream API. The browser must never receive a token.",
+      "hints": [
+        "Persist the PKCE code_verifier and state server-side (keyed by state) between /login and /callback.",
+        "Store the whole token set in Redis under sess:<sid>; the SPA only ever sees the opaque sid cookie.",
+        "Before proxying, check access-token expiry; if stale, use the refresh token to get a new pair and write it back (rotation)."
+      ],
+      "solutionCode": "import express, { Request, Response } from 'express';\nimport cookieParser from 'cookie-parser';\nimport crypto from 'node:crypto';\nimport { redis } from './redis';\nimport { oidc } from './oidc'; // wraps Keycloak endpoints for realm 'acme'\n\nconst app = express();\napp.use(cookieParser());\n\nconst SESS_TTL = 60 * 60; // 1h session window\ntype Tokens = { access: string; refresh: string; accessExp: number; sub: string };\n\nconst rnd = () => crypto.randomBytes(32).toString('base64url');\n\n// 1) Start login: build PKCE + state, redirect to Keycloak.\napp.get('/bff/login', async (_req: Request, res: Response) => {\n  const { url, codeVerifier, state } = await oidc.buildAuthUrl(); // S256\n  await redis.set(`pkce:${state}`, codeVerifier, 'EX', 300);\n  res.redirect(url);\n});\n\n// 2) Callback: exchange code, store tokens server-side, set opaque cookie.\napp.get('/bff/callback', async (req: Request, res: Response) => {\n  const { code, state } = req.query as { code: string; state: string };\n  const verifier = await redis.get(`pkce:${state}`);\n  if (!verifier) return res.status(400).send('bad_state');\n  await redis.del(`pkce:${state}`);\n\n  const t = await oidc.exchangeCode(code, verifier);\n  const sid = rnd();\n  const tokens: Tokens = {\n    access: t.access_token,\n    refresh: t.refresh_token,\n    accessExp: Date.now() + t.expires_in * 1000,\n    sub: t.claims.sub,\n  };\n  await redis.set(`sess:${sid}`, JSON.stringify(tokens), 'EX', SESS_TTL);\n  await redis.sadd(`kc-sub:${tokens.sub}`, sid);\n\n  res.cookie('__Host-sid', sid, {\n    httpOnly: true, secure: true, sameSite: 'lax', path: '/',\n  });\n  res.redirect('/');\n});\n\n// Load + refresh (with rotation) as needed.\nasync function getFreshTokens(sid: string): Promise<Tokens | null> {\n  const raw = await redis.get(`sess:${sid}`);\n  if (!raw) return null;\n  let tokens = JSON.parse(raw) as Tokens;\n  if (Date.now() < tokens.accessExp - 5000) return tokens; // still valid\n\n  const refreshed = await oidc.refresh(tokens.refresh); // rotates refresh token\n  tokens = {\n    access: refreshed.access_token,\n    refresh: refreshed.refresh_token, // new refresh -> rotation\n    accessExp: Date.now() + refreshed.expires_in * 1000,\n    sub: tokens.sub,\n  };\n  await redis.set(`sess:${sid}`, JSON.stringify(tokens), 'EX', SESS_TTL);\n  return tokens;\n}\n\n// 3) Proxy a downstream call; attach the real token server-side only.\napp.get('/bff/api/orders', async (req: Request, res: Response) => {\n  const sid = req.cookies['__Host-sid'];\n  if (!sid) return res.status(401).json({ error: 'no_session' });\n  const tokens = await getFreshTokens(sid);\n  if (!tokens) return res.status(401).json({ error: 'expired' });\n\n  const upstream = await fetch('https://api.acme.com/orders', {\n    headers: { Authorization: `Bearer ${tokens.access}` },\n  });\n  const body = await upstream.text();\n  res.status(upstream.status).type('application/json').send(body);\n});\n\n// 4) Back-channel logout from Keycloak.\napp.post('/bff/backchannel-logout', express.urlencoded({ extended: false }), async (req, res) => {\n  const sub = await oidc.validateLogoutToken(req.body.logout_token);\n  const sids = await redis.smembers(`kc-sub:${sub}`);\n  if (sids.length) await redis.del(...sids.map((s) => `sess:${s}`));\n  await redis.del(`kc-sub:${sub}`);\n  res.sendStatus(200);\n});\n\nexport default app;",
+      "solutionLanguage": "typescript",
+      "explanation": "This BFF centralizes every powerful credential on the server so the browser only ever holds an opaque, HttpOnly __Host-sid cookie, which means an XSS flaw in the SPA cannot exfiltrate a bearer token to replay elsewhere. The login step uses the authorization-code flow with PKCE (S256) and persists the code_verifier and state server-side keyed by state, closing the interception and CSRF-on-callback gaps of naive implementations. Tokens are stored in Redis under sess:<sid> with a bounded TTL, and a kc-sub:<sub> set links the Keycloak subject to its sessions so back-channel logout can find and destroy them. On each proxied request the BFF checks access-token expiry and, when stale, uses the refresh token to obtain a new pair, writing the rotated refresh token back — rotation is thus invisible to the SPA and never exposes tokens to the client. The downstream call attaches the Authorization header only on the server and returns just the data, so no token crosses the wire to the browser. Finally, the back-channel logout endpoint lets Keycloak terminate local sessions directly, giving reliable Single Log-Out independent of browser cookie policies; a production version would additionally add CSRF protection to mutating proxy routes and verify the logout token signature and audience.",
+      "relatedTopic": "auth-sessions-sso"
+    }
+  ],
+  "references": [
+    { "label": "MDN: Set-Cookie header", "url": "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Set-Cookie" },
+    { "label": "MDN: SameSite cookies", "url": "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Set-Cookie/SameSite" },
+    { "label": "OWASP Session Management Cheat Sheet", "url": "https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html" },
+    { "label": "OWASP CSRF Prevention Cheat Sheet", "url": "https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html" },
+    { "label": "Keycloak Server Administration Guide", "url": "https://www.keycloak.org/docs/latest/server_admin/" },
+    { "label": "SAML vs OIDC (Auth0 comparison)", "url": "https://auth0.com/intro-to-iam/saml-vs-openid-connect-oidc" }
+  ]
+}

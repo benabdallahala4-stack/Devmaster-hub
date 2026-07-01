@@ -1,0 +1,635 @@
+{
+  "id": "pagination",
+  "title": "API Pagination",
+  "category": "Backend",
+  "subcategory": "API Design",
+  "difficulty": "senior",
+  "tags": [
+    "pagination",
+    "cursor-pagination",
+    "keyset-pagination",
+    "offset-limit",
+    "api-design",
+    "database-indexing",
+    "graphql-relay"
+  ],
+  "description": "A staff-level treatment of paginating large collections over an API: the failure modes of OFFSET/LIMIT at scale, keyset (cursor) pagination that stays constant-cost, opaque page tokens, stable ordering with tiebreakers, and the indexing required to make it fast. Covers total-count cost, GraphQL Relay connections, and consistency under concurrent writes.",
+  "estReadMinutes": 27,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "What Pagination Actually Is",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Pagination is the contract by which a client walks a large ordered collection in bounded chunks. A naive endpoint that returns \"all users\" works fine with a thousand rows and falls over at ten million: unbounded responses blow up memory on the server, saturate the network, and time out the client. Pagination bounds the work per request so that latency and resource usage stay predictable regardless of how large the underlying dataset grows."
+        },
+        {
+          "type": "paragraph",
+          "text": "The two dominant families are OFFSET/LIMIT (also called page-number pagination) and keyset/cursor pagination. They look interchangeable in a small demo, but they have fundamentally different performance and correctness characteristics at scale. Choosing the wrong one is one of the most common causes of production database incidents in list-heavy APIs."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Rule of thumb: if the collection can grow without bound and users can navigate deep into it (feeds, logs, audit trails, event streams), design keyset pagination from day one. Retrofitting it after an incident is painful because it changes your public API surface."
+        }
+      ]
+    },
+    {
+      "id": "why-paginate",
+      "heading": "Why Pagination Matters at Scale",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Every layer of the stack has an implicit budget. A single request should touch a bounded number of rows, buffer a bounded amount of data, and complete within your latency SLO. Without pagination, a list endpoint's cost scales linearly with the table, so p99 latency and memory usage drift upward silently as the product succeeds — the very success that grows the table is what breaks the endpoint."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Server memory: materializing a full result set into a response buffer is O(n) heap; a few concurrent large requests can trigger GC storms or OOM kills.",
+            "Database load: a query with no LIMIT holds locks/latches and buffer pool pages longer, evicting hot data and hurting every other query.",
+            "Network and client: mobile clients cannot render or hold megabytes of JSON; unbounded payloads waste bandwidth and battery.",
+            "Tail latency: unbounded work makes latency a function of data size, so your SLO erodes as the dataset grows even with zero code changes."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Pagination converts an O(n) endpoint into a series of O(page-size) requests. But that guarantee only holds if the pagination mechanism itself is constant-cost per page. OFFSET/LIMIT breaks this promise for deep pages, which is the central pitfall this topic exists to teach."
+        }
+      ]
+    },
+    {
+      "id": "offset-limit",
+      "heading": "OFFSET/LIMIT Pagination",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "OFFSET/LIMIT is the pagination everyone reaches for first because it maps directly onto page numbers. Page 3 with a page size of 20 is OFFSET 40 LIMIT 20. It supports random page access — jump to page 500 directly — and is trivial to implement. This is why almost every ORM defaults to it and why almost every list endpoint starts here."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- Page number pagination: page 3, page size 20\n-- OFFSET = (page - 1) * page_size = 40\nSELECT id, author_id, created_at, body\nFROM posts\nORDER BY created_at DESC, id DESC\nLIMIT 20 OFFSET 40;"
+        },
+        {
+          "type": "paragraph",
+          "text": "The catch is in the execution model. The database cannot magically start at row 40. To honor ORDER BY, it must produce the sorted stream of rows, count off the first OFFSET of them, throw them away, and only then begin returning rows. The work is proportional to OFFSET + LIMIT, not LIMIT. For shallow pages nobody notices. For deep pages the discarded work dominates."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "OFFSET does not skip work in the storage engine; it skips output. The engine still reads and orders every row up to the offset and then discards them. OFFSET 1000000 means the engine walks a million rows to return twenty."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Pros: random page access, simple mental model, works with any ORDER BY, easy to show total page counts.",
+            "Cons: cost grows with page depth (O(offset)); results are unstable when rows are inserted/deleted concurrently, producing duplicates and skips."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "deep-pagination",
+      "heading": "The Deep-Pagination Problem",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Deep pagination is the specific failure where a high OFFSET forces the database to scan and discard a huge number of rows to reach the requested window. Reading page 1 (OFFSET 0) touches 20 rows. Reading page 5000 (OFFSET 99980) touches 100000 rows and returns 20 of them. The first 99980 rows are read, sorted, and thrown away. Cost is O(offset), so late pages are effectively unusable — they time out or hammer the buffer pool."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- Pathological deep offset: page 5000\nSELECT id, author_id, created_at, body\nFROM posts\nORDER BY created_at DESC, id DESC\nLIMIT 20 OFFSET 99980;\n\n-- EXPLAIN ANALYZE (illustrative):\n--   Limit  (actual rows=20 loops=1)\n--     ->  Index Scan Backward using idx_posts_created_id on posts\n--           (actual rows=100000 loops=1)   <-- 100000 rows read to emit 20\n--   Execution Time: 812.4 ms"
+        },
+        {
+          "type": "paragraph",
+          "text": "Note the 100000 rows read in the plan even though only 20 are returned. This is why crawlers or bots that walk a list to the end can quietly melt a database: each deep request is a near-full scan, and they issue thousands of them. Many APIs mitigate by capping the maximum page number, but that is a band-aid that breaks legitimate deep access."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "A hard cap like \"page must be <= 100\" is a symptom, not a fix. It signals the pagination model cannot scale. Keyset pagination removes the cap entirely because deep pages cost the same as shallow ones."
+        }
+      ]
+    },
+    {
+      "id": "keyset",
+      "heading": "Keyset (Cursor) Pagination",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Keyset pagination — also called seek method or cursor pagination — replaces \"skip N rows\" with \"start after the last row I saw.\" Instead of OFFSET, you carry the sort key of the last returned row and add a WHERE clause that seeks directly to the next window using the index. There is no discarding: the index B-tree navigates straight to the starting key in O(log n) and streams the next LIMIT rows."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- First page: no cursor yet\nSELECT id, author_id, created_at, body\nFROM posts\nORDER BY created_at DESC, id DESC\nLIMIT 20;\n\n-- Next page: seek past the last-seen (created_at, id) tuple.\n-- Row-value comparison implements the correct multi-column boundary.\nSELECT id, author_id, created_at, body\nFROM posts\nWHERE (created_at, id) < (:last_created_at, :last_id)\nORDER BY created_at DESC, id DESC\nLIMIT 20;"
+        },
+        {
+          "type": "paragraph",
+          "text": "The row-value expression (created_at, id) < (:last_created_at, :last_id) is the crucial detail. It is NOT the same as created_at < :last_created_at AND id < :last_id, which is wrong when timestamps tie. Row-value comparison means: created_at < last, OR (created_at = last AND id < last_id). PostgreSQL supports tuple comparison natively; MySQL 8 supports it too. On engines that don't, you expand it manually into the OR form."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- Portable expansion of the row-value comparison (same semantics)\nSELECT id, author_id, created_at, body\nFROM posts\nWHERE created_at < :last_created_at\n   OR (created_at = :last_created_at AND id < :last_id)\nORDER BY created_at DESC, id DESC\nLIMIT 20;"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Keyset cost is O(log n + page_size) for every page — page 1 and page 5000 cost the same. This is the property that makes deep, unbounded feeds viable."
+        }
+      ]
+    },
+    {
+      "id": "why-keyset-constant",
+      "heading": "Why Keyset Stays Constant-Cost",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The difference is where the work happens. OFFSET filters after ordering: the engine builds the sorted stream and counts off rows to discard, so the discarded rows are real reads. Keyset filters before scanning: the WHERE clause becomes an index range predicate, so the B-tree descends directly to the boundary key and reads only forward from there. No row before the cursor is ever touched."
+        },
+        {
+          "type": "table",
+          "headers": ["Aspect", "OFFSET/LIMIT", "Keyset/Cursor"],
+          "rows": [
+            ["Page-jump / random access", "Yes (page N directly)", "No (sequential next/prev only)"],
+            ["Cost of deep page", "O(offset) — reads+discards", "O(log n + page_size) — constant"],
+            ["Stability under inserts/deletes", "Unstable (dupes/skips)", "Stable (anchored to a key)"],
+            ["Total page count", "Easy (needs COUNT(*))", "Not naturally available"],
+            ["Best use case", "Small/bounded sets, admin tables", "Feeds, logs, infinite scroll, large sets"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The tradeoff is expressiveness: keyset gives up arbitrary page jumps. You can go next and (with a mirrored query) previous, but you cannot jump to \"page 500\" because a cursor encodes a position, not an ordinal. For feeds and infinite scroll this is exactly what you want; for a paginated admin grid where users click page numbers, OFFSET may still be the right call on a bounded table."
+        }
+      ]
+    },
+    {
+      "id": "stable-ordering",
+      "heading": "Stable Ordering and Tiebreakers",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Keyset pagination requires a total order: given any two rows, the sort must place one strictly before the other, deterministically, every time. If you order only by created_at and two rows share a timestamp, their relative order is undefined and can change between queries. A cursor on created_at alone will then either skip or duplicate the tied rows at a page boundary."
+        },
+        {
+          "type": "paragraph",
+          "text": "The fix is a tiebreaker: append a unique, immutable column — almost always the primary key — to the sort key. (created_at, id) is a total order because id is unique. The sort key should be immutable per row; if you paginate by a column that can be updated (like updated_at), a row can move relative to the cursor mid-walk and be seen twice or missed. Prefer keys that never change once the row exists."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Use a unique column as the final tiebreaker (primary key is ideal).",
+            "Prefer immutable sort keys (created_at, id) over mutable ones (updated_at) to avoid rows jumping across the cursor.",
+            "The ORDER BY must exactly match the cursor comparison, including direction on every column.",
+            "If you must sort by a mutable/non-unique column, still append the PK so the order is total."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "A non-unique sort key without a tiebreaker is the single most common keyset bug. It works in testing (few collisions) and corrupts page boundaries in production (many collisions), producing intermittent duplicates that are maddening to debug."
+        }
+      ]
+    },
+    {
+      "id": "concurrent-writes",
+      "heading": "Inserts and Deletes Mid-Pagination",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Real collections change while a client paginates. Under OFFSET, any insert or delete before the current window shifts every subsequent row's ordinal position, so the offset points at the wrong place. This is offset drift. If a row is inserted near the top after you fetched page 1, page 2's OFFSET now re-includes a row you already saw (duplicate); if a row is deleted, OFFSET skips a row you never saw (gap)."
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "OFFSET drift (page size 3):\n\nSnapshot A (page 1, OFFSET 0):   [r1 r2 r3] r4 r5 r6 ...\nA new row r0 is inserted at top.\nSnapshot B (page 2, OFFSET 3):    r0 r1 r2 [r3 r4 r5] ...\n                                              ^\n            r3 is returned AGAIN -> duplicate; if r0 had been a\n            deletion instead, r4 would have been SKIPPED."
+        },
+        {
+          "type": "paragraph",
+          "text": "Keyset is immune to this class of bug because the cursor anchors to a specific key value, not to a positional count. \"Give me rows after (created_at, id) = (T, 42)\" returns the same logical boundary no matter how many rows were inserted or deleted elsewhere. Newly inserted rows that sort after the cursor simply appear on later pages; rows deleted before the cursor are irrelevant because we already passed them."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Keyset gives stable, gap-free forward traversal even on a live table. It does not give a consistent snapshot — a row inserted before your current cursor position will not appear. If you need a true snapshot (e.g., a nightly export), use a repeatable-read transaction or a snapshot timestamp, not just pagination."
+        }
+      ]
+    },
+    {
+      "id": "opaque-tokens",
+      "heading": "Designing Opaque Page Tokens",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Never expose raw keyset values as query parameters like ?after_created_at=...&after_id=.... That leaks internal schema, invites clients to hand-craft cursors, and freezes your sort implementation as a public contract. Instead, emit an opaque token: serialize the cursor state, base64url-encode it, and return it as next_page_token. Clients treat it as a blob and echo it back verbatim."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Opaque cursor: base64url-encode the last-seen sort key.\n// Include a version so you can evolve the format safely.\ninterface CursorPayload {\n  v: 1;\n  createdAt: string; // ISO-8601 of last row\n  id: number;        // tiebreaker\n}\n\nexport function encodeCursor(p: CursorPayload): string {\n  const json = JSON.stringify(p);\n  return Buffer.from(json, 'utf8').toString('base64url');\n}\n\nexport function decodeCursor(token: string): CursorPayload {\n  const json = Buffer.from(token, 'base64url').toString('utf8');\n  const p = JSON.parse(json) as CursorPayload;\n  if (p.v !== 1 || typeof p.id !== 'number' || !p.createdAt) {\n    throw new Error('invalid_cursor');\n  }\n  return p;\n}"
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Version the payload (v: 1) so cursor format can evolve without breaking old links.",
+            "Validate on decode and reject malformed tokens with 400, never trust the contents blindly.",
+            "For untrusted clients, consider signing (HMAC) or encrypting the token so it cannot be forged or used to probe data.",
+            "Keep it opaque in docs: the token is not a stable identifier and should not be stored long-term."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Base64 is encoding, not security. If a cursor could be manipulated to access other tenants' data or bypass filters, sign or encrypt it. Always re-apply authorization filters (tenant_id, visibility) on every page, never assume the cursor implies access."
+        }
+      ]
+    },
+    {
+      "id": "api-shape",
+      "heading": "API Request and Response Shape",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A clean cursor API takes a page_size and an optional page_token, and returns the items plus a next_page_token that is null/absent on the last page. This mirrors the conventions used by Google, Stripe, and Slack. The request never contains offsets or raw keys."
+        },
+        {
+          "type": "code",
+          "language": "http",
+          "code": "GET /v1/posts?page_size=20 HTTP/1.1\nHost: api.example.com\nAuthorization: Bearer <token>\n\n# Follow-up request for the next page:\nGET /v1/posts?page_size=20&page_token=eyJ2IjoxLCJjcmVhdGVkQXQiOiIyMDI2LTA2LTMwVDEyOjAwOjAwWiIsImlkIjo0Mn0 HTTP/1.1\nHost: api.example.com\nAuthorization: Bearer <token>"
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "code": "{\n  \"items\": [\n    { \"id\": 41, \"author_id\": 7, \"created_at\": \"2026-06-30T12:00:01Z\", \"body\": \"...\" },\n    { \"id\": 40, \"author_id\": 3, \"created_at\": \"2026-06-30T12:00:00Z\", \"body\": \"...\" }\n  ],\n  \"next_page_token\": \"eyJ2IjoxLCJjcmVhdGVkQXQiOiIyMDI2LTA2LTMwVDEyOjAwOjAwWiIsImlkIjo0MH0\",\n  \"page_size\": 20\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "On the final page, next_page_token is omitted (or null). Clients loop until it is absent. Note there is no total field here — supplying an exact total is expensive at scale, covered next. If the client needs a hint, return an approximate count in a separate, clearly-labeled field."
+        }
+      ]
+    },
+    {
+      "id": "total-counts",
+      "heading": "The Cost of Total Counts",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "\"Showing 1-20 of 4,812,004\" requires COUNT(*) over the filtered set, which on most engines is a full scan of the matching rows — often more expensive than the page query itself, and it grows with the table. Computing an exact total on every list request is one of the sneakiest scaling traps: the page is fast, the count is not."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- Exact count: scans all matching rows every call. Expensive at scale.\nSELECT count(*) FROM posts WHERE author_id = 7;\n\n-- Cheap approximate count (Postgres planner estimate for the whole table):\nSELECT reltuples::bigint AS approx_rows\nFROM pg_class WHERE relname = 'posts';\n\n-- For filtered approximate counts, EXPLAIN gives the planner's row estimate\n-- without executing the scan:\nEXPLAIN SELECT id FROM posts WHERE author_id = 7;"
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Omit totals entirely for infinite-scroll UIs — they don't need them.",
+            "Return an approximate count (planner estimate or a periodically-refreshed materialized counter) and label it as approximate.",
+            "Cache exact counts with a short TTL if the UI truly needs them and staleness is acceptable.",
+            "Use has_more (fetch page_size + 1 rows; if you got the extra one, there's a next page) instead of a total for a boolean 'more pages' signal."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The has_more trick: request LIMIT page_size + 1. If you receive page_size + 1 rows, drop the extra and set has_more = true. This gives a next-page indicator for one extra row of cost, with no COUNT(*)."
+        }
+      ]
+    },
+    {
+      "id": "indexing",
+      "heading": "Indexing for Keyset Queries",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Keyset pagination is only constant-cost if a composite index matches the ORDER BY exactly — same columns, same order, same directions. Without it, the engine still sorts, and you lose the whole benefit. The index must cover the sort key and its tiebreaker as leading columns; equality filters (like tenant_id or author_id) go before the range columns."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- Sort key is (created_at DESC, id DESC). Index must match.\nCREATE INDEX idx_posts_created_id\n  ON posts (created_at DESC, id DESC);\n\n-- When you always filter by author, put the equality column FIRST,\n-- then the range/sort columns:\nCREATE INDEX idx_posts_author_created_id\n  ON posts (author_id, created_at DESC, id DESC);\n\n-- This index serves:\n--   WHERE author_id = ?\n--     AND (created_at, id) < (?, ?)\n--   ORDER BY created_at DESC, id DESC\n--   LIMIT 20\n-- as a pure index range scan: descend to the boundary, stream 20 rows."
+        },
+        {
+          "type": "paragraph",
+          "text": "The column order in the index follows the classic rule: equality predicates first, then the range/ordering columns. If author_id came after created_at, the range scan couldn't be constrained by author efficiently. Match the index to the actual WHERE + ORDER BY of your hot query, and confirm with EXPLAIN that you get an index scan with no separate sort node."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Verify with EXPLAIN ANALYZE: you want 'Index Scan' (or 'Index Only Scan') and NO 'Sort' node. A 'Sort' node above your scan means the index does not match the ORDER BY and every page will pay the sort cost."
+        }
+      ]
+    },
+    {
+      "id": "graphql-relay",
+      "heading": "GraphQL Relay Connections",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "GraphQL's Relay Connections spec standardizes cursor pagination. A connection wraps a list in edges (each with a node and a cursor) plus a pageInfo object (hasNextPage, hasPreviousPage, startCursor, endCursor). Clients pass first/after (forward) or last/before (backward). The cursor is opaque, exactly the keyset token described above."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Relay-style connection types\ntype PostConnection = {\n  edges: Array<{ node: Post; cursor: string }>;\n  pageInfo: {\n    hasNextPage: boolean;\n    hasPreviousPage: boolean;\n    startCursor: string | null;\n    endCursor: string | null;\n  };\n};\n\n// Query: postsConnection(first: 20, after: \"<opaque cursor>\")\n// Resolver decodes `after` into (createdAt, id), runs the keyset SQL\n// with LIMIT first + 1 to compute hasNextPage, and encodes each\n// node's (createdAt, id) back into its edge.cursor."
+        },
+        {
+          "type": "paragraph",
+          "text": "Relay maps cleanly onto keyset pagination: edge.cursor is the encoded sort key of that node, endCursor is the token for the next page, and hasNextPage comes from the fetch-one-extra trick. The spec's discipline (opaque cursors, per-edge cursors, explicit pageInfo) is a good template even for REST APIs."
+        }
+      ]
+    },
+    {
+      "id": "consistency-realtime",
+      "heading": "Consistency in Real-Time Data",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "For rapidly-changing collections (activity feeds, chat, event logs), even keyset pagination has subtleties. Descending by created_at means new rows appear at the top — the page the client already saw — so a plain 'load more' walking downward is naturally stable, but a 'refresh' at the top needs a different query (rows newer than the top cursor). Design forward and backward walks explicitly."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Downward infinite scroll (older items): WHERE (created_at, id) < cursor — stable and gap-free.",
+            "Upward refresh (newer items): WHERE (created_at, id) > cursor — fetch items above the newest seen.",
+            "Beware clock skew if created_at is set by app servers; a monotonic sequence or DB-generated timestamp avoids out-of-order inserts.",
+            "For strict snapshots (exports, reconciliation), pin a snapshot LSN/timestamp and paginate within a repeatable-read transaction."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Infinite scroll is just cursor pagination with the token held in client state. Each scroll-to-bottom sends the last endCursor and appends the next batch — no page numbers, no offsets, constant cost per batch."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Most pagination incidents trace back to a small set of recurring errors. They tend to pass code review and testing because they only manifest at scale or under concurrency."
+        },
+        {
+          "type": "list",
+          "style": "ordered",
+          "items": [
+            "Using OFFSET on an unbounded, deeply-navigable collection — the deep-page scan eventually times out.",
+            "Keyset ordering by a non-unique column with no tiebreaker — intermittent duplicates/skips at page boundaries.",
+            "Writing created_at < ? AND id < ? instead of the row-value (created_at, id) < (?, ?) — drops valid rows and skips others.",
+            "ORDER BY that does not match the composite index — silent sort node, no constant-cost benefit.",
+            "Returning an exact COUNT(*) total on every list call — the count outgrows the page and dominates latency.",
+            "Exposing raw cursor fields as query params instead of an opaque, versioned token — freezes internal schema as public API.",
+            "Forgetting to re-apply authorization/tenant filters on cursor-driven queries — a cursor is not an authorization grant."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The row-value comparison mistake is especially insidious: (created_at, id) < (?, ?) and created_at < ? AND id < ? are NOT equivalent. The naive AND form omits every row whose created_at equals the cursor's but whose id is larger, silently dropping data at each page boundary."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "offset-vs-keyset-scan",
+      "title": "OFFSET scans+discards vs Keyset seeks",
+      "type": "ascii",
+      "content": "OFFSET 99980 LIMIT 20  (page 5000)\n\n  index:  [ r1 r2 r3 ............... r99980 | r99981 ... r100000 ] ...\n           \\_______ read & DISCARD 99980 _______/ \\__ return 20 __/\n           cost grows with page depth  => O(offset)\n\n\nKEYSET  WHERE (created_at,id) < (T,42)  LIMIT 20\n\n  index:  ....................  (T,42) | rNEXT ... r+20 ] ...\n                                  ^seek \\__ return 20 __/\n           B-tree descends to boundary directly => O(log n + 20)\n           page 1 and page 5000 cost the SAME"
+    },
+    {
+      "id": "choose-pagination",
+      "title": "Choosing OFFSET vs Cursor",
+      "type": "mermaid",
+      "content": "flowchart TD\n  A[Need to paginate a list] --> B{Collection unbounded\\nand deeply navigable?}\n  B -- No, small/bounded --> C{Users click page numbers?}\n  C -- Yes --> D[OFFSET/LIMIT\\nrandom access OK]\n  C -- No --> E[Either works\\nprefer keyset]\n  B -- Yes --> F{Need arbitrary\\npage jumps?}\n  F -- No --> G[Keyset/Cursor\\nopaque token]\n  F -- Yes --> H[Reconsider UX\\nor hybrid: keyset + search]\n  G --> I[Add composite index\\nmatching ORDER BY]"
+    },
+    {
+      "id": "cursor-token-flow",
+      "title": "Opaque cursor round-trip",
+      "type": "ascii",
+      "content": "client                         server\n  |  GET /posts?page_size=20      |\n  |------------------------------>| keyset SQL, LIMIT 21\n  |                               | last row -> (created_at,id)\n  |                               | encodeCursor -> base64url\n  |  { items, next_page_token }   |\n  |<------------------------------|\n  |  GET ...?page_token=<token>   |\n  |------------------------------>| decodeCursor -> (created_at,id)\n  |                               | WHERE (created_at,id) < (?,?)\n  |  { items, next_page_token }   |\n  |<------------------------------|\n  (loop until next_page_token absent)"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-why-offset-slow",
+      "question": "Why is a query with a high OFFSET slow, even when it returns only 20 rows?",
+      "answer": "OFFSET does not tell the storage engine to start reading at row N; it tells the engine to produce the ordered stream and then discard the first N rows from the output. To honor ORDER BY, those first N rows must actually be read and sorted before they can be thrown away. So OFFSET 99980 LIMIT 20 reads and orders 100000 rows to emit 20, making the cost O(offset + limit) rather than O(limit). The discarded work dominates for deep pages. This is why late pages time out and why crawlers walking a list to the end can overload a database. The fix is keyset pagination, which seeks to the boundary via the index instead of discarding.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["offset", "performance", "deep-pagination"],
+      "followUps": ["What does EXPLAIN ANALYZE show for the discarded rows?", "How does keyset avoid this?"]
+    },
+    {
+      "id": "q-keyset-basics",
+      "question": "How does keyset (cursor) pagination work at the SQL level?",
+      "answer": "Keyset pagination remembers the sort key of the last row returned and adds a WHERE clause that seeks past it, instead of using OFFSET. For a sort of (created_at DESC, id DESC), the next page is WHERE (created_at, id) < (:last_created_at, :last_id) ORDER BY created_at DESC, id DESC LIMIT 20. With a composite index matching that ORDER BY, the engine descends the B-tree directly to the boundary key and streams the next LIMIT rows, touching no rows before the cursor. Each page costs O(log n + page_size), independent of depth. There is no OFFSET, so there is nothing to discard. The tradeoff is that you can only move next/previous, not jump to an arbitrary page number.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["keyset", "cursor", "sql"],
+      "followUps": ["Why is a composite index required?", "How do you build the previous-page query?"]
+    },
+    {
+      "id": "q-stable-ordering",
+      "question": "Why does cursor pagination require a stable, unique ordering?",
+      "answer": "A cursor encodes a position in a sorted stream, and that stream must be a total order for the boundary to be well-defined. If you sort only by created_at and two rows share a timestamp, their relative order is undefined and can differ between queries. At a page boundary this means the tied rows can be duplicated (returned on both pages) or skipped (returned on neither), because the WHERE clause cannot cleanly separate 'before' from 'after' the cursor. Appending a unique, immutable tiebreaker such as the primary key — sorting by (created_at, id) — makes the order total, so every row has a deterministic, unambiguous position. Without the tiebreaker the bug is intermittent: rare in tests with few collisions, frequent in production with many.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["stability", "tiebreaker", "ordering"],
+      "followUps": ["Why immutable and not just unique?", "What if you must sort by a non-unique column?"]
+    },
+    {
+      "id": "q-dupes-skips",
+      "question": "How do inserts and deletes during pagination cause duplicates and skips, and which method is affected?",
+      "answer": "OFFSET pagination is affected. Because OFFSET is a positional count, any insert or delete before the current window shifts every later row's ordinal. If a row is inserted near the top after page 1, page 2's OFFSET now re-includes a row already seen — a duplicate. If a row is deleted before the window, OFFSET jumps past a row that was never seen — a skip. Keyset pagination is immune because the cursor anchors to a specific key value, not a count: 'rows after (T, 42)' returns the same logical boundary regardless of concurrent inserts/deletes elsewhere. Keyset gives stable, gap-free forward traversal on a live table, though it does not provide a full consistent snapshot of rows inserted before the cursor.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["concurrency", "offset-drift", "stability"],
+      "followUps": ["How do you get a true snapshot for an export?", "Does keyset show rows inserted before the cursor?"]
+    },
+    {
+      "id": "q-count-cost",
+      "question": "Why is returning a total count expensive, and what are the alternatives?",
+      "answer": "An exact total requires COUNT(*) over the filtered set, which on most engines scans every matching row — often costing more than the page query itself and growing with the table. So a fast paginated endpoint can be dominated by its own count. Alternatives include omitting the total entirely (infinite scroll never needs it), returning an approximate count from the planner's estimate or a periodically refreshed counter, or caching an exact count with a short TTL when staleness is acceptable. A common cheap trick is fetching page_size + 1 rows to compute a boolean has_more instead of a full count. The key principle is to make the total optional and clearly labeled as approximate when shown.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["count", "performance", "scaling"],
+      "followUps": ["How does the has_more trick work?", "How do you keep an approximate counter fresh?"]
+    },
+    {
+      "id": "q-opaque-token",
+      "question": "How should you design an opaque page token, and why not expose raw keys?",
+      "answer": "Serialize the cursor state — the last-seen sort key plus a version field — into JSON, then base64url-encode it into a single next_page_token that clients treat as an opaque blob. Exposing raw fields like ?after_created_at=...&after_id=... leaks your internal schema, freezes your sort implementation as a public contract, and lets clients hand-craft cursors that may probe data or break when you change ordering. Including a version (v: 1) lets the format evolve without breaking existing links, and validating on decode lets you reject malformed tokens with a 400. For untrusted clients, sign the token with HMAC or encrypt it so it cannot be forged. Critically, the token is not an authorization grant — always re-apply tenant and visibility filters on every page.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["opaque-cursor", "api-design", "security"],
+      "followUps": ["When would you sign or encrypt the token?", "Why version the payload?"]
+    },
+    {
+      "id": "q-multicol-keyset",
+      "question": "How do you write a correct keyset condition when sorting by multiple columns?",
+      "answer": "Use a row-value (tuple) comparison that matches the sort exactly, not a naive per-column AND. For ORDER BY created_at DESC, id DESC the correct boundary is WHERE (created_at, id) < (:last_created_at, :last_id). This expands to created_at < last OR (created_at = last AND id < last_id). The common mistake, created_at < ? AND id < ?, is wrong: it drops every row whose created_at equals the cursor's timestamp but whose id is larger, silently losing data at each page boundary. PostgreSQL and MySQL 8 support tuple comparison natively; on engines that don't, expand it into the explicit OR form. The comparison direction (< vs >) must match the ORDER BY direction on each column.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["row-value", "multi-column", "sql"],
+      "followUps": ["How does the expansion look for three sort columns?", "How do mixed ASC/DESC directions change it?"]
+    },
+    {
+      "id": "q-index-match",
+      "question": "What index do you need to make keyset pagination constant-cost?",
+      "answer": "You need a composite index whose columns and directions exactly match the ORDER BY, with equality-filter columns placed first. For WHERE author_id = ? AND (created_at, id) < (?, ?) ORDER BY created_at DESC, id DESC, the index should be (author_id, created_at DESC, id DESC). The equality column (author_id) leads so the range scan is constrained to that author, then the range/ordering columns follow. With this index the engine does a pure index range scan — descend to the boundary and stream page_size rows — with no separate sort. Verify with EXPLAIN that you get an Index Scan and no Sort node; a Sort node means the index does not match the ORDER BY and you pay the sort on every page.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["indexing", "composite-index", "performance"],
+      "followUps": ["Why do equality columns go first?", "What is an index-only scan and when do you get one?"]
+    },
+    {
+      "id": "q-offset-vs-keyset-when",
+      "question": "When would you still choose OFFSET/LIMIT over keyset pagination?",
+      "answer": "OFFSET is still reasonable for small or bounded collections where users navigate by clicking page numbers and need random access, such as an admin table with a few thousand rows. It gives arbitrary page jumps and easy 'page X of Y' displays that keyset cannot provide. The deep-page cost only bites when the table is large and users go deep, so on bounded data with shallow navigation OFFSET is simpler and adequate. Keyset is the right choice for unbounded, deeply-navigable collections — feeds, logs, event streams, infinite scroll — where constant per-page cost and stability under writes matter. Some systems offer a hybrid: keyset for scrolling plus search/filter to jump, avoiding the need for numeric page jumps entirely.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["tradeoffs", "offset", "keyset"],
+      "followUps": ["What is a hybrid keyset+search approach?", "How do you show 'page X of Y' with keyset?"]
+    },
+    {
+      "id": "q-has-more",
+      "question": "How can you tell there is a next page without running COUNT(*)?",
+      "answer": "Fetch one more row than the client asked for: request LIMIT page_size + 1. If you receive page_size + 1 rows, there is at least one more page, so drop the extra row from the response and set has_more (or hasNextPage) to true. If you receive page_size or fewer, you are on the last page. This costs one extra row read instead of a full-table COUNT(*) and works identically for OFFSET and keyset queries. It is exactly how GraphQL Relay resolvers compute pageInfo.hasNextPage. The client loops until has_more is false or next_page_token is absent.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["has-more", "pageinfo", "performance"],
+      "followUps": ["How do you compute hasPreviousPage?", "Does the extra row leak into the cursor?"]
+    },
+    {
+      "id": "q-relay-connections",
+      "question": "What is a GraphQL Relay Connection and how does it map to keyset pagination?",
+      "answer": "A Relay Connection is a standardized shape for cursor pagination in GraphQL: a connection has edges (each an object with a node and a cursor) and a pageInfo (hasNextPage, hasPreviousPage, startCursor, endCursor). Clients paginate forward with first/after or backward with last/before, where after/before are opaque cursors. This maps directly onto keyset pagination: each edge.cursor is the encoded sort key of that node, endCursor is the token to fetch the next page, and hasNextPage is computed with the fetch-one-extra trick. The resolver decodes after into the sort-key tuple, runs the keyset SQL, and encodes each row's key back into its edge cursor. The spec's discipline is a good template even for REST.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["graphql", "relay", "connections"],
+      "followUps": ["What goes in startCursor vs endCursor?", "How do you support backward pagination?"]
+    },
+    {
+      "id": "q-immutable-key",
+      "question": "Why should the keyset sort column be immutable, not just unique?",
+      "answer": "Uniqueness makes the order total, but immutability keeps a row's position fixed during the walk. If you paginate by a mutable column like updated_at, a row can be updated mid-pagination and jump across the cursor boundary: if it moves ahead of the cursor it can be seen a second time, and if it moves behind the cursor it can be missed entirely. Because created_at (or the primary key) never changes once the row exists, its position in the ordering is stable, so a paginating client sees each row at most once. When you must sort by a mutable column for product reasons, accept that duplicates/skips are possible, or snapshot the data, or de-duplicate on the client by id. Prefer immutable keys whenever the requirement allows.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["immutability", "ordering", "stability"],
+      "followUps": ["How do you paginate a 'recently updated' list safely?", "Can client-side de-dup by id help?"]
+    },
+    {
+      "id": "q-realtime-refresh",
+      "question": "How do you handle new items appearing at the top of a real-time feed while paginating?",
+      "answer": "Design forward and backward walks as separate queries. When sorting newest-first, scrolling down for older items uses WHERE (created_at, id) < cursor, which is naturally stable because new rows land above the window you already passed. Refreshing for newer items uses the mirrored WHERE (created_at, id) > cursor against the newest cursor the client holds, fetching only rows above it. Keep the two cursors (top and bottom) in client state. Beware clock skew if timestamps are set by application servers rather than the database, since out-of-order inserts can appear above a cursor you already passed; a DB-generated timestamp or a monotonic sequence avoids this. For strict snapshots, pin a snapshot timestamp and paginate inside a repeatable-read transaction.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["real-time", "infinite-scroll", "consistency"],
+      "followUps": ["How does clock skew corrupt ordering?", "When do you need a repeatable-read snapshot?"]
+    },
+    {
+      "id": "q-cursor-auth",
+      "question": "Is a page token an authorization grant? What must you still check on each page?",
+      "answer": "No. A cursor encodes a position in a result set, not permission to see rows. Every page request must independently re-apply the same authorization and scoping filters as the first — tenant_id, ownership, visibility, soft-delete — because the cursor only tells you where to resume, not what the caller is allowed to see. If you skip this, a valid-looking token from one context could return rows the caller should not access, especially if the token was forged or replayed. For untrusted clients, sign or encrypt the token so its contents cannot be tampered with, but even a valid signature does not replace authorization checks. Treat the cursor as untrusted input: validate it, and always filter as if it were a fresh query.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": ["security", "authorization", "opaque-cursor"],
+      "followUps": ["How does signing differ from encrypting the token?", "What breaks if you trust cursor contents?"]
+    },
+    {
+      "id": "q-previous-page",
+      "question": "How do you implement a previous-page (backward) query in keyset pagination?",
+      "answer": "You mirror the forward query: reverse the comparison operators and the ORDER BY, then reverse the result set back in the application. For a forward page of ORDER BY created_at DESC, id DESC WHERE (created_at, id) < cursor, the previous page is WHERE (created_at, id) > cursor ORDER BY created_at ASC, id ASC LIMIT page_size, and you reverse the returned rows so they display newest-first again. You anchor the backward query on the first row of the current page (its startCursor). The same composite index serves both directions because B-trees can be scanned forward or backward. This is exactly how Relay's last/before backward pagination is implemented.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": ["backward-pagination", "keyset", "relay"],
+      "followUps": ["Why reverse the rows in the application?", "Which cursor anchors the backward query?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-offset-to-keyset",
+      "title": "Convert an OFFSET endpoint to keyset with an opaque cursor",
+      "difficulty": "senior",
+      "category": "Backend",
+      "prompt": "A GET /posts endpoint currently uses OFFSET/LIMIT and times out on deep pages. Convert it to keyset pagination over ORDER BY created_at DESC, id DESC. Provide (a) the keyset SQL for the first and subsequent pages using a row-value comparison, and (b) TypeScript encode/decode for an opaque, versioned base64url next_page_token carrying the last-seen (created_at, id). Use the fetch-one-extra trick to compute has_more.",
+      "hints": [
+        "Match the ORDER BY exactly in both the WHERE row-value comparison and the query itself.",
+        "Fetch LIMIT page_size + 1 rows; if you get the extra one, set has_more and drop it before encoding the cursor.",
+        "Encode the last KEPT row's (created_at, id) into the token, and version the payload so the format can evolve."
+      ],
+      "solutionCode": "-- (a) SQL --------------------------------------------------------\n-- First page (no cursor):\nSELECT id, author_id, created_at, body\nFROM posts\nORDER BY created_at DESC, id DESC\nLIMIT 21;            -- page_size (20) + 1 for has_more\n\n-- Subsequent page (cursor -> :last_created_at, :last_id):\nSELECT id, author_id, created_at, body\nFROM posts\nWHERE (created_at, id) < (:last_created_at, :last_id)\nORDER BY created_at DESC, id DESC\nLIMIT 21;\n\n-- Supporting index:\nCREATE INDEX idx_posts_created_id ON posts (created_at DESC, id DESC);",
+      "solutionLanguage": "sql",
+      "explanation": "The row-value comparison (created_at, id) < (:last_created_at, :last_id) is the correct multi-column boundary; it is not equivalent to created_at < ? AND id < ?, which would drop rows tied on created_at. The LIMIT of page_size + 1 lets the resolver detect a next page with one extra row instead of an expensive COUNT(*): if 21 rows come back, set has_more true and drop the 21st. The cursor encodes the (created_at, id) of the last KEPT row (the 20th), so the next request seeks past exactly the last row the client saw. The composite index (created_at DESC, id DESC) matches the ORDER BY so the plan is a pure backward index range scan with no sort node, making every page O(log n + page_size). In application code, encodeCursor JSON-serializes { v: 1, createdAt, id } and base64url-encodes it, while decodeCursor reverses that and validates the version and field types, rejecting malformed tokens with a 400. Because the token is opaque and versioned, the internal sort schema stays private and the format can evolve later; authorization and tenant filters must still be re-applied on every page since the cursor is not a grant.",
+      "relatedTopic": "pagination"
+    },
+    {
+      "id": "ch-composite-index",
+      "title": "Design the composite index and query for stable keyset ordering",
+      "difficulty": "senior",
+      "category": "Backend",
+      "prompt": "You must paginate a per-author feed: always filtered by author_id, ordered newest-first by created_at with a tiebreaker, constant-cost per page. Design the composite index and write the keyset query so it executes as a pure index range scan with no sort node. Explain the column order.",
+      "hints": [
+        "Put the equality-filter column first, then the range/ordering columns.",
+        "Add the primary key as the final tiebreaker so the order is total.",
+        "Confirm with EXPLAIN that there is an Index Scan and NO Sort node."
+      ],
+      "solutionCode": "-- Composite index: equality column first, then sort key + tiebreaker\nCREATE INDEX idx_posts_author_created_id\n  ON posts (author_id, created_at DESC, id DESC);\n\n-- First page for an author:\nSELECT id, author_id, created_at, body\nFROM posts\nWHERE author_id = :author_id\nORDER BY created_at DESC, id DESC\nLIMIT :page_size;\n\n-- Next page (seek past last-seen tuple):\nSELECT id, author_id, created_at, body\nFROM posts\nWHERE author_id = :author_id\n  AND (created_at, id) < (:last_created_at, :last_id)\nORDER BY created_at DESC, id DESC\nLIMIT :page_size;\n\n-- Verify plan (expect Index Scan, no Sort):\nEXPLAIN ANALYZE\nSELECT id FROM posts\nWHERE author_id = :author_id\n  AND (created_at, id) < (:last_created_at, :last_id)\nORDER BY created_at DESC, id DESC\nLIMIT :page_size;",
+      "solutionLanguage": "sql",
+      "explanation": "The index leads with author_id because it is an equality predicate: placing it first lets the engine narrow to a single author's contiguous slice of the B-tree, then scan that slice in (created_at DESC, id DESC) order. If created_at came before author_id, the author filter could not constrain the range efficiently and the engine would either scan more of the index or add a sort. Appending id as the final column makes the ordering total, so tied timestamps have a deterministic position and page boundaries never duplicate or skip rows. The ORDER BY exactly matches the index column order and directions, which is what lets the optimizer satisfy the sort from the index itself and emit no Sort node. The row-value comparison (created_at, id) < (:last_created_at, :last_id) turns the cursor into a range predicate the index can seek on, giving O(log n + page_size) per page regardless of depth. Running EXPLAIN ANALYZE should confirm an Index Scan (or Index Only Scan if the selected columns are all covered) with the actual row count near page_size and no separate sort operation.",
+      "relatedTopic": "pagination"
+    }
+  ],
+  "references": [
+    { "label": "Use The Index, Luke — Paging Through Results (keyset/seek method)", "url": "https://use-the-index-luke.com/no-offset" },
+    { "label": "Markus Winand — We need tool support for keyset pagination", "url": "https://use-the-index-luke.com/blog/2013-07/pagination-done-the-postgresql-way" },
+    { "label": "GraphQL Cursor Connections Specification (Relay)", "url": "https://relay.dev/graphql/connections.htm" },
+    { "label": "Stripe API Reference — Pagination", "url": "https://stripe.com/docs/api/pagination" },
+    { "label": "Slack API — Pagination", "url": "https://api.slack.com/docs/pagination" },
+    { "label": "Google API Improvement Proposals — AIP-158 Pagination", "url": "https://google.aip.dev/158" }
+  ]
+}

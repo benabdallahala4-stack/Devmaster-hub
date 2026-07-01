@@ -4,7 +4,16 @@
   "category": "DevOps",
   "subcategory": "Monitoring",
   "difficulty": "mid",
-  "tags": ["observability", "prometheus", "opentelemetry", "slo", "tracing", "metrics", "alerting", "promql"],
+  "tags": [
+    "observability",
+    "prometheus",
+    "opentelemetry",
+    "slo",
+    "tracing",
+    "metrics",
+    "alerting",
+    "promql"
+  ],
   "description": "A staff-level deep dive into the three pillars of observability, SLOs and error budgets, Prometheus and PromQL, distributed tracing, and the failure modes that cripple monitoring systems in production.",
   "estReadMinutes": 28,
   "sections": [
@@ -13,15 +22,28 @@
       "heading": "Introduction: From Monitoring to Observability",
       "kind": "intro",
       "blocks": [
-        {"type": "paragraph", "text": "Observability is the property of a system that lets you ask arbitrary questions about its internal state from the outside, without shipping new code to answer each one. It borrows the term from control theory, where a system is observable if you can infer its internal state purely from its external outputs."},
-        {"type": "paragraph", "text": "The practical distinction from classic monitoring is about unknown-unknowns. Monitoring answers questions you predicted in advance: is CPU above 80 percent, is the queue depth growing. Observability is about debugging novel failures you never dashboarded for: why are exactly the requests from one tenant, on one API version, hitting one shard, timing out only after a cache miss. You answer that by slicing high-dimensional telemetry interactively, not by having pre-built an alert for it."},
-        {"type": "list", "items": [
-          "Metrics: cheap, aggregatable numeric time series. Great for trends, alerting, and SLOs.",
-          "Logs: discrete, timestamped events with rich context. Great for forensic detail on a single request.",
-          "Traces: causally-linked spans across services. Great for understanding latency and dependencies in a distributed call.",
-          "The three pillars are complementary, not redundant: you alert on a metric, pivot to traces to find the slow service, then read logs for the exact error."
-        ]},
-        {"type": "callout", "variant": "info", "text": "A useful litmus test: if you can only answer a production question by adding a new log line and redeploying, your system is monitorable but not observable."}
+        {
+          "type": "paragraph",
+          "text": "Observability is the property of a system that lets you ask arbitrary questions about its internal state from the outside, without shipping new code to answer each one. It borrows the term from control theory, where a system is observable if you can infer its internal state purely from its external outputs."
+        },
+        {
+          "type": "paragraph",
+          "text": "The practical distinction from classic monitoring is about unknown-unknowns. Monitoring answers questions you predicted in advance: is CPU above 80 percent, is the queue depth growing. Observability is about debugging novel failures you never dashboarded for: why are exactly the requests from one tenant, on one API version, hitting one shard, timing out only after a cache miss. You answer that by slicing high-dimensional telemetry interactively, not by having pre-built an alert for it."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Metrics: cheap, aggregatable numeric time series. Great for trends, alerting, and SLOs.",
+            "Logs: discrete, timestamped events with rich context. Great for forensic detail on a single request.",
+            "Traces: causally-linked spans across services. Great for understanding latency and dependencies in a distributed call.",
+            "The three pillars are complementary, not redundant: you alert on a metric, pivot to traces to find the slow service, then read logs for the exact error."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A useful litmus test: if you can only answer a production question by adding a new log line and redeploying, your system is monitorable but not observable."
+        }
       ]
     },
     {
@@ -29,14 +51,24 @@
       "heading": "Why Observability Matters",
       "kind": "why",
       "blocks": [
-        {"type": "paragraph", "text": "In a monolith, a single stack trace usually told you what broke. In a microservice or serverless architecture, a single user request fans out across dozens of services, queues, and databases. The failure is rarely in one place; it is an emergent property of interactions, retries, and partial degradation. Without correlated telemetry you are debugging blind."},
-        {"type": "list", "items": [
-          "MTTR (mean time to resolution) is dominated by detection and diagnosis, not by the fix itself. Good observability collapses the diagnosis phase from hours to minutes.",
-          "SLOs give you an objective, data-driven definition of 'reliable enough', which lets you trade velocity against reliability instead of arguing about it.",
-          "Cost: telemetry is expensive at scale. Cardinality and retention decisions made carelessly produce six-figure observability bills and OOM-killed Prometheus servers.",
-          "Customer trust: you want to detect a regression from your dashboards before your customers detect it on Twitter."
-        ]},
-        {"type": "callout", "variant": "success", "text": "The strongest observability cultures alert on symptoms the user feels (latency, errors, saturation) and use the three pillars to drill down to causes — rather than paging on every internal cause directly."}
+        {
+          "type": "paragraph",
+          "text": "In a monolith, a single stack trace usually told you what broke. In a microservice or serverless architecture, a single user request fans out across dozens of services, queues, and databases. The failure is rarely in one place; it is an emergent property of interactions, retries, and partial degradation. Without correlated telemetry you are debugging blind."
+        },
+        {
+          "type": "list",
+          "items": [
+            "MTTR (mean time to resolution) is dominated by detection and diagnosis, not by the fix itself. Good observability collapses the diagnosis phase from hours to minutes.",
+            "SLOs give you an objective, data-driven definition of 'reliable enough', which lets you trade velocity against reliability instead of arguing about it.",
+            "Cost: telemetry is expensive at scale. Cardinality and retention decisions made carelessly produce six-figure observability bills and OOM-killed Prometheus servers.",
+            "Customer trust: you want to detect a regression from your dashboards before your customers detect it on Twitter."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The strongest observability cultures alert on symptoms the user feels (latency, errors, saturation) and use the three pillars to drill down to causes — rather than paging on every internal cause directly."
+        }
       ]
     },
     {
@@ -44,18 +76,64 @@
       "heading": "Core Concept: The Three Pillars in Depth",
       "kind": "concept",
       "blocks": [
-        {"type": "heading", "text": "Metrics"},
-        {"type": "paragraph", "text": "Metrics are pre-aggregated numeric samples over time. A counter only increases (requests served), a gauge goes up and down (in-flight requests, memory), a histogram buckets observations so you can compute quantiles (request latency). They are cheap to store because dimensionality is bounded by label combinations, and cheap to query because aggregation happens at write time or scrape time."},
-        {"type": "heading", "text": "Logs"},
-        {"type": "paragraph", "text": "Logs are discrete events. The key maturity step is structured logging: emit JSON or key-value pairs, not free-text strings, so logs are queryable fields rather than regex hunts. Always attach correlation IDs (trace_id, request_id) so a log line can be joined back to a trace."},
-        {"type": "heading", "text": "Traces"},
-        {"type": "paragraph", "text": "A trace is a tree of spans representing one logical operation as it propagates through services. Each span has a start time, duration, parent span ID, and attributes. Context propagation carries the trace ID across process and network boundaries (typically via the W3C traceparent header) so the spans can be reassembled into one trace at the collector."},
-        {"type": "table", "headers": ["Pillar", "Cost per unit", "Cardinality tolerance", "Best for"], "rows": [
-          ["Metrics", "Very low", "Low — labels multiply series", "Alerting, SLOs, trends, dashboards"],
-          ["Logs", "Medium", "High — fields are free", "Forensic detail, audit, rare errors"],
-          ["Traces", "Medium-high", "High (usually sampled)", "Latency breakdown, dependency mapping"]
-        ]},
-        {"type": "callout", "variant": "warning", "text": "Do not try to recreate metrics by counting log lines at query time at scale — it is slow and expensive. Emit a counter. Conversely, do not push per-request unique IDs into metric labels — that is a cardinality bomb."}
+        {
+          "type": "heading",
+          "text": "Metrics"
+        },
+        {
+          "type": "paragraph",
+          "text": "Metrics are pre-aggregated numeric samples over time. A counter only increases (requests served), a gauge goes up and down (in-flight requests, memory), a histogram buckets observations so you can compute quantiles (request latency). They are cheap to store because dimensionality is bounded by label combinations, and cheap to query because aggregation happens at write time or scrape time."
+        },
+        {
+          "type": "heading",
+          "text": "Logs"
+        },
+        {
+          "type": "paragraph",
+          "text": "Logs are discrete events. The key maturity step is structured logging: emit JSON or key-value pairs, not free-text strings, so logs are queryable fields rather than regex hunts. Always attach correlation IDs (trace_id, request_id) so a log line can be joined back to a trace."
+        },
+        {
+          "type": "heading",
+          "text": "Traces"
+        },
+        {
+          "type": "paragraph",
+          "text": "A trace is a tree of spans representing one logical operation as it propagates through services. Each span has a start time, duration, parent span ID, and attributes. Context propagation carries the trace ID across process and network boundaries (typically via the W3C traceparent header) so the spans can be reassembled into one trace at the collector."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Pillar",
+            "Cost per unit",
+            "Cardinality tolerance",
+            "Best for"
+          ],
+          "rows": [
+            [
+              "Metrics",
+              "Very low",
+              "Low — labels multiply series",
+              "Alerting, SLOs, trends, dashboards"
+            ],
+            [
+              "Logs",
+              "Medium",
+              "High — fields are free",
+              "Forensic detail, audit, rare errors"
+            ],
+            [
+              "Traces",
+              "Medium-high",
+              "High (usually sampled)",
+              "Latency breakdown, dependency mapping"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Do not try to recreate metrics by counting log lines at query time at scale — it is slow and expensive. Emit a counter. Conversely, do not push per-request unique IDs into metric labels — that is a cardinality bomb."
+        }
       ]
     },
     {
@@ -63,22 +141,47 @@
       "heading": "Core Concept: RED and USE Methods",
       "kind": "concept",
       "blocks": [
-        {"type": "paragraph", "text": "RED and USE are two complementary frameworks for deciding what to measure so you do not drown in arbitrary metrics."},
-        {"type": "heading", "text": "RED — for request-driven services"},
-        {"type": "list", "items": [
-          "Rate: requests per second the service is handling.",
-          "Errors: number/fraction of those requests that are failing.",
-          "Duration: distribution of latency (use histograms, watch p50/p90/p99, never just the mean)."
-        ]},
-        {"type": "paragraph", "text": "RED is what your users feel. It is the natural basis for SLIs and symptom-based alerting."},
-        {"type": "heading", "text": "USE — for resources"},
-        {"type": "list", "items": [
-          "Utilization: percent of time the resource was busy (CPU, disk, NIC).",
-          "Saturation: how much work is queued/waiting that the resource could not service (run-queue length, swap).",
-          "Errors: count of error events (disk read errors, dropped packets, ECC errors)."
-        ]},
-        {"type": "paragraph", "text": "USE is what your infrastructure feels. It is the natural basis for capacity and saturation diagnosis. The mental model: use RED to detect that users are hurting, use USE to find which resource is the bottleneck."},
-        {"type": "code", "language": "promql", "code": "# RED: error rate for an HTTP service (5xx fraction over 5m)\nsum(rate(http_requests_total{job=\"checkout\",code=~\"5..\"}[5m]))\n  /\nsum(rate(http_requests_total{job=\"checkout\"}[5m]))\n\n# RED: p99 latency from a native histogram / classic histogram\nhistogram_quantile(\n  0.99,\n  sum by (le) (rate(http_request_duration_seconds_bucket{job=\"checkout\"}[5m]))\n)\n\n# USE: CPU saturation proxy — run-queue waiting per core\nsum(rate(node_pressure_cpu_waiting_seconds_total[5m])) by (instance)"}
+        {
+          "type": "paragraph",
+          "text": "RED and USE are two complementary frameworks for deciding what to measure so you do not drown in arbitrary metrics."
+        },
+        {
+          "type": "heading",
+          "text": "RED — for request-driven services"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Rate: requests per second the service is handling.",
+            "Errors: number/fraction of those requests that are failing.",
+            "Duration: distribution of latency (use histograms, watch p50/p90/p99, never just the mean)."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "RED is what your users feel. It is the natural basis for SLIs and symptom-based alerting."
+        },
+        {
+          "type": "heading",
+          "text": "USE — for resources"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Utilization: percent of time the resource was busy (CPU, disk, NIC).",
+            "Saturation: how much work is queued/waiting that the resource could not service (run-queue length, swap).",
+            "Errors: count of error events (disk read errors, dropped packets, ECC errors)."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "USE is what your infrastructure feels. It is the natural basis for capacity and saturation diagnosis. The mental model: use RED to detect that users are hurting, use USE to find which resource is the bottleneck."
+        },
+        {
+          "type": "code",
+          "language": "promql",
+          "code": "# RED: error rate for an HTTP service (5xx fraction over 5m)\nsum(rate(http_requests_total{job=\"checkout\",code=~\"5..\"}[5m]))\n  /\nsum(rate(http_requests_total{job=\"checkout\"}[5m]))\n\n# RED: p99 latency from a native histogram / classic histogram\nhistogram_quantile(\n  0.99,\n  sum by (le) (rate(http_request_duration_seconds_bucket{job=\"checkout\"}[5m]))\n)\n\n# USE: CPU saturation proxy — run-queue waiting per core\nsum(rate(node_pressure_cpu_waiting_seconds_total[5m])) by (instance)"
+        }
       ]
     },
     {
@@ -86,21 +189,61 @@
       "heading": "Core Concept: SLI, SLO, SLA and Error Budgets",
       "kind": "concept",
       "blocks": [
-        {"type": "paragraph", "text": "These three are often conflated in interviews; the distinction is the whole point."},
-        {"type": "list", "items": [
-          "SLI (Service Level Indicator): a measured quantity, e.g. the proportion of requests served in under 300ms with a 2xx/3xx status, over a window.",
-          "SLO (Service Level Objective): an internal target for an SLI, e.g. 99.9% of requests succeed within 300ms over 28 days. No money changes hands.",
-          "SLA (Service Level Agreement): a contractual promise to customers with financial penalties, usually set looser than the SLO so the SLO trips first as an early warning."
-        ]},
-        {"type": "heading", "text": "Error budget"},
-        {"type": "paragraph", "text": "If your SLO is 99.9% over 28 days, then 0.1% of requests are allowed to fail — that is your error budget. With ~1,000,000 requests, the budget is ~1,000 failed requests; in time terms, 99.9% availability over 28 days is about 40 minutes of allowed downtime. The budget reframes reliability as a currency: you can spend it on risky deploys, experiments, or chaos testing. When the budget is exhausted, the error budget policy kicks in — typically freezing feature releases and redirecting the team to reliability work until you are back in budget."},
-        {"type": "table", "headers": ["SLO", "Allowed unavailability (28d)", "Allowed unavailability (30d)"], "rows": [
-          ["99%", "~6h 43m", "~7h 12m"],
-          ["99.9%", "~40m", "~43m"],
-          ["99.95%", "~20m", "~21m"],
-          ["99.99%", "~4m", "~4m 19s"]
-        ]},
-        {"type": "callout", "variant": "info", "text": "Burn-rate alerting is the modern best practice: alert when you are consuming the error budget abnormally fast (e.g. a fast burn-rate of 14.4x over 1h and a slow burn-rate of 6x over 6h), not when a single static threshold is crossed. This catches both sudden outages and slow leaks while keeping pages rare."}
+        {
+          "type": "paragraph",
+          "text": "These three are often conflated in interviews; the distinction is the whole point."
+        },
+        {
+          "type": "list",
+          "items": [
+            "SLI (Service Level Indicator): a measured quantity, e.g. the proportion of requests served in under 300ms with a 2xx/3xx status, over a window.",
+            "SLO (Service Level Objective): an internal target for an SLI, e.g. 99.9% of requests succeed within 300ms over 28 days. No money changes hands.",
+            "SLA (Service Level Agreement): a contractual promise to customers with financial penalties, usually set looser than the SLO so the SLO trips first as an early warning."
+          ]
+        },
+        {
+          "type": "heading",
+          "text": "Error budget"
+        },
+        {
+          "type": "paragraph",
+          "text": "If your SLO is 99.9% over 28 days, then 0.1% of requests are allowed to fail — that is your error budget. With ~1,000,000 requests, the budget is ~1,000 failed requests; in time terms, 99.9% availability over 28 days is about 40 minutes of allowed downtime. The budget reframes reliability as a currency: you can spend it on risky deploys, experiments, or chaos testing. When the budget is exhausted, the error budget policy kicks in — typically freezing feature releases and redirecting the team to reliability work until you are back in budget."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "SLO",
+            "Allowed unavailability (28d)",
+            "Allowed unavailability (30d)"
+          ],
+          "rows": [
+            [
+              "99%",
+              "~6h 43m",
+              "~7h 12m"
+            ],
+            [
+              "99.9%",
+              "~40m",
+              "~43m"
+            ],
+            [
+              "99.95%",
+              "~20m",
+              "~21m"
+            ],
+            [
+              "99.99%",
+              "~4m",
+              "~4m 19s"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Burn-rate alerting is the modern best practice: alert when you are consuming the error budget abnormally fast (e.g. a fast burn-rate of 14.4x over 1h and a slow burn-rate of 6x over 6h), not when a single static threshold is crossed. This catches both sudden outages and slow leaks while keeping pages rare."
+        }
       ]
     },
     {
@@ -108,12 +251,33 @@
       "heading": "Core Concept: Prometheus and PromQL",
       "kind": "concept",
       "blocks": [
-        {"type": "paragraph", "text": "Prometheus is a pull-based time-series database. It scrapes /metrics HTTP endpoints on a schedule, stores samples as (metric name + label set) -> time series, and exposes PromQL for querying. Each unique combination of metric name and label values is one time series; this is the single most important fact for understanding both its power and its failure modes."},
-        {"type": "heading", "text": "Instrumenting a service"},
-        {"type": "code", "language": "go", "code": "var (\n  httpRequests = prometheus.NewCounterVec(\n    prometheus.CounterOpts{\n      Name: \"http_requests_total\",\n      Help: \"Total HTTP requests.\",\n    },\n    // Bounded label set: method, route template, status class.\n    []string{\"method\", \"route\", \"status\"},\n  )\n  httpDuration = prometheus.NewHistogramVec(\n    prometheus.HistogramOpts{\n      Name:    \"http_request_duration_seconds\",\n      Help:    \"HTTP request latency.\",\n      Buckets: prometheus.DefBuckets, // .005 .. 10s\n    },\n    []string{\"route\"},\n  )\n)\n\nfunc instrument(route string, h http.HandlerFunc) http.HandlerFunc {\n  return func(w http.ResponseWriter, r *http.Request) {\n    start := time.Now()\n    rec := &statusRecorder{ResponseWriter: w, status: 200}\n    h(rec, r)\n    // route is a TEMPLATE like /users/:id, NEVER the raw path /users/9381.\n    httpRequests.WithLabelValues(r.Method, route, strconv.Itoa(rec.status)).Inc()\n    httpDuration.WithLabelValues(route).Observe(time.Since(start).Seconds())\n  }\n}"},
-        {"type": "heading", "text": "PromQL essentials"},
-        {"type": "code", "language": "promql", "code": "# rate() on a counter gives per-second average over the window.\n# ALWAYS rate() counters before summing; raw counters reset on restart.\nsum by (route) (rate(http_requests_total[5m]))\n\n# increase() = rate() * window, for totals over a period\nsum(increase(http_requests_total{status=~\"5..\"}[1h]))\n\n# Beware: sum(rate(x[5m])) is correct; rate(sum(x)[5m]) is NOT valid/meaningful.\n# Aggregate AFTER rate, never rate an already-aggregated series.\n\n# Recording rule to precompute an expensive SLI query\n# groups.yaml:\n#   - record: job:http_request_errors:ratio_rate5m\n#     expr: sum(rate(http_requests_total{status=~\"5..\"}[5m]))\n#           / sum(rate(http_requests_total[5m]))"},
-        {"type": "callout", "variant": "warning", "text": "rate() needs at least two samples in the window and ignores counter resets correctly only if you give it the raw counter. A common bug is applying rate() to a gauge or to an already-summed expression, which produces garbage."}
+        {
+          "type": "paragraph",
+          "text": "Prometheus is a pull-based time-series database. It scrapes /metrics HTTP endpoints on a schedule, stores samples as (metric name + label set) -> time series, and exposes PromQL for querying. Each unique combination of metric name and label values is one time series; this is the single most important fact for understanding both its power and its failure modes."
+        },
+        {
+          "type": "heading",
+          "text": "Instrumenting a service"
+        },
+        {
+          "type": "code",
+          "language": "go",
+          "code": "var (\n  httpRequests = prometheus.NewCounterVec(\n    prometheus.CounterOpts{\n      Name: \"http_requests_total\",\n      Help: \"Total HTTP requests.\",\n    },\n    // Bounded label set: method, route template, status class.\n    []string{\"method\", \"route\", \"status\"},\n  )\n  httpDuration = prometheus.NewHistogramVec(\n    prometheus.HistogramOpts{\n      Name:    \"http_request_duration_seconds\",\n      Help:    \"HTTP request latency.\",\n      Buckets: prometheus.DefBuckets, // .005 .. 10s\n    },\n    []string{\"route\"},\n  )\n)\n\nfunc instrument(route string, h http.HandlerFunc) http.HandlerFunc {\n  return func(w http.ResponseWriter, r *http.Request) {\n    start := time.Now()\n    rec := &statusRecorder{ResponseWriter: w, status: 200}\n    h(rec, r)\n    // route is a TEMPLATE like /users/:id, NEVER the raw path /users/9381.\n    httpRequests.WithLabelValues(r.Method, route, strconv.Itoa(rec.status)).Inc()\n    httpDuration.WithLabelValues(route).Observe(time.Since(start).Seconds())\n  }\n}"
+        },
+        {
+          "type": "heading",
+          "text": "PromQL essentials"
+        },
+        {
+          "type": "code",
+          "language": "promql",
+          "code": "# rate() on a counter gives per-second average over the window.\n# ALWAYS rate() counters before summing; raw counters reset on restart.\nsum by (route) (rate(http_requests_total[5m]))\n\n# increase() = rate() * window, for totals over a period\nsum(increase(http_requests_total{status=~\"5..\"}[1h]))\n\n# Beware: sum(rate(x[5m])) is correct; rate(sum(x)[5m]) is NOT valid/meaningful.\n# Aggregate AFTER rate, never rate an already-aggregated series.\n\n# Recording rule to precompute an expensive SLI query\n# groups.yaml:\n#   - record: job:http_request_errors:ratio_rate5m\n#     expr: sum(rate(http_requests_total{status=~\"5..\"}[5m]))\n#           / sum(rate(http_requests_total[5m]))"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "rate() needs at least two samples in the window and ignores counter resets correctly only if you give it the raw counter. A common bug is applying rate() to a gauge or to an already-summed expression, which produces garbage."
+        }
       ]
     },
     {
@@ -121,15 +285,49 @@
       "heading": "Core Concept: Distributed Tracing with OpenTelemetry",
       "kind": "concept",
       "blocks": [
-        {"type": "paragraph", "text": "OpenTelemetry (OTel) is the vendor-neutral standard for generating and exporting telemetry. A trace is identified by a 16-byte trace_id; each span has an 8-byte span_id and references its parent. Context propagation is what makes the trace span multiple services: the current trace and span IDs are injected into outgoing requests and extracted on the receiving side."},
-        {"type": "code", "language": "typescript", "code": "import { trace, context, propagation } from '@opentelemetry/api';\n\nconst tracer = trace.getTracer('checkout-service');\n\nasync function chargeCard(order: Order) {\n  // startActiveSpan makes this span the current context for the callback.\n  return tracer.startActiveSpan('charge_card', async (span) => {\n    span.setAttribute('order.id', order.id);\n    span.setAttribute('order.amount_cents', order.amountCents);\n    try {\n      const headers: Record<string, string> = {};\n      // Inject the W3C traceparent into outbound call so the payment\n      // service's spans link into THIS trace.\n      propagation.inject(context.active(), headers);\n      const res = await fetch('https://payments/charge', { headers });\n      span.setAttribute('http.status_code', res.status);\n      return res;\n    } catch (err) {\n      span.recordException(err as Error);\n      span.setStatus({ code: 2 }); // ERROR\n      throw err;\n    } finally {\n      span.end(); // MUST end, or the span leaks and the trace is incomplete.\n    }\n  });\n}"},
-        {"type": "paragraph", "text": "Sampling controls cost. Head sampling decides at the root span whether to keep the whole trace (cheap, but you may drop the rare error trace you needed). Tail sampling buffers spans in a collector and decides after seeing the whole trace — letting you keep all error traces and slow traces while dropping boring fast successes. Tail sampling needs a stateful collector and memory, but gives far better signal per dollar."},
-        {"type": "table", "headers": ["Concept", "What it is", "Gotcha"], "rows": [
-          ["trace_id", "Shared id for the whole request", "Must propagate across every hop or trace splits"],
-          ["span", "One unit of work with timing", "Forgetting span.end() leaks/breaks traces"],
-          ["baggage", "Key-values propagated with context", "Bloats every header; never put PII in it"],
-          ["sampling", "Keep a subset of traces", "Head sampling can drop the error you needed"]
-        ]}
+        {
+          "type": "paragraph",
+          "text": "OpenTelemetry (OTel) is the vendor-neutral standard for generating and exporting telemetry. A trace is identified by a 16-byte trace_id; each span has an 8-byte span_id and references its parent. Context propagation is what makes the trace span multiple services: the current trace and span IDs are injected into outgoing requests and extracted on the receiving side."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { trace, context, propagation } from '@opentelemetry/api';\n\nconst tracer = trace.getTracer('checkout-service');\n\nasync function chargeCard(order: Order) {\n  // startActiveSpan makes this span the current context for the callback.\n  return tracer.startActiveSpan('charge_card', async (span) => {\n    span.setAttribute('order.id', order.id);\n    span.setAttribute('order.amount_cents', order.amountCents);\n    try {\n      const headers: Record<string, string> = {};\n      // Inject the W3C traceparent into outbound call so the payment\n      // service's spans link into THIS trace.\n      propagation.inject(context.active(), headers);\n      const res = await fetch('https://payments/charge', { headers });\n      span.setAttribute('http.status_code', res.status);\n      return res;\n    } catch (err) {\n      span.recordException(err as Error);\n      span.setStatus({ code: 2 }); // ERROR\n      throw err;\n    } finally {\n      span.end(); // MUST end, or the span leaks and the trace is incomplete.\n    }\n  });\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Sampling controls cost. Head sampling decides at the root span whether to keep the whole trace (cheap, but you may drop the rare error trace you needed). Tail sampling buffers spans in a collector and decides after seeing the whole trace — letting you keep all error traces and slow traces while dropping boring fast successes. Tail sampling needs a stateful collector and memory, but gives far better signal per dollar."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Concept",
+            "What it is",
+            "Gotcha"
+          ],
+          "rows": [
+            [
+              "trace_id",
+              "Shared id for the whole request",
+              "Must propagate across every hop or trace splits"
+            ],
+            [
+              "span",
+              "One unit of work with timing",
+              "Forgetting span.end() leaks/breaks traces"
+            ],
+            [
+              "baggage",
+              "Key-values propagated with context",
+              "Bloats every header; never put PII in it"
+            ],
+            [
+              "sampling",
+              "Keep a subset of traces",
+              "Head sampling can drop the error you needed"
+            ]
+          ]
+        }
       ]
     },
     {
@@ -137,9 +335,20 @@
       "heading": "Core Concept: Structured Logging and Correlation",
       "kind": "concept",
       "blocks": [
-        {"type": "paragraph", "text": "Structured logs turn debugging from grep archaeology into queryable analytics. Emit machine-parseable events with stable field names, and always include the trace_id so you can pivot between logs and traces."},
-        {"type": "code", "language": "typescript", "code": "import { trace } from '@opentelemetry/api';\nimport pino from 'pino';\n\nconst logger = pino();\n\nfunction logWithTrace(level: 'info' | 'error', msg: string, fields: object) {\n  const span = trace.getActiveSpan();\n  const ctx = span?.spanContext();\n  logger[level]({\n    ...fields,\n    msg,\n    trace_id: ctx?.traceId,   // join key back to the trace\n    span_id: ctx?.spanId,\n  });\n}\n\n// Good: structured, queryable, correlatable\nlogWithTrace('error', 'payment_declined', {\n  order_id: 'ord_123', tenant: 'acme', reason: 'insufficient_funds', amount_cents: 4200,\n});\n// Bad: 'Payment failed for order ord_123 because insufficient_funds'\n// — now you need a regex to extract order_id and you lost the trace link."},
-        {"type": "callout", "variant": "danger", "text": "Never log secrets, full PANs, passwords, or raw tokens — and beware that whole-object logging (logger.info(req)) silently leaks Authorization headers and PII. Add redaction at the logger layer, not at each call site."}
+        {
+          "type": "paragraph",
+          "text": "Structured logs turn debugging from grep archaeology into queryable analytics. Emit machine-parseable events with stable field names, and always include the trace_id so you can pivot between logs and traces."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { trace } from '@opentelemetry/api';\nimport pino from 'pino';\n\nconst logger = pino();\n\nfunction logWithTrace(level: 'info' | 'error', msg: string, fields: object) {\n  const span = trace.getActiveSpan();\n  const ctx = span?.spanContext();\n  logger[level]({\n    ...fields,\n    msg,\n    trace_id: ctx?.traceId,   // join key back to the trace\n    span_id: ctx?.spanId,\n  });\n}\n\n// Good: structured, queryable, correlatable\nlogWithTrace('error', 'payment_declined', {\n  order_id: 'ord_123', tenant: 'acme', reason: 'insufficient_funds', amount_cents: 4200,\n});\n// Bad: 'Payment failed for order ord_123 because insufficient_funds'\n// — now you need a regex to extract order_id and you lost the trace link."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Never log secrets, full PANs, passwords, or raw tokens — and beware that whole-object logging (logger.info(req)) silently leaks Authorization headers and PII. Add redaction at the logger layer, not at each call site."
+        }
       ]
     },
     {
@@ -147,16 +356,37 @@
       "heading": "Production Example: A Cardinality-Driven Outage",
       "kind": "example",
       "blocks": [
-        {"type": "paragraph", "text": "Scenario: a payments team added a metric to track per-customer charge latency. To make dashboards 'drillable', an engineer added the customer_id and the raw request path as labels on a histogram. It passed review and shipped on a Friday."},
-        {"type": "code", "language": "go", "code": "// The change that caused the incident.\n// customer_id has ~4M distinct values; path includes the order UUID.\nchargeLatency := prometheus.NewHistogramVec(\n  prometheus.HistogramOpts{Name: \"charge_latency_seconds\", Buckets: prometheus.DefBuckets},\n  []string{\"customer_id\", \"path\", \"status\"}, // <-- cardinality bomb\n)\n// Each unique (customer_id, path, status, le) tuple = one series.\n// 4M customers x ~12 le buckets x N paths => tens of millions of series."},
-        {"type": "paragraph", "text": "Within 90 minutes Prometheus head memory ballooned past 60GB and the server was OOM-killed by Kubernetes. On restart it tried to replay the WAL, OOMed again, and crash-looped. Because alerting ran on that same Prometheus, the team was now blind: no metrics, no alerts, during a payment degradation. They restored service by deleting the offending metric, redeploying, and adding an admission-time relabel rule to drop the high-cardinality labels at scrape time."},
-        {"type": "code", "language": "yaml", "code": "# Defensive scrape config: drop dangerous labels before ingestion.\nmetric_relabel_configs:\n  - source_labels: [__name__]\n    regex: charge_latency_seconds.*\n    action: keep\n  - regex: customer_id|path   # strip the high-cardinality labels\n    action: labeldrop\n\n# And cap series per target so one bad deploy cannot take down the TSDB:\n# (Prometheus flag)  --storage.tsdb.head-series-limit is not a thing; use\n# sample_limit in scrape_config:\nsample_limit: 50000"},
-        {"type": "list", "items": [
-          "Root cause: unbounded label values (customer_id, UUID-bearing path) multiplied series count past memory capacity.",
-          "Contributing cause: alerting lived on the same Prometheus it monitored — no independent meta-monitoring.",
-          "Fixes: aggregate per-customer data in logs/traces not metric labels; enforce sample_limit; add a separate small Prometheus that alerts on the main one's up and series count; add a CI lint that rejects high-cardinality labels."
-        ]},
-        {"type": "callout", "variant": "success", "text": "The durable lesson: metrics labels are for low-cardinality dimensions you alert and group by (route, status, region). High-cardinality identity (user, request, order) belongs in traces and logs, joined via exemplars."}
+        {
+          "type": "paragraph",
+          "text": "Scenario: a payments team added a metric to track per-customer charge latency. To make dashboards 'drillable', an engineer added the customer_id and the raw request path as labels on a histogram. It passed review and shipped on a Friday."
+        },
+        {
+          "type": "code",
+          "language": "go",
+          "code": "// The change that caused the incident.\n// customer_id has ~4M distinct values; path includes the order UUID.\nchargeLatency := prometheus.NewHistogramVec(\n  prometheus.HistogramOpts{Name: \"charge_latency_seconds\", Buckets: prometheus.DefBuckets},\n  []string{\"customer_id\", \"path\", \"status\"}, // <-- cardinality bomb\n)\n// Each unique (customer_id, path, status, le) tuple = one series.\n// 4M customers x ~12 le buckets x N paths => tens of millions of series."
+        },
+        {
+          "type": "paragraph",
+          "text": "Within 90 minutes Prometheus head memory ballooned past 60GB and the server was OOM-killed by Kubernetes. On restart it tried to replay the WAL, OOMed again, and crash-looped. Because alerting ran on that same Prometheus, the team was now blind: no metrics, no alerts, during a payment degradation. They restored service by deleting the offending metric, redeploying, and adding an admission-time relabel rule to drop the high-cardinality labels at scrape time."
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "code": "# Defensive scrape config: drop dangerous labels before ingestion.\nmetric_relabel_configs:\n  - source_labels: [__name__]\n    regex: charge_latency_seconds.*\n    action: keep\n  - regex: customer_id|path   # strip the high-cardinality labels\n    action: labeldrop\n\n# And cap series per target so one bad deploy cannot take down the TSDB:\n# (Prometheus flag)  --storage.tsdb.head-series-limit is not a thing; use\n# sample_limit in scrape_config:\nsample_limit: 50000"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Root cause: unbounded label values (customer_id, UUID-bearing path) multiplied series count past memory capacity.",
+            "Contributing cause: alerting lived on the same Prometheus it monitored — no independent meta-monitoring.",
+            "Fixes: aggregate per-customer data in logs/traces not metric labels; enforce sample_limit; add a separate small Prometheus that alerts on the main one's up and series count; add a CI lint that rejects high-cardinality labels."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The durable lesson: metrics labels are for low-cardinality dimensions you alert and group by (route, status, region). High-cardinality identity (user, request, order) belongs in traces and logs, joined via exemplars."
+        }
       ]
     },
     {
@@ -164,17 +394,24 @@
       "heading": "Common Mistakes and Production Incidents",
       "kind": "mistake",
       "blocks": [
-        {"type": "list", "items": [
-          "Alerting on causes, not symptoms: paging on 'CPU > 80%' generates noise; the box can be hot and healthy. Page on the user-facing symptom (latency/error SLO burn) and use CPU as a diagnostic, not a pager.",
-          "Alert fatigue: too many noisy, non-actionable, or flapping alerts train responders to ignore the pager. Every alert must be actionable, urgent, and link to a runbook. Demote the rest to dashboards or tickets.",
-          "Averaging latency: the mean hides the tail. A 50ms mean can hide a 4s p99 that is killing 1% of users. Always use histograms and quantiles.",
-          "Cardinality explosions: putting user_id, request_id, full URLs, or error messages into metric labels. This kills Prometheus memory and query speed.",
-          "rate() footguns: applying rate() to gauges, or aggregating before rate()-ing a counter, producing meaningless numbers.",
-          "Logging unstructured free text, or logging at debug level in hot paths in production — log volume itself becomes an outage.",
-          "Sampling traces with head sampling only, then being unable to find the rare error trace because it was sampled out.",
-          "Monitoring the monitoring stack with itself, so when it dies you also lose the alert that would have told you it died."
-        ]},
-        {"type": "callout", "variant": "warning", "text": "A subtle one: dashboards-as-alerting. If a human staring at a dashboard is your detection mechanism, you do not have alerting — you have a screensaver. Detection must be automated and tied to SLOs."}
+        {
+          "type": "list",
+          "items": [
+            "Alerting on causes, not symptoms: paging on 'CPU > 80%' generates noise; the box can be hot and healthy. Page on the user-facing symptom (latency/error SLO burn) and use CPU as a diagnostic, not a pager.",
+            "Alert fatigue: too many noisy, non-actionable, or flapping alerts train responders to ignore the pager. Every alert must be actionable, urgent, and link to a runbook. Demote the rest to dashboards or tickets.",
+            "Averaging latency: the mean hides the tail. A 50ms mean can hide a 4s p99 that is killing 1% of users. Always use histograms and quantiles.",
+            "Cardinality explosions: putting user_id, request_id, full URLs, or error messages into metric labels. This kills Prometheus memory and query speed.",
+            "rate() footguns: applying rate() to gauges, or aggregating before rate()-ing a counter, producing meaningless numbers.",
+            "Logging unstructured free text, or logging at debug level in hot paths in production — log volume itself becomes an outage.",
+            "Sampling traces with head sampling only, then being unable to find the rare error trace because it was sampled out.",
+            "Monitoring the monitoring stack with itself, so when it dies you also lose the alert that would have told you it died."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "A subtle one: dashboards-as-alerting. If a human staring at a dashboard is your detection mechanism, you do not have alerting — you have a screensaver. Detection must be automated and tied to SLOs."
+        }
       ]
     },
     {
@@ -182,19 +419,26 @@
       "heading": "Best Practices",
       "kind": "bestpractice",
       "blocks": [
-        {"type": "list", "items": [
-          "Define SLOs on user-centric SLIs first (availability + latency), then build alerting on multi-window burn rates against the error budget.",
-          "Use RED for services and USE for resources; standardize metric names across teams so dashboards compose.",
-          "Keep metric label cardinality bounded and known. Lint instrumentation in CI to reject obvious cardinality bombs.",
-          "Instrument with OpenTelemetry so you are vendor-portable; export to whatever backend (Tempo, Jaeger, a SaaS) you choose.",
-          "Always propagate trace context and stamp trace_id into structured logs to enable pivoting between pillars. Use exemplars to jump from a metric spike to a representative trace.",
-          "Prefer tail sampling so you keep all error/slow traces while dropping boring successes.",
-          "Run independent meta-monitoring: a small, separate system that alerts when your main observability stack is down or behind.",
-          "Make every alert actionable with an owner and a runbook link; review and prune noisy alerts regularly.",
-          "Set retention and downsampling deliberately — recent high-resolution, older downsampled — to control cost.",
-          "Practice game days / chaos drills so you exercise dashboards and runbooks before a real incident."
-        ]},
-        {"type": "callout", "variant": "success", "text": "North star: when an incident starts, an on-call engineer should go from page -> SLO burn dashboard -> offending service trace -> error log in under five minutes, without writing a single new query from scratch."}
+        {
+          "type": "list",
+          "items": [
+            "Define SLOs on user-centric SLIs first (availability + latency), then build alerting on multi-window burn rates against the error budget.",
+            "Use RED for services and USE for resources; standardize metric names across teams so dashboards compose.",
+            "Keep metric label cardinality bounded and known. Lint instrumentation in CI to reject obvious cardinality bombs.",
+            "Instrument with OpenTelemetry so you are vendor-portable; export to whatever backend (Tempo, Jaeger, a SaaS) you choose.",
+            "Always propagate trace context and stamp trace_id into structured logs to enable pivoting between pillars. Use exemplars to jump from a metric spike to a representative trace.",
+            "Prefer tail sampling so you keep all error/slow traces while dropping boring successes.",
+            "Run independent meta-monitoring: a small, separate system that alerts when your main observability stack is down or behind.",
+            "Make every alert actionable with an owner and a runbook link; review and prune noisy alerts regularly.",
+            "Set retention and downsampling deliberately — recent high-resolution, older downsampled — to control cost.",
+            "Practice game days / chaos drills so you exercise dashboards and runbooks before a real incident."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "North star: when an incident starts, an on-call engineer should go from page -> SLO burn dashboard -> offending service trace -> error log in under five minutes, without writing a single new query from scratch."
+        }
       ]
     },
     {
@@ -202,8 +446,15 @@
       "heading": "Note: The OpenTelemetry Collector as a Control Point",
       "kind": "note",
       "blocks": [
-        {"type": "paragraph", "text": "Rather than pointing every service directly at a vendor, run the OpenTelemetry Collector as a sidecar or gateway. It becomes the single place to batch, retry, filter PII, do tail sampling, enforce attribute limits, and fan out to multiple backends. This decouples your application instrumentation from your backend choice and gives platform teams one knob to control cost and cardinality centrally."},
-        {"type": "code", "language": "yaml", "code": "# otel-collector-config.yaml (gateway)\nreceivers:\n  otlp:\n    protocols: { grpc: {}, http: {} }\nprocessors:\n  batch: {}\n  tail_sampling:\n    decision_wait: 10s\n    policies:\n      - name: errors\n        type: status_code\n        status_code: { status_codes: [ERROR] }\n      - name: slow\n        type: latency\n        latency: { threshold_ms: 1000 }\n      - name: sample-rest\n        type: probabilistic\n        probabilistic: { sampling_percentage: 5 }\nexporters:\n  otlphttp/tempo: { endpoint: http://tempo:4318 }\nservice:\n  pipelines:\n    traces:\n      receivers: [otlp]\n      processors: [tail_sampling, batch]\n      exporters: [otlphttp/tempo]"}
+        {
+          "type": "paragraph",
+          "text": "Rather than pointing every service directly at a vendor, run the OpenTelemetry Collector as a sidecar or gateway. It becomes the single place to batch, retry, filter PII, do tail sampling, enforce attribute limits, and fan out to multiple backends. This decouples your application instrumentation from your backend choice and gives platform teams one knob to control cost and cardinality centrally."
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "code": "# otel-collector-config.yaml (gateway)\nreceivers:\n  otlp:\n    protocols: { grpc: {}, http: {} }\nprocessors:\n  batch: {}\n  tail_sampling:\n    decision_wait: 10s\n    policies:\n      - name: errors\n        type: status_code\n        status_code: { status_codes: [ERROR] }\n      - name: slow\n        type: latency\n        latency: { threshold_ms: 1000 }\n      - name: sample-rest\n        type: probabilistic\n        probabilistic: { sampling_percentage: 5 }\nexporters:\n  otlphttp/tempo: { endpoint: http://tempo:4318 }\nservice:\n  pipelines:\n    traces:\n      receivers: [otlp]\n      processors: [tail_sampling, batch]\n      exporters: [otlphttp/tempo]"
+        }
       ]
     }
   ],
@@ -241,8 +492,15 @@
       "difficulty": "junior",
       "category": "DevOps",
       "tricky": false,
-      "tags": ["observability", "monitoring", "fundamentals"],
-      "followUps": ["Give an example of a question only an observable system can answer.", "Why are the three pillars complementary rather than redundant?"]
+      "tags": [
+        "observability",
+        "monitoring",
+        "fundamentals"
+      ],
+      "followUps": [
+        "Give an example of a question only an observable system can answer.",
+        "Why are the three pillars complementary rather than redundant?"
+      ]
     },
     {
       "id": "q-three-pillars",
@@ -251,8 +509,15 @@
       "difficulty": "junior",
       "category": "DevOps",
       "tricky": false,
-      "tags": ["metrics", "logs", "traces"],
-      "followUps": ["Why not just count log lines instead of emitting metrics?", "What is an exemplar and how does it bridge metrics and traces?"]
+      "tags": [
+        "metrics",
+        "logs",
+        "traces"
+      ],
+      "followUps": [
+        "Why not just count log lines instead of emitting metrics?",
+        "What is an exemplar and how does it bridge metrics and traces?"
+      ]
     },
     {
       "id": "q-red-use",
@@ -261,8 +526,15 @@
       "difficulty": "mid",
       "category": "DevOps",
       "tricky": false,
-      "tags": ["red", "use", "methodology"],
-      "followUps": ["Why is saturation often a better leading indicator than utilization?", "How would you express RED metrics in PromQL?"]
+      "tags": [
+        "red",
+        "use",
+        "methodology"
+      ],
+      "followUps": [
+        "Why is saturation often a better leading indicator than utilization?",
+        "How would you express RED metrics in PromQL?"
+      ]
     },
     {
       "id": "q-sli-slo-sla",
@@ -271,8 +543,16 @@
       "difficulty": "mid",
       "category": "DevOps",
       "tricky": false,
-      "tags": ["slo", "sli", "sla", "error-budget"],
-      "followUps": ["How long of allowed downtime is 99.99% over 30 days?", "What should the policy do when the budget is exhausted?"]
+      "tags": [
+        "slo",
+        "sli",
+        "sla",
+        "error-budget"
+      ],
+      "followUps": [
+        "How long of allowed downtime is 99.99% over 30 days?",
+        "What should the policy do when the budget is exhausted?"
+      ]
     },
     {
       "id": "q-promql-rate",
@@ -281,8 +561,15 @@
       "difficulty": "senior",
       "category": "DevOps",
       "tricky": false,
-      "tags": ["promql", "prometheus", "rate"],
-      "followUps": ["What is the difference between rate() and increase()?", "Why does rate() need at least two samples in the window?"]
+      "tags": [
+        "promql",
+        "prometheus",
+        "rate"
+      ],
+      "followUps": [
+        "What is the difference between rate() and increase()?",
+        "Why does rate() need at least two samples in the window?"
+      ]
     },
     {
       "id": "q-cardinality-tricky",
@@ -291,8 +578,15 @@
       "difficulty": "senior",
       "category": "DevOps",
       "tricky": true,
-      "tags": ["cardinality", "prometheus", "incident"],
-      "followUps": ["How do you detect a cardinality problem before it OOMs the server?", "Why is meta-monitoring on a separate Prometheus important here?"]
+      "tags": [
+        "cardinality",
+        "prometheus",
+        "incident"
+      ],
+      "followUps": [
+        "How do you detect a cardinality problem before it OOMs the server?",
+        "Why is meta-monitoring on a separate Prometheus important here?"
+      ]
     },
     {
       "id": "q-alert-fatigue-tricky",
@@ -301,8 +595,15 @@
       "difficulty": "senior",
       "category": "DevOps",
       "tricky": true,
-      "tags": ["alerting", "alert-fatigue", "slo"],
-      "followUps": ["What burn-rate windows would you pick for a 99.9% SLO?", "How do you avoid a single noisy dependency paging every downstream service?"]
+      "tags": [
+        "alerting",
+        "alert-fatigue",
+        "slo"
+      ],
+      "followUps": [
+        "What burn-rate windows would you pick for a 99.9% SLO?",
+        "How do you avoid a single noisy dependency paging every downstream service?"
+      ]
     },
     {
       "id": "q-head-vs-tail-sampling-tricky",
@@ -311,8 +612,15 @@
       "difficulty": "senior",
       "category": "DevOps",
       "tricky": true,
-      "tags": ["tracing", "sampling", "opentelemetry"],
-      "followUps": ["Why must all spans of a trace reach the same tail-sampling collector?", "How does consistent probability sampling keep rates accurate across services?"]
+      "tags": [
+        "tracing",
+        "sampling",
+        "opentelemetry"
+      ],
+      "followUps": [
+        "Why must all spans of a trace reach the same tail-sampling collector?",
+        "How does consistent probability sampling keep rates accurate across services?"
+      ]
     },
     {
       "id": "q-context-propagation",
@@ -321,8 +629,15 @@
       "difficulty": "mid",
       "category": "DevOps",
       "tricky": false,
-      "tags": ["tracing", "context-propagation", "opentelemetry"],
-      "followUps": ["How do you propagate context across a message queue?", "What is baggage and when should you avoid it?"]
+      "tags": [
+        "tracing",
+        "context-propagation",
+        "opentelemetry"
+      ],
+      "followUps": [
+        "How do you propagate context across a message queue?",
+        "What is baggage and when should you avoid it?"
+      ]
     },
     {
       "id": "q-histogram-quantiles",
@@ -331,8 +646,16 @@
       "difficulty": "senior",
       "category": "DevOps",
       "tricky": false,
-      "tags": ["histogram", "quantiles", "promql", "latency"],
-      "followUps": ["What are the tradeoffs of native histograms vs classic bucketed histograms?", "How do bucket boundaries affect quantile accuracy?"]
+      "tags": [
+        "histogram",
+        "quantiles",
+        "promql",
+        "latency"
+      ],
+      "followUps": [
+        "What are the tradeoffs of native histograms vs classic bucketed histograms?",
+        "How do bucket boundaries affect quantile accuracy?"
+      ]
     },
     {
       "id": "q-pull-vs-push",
@@ -341,8 +664,15 @@
       "difficulty": "mid",
       "category": "DevOps",
       "tricky": false,
-      "tags": ["prometheus", "pull", "pushgateway"],
-      "followUps": ["Why is the 'up' metric useful for meta-monitoring?", "What problems arise if you use Pushgateway for long-running services?"]
+      "tags": [
+        "prometheus",
+        "pull",
+        "pushgateway"
+      ],
+      "followUps": [
+        "Why is the 'up' metric useful for meta-monitoring?",
+        "What problems arise if you use Pushgateway for long-running services?"
+      ]
     },
     {
       "id": "q-symptom-alerting",
@@ -351,8 +681,158 @@
       "difficulty": "mid",
       "category": "DevOps",
       "tricky": false,
-      "tags": ["alerting", "symptoms", "best-practice"],
-      "followUps": ["Give an example where cause-based alerting prevents an outage.", "How do predictive alerts like disk-fill projections fit in?"]
+      "tags": [
+        "alerting",
+        "symptoms",
+        "best-practice"
+      ],
+      "followUps": [
+        "Give an example where cause-based alerting prevents an outage.",
+        "How do predictive alerts like disk-fill projections fit in?"
+      ]
+    },
+    {
+      "id": "q-ext-liveness-vs-readiness",
+      "question": "What is the difference between a liveness probe and a readiness probe, and why is confusing them dangerous?",
+      "answer": "A readiness probe answers 'can this instance serve traffic right now?' and controls whether the load balancer routes requests to it; a liveness probe answers 'is this process wedged and does it need a restart?' and controls whether the orchestrator kills and recreates the pod. They must check different things: readiness should reflect dependency availability (e.g. a warmed cache or a reachable database) so a temporarily unready pod is simply drained, while liveness should check only that the process itself is not deadlocked. The dangerous confusion is putting a dependency check into the liveness probe: if a shared database blips, every pod's liveness fails simultaneously, the orchestrator restarts them all at once, and you turn a brief degradation into a full outage and a restart storm. A good rule is to make liveness cheap and self-contained, make readiness reflect real serving capability, and use a startup probe for slow-booting apps so liveness does not kill them before they finish initializing.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": [
+        "health-checks",
+        "kubernetes",
+        "readiness",
+        "liveness"
+      ],
+      "followUps": [
+        "Why should a liveness probe not check downstream dependencies?",
+        "What problem does a startup probe solve that liveness cannot?"
+      ]
+    },
+    {
+      "id": "q-ext-apm-vs-three-pillars",
+      "question": "What is an APM tool and how does it relate to the three pillars of observability?",
+      "answer": "APM (Application Performance Monitoring) is a category of tooling focused on tracing code-level performance inside and across application processes: transaction traces, database call breakdowns, slow endpoints, error rates, and often code-level flame graphs and dependency maps. It is essentially an opinionated, application-centric consumer of the three pillars, leaning heavily on distributed tracing and derived RED-style metrics, with auto-instrumentation agents that hook common frameworks so you get spans without hand-writing them. The relationship is that the pillars are the raw signal types while APM is a product experience built on top of them, historically shipped by a single vendor with proprietary agents. The modern shift is to instrument with OpenTelemetry so the signal is vendor-neutral, then feed any APM backend, avoiding lock-in while keeping the code-level visibility APM is known for.",
+      "difficulty": "junior",
+      "category": "DevOps",
+      "tags": [
+        "apm",
+        "tracing",
+        "opentelemetry"
+      ],
+      "tricky": false,
+      "followUps": [
+        "Why do teams prefer OpenTelemetry over vendor-specific APM agents?",
+        "What does APM give you that raw metrics alone do not?"
+      ]
+    },
+    {
+      "id": "q-ext-log-levels-sampling",
+      "question": "How should you choose log levels, and how do you keep logging from becoming its own outage in a hot path?",
+      "answer": "Log levels encode severity and audience: ERROR for actionable failures that need attention, WARN for recoverable anomalies, INFO for high-level lifecycle events, and DEBUG/TRACE for verbose developer detail that is off by default in production. The failure mode is logging at INFO or DEBUG on a per-request hot path: at high throughput the log volume can saturate disk I/O, back-pressure the app, blow up ingestion cost, and effectively cause a self-inflicted outage. Mitigations include making the production level configurable per component (so you can raise verbosity for one module during an incident without a redeploy), using asynchronous non-blocking log appenders so logging never blocks request handling, and applying log sampling for high-frequency events (e.g. keep 1 in N identical warnings) while always keeping errors. You should also rate-limit or dedupe noisy repeated lines, since a tight error loop can emit millions of identical lines and drown the signal.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tags": [
+        "logging",
+        "log-levels",
+        "sampling",
+        "performance"
+      ],
+      "tricky": false,
+      "followUps": [
+        "How would you enable DEBUG for one service during an incident without redeploying?",
+        "Why prefer async log appenders in a latency-sensitive service?"
+      ]
+    },
+    {
+      "id": "q-ext-averages-hide-tails",
+      "question": "A dashboard shows average latency is a healthy 40ms, yet customers complain the app is slow. What is likely happening?",
+      "answer": "The average is hiding the tail. Latency distributions are right-skewed and often multi-modal, so a low mean can coexist with a brutal p99 or p99.9 that a meaningful fraction of users hit on every page load. Because a single user session makes many requests, even a 1 percent slow rate means most sessions touch at least one slow request, so the user-perceived experience tracks the tail, not the mean. Averages also mask bimodal behavior such as a fast cache-hit path and a slow cache-miss path that average to a misleadingly moderate number. The fix is to dashboard and alert on high percentiles (p95/p99/p99.9) computed from histograms, look at the full distribution or a heatmap rather than one number, and remember that you cannot average per-instance percentiles together — you must aggregate the raw histogram buckets first and compute the quantile once.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tags": [
+        "percentiles",
+        "latency",
+        "averages",
+        "histogram"
+      ],
+      "tricky": true,
+      "followUps": [
+        "Why does per-session experience track the tail rather than the mean?",
+        "How does a latency heatmap reveal bimodal behavior an average hides?"
+      ]
+    },
+    {
+      "id": "q-ext-exemplars-bridge",
+      "question": "What are exemplars in Prometheus/OpenTelemetry, and what problem do they solve?",
+      "answer": "An exemplar is a specific trace reference attached to a metric sample, typically a trace_id recorded alongside an observation that fell into a particular histogram bucket. The problem it solves is the pivot gap between metrics and traces: metrics tell you that p99 latency spiked, but being aggregates they cannot point you to a concrete slow request, while high-cardinality identity cannot go into metric labels without exploding cardinality. Exemplars thread a small number of example trace IDs through the metric so that from a latency spike on a dashboard you can click straight into a representative trace of a request that actually experienced that latency. This gives you the best of both worlds — cheap aggregatable metrics for alerting plus a direct jump to a real trace for root-cause analysis — without polluting metric labels. In Prometheus exemplars ride alongside histogram buckets and are surfaced by Grafana as clickable points on the graph.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tags": [
+        "exemplars",
+        "metrics",
+        "traces",
+        "prometheus"
+      ],
+      "tricky": false,
+      "followUps": [
+        "Why can't you just add trace_id as a metric label instead?",
+        "How does Grafana surface exemplars on a latency panel?"
+      ]
+    },
+    {
+      "id": "q-ext-meta-monitoring",
+      "question": "Who monitors the monitoring system, and how do you avoid being blind when Prometheus itself dies?",
+      "answer": "If your alerting runs on the same Prometheus that is scraping your services, then when that Prometheus is OOM-killed, crash-looping, or falling behind on scrapes, you lose both your metrics and the alert that would have told you it broke — you are blind precisely when you most need signal. The standard answer is meta-monitoring: run an independent, small, well-resourced monitoring instance whose only job is to watch the primary stack, alerting on things like the primary's up being 0, scrape lag, WAL replay failures, ingestion rate anomalies, and rising series count that predicts an imminent cardinality OOM. A complementary technique is a deadman's switch: the primary continuously sends a heartbeat alert that is expected to always fire, and an external system (often a separate paging integration) pages you if that heartbeat ever stops, which detects a totally dead pipeline. Together these ensure a silent failure of the observability stack itself becomes a page rather than an undetected blackout.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tags": [
+        "meta-monitoring",
+        "prometheus",
+        "reliability",
+        "deadmans-switch"
+      ],
+      "tricky": true,
+      "followUps": [
+        "How does a deadman's switch alert detect a fully dead pipeline?",
+        "What early signals predict a cardinality-driven OOM before it happens?"
+      ]
+    },
+    {
+      "id": "q-ext-runbook-oncall",
+      "question": "What makes a good runbook, and how does it fit into healthy on-call practice?",
+      "answer": "A good runbook is a concise, actionable playbook attached to a specific alert that tells the responder what the alert means, what user impact it implies, the first diagnostic steps and queries to run, known remediations with their risks, and clear escalation paths if those do not work. It should link directly from the alert annotation so the paged engineer reaches it in one click, and it should be kept current by updating it after every incident where it was wrong or incomplete. In healthy on-call practice every page must be actionable, urgent, and runbook-linked; non-actionable alerts get demoted to dashboards or tickets to fight alert fatigue. Rotations should be humane (sustainable page volume, follow-the-sun where possible, comp for after-hours load) and backed by blameless postmortems that turn incidents into runbook and system improvements rather than individual blame. The goal is that a responder who has never seen this alert before can still act correctly at 3am.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tags": [
+        "runbook",
+        "on-call",
+        "alerting",
+        "incident-response"
+      ],
+      "tricky": false,
+      "followUps": [
+        "Why should runbooks be updated as part of the postmortem process?",
+        "How do blameless postmortems improve reliability over time?"
+      ]
+    },
+    {
+      "id": "q-ext-cardinality-cost-model",
+      "question": "How do you estimate the cost of a metric before shipping it, and what drives observability spend?",
+      "answer": "The dominant cost driver for metrics is active time series count, which is the product of the metric's label cardinalities: multiply the distinct values of each label together, and for histograms multiply by the number of buckets plus the sum and count series. So a histogram with a 20-value route label, a 5-value status label, and 12 buckets is roughly 20 x 5 x 14 = 1400 series per instance, then multiplied by the number of instances scraped. You estimate before shipping by writing out that product and rejecting any label whose value set is unbounded or user-derived (user_id, request_id, raw URL, error message). Beyond series count, cost is driven by scrape frequency and retention for metrics, by ingested volume and indexed fields for logs, and by trace span throughput and sampling rate for traces. Practical controls include enforcing per-scrape sample_limit, using relabeling to drop dangerous labels at ingestion, downsampling old data, sampling traces (ideally tail-based), and reducing scrape frequency for cheap-to-derive series — all decided deliberately rather than discovered on the invoice.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tags": [
+        "cardinality",
+        "cost",
+        "metrics",
+        "capacity"
+      ],
+      "tricky": true,
+      "followUps": [
+        "Why does a histogram cost more series than a counter with the same labels?",
+        "Which levers reduce metric cost with the least loss of signal?"
+      ]
     }
   ],
   "challenges": [
@@ -391,16 +871,76 @@
       "solutionLanguage": "typescript",
       "explanation": "This middleware ties all three pillars together for every request while staying cardinality-safe, which is the crux of the exercise. The span name and the http.route attribute use the route TEMPLATE ('/users/:id') rather than req.url ('/users/9381'); using the raw URL would create a near-unbounded set of span names and, worse, an unbounded metric label that would explode Prometheus. RED is covered explicitly: reqCounter gives Rate and Errors (sliced by status class) and the latency histogram gives Duration — and status is bucketed into a class ('2xx','5xx') to keep the label set tiny. The structured log emitted on res.finish includes trace_id and span_id read from the span's context, which is the join key that lets an engineer pivot from a metric spike to the trace to the exact log line. Crucially, the rest of the handler chain runs inside context.with(setSpan(...)), so any OTel-instrumented outbound HTTP/DB client automatically injects the W3C traceparent and the downstream service's spans attach to this same trace. The span is ended in the finish handler (and could be guarded in a finally for thrown errors), preventing the leaked-span bug that produces incomplete traces. The net result: one alertable metric, one correlatable log, and one propagated trace per request, with no cardinality footguns.",
       "relatedTopic": "tracing-otel"
+    },
+    {
+      "id": "ch-ext-kubernetes-probes",
+      "title": "Design Correct Liveness, Readiness, and Startup Probes",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "prompt": "You run a Java service in Kubernetes that takes ~45 seconds to warm its JIT and load caches on boot, serves HTTP on :8080, and depends on a shared Postgres. During a recent Postgres blip, every pod's health check failed at once and Kubernetes restarted the entire deployment, turning a 30-second database hiccup into a 10-minute outage. Design the probe configuration (liveness, readiness, startup) and the two health endpoints so that a dependency blip drains traffic gracefully instead of triggering a mass restart, and so slow boots are not killed prematurely. Explain what each endpoint must and must not check.",
+      "hints": [
+        "Split health into two endpoints: one shallow self-check and one dependency-aware check.",
+        "Liveness must NOT depend on Postgres; readiness MAY reflect Postgres reachability.",
+        "Use a startup probe to protect the slow 45s boot so liveness does not fire during warmup.",
+        "Set failureThreshold and periodSeconds so a brief blip drains rather than restarts.",
+        "Remember: readiness failing removes the pod from the Service endpoints; liveness failing kills the pod."
+      ],
+      "solutionCode": "# Two distinct endpoints in the app:\n#   GET /healthz  -> liveness: process is up and event loop/threads not wedged.\n#                    Returns 200 with NO downstream dependency checks.\n#   GET /readyz   -> readiness: can we actually serve? Checks Postgres pool\n#                    can hand out a connection within a short timeout.\n#\n# Kubernetes probe config on the container:\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: payments-api\nspec:\n  template:\n    spec:\n      containers:\n        - name: app\n          image: payments-api:1.4.2\n          ports:\n            - containerPort: 8080\n\n          # STARTUP: protect the slow ~45s boot. Liveness/readiness do not\n          # run until this succeeds. 30 * 3s = up to 90s allowed to start.\n          startupProbe:\n            httpGet: { path: /healthz, port: 8080 }\n            periodSeconds: 3\n            failureThreshold: 30\n\n          # LIVENESS: cheap, self-contained. NO Postgres check here, or a DB\n          # blip would kill every pod at once (the incident we are fixing).\n          livenessProbe:\n            httpGet: { path: /healthz, port: 8080 }\n            periodSeconds: 10\n            timeoutSeconds: 2\n            failureThreshold: 3   # ~30s of true wedge before restart\n\n          # READINESS: dependency-aware. If Postgres is unreachable this pod\n          # is pulled from the Service endpoints (traffic drains) but the pod\n          # is NOT restarted, so it rejoins instantly when the DB recovers.\n          readinessProbe:\n            httpGet: { path: /readyz, port: 8080 }\n            periodSeconds: 5\n            timeoutSeconds: 2\n            failureThreshold: 2\n            successThreshold: 1",
+      "solutionLanguage": "yaml",
+      "explanation": "The core of the fix is separating 'is this process alive?' from 'can this process serve right now?' and never letting a shared dependency influence the former. /healthz backs the liveness probe and checks only local process health, so a Postgres blip cannot make liveness fail across every pod simultaneously — which is exactly what caused the mass restart and turned a 30-second hiccup into a 10-minute outage. /readyz backs the readiness probe and does check that a Postgres connection can be obtained; when the database is unreachable, readiness fails and Kubernetes removes the pod from the Service endpoints so traffic drains, but it does NOT kill the pod, so every replica rejoins immediately once the database recovers with no restart storm and no cold JIT/cache. The startupProbe solves the second problem: it gives the slow ~45-second boot up to 90 seconds (30 failures at 3-second intervals) to become healthy before the liveness probe is even allowed to run, preventing premature kills during warmup that would otherwise crash-loop a slow-starting service. The failureThreshold and periodSeconds values are chosen so that a genuinely wedged process is still restarted within about 30 seconds, while transient blips within the thresholds are tolerated. The general principle to state in an interview is: liveness self-contained and cheap, readiness reflecting real serving capability including dependencies, and startup guarding slow boots — a dependency outage should drain traffic, never trigger a fleet-wide restart.",
+      "relatedTopic": "observability"
+    },
+    {
+      "id": "ch-ext-promql-golden-signals",
+      "title": "Write PromQL for the Four Golden Signals and Detect a Cardinality Blowup",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "prompt": "For an HTTP service instrumented with http_requests_total{job,route,code} and http_request_duration_seconds_bucket{job,route,le}, plus standard node and process exporters, write PromQL for all four golden signals: traffic, errors (as a ratio), latency (p99, aggregated correctly across instances), and saturation. Then write two operational queries: one that surfaces the top time-series-producing metrics so you can catch a cardinality blowup before it OOMs Prometheus, and one that alerts when scrape targets are down. Note any correctness pitfalls in your comments.",
+      "hints": [
+        "Traffic = request rate; always rate() the counter before summing.",
+        "Errors = 5xx rate divided by total rate; keep numerator and denominator consistent.",
+        "For p99 you must sum bucket rates by le FIRST, then histogram_quantile — never average per-instance quantiles.",
+        "Saturation: use a resource-pressure or queue signal, not just utilization.",
+        "Cardinality: count series per metric name with count by (__name__)({__name__=~'.+'}); 'up == 0' finds dead targets."
+      ],
+      "solutionCode": "# === FOUR GOLDEN SIGNALS ===\n\n# 1) TRAFFIC — requests per second per route.\n#    rate() each raw counter series, THEN aggregate. Never rate a sum.\nsum by (route) (rate(http_requests_total{job=\"api\"}[5m]))\n\n# 2) ERRORS — fraction of requests that are 5xx over 5m.\n#    Numerator and denominator use the SAME window and label matchers.\nsum(rate(http_requests_total{job=\"api\", code=~\"5..\"}[5m]))\n  /\nsum(rate(http_requests_total{job=\"api\"}[5m]))\n\n# 3) LATENCY — p99 across ALL instances.\n#    Correct: sum bucket rates by le first, then compute the quantile once.\n#    WRONG would be avg() of per-instance histogram_quantile results —\n#    quantiles are not linear and do not average.\nhistogram_quantile(\n  0.99,\n  sum by (le) (rate(http_request_duration_seconds_bucket{job=\"api\"}[5m]))\n)\n\n# 4) SATURATION — how much work is queued beyond capacity.\n#    CPU pressure (waiting time) is a better saturation signal than raw\n#    utilization, which can be 100% while perfectly healthy.\nsum by (instance) (rate(node_pressure_cpu_waiting_seconds_total[5m]))\n\n# === OPERATIONAL / META-MONITORING QUERIES ===\n\n# A) CARDINALITY WATCH — top metric names by active series count.\n#    Run this to spot a blowup BEFORE it OOMs the TSDB.\ntopk(10, count by (__name__)({__name__=~\".+\"}))\n\n# A2) Per-target series count — find the one bad exporter/deploy.\ntopk(10, count by (job, instance)({__name__=~\".+\"}))\n\n# B) DEAD TARGETS — page when a scrape target is down.\n#    'up' is 1 on a successful scrape, 0 on failure; ideal for meta-monitoring.\nmax by (job, instance) (up == 0)\n\n# B2) Scrape falling behind (samples appended slowing) — early OOM signal.\nrate(prometheus_tsdb_head_series[10m]) > 0\n  and prometheus_tsdb_head_series > 2e6",
+      "solutionLanguage": "text",
+      "explanation": "This challenge exercises the four golden signals and the correctness traps that separate a working PromQL answer from a broken one. Traffic is the per-second request rate, and the load-bearing detail is that rate() must be applied to each raw counter series before any sum — rate() relies on seeing individual counter resets, so summing first and rating after produces meaningless numbers. Errors are expressed as a ratio with the numerator (5xx rate) and denominator (total rate) sharing the exact same window and matchers so the fraction is coherent. The latency query is the classic interview trap: to get a fleet-wide p99 you must sum the bucket rates by le first and call histogram_quantile once, because quantiles are non-linear and averaging per-instance p99s is statistically meaningless. Saturation deliberately uses a CPU pressure/waiting signal rather than plain utilization, because a resource pegged at 100% utilization can still be perfectly healthy — what hurts is work queued beyond what the resource can service, which pressure captures. The operational queries turn PromQL into a safety tool: topk(count by (__name__)) and its per-target variant surface a cardinality blowup so you can catch a bad deploy before it OOMs Prometheus, while up == 0 detects dead scrape targets and the head-series check gives an early warning that the TSDB is growing toward a memory cliff. Note the language is 'text' because the app has no PromQL highlighter, so the query is presented as annotated plain text.",
+      "relatedTopic": "observability"
     }
   ],
   "references": [
-    {"label": "Google SRE Book — Service Level Objectives", "url": "https://sre.google/sre-book/service-level-objectives/"},
-    {"label": "Google SRE Workbook — Alerting on SLOs", "url": "https://sre.google/workbook/alerting-on-slos/"},
-    {"label": "Prometheus — Best Practices: Naming and Labels", "url": "https://prometheus.io/docs/practices/naming/"},
-    {"label": "Prometheus — Querying Basics (PromQL)", "url": "https://prometheus.io/docs/prometheus/latest/querying/basics/"},
-    {"label": "OpenTelemetry Documentation", "url": "https://opentelemetry.io/docs/"},
-    {"label": "W3C Trace Context Specification", "url": "https://www.w3.org/TR/trace-context/"},
-    {"label": "Brendan Gregg — The USE Method", "url": "https://www.brendangregg.com/usemethod.html"},
-    {"label": "Tom Wilkie — The RED Method", "url": "https://grafana.com/blog/2018/08/02/the-red-method-how-to-instrument-your-services/"}
+    {
+      "label": "Google SRE Book — Service Level Objectives",
+      "url": "https://sre.google/sre-book/service-level-objectives/"
+    },
+    {
+      "label": "Google SRE Workbook — Alerting on SLOs",
+      "url": "https://sre.google/workbook/alerting-on-slos/"
+    },
+    {
+      "label": "Prometheus — Best Practices: Naming and Labels",
+      "url": "https://prometheus.io/docs/practices/naming/"
+    },
+    {
+      "label": "Prometheus — Querying Basics (PromQL)",
+      "url": "https://prometheus.io/docs/prometheus/latest/querying/basics/"
+    },
+    {
+      "label": "OpenTelemetry Documentation",
+      "url": "https://opentelemetry.io/docs/"
+    },
+    {
+      "label": "W3C Trace Context Specification",
+      "url": "https://www.w3.org/TR/trace-context/"
+    },
+    {
+      "label": "Brendan Gregg — The USE Method",
+      "url": "https://www.brendangregg.com/usemethod.html"
+    },
+    {
+      "label": "Tom Wilkie — The RED Method",
+      "url": "https://grafana.com/blog/2018/08/02/the-red-method-how-to-instrument-your-services/"
+    }
   ]
 }

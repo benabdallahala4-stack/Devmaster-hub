@@ -4,7 +4,14 @@
   "category": "DevOps",
   "subcategory": "Delivery",
   "difficulty": "mid",
-  "tags": ["ci-cd", "pipelines", "deployment", "dora", "automation", "release-engineering"],
+  "tags": [
+    "ci-cd",
+    "pipelines",
+    "deployment",
+    "dora",
+    "automation",
+    "release-engineering"
+  ],
   "description": "A staff-level tour of continuous integration and delivery: pipeline design, deployment strategies, artifact promotion, secrets, and the metrics that prove your delivery actually works.",
   "estReadMinutes": 28,
   "sections": [
@@ -13,9 +20,19 @@
       "heading": "Introduction",
       "kind": "intro",
       "blocks": [
-        {"type": "paragraph", "text": "CI/CD is the automated path that takes a code change from a developer's branch to running in production, with each step verifying the change is safe to advance. It is less a single tool than a discipline: small batches, fast feedback, repeatable builds, and the confidence to ship many times a day without ceremony."},
-        {"type": "paragraph", "text": "The acronym smuggles three distinct ideas under two letters. Continuous Integration is about merging frequently and validating every merge. Continuous Delivery is about always having a deployable, release-ready artifact. Continuous Deployment is about pushing every passing change to production automatically. Conflating them is the single most common source of confusion in interviews and in real org strategy discussions."},
-        {"type": "callout", "variant": "info", "text": "Rule of thumb: CI ends at a green build and a published artifact. Delivery makes that artifact promotable on demand. Deployment removes the human from the on-demand step."}
+        {
+          "type": "paragraph",
+          "text": "CI/CD is the automated path that takes a code change from a developer's branch to running in production, with each step verifying the change is safe to advance. It is less a single tool than a discipline: small batches, fast feedback, repeatable builds, and the confidence to ship many times a day without ceremony."
+        },
+        {
+          "type": "paragraph",
+          "text": "The acronym smuggles three distinct ideas under two letters. Continuous Integration is about merging frequently and validating every merge. Continuous Delivery is about always having a deployable, release-ready artifact. Continuous Deployment is about pushing every passing change to production automatically. Conflating them is the single most common source of confusion in interviews and in real org strategy discussions."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Rule of thumb: CI ends at a green build and a published artifact. Delivery makes that artifact promotable on demand. Deployment removes the human from the on-demand step."
+        }
       ]
     },
     {
@@ -23,15 +40,25 @@
       "heading": "Why CI/CD Matters",
       "kind": "why",
       "blocks": [
-        {"type": "paragraph", "text": "The business case is throughput and safety at the same time. Teams that deploy frequently in small batches recover from failures faster and have lower change-failure rates, because each change is small enough to reason about and roll back. The DORA research program quantified this: elite performers deploy on-demand, have lead times under an hour, restore service in under an hour, and keep change-failure rate under 15 percent."},
-        {"type": "list", "items": [
-          "Smaller batches mean smaller blast radius and faster, more obvious rollbacks.",
-          "Automated gates remove the 'it depends who reviewed it' variance from releases.",
-          "Reproducible builds make 'works on my machine' a debuggable problem, not a shrug.",
-          "Fast feedback (minutes, not hours) keeps engineers in flow and bugs cheap to fix.",
-          "A promotable artifact decouples 'is it built and tested' from 'should we release now'."
-        ]},
-        {"type": "callout", "variant": "success", "text": "The goal is not speed for its own sake. It is reducing the cost and risk of any single change so that shipping becomes boring."}
+        {
+          "type": "paragraph",
+          "text": "The business case is throughput and safety at the same time. Teams that deploy frequently in small batches recover from failures faster and have lower change-failure rates, because each change is small enough to reason about and roll back. The DORA research program quantified this: elite performers deploy on-demand, have lead times under an hour, restore service in under an hour, and keep change-failure rate under 15 percent."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Smaller batches mean smaller blast radius and faster, more obvious rollbacks.",
+            "Automated gates remove the 'it depends who reviewed it' variance from releases.",
+            "Reproducible builds make 'works on my machine' a debuggable problem, not a shrug.",
+            "Fast feedback (minutes, not hours) keeps engineers in flow and bugs cheap to fix.",
+            "A promotable artifact decouples 'is it built and tested' from 'should we release now'."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The goal is not speed for its own sake. It is reducing the cost and risk of any single change so that shipping becomes boring."
+        }
       ]
     },
     {
@@ -39,14 +66,48 @@
       "heading": "CI vs Continuous Delivery vs Continuous Deployment",
       "kind": "concept",
       "blocks": [
-        {"type": "paragraph", "text": "These three terms describe a progression of automation maturity. Each builds on the previous one, and you can stop at any rung deliberately."},
-        {"type": "table", "headers": ["Practice", "What it automates", "Human gate", "Trigger to prod"], "rows": [
-          ["Continuous Integration", "Build + test on every merge to trunk", "Code review", "None (does not reach prod)"],
-          ["Continuous Delivery", "Always-deployable artifact, one-click promote", "Yes — someone clicks 'release'", "Manual approval"],
-          ["Continuous Deployment", "Auto-promote every green build to prod", "No — gates are fully automated", "Green pipeline"]
-        ]},
-        {"type": "paragraph", "text": "The boundary that trips people up is Delivery versus Deployment. Both require a fully automated, trustworthy pipeline. The only difference is the final gate: Delivery keeps a human in the loop for the production push (regulatory sign-off, business timing, marketing launch); Deployment automates even that. Continuous Deployment requires Continuous Delivery first — you cannot safely auto-ship what you cannot reliably one-click ship."},
-        {"type": "callout", "variant": "warning", "text": "Many regulated industries run Continuous Delivery deliberately, not because they lack the pipeline maturity for Deployment, but because an auditor needs a named human approval per production change."}
+        {
+          "type": "paragraph",
+          "text": "These three terms describe a progression of automation maturity. Each builds on the previous one, and you can stop at any rung deliberately."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Practice",
+            "What it automates",
+            "Human gate",
+            "Trigger to prod"
+          ],
+          "rows": [
+            [
+              "Continuous Integration",
+              "Build + test on every merge to trunk",
+              "Code review",
+              "None (does not reach prod)"
+            ],
+            [
+              "Continuous Delivery",
+              "Always-deployable artifact, one-click promote",
+              "Yes — someone clicks 'release'",
+              "Manual approval"
+            ],
+            [
+              "Continuous Deployment",
+              "Auto-promote every green build to prod",
+              "No — gates are fully automated",
+              "Green pipeline"
+            ]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The boundary that trips people up is Delivery versus Deployment. Both require a fully automated, trustworthy pipeline. The only difference is the final gate: Delivery keeps a human in the loop for the production push (regulatory sign-off, business timing, marketing launch); Deployment automates even that. Continuous Deployment requires Continuous Delivery first — you cannot safely auto-ship what you cannot reliably one-click ship."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Many regulated industries run Continuous Delivery deliberately, not because they lack the pipeline maturity for Deployment, but because an auditor needs a named human approval per production change."
+        }
       ]
     },
     {
@@ -54,18 +115,35 @@
       "heading": "Core Concept: Pipeline Stages",
       "kind": "concept",
       "blocks": [
-        {"type": "paragraph", "text": "A production pipeline is a sequence of stages where each stage is a quality gate: it either passes the artifact forward or fails fast and stops. The canonical ordering is commit, build, test, security scan, image build, deploy. Order matters — cheap, fast checks go first so expensive stages never run on doomed commits."},
-        {"type": "heading", "text": "The canonical stages"},
-        {"type": "list", "items": [
-          "Commit/Lint: format, static analysis, fast unit tests — seconds, runs on every push.",
-          "Build: compile, resolve dependencies, produce binaries; fails on compile or dependency errors.",
-          "Test: unit + integration + contract tests against ephemeral dependencies.",
-          "Security scan: SAST, dependency CVE scan, secret detection, IaC scanning.",
-          "Docker build: produce an immutable, content-addressed image with a digest.",
-          "Deploy: promote the exact same digest through dev, staging, and production."
-        ]},
-        {"type": "code", "language": "yaml", "code": "# GitHub Actions: fail-fast ordering, fast checks first\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: npm ci && npm run lint && npm run typecheck\n\n  test:\n    needs: lint            # never run expensive tests on lint failures\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: npm ci && npm test -- --coverage\n\n  build-image:\n    needs: test\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: |\n          docker build -t $REG/app:${{ github.sha }} .\n          docker push $REG/app:${{ github.sha }}"},
-        {"type": "callout", "variant": "info", "text": "Tag images with the immutable commit SHA or a content digest, never 'latest'. The artifact that passed staging must be byte-for-byte the artifact that reaches prod."}
+        {
+          "type": "paragraph",
+          "text": "A production pipeline is a sequence of stages where each stage is a quality gate: it either passes the artifact forward or fails fast and stops. The canonical ordering is commit, build, test, security scan, image build, deploy. Order matters — cheap, fast checks go first so expensive stages never run on doomed commits."
+        },
+        {
+          "type": "heading",
+          "text": "The canonical stages"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Commit/Lint: format, static analysis, fast unit tests — seconds, runs on every push.",
+            "Build: compile, resolve dependencies, produce binaries; fails on compile or dependency errors.",
+            "Test: unit + integration + contract tests against ephemeral dependencies.",
+            "Security scan: SAST, dependency CVE scan, secret detection, IaC scanning.",
+            "Docker build: produce an immutable, content-addressed image with a digest.",
+            "Deploy: promote the exact same digest through dev, staging, and production."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "code": "# GitHub Actions: fail-fast ordering, fast checks first\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: npm ci && npm run lint && npm run typecheck\n\n  test:\n    needs: lint            # never run expensive tests on lint failures\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: npm ci && npm test -- --coverage\n\n  build-image:\n    needs: test\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: |\n          docker build -t $REG/app:${{ github.sha }} .\n          docker push $REG/app:${{ github.sha }}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Tag images with the immutable commit SHA or a content digest, never 'latest'. The artifact that passed staging must be byte-for-byte the artifact that reaches prod."
+        }
       ]
     },
     {
@@ -73,18 +151,62 @@
       "heading": "Core Concept: Branching Models and Build Caching",
       "kind": "concept",
       "blocks": [
-        {"type": "heading", "text": "Trunk-based vs Gitflow"},
-        {"type": "paragraph", "text": "Trunk-based development keeps one long-lived branch (main/trunk). Engineers merge small changes multiple times a day behind feature flags, and releases are cut from trunk. Gitflow maintains long-lived develop, release, and hotfix branches with elaborate merge rituals. For high-frequency CI/CD, trunk-based wins: long-lived branches accumulate merge conflicts and delay integration, which is precisely what CI exists to prevent."},
-        {"type": "table", "headers": ["Aspect", "Trunk-based", "Gitflow"], "rows": [
-          ["Branch lifetime", "Hours to a day", "Days to weeks"],
-          ["Integration frequency", "Many times/day", "At release time"],
-          ["Feature isolation", "Feature flags", "Branches"],
-          ["Best fit", "Continuous delivery/deployment", "Scheduled, versioned releases"]
-        ]},
-        {"type": "heading", "text": "Build caching"},
-        {"type": "paragraph", "text": "Caching is the difference between a 2-minute and a 20-minute pipeline. Cache dependency directories keyed on the lockfile hash, and use Docker layer caching ordered so that rarely-changing layers (dependency installs) come before frequently-changing layers (your source)."},
-        {"type": "code", "language": "dockerfile", "code": "# Layer ordering: deps change rarely -> cached; source changes often\nFROM node:20-slim AS build\nWORKDIR /app\nCOPY package.json package-lock.json ./\nRUN npm ci                 # this layer is cached until lockfile changes\nCOPY . .                   # only this layer rebuilds on a code change\nRUN npm run build\n\nFROM gcr.io/distroless/nodejs20 AS runtime\nWORKDIR /app\nCOPY --from=build /app/dist ./dist\nCOPY --from=build /app/node_modules ./node_modules\nCMD [\"dist/server.js\"]"},
-        {"type": "callout", "variant": "warning", "text": "A poisoned cache is worse than no cache. Key caches strictly on the lockfile hash, and never cache anything keyed on a mutable tag — stale dependencies passing CI then failing in prod is a brutal debugging session."}
+        {
+          "type": "heading",
+          "text": "Trunk-based vs Gitflow"
+        },
+        {
+          "type": "paragraph",
+          "text": "Trunk-based development keeps one long-lived branch (main/trunk). Engineers merge small changes multiple times a day behind feature flags, and releases are cut from trunk. Gitflow maintains long-lived develop, release, and hotfix branches with elaborate merge rituals. For high-frequency CI/CD, trunk-based wins: long-lived branches accumulate merge conflicts and delay integration, which is precisely what CI exists to prevent."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Aspect",
+            "Trunk-based",
+            "Gitflow"
+          ],
+          "rows": [
+            [
+              "Branch lifetime",
+              "Hours to a day",
+              "Days to weeks"
+            ],
+            [
+              "Integration frequency",
+              "Many times/day",
+              "At release time"
+            ],
+            [
+              "Feature isolation",
+              "Feature flags",
+              "Branches"
+            ],
+            [
+              "Best fit",
+              "Continuous delivery/deployment",
+              "Scheduled, versioned releases"
+            ]
+          ]
+        },
+        {
+          "type": "heading",
+          "text": "Build caching"
+        },
+        {
+          "type": "paragraph",
+          "text": "Caching is the difference between a 2-minute and a 20-minute pipeline. Cache dependency directories keyed on the lockfile hash, and use Docker layer caching ordered so that rarely-changing layers (dependency installs) come before frequently-changing layers (your source)."
+        },
+        {
+          "type": "code",
+          "language": "dockerfile",
+          "code": "# Layer ordering: deps change rarely -> cached; source changes often\nFROM node:20-slim AS build\nWORKDIR /app\nCOPY package.json package-lock.json ./\nRUN npm ci                 # this layer is cached until lockfile changes\nCOPY . .                   # only this layer rebuilds on a code change\nRUN npm run build\n\nFROM gcr.io/distroless/nodejs20 AS runtime\nWORKDIR /app\nCOPY --from=build /app/dist ./dist\nCOPY --from=build /app/node_modules ./node_modules\nCMD [\"dist/server.js\"]"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "A poisoned cache is worse than no cache. Key caches strictly on the lockfile hash, and never cache anything keyed on a mutable tag — stale dependencies passing CI then failing in prod is a brutal debugging session."
+        }
       ]
     },
     {
@@ -92,15 +214,44 @@
       "heading": "Core Concept: Artifact Promotion and Deployment Strategies",
       "kind": "concept",
       "blocks": [
-        {"type": "paragraph", "text": "Build once, promote everywhere. The same immutable image digest moves from dev to staging to prod. You never rebuild per environment — rebuilding reintroduces the risk that the prod artifact differs from the one you tested. Environment differences live in config and secrets injected at deploy time, not in the binary."},
-        {"type": "heading", "text": "Blue/Green"},
-        {"type": "paragraph", "text": "Run two identical environments. Green is live, blue holds the new version. Cut traffic over at the load balancer atomically. Rollback is instant — flip back to green. Cost is double the infrastructure during the cutover, and stateful concerns (DB migrations, in-flight sessions) need care."},
-        {"type": "heading", "text": "Canary"},
-        {"type": "paragraph", "text": "Route a small percentage (1-5 percent) of traffic to the new version, watch error rate and latency SLOs, then progressively ramp. Cheaper than blue/green and catches issues with real production traffic before full exposure. Requires good observability — a canary with no metrics is just a slow rollout."},
-        {"type": "code", "language": "yaml", "code": "# Argo Rollouts canary: progressive ramp with automated analysis\napiVersion: argoproj.io/v1alpha1\nkind: Rollout\nspec:\n  strategy:\n    canary:\n      steps:\n        - setWeight: 5\n        - pause: {duration: 5m}\n        - analysis:           # auto-abort if SLOs breach\n            templates:\n              - templateName: error-rate\n        - setWeight: 25\n        - pause: {duration: 10m}\n        - setWeight: 50\n        - pause: {duration: 10m}\n        - setWeight: 100"},
-        {"type": "heading", "text": "Rollback"},
-        {"type": "paragraph", "text": "Rollback must be a first-class, rehearsed operation — a single command or an automated trigger on SLO breach, not a frantic manual redeploy. Because you promote immutable digests, rollback is just re-promoting the previous digest. The hard part is forward-incompatible database migrations: always make schema changes backward-compatible (expand-then-contract) so the old version can run against the new schema."},
-        {"type": "callout", "variant": "danger", "text": "A rollback you have never tested is not a rollback. If your migration drops a column the previous version still reads, you cannot roll back — you can only roll forward and pray."}
+        {
+          "type": "paragraph",
+          "text": "Build once, promote everywhere. The same immutable image digest moves from dev to staging to prod. You never rebuild per environment — rebuilding reintroduces the risk that the prod artifact differs from the one you tested. Environment differences live in config and secrets injected at deploy time, not in the binary."
+        },
+        {
+          "type": "heading",
+          "text": "Blue/Green"
+        },
+        {
+          "type": "paragraph",
+          "text": "Run two identical environments. Green is live, blue holds the new version. Cut traffic over at the load balancer atomically. Rollback is instant — flip back to green. Cost is double the infrastructure during the cutover, and stateful concerns (DB migrations, in-flight sessions) need care."
+        },
+        {
+          "type": "heading",
+          "text": "Canary"
+        },
+        {
+          "type": "paragraph",
+          "text": "Route a small percentage (1-5 percent) of traffic to the new version, watch error rate and latency SLOs, then progressively ramp. Cheaper than blue/green and catches issues with real production traffic before full exposure. Requires good observability — a canary with no metrics is just a slow rollout."
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "code": "# Argo Rollouts canary: progressive ramp with automated analysis\napiVersion: argoproj.io/v1alpha1\nkind: Rollout\nspec:\n  strategy:\n    canary:\n      steps:\n        - setWeight: 5\n        - pause: {duration: 5m}\n        - analysis:           # auto-abort if SLOs breach\n            templates:\n              - templateName: error-rate\n        - setWeight: 25\n        - pause: {duration: 10m}\n        - setWeight: 50\n        - pause: {duration: 10m}\n        - setWeight: 100"
+        },
+        {
+          "type": "heading",
+          "text": "Rollback"
+        },
+        {
+          "type": "paragraph",
+          "text": "Rollback must be a first-class, rehearsed operation — a single command or an automated trigger on SLO breach, not a frantic manual redeploy. Because you promote immutable digests, rollback is just re-promoting the previous digest. The hard part is forward-incompatible database migrations: always make schema changes backward-compatible (expand-then-contract) so the old version can run against the new schema."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "A rollback you have never tested is not a rollback. If your migration drops a column the previous version still reads, you cannot roll back — you can only roll forward and pray."
+        }
       ]
     },
     {
@@ -108,16 +259,30 @@
       "heading": "Core Concept: Secrets in Pipelines",
       "kind": "concept",
       "blocks": [
-        {"type": "paragraph", "text": "CI runners are a prime attack target because they hold credentials to build, push, and deploy. Treat pipeline secrets as production secrets. The modern best practice is short-lived, identity-based credentials via OIDC federation rather than long-lived static keys stored in CI settings."},
-        {"type": "list", "items": [
-          "Prefer OIDC: the CI provider mints a short-lived token your cloud trusts — no static cloud keys in CI at all.",
-          "If you must store secrets, use the provider's encrypted secret store, scoped to the minimum environments.",
-          "Mask secrets in logs and forbid echoing them; assume any printed secret is compromised.",
-          "Block secret exfiltration: pin third-party actions to a commit SHA, not a mutable tag, so a hijacked action can't steal your tokens.",
-          "Rotate on a schedule and on any suspected exposure; scope tokens to least privilege."
-        ]},
-        {"type": "code", "language": "yaml", "code": "# OIDC: no static AWS keys, short-lived role assumption per run\npermissions:\n  id-token: write          # required to request the OIDC token\n  contents: read\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: aws-actions/configure-aws-credentials@v4\n        with:\n          role-to-assume: arn:aws:iam::123456789012:role/ci-deploy\n          aws-region: us-east-1\n      - run: aws s3 sync ./dist s3://my-bucket"},
-        {"type": "callout", "variant": "danger", "text": "Pinning third-party actions to @v3 instead of a commit SHA means the maintainer (or whoever compromises their account) can change what runs in your pipeline tomorrow. The 2025 tj-actions/changed-files supply-chain incident leaked CI secrets exactly this way."}
+        {
+          "type": "paragraph",
+          "text": "CI runners are a prime attack target because they hold credentials to build, push, and deploy. Treat pipeline secrets as production secrets. The modern best practice is short-lived, identity-based credentials via OIDC federation rather than long-lived static keys stored in CI settings."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Prefer OIDC: the CI provider mints a short-lived token your cloud trusts — no static cloud keys in CI at all.",
+            "If you must store secrets, use the provider's encrypted secret store, scoped to the minimum environments.",
+            "Mask secrets in logs and forbid echoing them; assume any printed secret is compromised.",
+            "Block secret exfiltration: pin third-party actions to a commit SHA, not a mutable tag, so a hijacked action can't steal your tokens.",
+            "Rotate on a schedule and on any suspected exposure; scope tokens to least privilege."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "code": "# OIDC: no static AWS keys, short-lived role assumption per run\npermissions:\n  id-token: write          # required to request the OIDC token\n  contents: read\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: aws-actions/configure-aws-credentials@v4\n        with:\n          role-to-assume: arn:aws:iam::123456789012:role/ci-deploy\n          aws-region: us-east-1\n      - run: aws s3 sync ./dist s3://my-bucket"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Pinning third-party actions to @v3 instead of a commit SHA means the maintainer (or whoever compromises their account) can change what runs in your pipeline tomorrow. The 2025 tj-actions/changed-files supply-chain incident leaked CI secrets exactly this way."
+        }
       ]
     },
     {
@@ -125,15 +290,49 @@
       "heading": "Core Concept: DORA Metrics",
       "kind": "concept",
       "blocks": [
-        {"type": "paragraph", "text": "DORA defines four key metrics that, taken together, measure both speed and stability. The insight is that they are not in tension — elite teams score well on all four, because small batches improve speed and stability simultaneously."},
-        {"type": "table", "headers": ["Metric", "Measures", "Elite target"], "rows": [
-          ["Deployment Frequency", "How often you ship to prod", "On-demand (multiple/day)"],
-          ["Lead Time for Changes", "Commit to running in prod", "Less than one hour"],
-          ["Change Failure Rate", "% of deploys causing a failure", "0-15%"],
-          ["Mean Time to Restore (MTTR)", "Time to recover from failure", "Less than one hour"]
-        ]},
-        {"type": "paragraph", "text": "The first two measure throughput; the last two measure stability. A senior signal in interviews is knowing they are balanced as a pair: optimizing deployment frequency while ignoring change-failure rate just means you're shipping breakage faster."},
-        {"type": "callout", "variant": "info", "text": "DORA metrics are outcome metrics, not targets to game. If you measure deployment frequency alone, teams will split one logical change into ten deploys to look good."}
+        {
+          "type": "paragraph",
+          "text": "DORA defines four key metrics that, taken together, measure both speed and stability. The insight is that they are not in tension — elite teams score well on all four, because small batches improve speed and stability simultaneously."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Metric",
+            "Measures",
+            "Elite target"
+          ],
+          "rows": [
+            [
+              "Deployment Frequency",
+              "How often you ship to prod",
+              "On-demand (multiple/day)"
+            ],
+            [
+              "Lead Time for Changes",
+              "Commit to running in prod",
+              "Less than one hour"
+            ],
+            [
+              "Change Failure Rate",
+              "% of deploys causing a failure",
+              "0-15%"
+            ],
+            [
+              "Mean Time to Restore (MTTR)",
+              "Time to recover from failure",
+              "Less than one hour"
+            ]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The first two measure throughput; the last two measure stability. A senior signal in interviews is knowing they are balanced as a pair: optimizing deployment frequency while ignoring change-failure rate just means you're shipping breakage faster."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "DORA metrics are outcome metrics, not targets to game. If you measure deployment frequency alone, teams will split one logical change into ten deploys to look good."
+        }
       ]
     },
     {
@@ -141,10 +340,24 @@
       "heading": "Production Example: A Canary That Saved an Outage",
       "kind": "example",
       "blocks": [
-        {"type": "paragraph", "text": "Scenario: a payments service team at a fintech ran a 5 percent canary with automated SLO analysis. A new release introduced a connection-pool change that exhausted database connections under real load — invisible in staging, which had a fraction of production concurrency. Within four minutes of the canary going live, error rate on the canary pods crossed the 1 percent threshold while the stable pods stayed healthy."},
-        {"type": "paragraph", "text": "The Argo Rollouts analysis run compared canary error rate against the stable baseline and automatically aborted, draining the 5 percent of traffic back to the stable version. No human paged, no full outage, blast radius capped at 5 percent of payment requests for four minutes. The fix shipped the next day with the pool size corrected and a staging load test added."},
-        {"type": "code", "language": "yaml", "code": "# The AnalysisTemplate that triggered the auto-abort\napiVersion: argoproj.io/v1alpha1\nkind: AnalysisTemplate\nmetadata:\n  name: error-rate\nspec:\n  metrics:\n    - name: error-rate\n      interval: 1m\n      successCondition: result < 0.01      # under 1% errors\n      failureLimit: 3                       # abort after 3 breaches\n      provider:\n        prometheus:\n          address: http://prometheus:9090\n          query: |\n            sum(rate(http_requests_total{job=\"payments\",code=~\"5..\"}[2m]))\n            / sum(rate(http_requests_total{job=\"payments\"}[2m]))"},
-        {"type": "callout", "variant": "success", "text": "The lesson: the canary did not prevent the bug — code review and tests missed it. The canary prevented the bug from becoming an incident. Defense in depth means assuming bad code will reach the deploy stage."}
+        {
+          "type": "paragraph",
+          "text": "Scenario: a payments service team at a fintech ran a 5 percent canary with automated SLO analysis. A new release introduced a connection-pool change that exhausted database connections under real load — invisible in staging, which had a fraction of production concurrency. Within four minutes of the canary going live, error rate on the canary pods crossed the 1 percent threshold while the stable pods stayed healthy."
+        },
+        {
+          "type": "paragraph",
+          "text": "The Argo Rollouts analysis run compared canary error rate against the stable baseline and automatically aborted, draining the 5 percent of traffic back to the stable version. No human paged, no full outage, blast radius capped at 5 percent of payment requests for four minutes. The fix shipped the next day with the pool size corrected and a staging load test added."
+        },
+        {
+          "type": "code",
+          "language": "yaml",
+          "code": "# The AnalysisTemplate that triggered the auto-abort\napiVersion: argoproj.io/v1alpha1\nkind: AnalysisTemplate\nmetadata:\n  name: error-rate\nspec:\n  metrics:\n    - name: error-rate\n      interval: 1m\n      successCondition: result < 0.01      # under 1% errors\n      failureLimit: 3                       # abort after 3 breaches\n      provider:\n        prometheus:\n          address: http://prometheus:9090\n          query: |\n            sum(rate(http_requests_total{job=\"payments\",code=~\"5..\"}[2m]))\n            / sum(rate(http_requests_total{job=\"payments\"}[2m]))"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The lesson: the canary did not prevent the bug — code review and tests missed it. The canary prevented the bug from becoming an incident. Defense in depth means assuming bad code will reach the deploy stage."
+        }
       ]
     },
     {
@@ -152,16 +365,23 @@
       "heading": "Common Mistakes and Production Incidents",
       "kind": "mistake",
       "blocks": [
-        {"type": "list", "items": [
-          "Rebuilding per environment: the prod image differs from the tested staging image, so 'we tested this' is a lie. Build once, promote the digest.",
-          "Flaky tests treated as noise: when red sometimes means nothing, engineers learn to ignore red, and a real failure slips through. Quarantine flaky tests, don't retry-until-green.",
-          "Mutable image tags ('latest', 'prod'): you can't reproduce or roll back to a specific known-good artifact.",
-          "Secrets echoed to logs or stored as long-lived static keys in CI settings — a single log leak or runner compromise hands an attacker production access.",
-          "Forward-incompatible migrations deployed with the app, making rollback impossible.",
-          "Slow pipelines (30+ min): engineers batch changes to avoid the wait, defeating the entire point of small batches.",
-          "Manual approval theater: a human clicks 'approve' on a 4000-line diff they never read — the gate exists but provides no real safety."
-        ]},
-        {"type": "callout", "variant": "warning", "text": "The most insidious failure is the slowly-rotting pipeline: caches get poisoned, tests get flaky, scans get muted 'just for now'. Treat pipeline health as a product with an owner, not a one-time setup."}
+        {
+          "type": "list",
+          "items": [
+            "Rebuilding per environment: the prod image differs from the tested staging image, so 'we tested this' is a lie. Build once, promote the digest.",
+            "Flaky tests treated as noise: when red sometimes means nothing, engineers learn to ignore red, and a real failure slips through. Quarantine flaky tests, don't retry-until-green.",
+            "Mutable image tags ('latest', 'prod'): you can't reproduce or roll back to a specific known-good artifact.",
+            "Secrets echoed to logs or stored as long-lived static keys in CI settings — a single log leak or runner compromise hands an attacker production access.",
+            "Forward-incompatible migrations deployed with the app, making rollback impossible.",
+            "Slow pipelines (30+ min): engineers batch changes to avoid the wait, defeating the entire point of small batches.",
+            "Manual approval theater: a human clicks 'approve' on a 4000-line diff they never read — the gate exists but provides no real safety."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The most insidious failure is the slowly-rotting pipeline: caches get poisoned, tests get flaky, scans get muted 'just for now'. Treat pipeline health as a product with an owner, not a one-time setup."
+        }
       ]
     },
     {
@@ -169,17 +389,24 @@
       "heading": "Best Practices",
       "kind": "bestpractice",
       "blocks": [
-        {"type": "list", "items": [
-          "Build once, promote the immutable digest through every environment.",
-          "Order stages cheap-to-expensive and fail fast; keep the inner loop under 10 minutes.",
-          "Use trunk-based development with feature flags to decouple deploy from release.",
-          "Make every deploy reversible: expand-then-contract migrations, one-command rollback, tested regularly.",
-          "Use OIDC for cloud credentials and pin third-party actions to commit SHAs.",
-          "Gate on real signals — coverage thresholds, SLO-based canary analysis, security scans — not vanity green checks.",
-          "Quarantine flaky tests immediately and fix them on a deadline; never normalize a red main.",
-          "Measure DORA metrics as a balanced set and review them, don't game them."
-        ]},
-        {"type": "callout", "variant": "success", "text": "If your engineers find the pipeline trustworthy enough to deploy on a Friday afternoon without anxiety, you've built it right."}
+        {
+          "type": "list",
+          "items": [
+            "Build once, promote the immutable digest through every environment.",
+            "Order stages cheap-to-expensive and fail fast; keep the inner loop under 10 minutes.",
+            "Use trunk-based development with feature flags to decouple deploy from release.",
+            "Make every deploy reversible: expand-then-contract migrations, one-command rollback, tested regularly.",
+            "Use OIDC for cloud credentials and pin third-party actions to commit SHAs.",
+            "Gate on real signals — coverage thresholds, SLO-based canary analysis, security scans — not vanity green checks.",
+            "Quarantine flaky tests immediately and fix them on a deadline; never normalize a red main.",
+            "Measure DORA metrics as a balanced set and review them, don't game them."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "If your engineers find the pipeline trustworthy enough to deploy on a Friday afternoon without anxiety, you've built it right."
+        }
       ]
     },
     {
@@ -187,8 +414,15 @@
       "heading": "Note: Pipeline as Code and GitOps",
       "kind": "note",
       "blocks": [
-        {"type": "paragraph", "text": "Define pipelines in version-controlled files (.github/workflows, .gitlab-ci.yml, Jenkinsfile) so the pipeline itself is reviewed, diffed, and rolled back like any code. GitOps extends this to deployment: a controller like Argo CD continuously reconciles the cluster to match a declared desired state in Git, so the repository is the single source of truth and every change is an auditable commit."},
-        {"type": "callout", "variant": "info", "text": "With GitOps, 'rollback' is git revert. The cluster reconciles itself back to the previous declared state — no imperative kubectl required."}
+        {
+          "type": "paragraph",
+          "text": "Define pipelines in version-controlled files (.github/workflows, .gitlab-ci.yml, Jenkinsfile) so the pipeline itself is reviewed, diffed, and rolled back like any code. GitOps extends this to deployment: a controller like Argo CD continuously reconciles the cluster to match a declared desired state in Git, so the repository is the single source of truth and every change is an auditable commit."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "With GitOps, 'rollback' is git revert. The cluster reconciles itself back to the previous declared state — no imperative kubectl required."
+        }
       ]
     }
   ],
@@ -220,8 +454,14 @@
       "difficulty": "junior",
       "category": "DevOps",
       "tricky": false,
-      "tags": ["ci", "fundamentals"],
-      "followUps": ["What makes a CI build trustworthy?", "How does CI relate to code review?"]
+      "tags": [
+        "ci",
+        "fundamentals"
+      ],
+      "followUps": [
+        "What makes a CI build trustworthy?",
+        "How does CI relate to code review?"
+      ]
     },
     {
       "id": "q-delivery-vs-deployment",
@@ -230,8 +470,14 @@
       "difficulty": "mid",
       "category": "DevOps",
       "tricky": false,
-      "tags": ["delivery", "deployment"],
-      "followUps": ["Why might a mature team deliberately choose Delivery over Deployment?", "What gates would you automate to move from Delivery to Deployment?"]
+      "tags": [
+        "delivery",
+        "deployment"
+      ],
+      "followUps": [
+        "Why might a mature team deliberately choose Delivery over Deployment?",
+        "What gates would you automate to move from Delivery to Deployment?"
+      ]
     },
     {
       "id": "q-stage-order",
@@ -240,8 +486,14 @@
       "difficulty": "mid",
       "category": "DevOps",
       "tricky": false,
-      "tags": ["pipeline", "stages"],
-      "followUps": ["Where do security scans belong in the order?", "How do you parallelize stages safely?"]
+      "tags": [
+        "pipeline",
+        "stages"
+      ],
+      "followUps": [
+        "Where do security scans belong in the order?",
+        "How do you parallelize stages safely?"
+      ]
     },
     {
       "id": "q-build-once",
@@ -250,8 +502,14 @@
       "difficulty": "mid",
       "category": "DevOps",
       "tricky": false,
-      "tags": ["promotion", "artifacts"],
-      "followUps": ["How do you inject environment-specific config without rebuilding?", "Why use a digest instead of a tag?"]
+      "tags": [
+        "promotion",
+        "artifacts"
+      ],
+      "followUps": [
+        "How do you inject environment-specific config without rebuilding?",
+        "Why use a digest instead of a tag?"
+      ]
     },
     {
       "id": "q-trunk-vs-gitflow",
@@ -260,8 +518,14 @@
       "difficulty": "mid",
       "category": "DevOps",
       "tricky": false,
-      "tags": ["branching", "trunk-based"],
-      "followUps": ["How do feature flags enable trunk-based development?", "How do you handle a long-running feature on trunk?"]
+      "tags": [
+        "branching",
+        "trunk-based"
+      ],
+      "followUps": [
+        "How do feature flags enable trunk-based development?",
+        "How do you handle a long-running feature on trunk?"
+      ]
     },
     {
       "id": "q-blue-green-vs-canary",
@@ -270,8 +534,15 @@
       "difficulty": "senior",
       "category": "DevOps",
       "tricky": false,
-      "tags": ["blue-green", "canary", "deployment"],
-      "followUps": ["How do canaries interact with sticky sessions?", "How do you canary a change that touches the database schema?"]
+      "tags": [
+        "blue-green",
+        "canary",
+        "deployment"
+      ],
+      "followUps": [
+        "How do canaries interact with sticky sessions?",
+        "How do you canary a change that touches the database schema?"
+      ]
     },
     {
       "id": "q-dora",
@@ -280,8 +551,14 @@
       "difficulty": "mid",
       "category": "DevOps",
       "tricky": false,
-      "tags": ["dora", "metrics"],
-      "followUps": ["How would you instrument lead time for changes?", "Why are DORA metrics dangerous as individual targets?"]
+      "tags": [
+        "dora",
+        "metrics"
+      ],
+      "followUps": [
+        "How would you instrument lead time for changes?",
+        "Why are DORA metrics dangerous as individual targets?"
+      ]
     },
     {
       "id": "q-secrets",
@@ -290,8 +567,14 @@
       "difficulty": "senior",
       "category": "DevOps",
       "tricky": false,
-      "tags": ["secrets", "security"],
-      "followUps": ["How does OIDC federation actually work between GitHub and AWS?", "What's the blast radius if a CI runner is compromised?"]
+      "tags": [
+        "secrets",
+        "security"
+      ],
+      "followUps": [
+        "How does OIDC federation actually work between GitHub and AWS?",
+        "What's the blast radius if a CI runner is compromised?"
+      ]
     },
     {
       "id": "q-works-on-ci-not-prod",
@@ -300,8 +583,15 @@
       "difficulty": "senior",
       "category": "DevOps",
       "tricky": true,
-      "tags": ["env-parity", "debugging", "production"],
-      "followUps": ["How would canary deployment have caught this?", "What's the difference between config drift and code drift?"]
+      "tags": [
+        "env-parity",
+        "debugging",
+        "production"
+      ],
+      "followUps": [
+        "How would canary deployment have caught this?",
+        "What's the difference between config drift and code drift?"
+      ]
     },
     {
       "id": "q-flaky-tests",
@@ -310,8 +600,15 @@
       "difficulty": "senior",
       "category": "DevOps",
       "tricky": true,
-      "tags": ["flaky-tests", "testing", "reliability"],
-      "followUps": ["How do you detect flakiness systematically?", "When is a flaky test actually a real bug report?"]
+      "tags": [
+        "flaky-tests",
+        "testing",
+        "reliability"
+      ],
+      "followUps": [
+        "How do you detect flakiness systematically?",
+        "When is a flaky test actually a real bug report?"
+      ]
     },
     {
       "id": "q-rollback-migration",
@@ -320,8 +617,15 @@
       "difficulty": "senior",
       "category": "DevOps",
       "tricky": true,
-      "tags": ["rollback", "migrations", "database"],
-      "followUps": ["Walk through expand-and-contract for renaming a column.", "How do feature flags help decouple schema changes from code?"]
+      "tags": [
+        "rollback",
+        "migrations",
+        "database"
+      ],
+      "followUps": [
+        "Walk through expand-and-contract for renaming a column.",
+        "How do feature flags help decouple schema changes from code?"
+      ]
     },
     {
       "id": "q-cache-poisoning",
@@ -330,8 +634,15 @@
       "difficulty": "senior",
       "category": "DevOps",
       "tricky": true,
-      "tags": ["caching", "dependencies", "footgun"],
-      "followUps": ["How do you key a Docker layer cache correctly?", "What's the security risk of a shared writable cache across branches?"]
+      "tags": [
+        "caching",
+        "dependencies",
+        "footgun"
+      ],
+      "followUps": [
+        "How do you key a Docker layer cache correctly?",
+        "What's the security risk of a shared writable cache across branches?"
+      ]
     },
     {
       "id": "q-quality-gates",
@@ -340,8 +651,157 @@
       "difficulty": "senior",
       "category": "DevOps",
       "tricky": false,
-      "tags": ["quality-gates", "best-practices"],
-      "followUps": ["How do you prevent approval fatigue on PRs?", "What gate would you add to catch performance regressions?"]
+      "tags": [
+        "quality-gates",
+        "best-practices"
+      ],
+      "followUps": [
+        "How do you prevent approval fatigue on PRs?",
+        "What gate would you add to catch performance regressions?"
+      ]
+    },
+    {
+      "id": "q-ext-supply-chain-slsa-sbom",
+      "question": "What is software supply-chain security in CI/CD, and how do SLSA, SBOMs, and artifact signing fit together?",
+      "answer": "Supply-chain security protects everything that feeds into your artifact: source, dependencies, build system, and the resulting image. SLSA is a framework of increasing levels of build integrity, culminating in provenance — a signed attestation of exactly what source and build steps produced an artifact, generated by a trusted, tamper-resistant builder. An SBOM (Software Bill of Materials, e.g. CycloneDX or SPDX) is a machine-readable inventory of every component and version in the artifact, so when a CVE like Log4Shell drops you can instantly answer 'are we affected'. Artifact signing (e.g. Cosign/Sigstore) cryptographically binds an identity to the image digest so consumers can verify it hasn't been tampered with and came from your pipeline. Together they let a deployer enforce a policy: only run images that are signed, carry a valid SBOM, and have SLSA provenance from an approved builder. The through-line is that trusting the running artifact requires verifiable evidence of how it was built, not just a green checkmark.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": [
+        "supply-chain",
+        "slsa",
+        "sbom",
+        "signing",
+        "security"
+      ],
+      "followUps": [
+        "How does Sigstore keyless signing avoid managing long-lived signing keys?",
+        "How would you enforce 'only signed images run' at deploy time?"
+      ]
+    },
+    {
+      "id": "q-ext-gitops-pull-vs-push",
+      "question": "What is the difference between push-based and pull-based (GitOps) deployment, and why is pull often preferred?",
+      "answer": "In push-based deployment, the CI pipeline holds cluster credentials and runs commands like kubectl apply to push changes into the environment from outside. In pull-based GitOps, an in-cluster controller such as Argo CD or Flux watches a Git repository and continuously reconciles the cluster to match the declared desired state, pulling changes in. Pull is often preferred for security because the cluster credentials never leave the cluster — CI only needs write access to Git, shrinking the blast radius of a compromised runner. It also gives continuous drift detection and self-healing: if someone hand-edits the cluster, the controller reverts it back to what Git declares. Rollback becomes a git revert rather than an imperative redeploy, and every change is an auditable commit. The trade-off is an added moving part (the controller) and that imperative one-off operations no longer fit the model cleanly.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": [
+        "gitops",
+        "deployment",
+        "argocd",
+        "flux"
+      ],
+      "followUps": [
+        "How does GitOps handle secrets that can't live in plaintext in Git?",
+        "What is configuration drift and how does pull-based delivery detect it?"
+      ]
+    },
+    {
+      "id": "q-ext-feature-flags-dark-launch",
+      "question": "How do feature flags and dark launches decouple deployment from release, and what is the operational cost?",
+      "answer": "A feature flag wraps new code in a runtime toggle so you can deploy the code to production disabled, then enable it for specific users, percentages, or segments without a new deploy. This decouples deploy (shipping the binary) from release (exposing the behavior), which is what makes trunk-based development safe — half-finished features ride to prod dark and off. A dark launch takes it further: you run the new code path in production against real traffic but discard or shadow its output, so you can measure performance and correctness under real load before anyone sees results. The kill-switch property is the operational win — a bad feature is turned off in seconds without a rollback or redeploy. The cost is real: flags accumulate as technical debt, every flag doubles the code paths you must test, and stale flags cause incidents (the Knight Capital collapse was partly a repurposed dead flag). You need a lifecycle to expire flags, not just create them.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": [
+        "feature-flags",
+        "dark-launch",
+        "release"
+      ],
+      "followUps": [
+        "How do feature flags help decouple a schema migration from the code that uses it?",
+        "How would you prevent flag debt from accumulating?"
+      ]
+    },
+    {
+      "id": "q-ext-monorepo-selective-builds",
+      "question": "How do you keep CI fast in a large monorepo where you shouldn't rebuild and test everything on every commit?",
+      "answer": "You build and test only what a change actually affects, using dependency-aware selective builds. Tools like Bazel, Nx, or Turborepo model the dependency graph between projects and, given the changed files, compute the affected set — then run tasks only for those targets plus their downstream dependents. Content-addressed caching means unchanged targets are restored from cache instead of rebuilt, often across the whole team via a remote cache. Path filters in the CI config (for example GitHub Actions paths or GitLab rules:changes) can skip entire jobs when their directory is untouched. The subtlety is correctness: your affected-detection must include transitive dependents, or you'll skip a test that a shared library change actually broke. The payoff is that a one-line change to one service doesn't trigger an hour-long full build, which is what keeps small-batch CI viable at monorepo scale.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": [
+        "monorepo",
+        "selective-builds",
+        "caching",
+        "bazel"
+      ],
+      "followUps": [
+        "How does remote build caching share work across a team?",
+        "What happens if your affected-target detection misses a transitive dependency?"
+      ]
+    },
+    {
+      "id": "q-ext-smoke-health-checks",
+      "question": "What is the role of smoke tests and health checks in a deployment, and how do they differ from readiness/liveness probes?",
+      "answer": "After a deploy, a smoke test is a small suite of critical-path checks — can we log in, can we place an order, does the homepage load — run against the freshly deployed environment to confirm the release is fundamentally working before it takes real traffic or progression continues. It's a gate: if the smoke test fails, the pipeline aborts or rolls back. Kubernetes readiness and liveness probes are continuous, per-pod platform-level checks: readiness gates whether a pod receives traffic (fail it and traffic is withheld until it recovers), and liveness restarts a pod that has become unresponsive. The difference is scope and lifecycle — smoke tests are release-level, end-to-end, and run once per deploy in the pipeline; probes are pod-level, shallow, and run forever. A common mistake is a readiness probe that only checks a static /healthz returning 200 while the app can't actually reach its database, so pods report healthy while every real request fails.",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "tricky": false,
+      "tags": [
+        "smoke-tests",
+        "health-checks",
+        "probes"
+      ],
+      "followUps": [
+        "Why should a readiness probe check dependencies but a liveness probe usually should not?",
+        "Where in a canary rollout would a smoke test run?"
+      ]
+    },
+    {
+      "id": "q-ext-parallelization-matrix",
+      "question": "TRICKY: You parallelize your test suite with a matrix to make CI faster, but now builds are slower and flakier. What went wrong?",
+      "answer": "Parallelization has real overhead and shared-state hazards that naive splitting ignores. First, each matrix shard pays fixed startup cost — checkout, dependency install, container spin-up — so splitting a 6-minute suite into 20 shards can spend more time on setup than testing and actually run slower; you want fewer, well-balanced shards, and you should cache dependencies per shard. Second, flakiness usually spikes because parallel tests now contend for shared resources they implicitly assumed were exclusive: the same database, the same fixed ports, the same temp files, or the same external sandbox account. Tests that passed serially fail intermittently under contention. The fixes are to give each parallel worker an isolated resource (its own schema/namespace/randomized port), balance shards by historical timing rather than file count so no shard is a straggler, and only parallelize suites that are genuinely independent. The deeper lesson is that parallelism exposes hidden coupling — it doesn't create the shared-state bug, it reveals a test isolation problem that was always there.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": [
+        "parallelization",
+        "matrix",
+        "flaky-tests",
+        "performance"
+      ],
+      "followUps": [
+        "How do you balance test shards so none is a straggler?",
+        "How would you isolate a shared database across parallel test workers?"
+      ]
+    },
+    {
+      "id": "q-ext-pinning-protected-branches",
+      "question": "TRICKY: Your pipeline pins actions to version tags like @v3 and requires PR approval, yet a supply-chain attack still injected malicious code into your build. What was missed?",
+      "answer": "Two subtle gaps. First, a version tag like @v3 is mutable — the maintainer (or an attacker who compromises their account) can move that tag to point at new commits, so pinning to a tag pins to nothing; you must pin third-party actions to a full commit SHA, which is immutable. The 2025 tj-actions/changed-files incident worked exactly this way: tags across many versions were re-pointed to a malicious commit that dumped CI secrets into logs. Second, branch protection is only as strong as its coverage — if approvals aren't required on the workflow files themselves, or if 'require review' allows the PR author to approve, or if the pipeline runs untrusted code from forked-PR triggers (pull_request_target) with access to secrets, an attacker gets execution without ever passing a real human gate. The full mitigation stack is: pin every third-party action to a SHA, use least-privilege ephemeral tokens (OIDC) so a leak has minimal value, require independent review including on CI config, and never expose secrets to workflows triggered by untrusted forks. The lesson is that 'we have approvals and pinning' is meaningless if the pinning is mutable and the approvals don't cover the pipeline itself.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": [
+        "supply-chain",
+        "dependency-pinning",
+        "protected-branches",
+        "security"
+      ],
+      "followUps": [
+        "Why is pull_request_target especially dangerous with secrets?",
+        "How does pinning to a SHA interact with getting security updates for the action?"
+      ]
+    },
+    {
+      "id": "q-ext-artifact-promotion-mechanics",
+      "question": "TRICKY: Your team 'promotes' releases by re-running the pipeline on the release branch for each environment. Why is this not real promotion, and what should you do instead?",
+      "answer": "Re-running the pipeline per environment rebuilds the artifact each time, which means the thing you ship to prod is not the thing you validated in staging — a floating dependency, a new base-image patch, or a build-tool change can silently differ, so 'we tested this' becomes false. That's building N times, not promoting once. Real promotion moves a single immutable artifact, identified by its content digest, through environments without rebuilding: the CI build stage publishes the image once to a registry, and each environment's deploy pulls that exact digest. Promotion is then a metadata operation — tag the digest as 'staging-approved' then 'prod-approved', or in GitOps update the environment's manifest to reference the same sha256 digest. Environment differences must live only in injected config and secrets, never in the binary. The tell that a team has this wrong is that they can't answer 'what exact bytes are running in prod' with a single digest that also passed staging. The fix is a build-once step whose output digest is the currency every downstream environment consumes.",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "tricky": true,
+      "tags": [
+        "artifact-promotion",
+        "immutable-artifacts",
+        "registry",
+        "digest"
+      ],
+      "followUps": [
+        "How do you attach environment-specific config to a promoted digest without rebuilding?",
+        "How would you record which digest passed which environment for audit?"
+      ]
     }
   ],
   "challenges": [
@@ -380,15 +840,72 @@
       "solutionLanguage": "yaml",
       "explanation": "The Rollout defines a progressive canary in three weight steps (10% -> 50% -> 100%) with analysis gates between them. When the controller sets weight to 10%, it splits live production traffic so only one in ten requests hits the new version, capping blast radius. After a 2-minute pause it runs the AnalysisTemplate, which queries Prometheus every 30 seconds for four samples. The query computes the canary's 5xx ratio: 5xx request rate divided by total request rate, scoped to role=canary so it measures only the new pods, not the stable baseline. The successCondition 'result < 0.02' means each sample must keep errors under 2%; failureLimit: 2 means two consecutive breaches trigger a failed analysis. A failed analysis makes Argo Rollouts automatically abort the rollout — it shifts all traffic back to the stable ReplicaSet and halts progression, with no human in the loop and no full outage. This protects production because the bad version is only ever exposed to a small, monitored slice of real traffic, and the abort happens in minutes based on real SLO signal rather than waiting for a customer to report an incident. If all analysis steps pass, the canary ramps to 100% and becomes the new stable version. Because the image is pinned by digest, the stable version it falls back to is a known-good, immutable artifact — rollback is just continuing to serve the previous ReplicaSet. The key insight is defense in depth: this assumes a bug will slip past tests and makes the production rollout itself the final, blast-radius-limited safety gate.",
       "relatedTopic": "cicd"
+    },
+    {
+      "id": "ch-ext-supply-chain-secure-build",
+      "title": "Build, Sign, and Attest a Secure Container Image",
+      "difficulty": "senior",
+      "category": "DevOps",
+      "prompt": "Write a GitHub Actions job that produces a supply-chain-hardened container image: build and push the image to a registry, generate a CycloneDX SBOM, sign the image with Cosign keyless (Sigstore/OIDC) so no long-lived signing key is stored, and attach the SBOM as a signed attestation to the image digest. The job must use OIDC (no static registry password and no static signing key), pin third-party actions to commit SHAs, and sign the digest that was actually pushed. Assume GitHub Container Registry (ghcr.io).",
+      "hints": [
+        "Set permissions: id-token: write (for keyless signing and OIDC) and packages: write (to push to ghcr.io).",
+        "Capture the pushed image digest from docker/build-push-action's outputs and sign that digest, not a mutable tag.",
+        "Use cosign sign with COSIGN_EXPERIMENTAL / keyless flow so identity comes from the OIDC token, not a stored key.",
+        "Generate the SBOM with a tool like syft (CycloneDX format) and attach it with cosign attest.",
+        "Pin every third-party action to a full commit SHA to prevent a moved tag from injecting code."
+      ],
+      "solutionCode": "name: secure-build\non:\n  push:\n    branches: [main]\n\npermissions:\n  contents: read\n  packages: write      # push to ghcr.io\n  id-token: write      # OIDC token for keyless cosign signing\n\nenv:\n  IMAGE: ghcr.io/${{ github.repository }}\n\njobs:\n  build-sign-attest:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Checkout\n        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2\n\n      - name: Log in to GHCR\n        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0\n        with:\n          registry: ghcr.io\n          username: ${{ github.actor }}\n          password: ${{ secrets.GITHUB_TOKEN }}   # short-lived, job-scoped\n\n      - name: Build and push\n        id: build\n        uses: docker/build-push-action@48aba3b46d1b1fec4febb7c5d0c644b249a11355 # v6.10.0\n        with:\n          context: .\n          push: true\n          tags: ${{ env.IMAGE }}:${{ github.sha }}\n\n      - name: Install cosign\n        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0\n\n      - name: Install syft\n        uses: anchore/sbom-action/download-syft@df80a981bc6edbc4e220a492d3cbe9f5547a6e75 # v0.17.9\n\n      # Sign the exact digest that was pushed (immutable), not the tag.\n      - name: Keyless sign image\n        run: cosign sign --yes \"${IMAGE}@${DIGEST}\"\n        env:\n          IMAGE: ${{ env.IMAGE }}\n          DIGEST: ${{ steps.build.outputs.digest }}\n\n      - name: Generate CycloneDX SBOM\n        run: syft \"${IMAGE}@${DIGEST}\" -o cyclonedx-json > sbom.cdx.json\n        env:\n          IMAGE: ${{ env.IMAGE }}\n          DIGEST: ${{ steps.build.outputs.digest }}\n\n      # Attach the SBOM as a signed, verifiable attestation on the digest.\n      - name: Attest SBOM\n        run: |\n          cosign attest --yes \\\n            --predicate sbom.cdx.json \\\n            --type cyclonedx \\\n            \"${IMAGE}@${DIGEST}\"\n        env:\n          IMAGE: ${{ env.IMAGE }}\n          DIGEST: ${{ steps.build.outputs.digest }}",
+      "solutionLanguage": "yaml",
+      "explanation": "This job hardens the supply chain end to end without storing any long-lived credential. The permissions block grants id-token: write, which is what enables both OIDC-based registry auth and Cosign keyless signing; packages: write lets the job push to ghcr.io using the ephemeral, job-scoped GITHUB_TOKEN rather than a static password. docker/build-push-action pushes the image and, crucially, exposes the resulting content digest as steps.build.outputs.digest — every subsequent step signs and inspects that immutable digest (IMAGE@sha256:...) rather than the mutable :sha tag, so what gets signed is exactly what was published. Cosign keyless signing uses the workflow's OIDC identity and Sigstore's transparency log, so there is no signing key to store, rotate, or leak; the signer identity (the repo and workflow) is recorded and verifiable. syft generates a CycloneDX SBOM enumerating every component in the image, and cosign attest binds that SBOM to the digest as a signed attestation, so a deployer can later verify both that the image is authentically ours and that its declared bill of materials hasn't been swapped. Finally, every third-party action is pinned to a full commit SHA, closing the moved-tag attack vector that hit tj-actions in 2025. The net result is a policy foundation: a downstream admission controller can refuse to run any image lacking a valid Cosign signature and SBOM attestation from this pipeline.",
+      "relatedTopic": "cicd"
+    },
+    {
+      "id": "ch-ext-monorepo-selective-ci",
+      "title": "Selective CI for a Monorepo with Path-Based Change Detection",
+      "difficulty": "mid",
+      "category": "DevOps",
+      "prompt": "Write a GitHub Actions workflow for a monorepo containing services under services/api and services/worker plus a shared library under libs/common. On each pull request, run each service's lint and tests ONLY if that service (or the shared library it depends on) actually changed, so an untouched service never triggers a slow build. A change to libs/common must trigger BOTH services because they depend on it. Ensure the required status check is always reported even when a service is skipped, so branch protection doesn't hang waiting on a check that never runs.",
+      "hints": [
+        "Use a filter job (e.g. dorny/paths-filter) to output booleans for which paths changed.",
+        "Include libs/common in each service's filter so a shared-library change fans out to both dependents.",
+        "Gate each service job with an if: condition on the filter outputs via needs.",
+        "Add a final aggregate job that always() runs and succeeds only if no needed job failed, and mark THAT as the required check.",
+        "Skipped jobs report as skipped, not success, which can block branch protection unless you gate on an aggregate."
+      ],
+      "solutionCode": "name: monorepo-ci\non:\n  pull_request:\n    branches: [main]\n\njobs:\n  changes:\n    runs-on: ubuntu-latest\n    outputs:\n      api: ${{ steps.filter.outputs.api }}\n      worker: ${{ steps.filter.outputs.worker }}\n    steps:\n      - uses: actions/checkout@v4\n      - id: filter\n        uses: dorny/paths-filter@v3\n        with:\n          filters: |\n            api:\n              - 'services/api/**'\n              - 'libs/common/**'      # shared dep fans out to api\n            worker:\n              - 'services/worker/**'\n              - 'libs/common/**'      # shared dep fans out to worker\n\n  api:\n    needs: changes\n    if: ${{ needs.changes.outputs.api == 'true' }}\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with: { node-version: '20', cache: 'npm' }\n      - run: npm ci\n      - run: npm run lint --workspace services/api\n      - run: npm test --workspace services/api\n\n  worker:\n    needs: changes\n    if: ${{ needs.changes.outputs.worker == 'true' }}\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with: { node-version: '20', cache: 'npm' }\n      - run: npm ci\n      - run: npm run lint --workspace services/worker\n      - run: npm test --workspace services/worker\n\n  # Aggregate gate: this is the single required status check.\n  ci-required:\n    needs: [api, worker]\n    if: ${{ always() }}\n    runs-on: ubuntu-latest\n    steps:\n      - name: Fail if any needed job failed\n        run: |\n          if [ \"${{ contains(needs.*.result, 'failure') }}\" = \"true\" ]; then\n            echo 'A required job failed'; exit 1\n          fi\n          echo 'All triggered jobs passed (or were correctly skipped)'",
+      "solutionLanguage": "yaml",
+      "explanation": "The workflow implements dependency-aware selective CI, the pattern that keeps monorepo pipelines fast. The changes job uses paths-filter to compare the PR's changed files against globs and emits a boolean per service; each service job is then gated with an if condition on those outputs via needs, so an untouched service is skipped entirely and never pays for a checkout, install, and test run. The correctness-critical detail is transitive dependency handling: libs/common is listed in both the api and worker filters, so a change to the shared library fans out and triggers both dependents — skipping a dependent because only the shared code changed is the classic monorepo mistake that lets a breakage through. The second subtlety is branch protection. In GitHub Actions a skipped job reports status 'skipped', not 'success', so if you mark api and worker as required checks directly, a PR that legitimately skips one will hang forever waiting on a check that never reports success. The fix is the ci-required aggregate job: it runs with if always() so it executes regardless of upstream skips, inspects needs.*.result, and fails only if a job genuinely failed — a skipped upstream is treated as acceptable. You then mark only ci-required as the required status check, giving you a single stable gate that is fast when little changed yet still blocks merges on real failures. To scale further you would layer content-hash caching or a graph tool like Nx so unchanged targets restore from cache rather than rerun.",
+      "relatedTopic": "cicd"
     }
   ],
   "references": [
-    {"label": "DORA — DevOps Research and Assessment", "url": "https://dora.dev/"},
-    {"label": "Google Cloud — DevOps Capabilities and Four Key Metrics", "url": "https://cloud.google.com/architecture/devops"},
-    {"label": "Argo Rollouts — Progressive Delivery", "url": "https://argoproj.github.io/argo-rollouts/"},
-    {"label": "Martin Fowler — Continuous Integration", "url": "https://martinfowler.com/articles/continuousIntegration.html"},
-    {"label": "Martin Fowler — Patterns for Managing Source Code Branches", "url": "https://martinfowler.com/articles/branching-patterns.html"},
-    {"label": "GitHub Docs — OIDC Hardening for Cloud", "url": "https://docs.github.com/en/actions/deployment/security-hardening-your-deployments"},
-    {"label": "Argo CD — Declarative GitOps CD", "url": "https://argo-cd.readthedocs.io/"}
+    {
+      "label": "DORA — DevOps Research and Assessment",
+      "url": "https://dora.dev/"
+    },
+    {
+      "label": "Google Cloud — DevOps Capabilities and Four Key Metrics",
+      "url": "https://cloud.google.com/architecture/devops"
+    },
+    {
+      "label": "Argo Rollouts — Progressive Delivery",
+      "url": "https://argoproj.github.io/argo-rollouts/"
+    },
+    {
+      "label": "Martin Fowler — Continuous Integration",
+      "url": "https://martinfowler.com/articles/continuousIntegration.html"
+    },
+    {
+      "label": "Martin Fowler — Patterns for Managing Source Code Branches",
+      "url": "https://martinfowler.com/articles/branching-patterns.html"
+    },
+    {
+      "label": "GitHub Docs — OIDC Hardening for Cloud",
+      "url": "https://docs.github.com/en/actions/deployment/security-hardening-your-deployments"
+    },
+    {
+      "label": "Argo CD — Declarative GitOps CD",
+      "url": "https://argo-cd.readthedocs.io/"
+    }
   ]
 }

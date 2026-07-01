@@ -1,0 +1,1100 @@
+{
+  "id": "rxjs",
+  "title": "RxJS & Reactive Programming",
+  "category": "Frontend",
+  "subcategory": "Reactive",
+  "difficulty": "senior",
+  "tags": [
+    "rxjs",
+    "observables",
+    "reactive-programming",
+    "operators",
+    "higher-order-mapping",
+    "subjects",
+    "angular",
+    "multicasting"
+  ],
+  "description": "A staff-level tour of RxJS 7+ and reactive programming: lazy cold-vs-hot Observables, the Subject family, unsubscription discipline, and the operator vocabulary (especially the four flattening operators) that separates senior Angular engineers from everyone else.",
+  "estReadMinutes": 32,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "RxJS is a library for composing asynchronous and event-based programs using Observable sequences. Where a Promise models a single future value, an Observable models a stream of zero, one, or infinitely many values over time, plus completion and error channels. Reactive programming is the discipline of declaring how data flows and how it transforms, rather than imperatively pulling values and mutating state at each step."
+        },
+        {
+          "type": "paragraph",
+          "text": "The core primitive is the Observable: a lazy, push-based producer of values. Nothing happens until you subscribe. On subscription an Observer (three optional callbacks: next, error, complete) is wired to the producer, and a Subscription is returned so you can tear the whole chain down. This laziness is the single most important mental model in RxJS: an Observable is a blueprint for work, not the work itself, and re-subscribing runs the blueprint again."
+        },
+        {
+          "type": "paragraph",
+          "text": "For Angular engineers RxJS is not optional trivia. HttpClient returns Observables, reactive forms expose valueChanges streams, the Router exposes params and events as streams, and the async pipe is the idiomatic way to bind streams into templates. Getting flattening, unsubscription, and multicasting right is what keeps an Angular app from leaking memory and firing duplicate requests."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Rule of thumb: an Observable does nothing until subscribed, does the same thing again for every new subscriber (unless multicast), and only stops when it completes, errors, or is unsubscribed. Almost every RxJS bug is a violation of one of those three facts."
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why Reactive Programming Matters",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Modern UIs are choreographies of asynchronous events: clicks, keystrokes, HTTP responses, WebSocket messages, timers, and route changes, all arriving in unpredictable order. Written imperatively with callbacks and mutable flags, this coordination degrades into a tangle of race conditions, forgotten teardown, and duplicate work. RxJS gives you a declarative algebra to express 'when this happens, transformed like this, cancelling that, combined with the other thing' as a single readable pipeline."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Cancellation is first-class: switchMap cancels an in-flight request when a newer one arrives, which is impossible to express cleanly with bare Promises.",
+            "Composition scales: operators are pure functions you chain, so complex behavior is built from small, testable, reusable pieces.",
+            "Backpressure and timing: debounceTime, throttleTime, and buffering operators handle high-frequency events without hand-rolled timers.",
+            "Unified model: HTTP, DOM events, timers, and state all become the same Observable type, so one vocabulary composes across every async source.",
+            "Testability: marble diagrams and TestScheduler let you assert on time-dependent behavior deterministically, without real timers."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Reactive programming has a real learning cost, and misused RxJS is worse than none. The failure modes are subtle: leaked subscriptions, nested subscribes that swallow cancellation, and multicasting bugs that either share too much or too little. Senior interviews probe exactly these edges."
+        }
+      ]
+    },
+    {
+      "id": "cold-vs-hot",
+      "heading": "Cold vs Hot Observables",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A cold Observable creates its producer fresh for each subscriber. The HTTP request, the interval, the data source begins when you subscribe and is private to that subscription. Two subscribers to the same cold Observable each get their own independent execution and their own values. Most Observables you create with of, from, interval, or HttpClient.get are cold."
+        },
+        {
+          "type": "paragraph",
+          "text": "A hot Observable shares a single producer among all subscribers. The producer exists and emits independently of subscription; subscribers merely tap into the ongoing stream and only see values emitted after they subscribed. fromEvent on a DOM element is effectively hot: the button is being clicked regardless of who is listening. Subjects are the canonical way to make something hot, and multicasting operators (share, shareReplay) turn a cold Observable hot."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { defer, of, share } from 'rxjs';\n\n// COLD: each subscriber triggers a new HTTP request.\nconst cold$ = this.http.get('/api/config');\ncold$.subscribe(a => console.log('A', a)); // request #1\ncold$.subscribe(b => console.log('B', b)); // request #2 (duplicate!)\n\n// HOT via share(): one execution multicast to all subscribers.\nconst hot$ = this.http.get('/api/config').pipe(share());\nhot$.subscribe(a => console.log('A', a)); // triggers request\nhot$.subscribe(b => console.log('B', b)); // joins the SAME request\n\n// defer() proves laziness: the factory runs per subscription.\nconst lazy$ = defer(() => of(Date.now()));"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Interview one-liner: cold = producer per subscriber (unicast, replayable); hot = one shared producer (multicast, you miss what happened before you subscribed). share/shareReplay convert cold to hot."
+        }
+      ]
+    },
+    {
+      "id": "observer-subscription",
+      "heading": "Observer, Subscription, and Teardown",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "When you subscribe you pass an Observer: an object (or up to three callbacks) with next(value), error(err), and complete(). The contract is strict: after error or complete no further next is delivered, and the two terminal events are mutually exclusive. subscribe returns a Subscription whose unsubscribe() method disposes the resources and runs any teardown logic the Observable registered."
+        },
+        {
+          "type": "paragraph",
+          "text": "Every long-lived subscription you create manually is a potential memory leak. If a component subscribes to an interval, a store, or a never-completing stream and does not unsubscribe on destroy, the callback (and everything it closes over, including the component) stays alive after the component is gone. This is the number-one RxJS bug in Angular apps."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Component, DestroyRef, inject, OnInit } from '@angular/core';\nimport { takeUntilDestroyed } from '@angular/core/rxjs-interop';\nimport { interval } from 'rxjs';\n\n@Component({ /* ... */ })\nexport class ClockComponent implements OnInit {\n  private destroyRef = inject(DestroyRef);\n\n  ngOnInit(): void {\n    interval(1000)\n      .pipe(takeUntilDestroyed(this.destroyRef))\n      .subscribe(tick => console.log(tick));\n    // Auto-unsubscribes when the component is destroyed. No leak.\n  }\n}"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Prefer the async pipe: it subscribes and unsubscribes for you when the view is created/destroyed.",
+            "For manual subscriptions use takeUntilDestroyed (Angular 16+) or takeUntil(destroy$) with a Subject fired in ngOnDestroy.",
+            "Subscriptions to streams that complete on their own (HttpClient, of, forkJoin) do not leak, but adding teardown is still good hygiene.",
+            "Add child subscriptions to a parent Subscription and call one unsubscribe() to dispose the whole tree."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "A subscription to a stream that never completes (interval, fromEvent, a global Subject) keeps your component in memory forever if you forget to unsubscribe. Always pair such subscriptions with a teardown operator."
+        }
+      ]
+    },
+    {
+      "id": "subjects",
+      "heading": "The Subject Family",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A Subject is both an Observer and an Observable: you can call next/error/complete on it to push values, and you can subscribe to it to receive them. Because a single Subject multicasts to all its subscribers, it is the primitive behind hot Observables and the bridge between imperative code and reactive streams. RxJS ships four Subject variants that differ in what they remember and replay."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Subject Type",
+            "Initial Value",
+            "Replays to Late Subscribers",
+            "Emits on Complete",
+            "Typical Use"
+          ],
+          "rows": [
+            [
+              "Subject",
+              "none",
+              "nothing (only future values)",
+              "no",
+              "event bus, imperative-to-reactive bridge"
+            ],
+            [
+              "BehaviorSubject",
+              "required (seed)",
+              "the current/last value",
+              "no",
+              "state container, current selection, form state"
+            ],
+            [
+              "ReplaySubject",
+              "none",
+              "last N values (buffer/window)",
+              "no",
+              "caches, recent-history streams"
+            ],
+            [
+              "AsyncSubject",
+              "none",
+              "only the final value, on complete",
+              "yes (single value)",
+              "one-shot results computed at completion"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Subject, BehaviorSubject, ReplaySubject, AsyncSubject } from 'rxjs';\n\nconst s = new Subject<number>();\ns.subscribe(v => console.log('S', v));\ns.next(1); // S 1 (subscriber present)\n\nconst b = new BehaviorSubject<number>(0); // seeded\nb.next(1);\nb.subscribe(v => console.log('B', v)); // B 1 (gets current value immediately)\n\nconst r = new ReplaySubject<number>(2); // buffer last 2\nr.next(1); r.next(2); r.next(3);\nr.subscribe(v => console.log('R', v)); // R 2, R 3\n\nconst a = new AsyncSubject<number>();\na.subscribe(v => console.log('A', v));\na.next(1); a.next(2);\na.complete(); // A 2 (only the last, only on complete)"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "BehaviorSubject is the workhorse of simple state management: it always has a value, exposes it synchronously via getValue(), and every subscriber immediately receives the current state. Expose it to the outside as a read-only stream with .asObservable()."
+        }
+      ]
+    },
+    {
+      "id": "marble-thinking",
+      "heading": "Marble Thinking",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Marble diagrams are the lingua franca of RxJS. A horizontal line is time flowing left to right; letters or shapes are emitted values; a vertical bar | is completion; an X is an error; and dashes are the passage of time with no emission. Every operator has a canonical marble diagram, and learning to sketch inputs and outputs is how you reason about timing and composition without running code."
+        },
+        {
+          "type": "paragraph",
+          "text": "In the marble string syntax used by TestScheduler, one character is one virtual frame, a space is ignored, parentheses group synchronous emissions in the same frame, and a caret ^ marks the subscription point for hot marbles. This same syntax powers deterministic tests, so marble thinking and marble testing are the same skill."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Reading a marble diagram for map(x => x * 10):\n// source:  --1--2--3|\n// map:      --10-20-30|\n\n// Reading debounceTime(20):\n// source:  a-b-c------d--|   (a,b,c are close together)\n// output:  ---------c----d|  (only the last of a burst survives)\n\n// Grouped sync emissions: (abc) all happen in one frame\n// merge of --a--b and --c--d might yield --(ac)--(bd)"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "When stuck on which combination or flattening operator to use, draw the marbles. The moment you see the desired output line, the correct operator is usually obvious."
+        }
+      ]
+    },
+    {
+      "id": "creation-operators",
+      "heading": "Creation Operators: of, from, fromEvent, interval, timer",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Creation operators are the entry points that turn plain values, iterables, promises, DOM events, or time into Observables. of emits its arguments synchronously then completes. from converts an array, iterable, Promise, or another Observable-like into a stream. fromEvent wraps an EventTarget so DOM events become a (hot) stream. interval emits an incrementing counter every period forever; timer emits after an initial delay and optionally repeats."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { of, from, fromEvent, interval, timer } from 'rxjs';\n\nof(1, 2, 3);                 // --> 1, 2, 3, | (synchronous)\nfrom([1, 2, 3]);             // same as of here, but iterates the array\nfrom(fetch('/api/data'));    // Promise -> Observable of the resolved value\n\nfromEvent(searchInput, 'input');   // hot stream of InputEvents\n\ninterval(1000);              // 0, 1, 2, 3, ... every second, never completes\ntimer(2000);                 // emits 0 once after 2s, then completes\ntimer(2000, 1000);           // first after 2s, then every 1s (polling)"
+        },
+        {
+          "type": "list",
+          "items": [
+            "of vs from: of(myArray) emits the whole array as ONE value; from(myArray) emits each element. This trips up almost everyone once.",
+            "interval and timer(delay, period) never complete on their own; always add takeUntil/take or you will leak.",
+            "fromEvent is hot and shares the underlying listener; multiple subscribers do not attach multiple DOM listeners in RxJS 7.",
+            "Use timer(0, period) for a poll that fires immediately then repeats; interval waits a full period before the first emission."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "of([1,2,3]) does NOT emit 1, 2, 3. It emits a single array value [1,2,3] and completes. Use from([1,2,3]) to emit the elements one at a time."
+        }
+      ]
+    },
+    {
+      "id": "transformation-operators",
+      "heading": "Transformation Operators: map, scan, and the pluck alternative",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Transformation operators reshape each emitted value. map applies a pure function to every value, exactly like Array.map but over time. scan is the streaming reduce: it accumulates state across emissions and emits the running accumulator on every value, making it ideal for counters, running totals, and in-stream state machines. pluck was deprecated in RxJS 7; the idiomatic replacement is map with optional chaining."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { of, interval } from 'rxjs';\nimport { map, scan, take } from 'rxjs';\n\n// map: transform each value\nof(1, 2, 3).pipe(map(x => x * 10)); // 10, 20, 30\n\n// scan: running accumulator (emits every step)\ninterval(1000).pipe(\n  scan((acc, _cur) => acc + 1, 0)\n); // 1, 2, 3, ... a running count\n\n// pluck alternative: map + optional chaining (pluck is deprecated)\ninterface User { profile?: { name?: string } }\nof<User>({ profile: { name: 'Ada' } }).pipe(\n  map(u => u.profile?.name ?? 'anonymous')\n); // 'Ada'"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "scan emits on every input (running values); reduce (its cousin) emits only ONCE on completion with the final accumulator. Use scan for live UI state, reduce for a final aggregate of a completing stream."
+        }
+      ]
+    },
+    {
+      "id": "filtering-operators",
+      "heading": "Filtering Operators: filter, take, first, debounceTime, throttleTime, distinctUntilChanged",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Filtering operators decide which values pass through and when to stop. filter drops values failing a predicate. take(n) completes after n values; first() takes the first value (optionally matching a predicate) then completes. debounceTime waits for a quiet gap before emitting the latest value (great for typeahead); throttleTime emits at most once per window (great for scroll/resize). distinctUntilChanged suppresses consecutive duplicates, and distinctUntilKeyChanged compares by a specific object key."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { fromEvent, interval } from 'rxjs';\nimport {\n  filter, take, first, debounceTime, throttleTime,\n  distinctUntilChanged, distinctUntilKeyChanged, map\n} from 'rxjs';\n\ninterval(100).pipe(filter(n => n % 2 === 0)); // 0, 2, 4, ...\ninterval(100).pipe(take(3));                   // 0, 1, 2, |\n\n// debounceTime: emit only after typing pauses for 300ms\nfromEvent(input, 'input').pipe(\n  map(e => (e.target as HTMLInputElement).value),\n  debounceTime(300),\n  distinctUntilChanged()          // skip if text unchanged\n);\n\n// throttleTime: at most one scroll event per 200ms\nfromEvent(window, 'scroll').pipe(throttleTime(200));\n\n// distinctUntilKeyChanged: dedupe by object key\ninterval(100).pipe(\n  map(n => ({ id: n % 3, n })),\n  distinctUntilKeyChanged('id')   // compares .id only\n);"
+        },
+        {
+          "type": "list",
+          "items": [
+            "debounceTime = 'wait until it stops' (last value of a burst). throttleTime = 'rate limit' (first value per window by default).",
+            "distinctUntilChanged uses === by default; pass a comparator for objects, or use distinctUntilKeyChanged for a single key.",
+            "take(0) completes immediately without emitting; first() throws EmptyError if the source completes with no match.",
+            "Order matters: debounceTime BEFORE distinctUntilChanged in a typeahead so you compare stabilized values, then trigger the request."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "distinctUntilChanged on objects rarely works as expected because it compares references. Two structurally-equal-but-distinct objects are treated as different. Supply an explicit comparator or map to a primitive key first."
+        }
+      ]
+    },
+    {
+      "id": "takeuntil",
+      "heading": "takeUntil and takeUntilDestroyed",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "takeUntil(notifier$) mirrors the source until the notifier emits, then completes the source subscription. It is the classic Angular teardown pattern: create a destroy$ Subject, put takeUntil(this.destroy$) as the LAST operator before subscribe, and fire destroy$.next() in ngOnDestroy. Angular 16+ replaces the boilerplate with takeUntilDestroyed, which wires teardown to the component/directive lifecycle automatically."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Component, DestroyRef, inject, OnDestroy, OnInit } from '@angular/core';\nimport { takeUntilDestroyed } from '@angular/core/rxjs-interop';\nimport { Subject, interval } from 'rxjs';\nimport { takeUntil } from 'rxjs';\n\n// Modern (Angular 16+): no manual Subject needed.\n@Component({ /* ... */ })\nexport class ModernCmp {\n  private ref = inject(DestroyRef);\n  ngOnInit() {\n    interval(1000).pipe(takeUntilDestroyed(this.ref)).subscribe();\n  }\n}\n\n// Classic pattern (still valid everywhere):\n@Component({ /* ... */ })\nexport class ClassicCmp implements OnInit, OnDestroy {\n  private destroy$ = new Subject<void>();\n  ngOnInit() {\n    interval(1000).pipe(takeUntil(this.destroy$)).subscribe();\n  }\n  ngOnDestroy() { this.destroy$.next(); this.destroy$.complete(); }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "takeUntil must be the LAST operator in the pipe. If a switchMap or mergeMap comes after takeUntil, its inner subscriptions can escape teardown and leak. Put takeUntil/takeUntilDestroyed immediately before subscribe."
+        }
+      ]
+    },
+    {
+      "id": "flattening-operators",
+      "heading": "Higher-Order Flattening: switchMap vs mergeMap vs concatMap vs exhaustMap",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A higher-order Observable is an Observable that emits other Observables (for example, each keystroke maps to an HTTP request Observable). Flattening operators subscribe to those inner Observables and flatten their values into a single output stream. The four operators differ only in how they handle a NEW inner Observable while a previous one is still active. This is the single most-tested RxJS concept in senior interviews, so know it cold."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Operator",
+            "Concurrency",
+            "Cancels Previous Inner",
+            "Preserves Order",
+            "Canonical Use Case"
+          ],
+          "rows": [
+            [
+              "switchMap",
+              "1 (only latest)",
+              "yes (unsubscribes prior)",
+              "n/a (only latest matters)",
+              "typeahead / autocomplete, latest-wins reads"
+            ],
+            [
+              "mergeMap (flatMap)",
+              "unlimited (or capped)",
+              "no",
+              "no (interleaved)",
+              "parallel independent requests, fire-and-forget"
+            ],
+            [
+              "concatMap",
+              "1 (queued)",
+              "no (waits for prior)",
+              "yes (strict FIFO)",
+              "ordered writes, autosave queue, sequential effects"
+            ],
+            [
+              "exhaustMap",
+              "1 (ignores new)",
+              "no (drops new while busy)",
+              "yes of survivors",
+              "double-submit-safe save/login button, ignore-until-done"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { fromEvent, of } from 'rxjs';\nimport { switchMap, mergeMap, concatMap, exhaustMap, map } from 'rxjs';\n\n// switchMap: cancel the in-flight request when a newer keystroke arrives.\nsearchTerm$.pipe(\n  switchMap(term => this.http.get(`/search?q=${term}`))\n);\n\n// mergeMap: fire all requests in parallel, results interleave.\nuserIds$.pipe(\n  mergeMap(id => this.http.get(`/users/${id}`))\n);\n\n// concatMap: strictly one at a time, in order (save queue).\nsaves$.pipe(\n  concatMap(payload => this.http.put('/doc', payload))\n);\n\n// exhaustMap: ignore clicks while a save is already running.\nsaveClicks$.pipe(\n  exhaustMap(() => this.http.post('/save', form.value))\n);"
+        },
+        {
+          "type": "list",
+          "items": [
+            "switchMap for reads where only the latest matters (search, dependent lookups). Cancelling stale requests prevents out-of-order responses overwriting fresh data.",
+            "mergeMap for parallelism where order does not matter (batch loads). Cap concurrency with the second argument to avoid overwhelming the server.",
+            "concatMap when order matters and you must not drop anything (writes, analytics events, an autosave queue). It buffers and processes FIFO.",
+            "exhaustMap to ignore new triggers until the current work finishes (submit buttons, login, refresh-token). This is the natural double-click guard."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Using switchMap on a WRITE (POST/PUT) is a classic bug: a rapid second submit cancels the first in-flight save, which may or may not have reached the server, leaving state ambiguous. For writes prefer exhaustMap (ignore extra clicks) or concatMap (queue them)."
+        }
+      ]
+    },
+    {
+      "id": "combination-operators",
+      "heading": "Combination Operators: combineLatest, forkJoin, zip, withLatestFrom, merge, concat, startWith",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Combination operators join multiple streams. combineLatest emits an array of the latest value from each source whenever ANY source emits, but only after every source has emitted at least once. forkJoin waits for ALL sources to COMPLETE and emits their final values once, like Promise.all. zip pairs values by index, emitting when every source has produced the nth value. withLatestFrom samples other streams only when the primary source emits. merge interleaves values from all sources concurrently, concat runs them in sequence, and startWith prepends a seed value."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { combineLatest, forkJoin, zip, merge, concat, of } from 'rxjs';\nimport { withLatestFrom, startWith, map } from 'rxjs';\n\n// combineLatest: recompute derived state when any input changes.\ncombineLatest([filter$, page$, sort$]).pipe(\n  map(([f, page, sort]) => this.buildQuery(f, page, sort))\n);\n\n// forkJoin: parallel one-shot requests, wait for all to finish.\nforkJoin({\n  user: this.http.get('/me'),\n  perms: this.http.get('/permissions'),\n}).subscribe(({ user, perms }) => this.render(user, perms));\n\n// zip: pair by index (rarely what you actually want)\nzip(names$, scores$); // [name0, score0], [name1, score1], ...\n\n// withLatestFrom: on save click, grab current form + user\nsaveClicks$.pipe(withLatestFrom(form$, user$));\n\n// merge / concat / startWith\nmerge(clicks$, keys$);                 // interleave\nconcat(setup$, main$);                 // setup completes, then main\ninterval(1000).pipe(startWith(-1));    // emit -1 immediately, then 0,1,2..."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "forkJoin never emits if ANY source does not complete. Passing it a hot Subject, a valueChanges stream, or an HttpClient call that errors will silently produce nothing. Use combineLatest for streams that stay open; reserve forkJoin for completing one-shots."
+        }
+      ]
+    },
+    {
+      "id": "error-handling",
+      "heading": "Error Handling: catchError, retry, retry with delay, throwError",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "An error terminates an Observable: it propagates down the chain and unsubscribes everything. catchError intercepts the error and returns a REPLACEMENT Observable, letting you recover with a fallback value or rethrow. retry(n) resubscribes to the source up to n times on error; in RxJS 7 the config form retry({ count, delay }) supports delayed and backoff retries, replacing the older retryWhen. throwError(() => new Error()) creates an Observable that errors immediately, used inside catchError to rethrow or in tests."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { of, throwError, timer } from 'rxjs';\nimport { catchError, retry, map } from 'rxjs';\n\n// catchError: recover with a fallback and keep the stream alive.\nthis.http.get('/api/config').pipe(\n  catchError(err => {\n    console.error(err);\n    return of(DEFAULT_CONFIG); // graceful fallback\n  })\n);\n\n// retry with exponential backoff (RxJS 7 config form).\nthis.http.get('/flaky').pipe(\n  retry({\n    count: 3,\n    delay: (error, attempt) => timer(Math.pow(2, attempt) * 500),\n  }),\n  catchError(err => throwError(() => new Error('gave up after retries')))\n);"
+        },
+        {
+          "type": "list",
+          "items": [
+            "catchError must RETURN an Observable. Returning of(fallback) recovers; returning throwError(() => err) rethrows to the next handler.",
+            "Placement matters: catchError inside a switchMap protects only the inner request, keeping the outer typeahead stream alive after a failed search. catchError outside kills the whole stream on the first error.",
+            "retry resubscribes to the SOURCE, so it re-runs side effects (a new HTTP request). It is not a replay of buffered values.",
+            "Prefer retry({ count, delay }) over the deprecated retryWhen for backoff; the delay callback receives the error and 1-based attempt number."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Once an Observable errors, it is dead: no more values, ever. If a component subscribes directly (no catchError) and the stream errors, the subscription terminates and the UI stops updating. Always catchError at the boundary where you can recover, especially inside flattening operators for typeaheads."
+        }
+      ]
+    },
+    {
+      "id": "multicasting-utility",
+      "heading": "Multicasting & Utility: shareReplay, share, tap, finalize, delay",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Utility and multicasting operators shape execution and side effects. share turns a cold Observable hot by multicasting one subscription to many subscribers. shareReplay(n) additionally replays the last n values to late subscribers, which is how you cache an HTTP result so multiple consumers share one request. tap runs a side effect (logging, dispatching) without altering the stream. finalize runs teardown logic on complete, error, OR unsubscribe. delay time-shifts every emission."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { timer } from 'rxjs';\nimport { shareReplay, share, tap, finalize, delay } from 'rxjs';\n\n// shareReplay: cache one HTTP call, replay to all/late subscribers.\nreadonly config$ = this.http.get('/api/config').pipe(\n  shareReplay({ bufferSize: 1, refCount: true })\n);\n\n// tap: side effects without changing values.\nsource$.pipe(\n  tap({ next: v => console.log('got', v), error: e => log(e) })\n);\n\n// finalize: runs on complete, error, OR unsubscribe (great for spinners).\nthis.loading = true;\nthis.http.get('/data').pipe(\n  finalize(() => (this.loading = false))\n).subscribe();\n\n// delay: shift emissions later in time.\ntimer(0).pipe(delay(1000));"
+        },
+        {
+          "type": "list",
+          "items": [
+            "shareReplay({ bufferSize: 1, refCount: true }) is the standard HTTP cache: one request, replayed value, and it resets when the last subscriber leaves.",
+            "shareReplay with refCount:false (the pre-7 default) keeps the source subscribed forever, which for an interval or event source is a memory leak.",
+            "tap is for effects only; never transform inside tap and expect the change downstream. Its return value is ignored.",
+            "finalize is the reliable place for spinner/cleanup logic because it fires on unsubscribe too, unlike a complete-only callback."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "shareReplay's refCount option is a classic gotcha. With refCount:false, an underlying never-completing source (interval, WebSocket) stays alive after every subscriber unsubscribes, leaking. Use { bufferSize: 1, refCount: true } unless you deliberately want a permanent cache."
+        }
+      ]
+    },
+    {
+      "id": "angular-integration",
+      "heading": "Angular Integration: async pipe, HttpClient, no nested subscribe",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "In Angular the async pipe is the idiomatic way to consume streams in templates: it subscribes, renders the latest value, marks the component for change detection, and unsubscribes automatically when the view is destroyed. HttpClient methods return cold Observables that complete after one emission, so the request fires only when something subscribes (the async pipe or an explicit subscribe). The cardinal sin is nesting subscribes: subscribing inside a subscribe callback abandons cancellation, breaks composition, and marches straight back into callback hell."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// TEMPLATE: let the async pipe manage the subscription.\n// <ng-container *ngIf=\"vm$ | async as vm\"> {{ vm.user.name }} </ng-container>\n\nimport { switchMap, map } from 'rxjs';\n\n// GOOD: compose with a flattening operator, one subscription (or async pipe).\nreadonly vm$ = this.route.params.pipe(\n  map(p => p['id']),\n  switchMap(id => this.userService.getUser(id))\n);\n\n// BAD: nested subscribe abandons cancellation and cannot be composed.\nthis.route.params.subscribe(p => {\n  this.userService.getUser(p['id']).subscribe(user => {\n    this.orders.getFor(user.id).subscribe(orders => {\n      this.orders = orders; // race conditions, no teardown, leaks\n    });\n  });\n});"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Default to *ngIf=\"stream$ | async as value\" (or the new @if control flow) and flatten dependent requests with switchMap/concatMap. If you ever type .subscribe( inside another .subscribe(, stop and reach for a flattening operator instead."
+        }
+      ]
+    },
+    {
+      "id": "testing-marbles",
+      "heading": "Testing with Marble Diagrams and TestScheduler",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "RxJS ships a TestScheduler that virtualizes time so time-dependent streams can be tested deterministically and instantly. You describe inputs and expected outputs as marble strings and assert them with expectObservable. In the marble syntax a dash is one virtual frame, a letter is a value (mapped via a values object), a pipe is completion, a hash is an error, parentheses group synchronous emissions, and a space is ignored for alignment."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { TestScheduler } from 'rxjs/testing';\nimport { map, debounceTime } from 'rxjs';\n\nlet scheduler: TestScheduler;\nbeforeEach(() => {\n  scheduler = new TestScheduler((actual, expected) => {\n    expect(actual).toEqual(expected);\n  });\n});\n\nit('maps values', () => {\n  scheduler.run(({ cold, expectObservable }) => {\n    const source$ = cold('--a--b|', { a: 1, b: 2 });\n    const result$ = source$.pipe(map(x => x * 10));\n    expectObservable(result$).toBe('--x--y|', { x: 10, y: 20 });\n  });\n});\n\nit('debounces bursts', () => {\n  scheduler.run(({ cold, expectObservable }) => {\n    const source$ = cold('a-b-c------|');\n    const result$ = source$.pipe(debounceTime(3));\n    expectObservable(result$).toBe('------c----|');\n  });\n});"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Inside scheduler.run(...) all schedulers (including AsyncScheduler used by debounceTime, delay, timer) are patched to the virtual clock, so tests run synchronously with zero real waiting. This is why marble testing is both fast and deterministic."
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common RxJS Mistakes",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Most production RxJS incidents cluster around a small set of recurring mistakes. Recognizing them on sight is a senior signal."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Forgetting to unsubscribe from never-completing streams (interval, fromEvent, global Subjects), leaking the component and its closure.",
+            "Nested subscribes instead of flattening, which abandons cancellation, causes race conditions, and hides errors.",
+            "Using switchMap for writes, cancelling an in-flight POST/PUT and leaving state ambiguous.",
+            "Expecting distinctUntilChanged to dedupe objects by value when it compares by reference.",
+            "Assuming combineLatest emits immediately, when it waits for every source to emit once; a source that never emits stalls the whole combination.",
+            "Using forkJoin with a stream that never completes, so it silently emits nothing.",
+            "shareReplay with refCount:false over an infinite source, keeping it subscribed forever.",
+            "Putting takeUntil before a flattening operator, letting inner subscriptions escape teardown."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The duplicate-HTTP-request bug: binding the same cold HttpClient Observable to multiple async pipes (or subscribing twice) fires the request once per subscriber. Add shareReplay({ bufferSize: 1, refCount: true }) or resolve it once and share the result."
+        }
+      ]
+    },
+    {
+      "id": "memory-leaks",
+      "heading": "Memory Leaks in Depth",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A subscription holds a reference chain from the producer to your Observer callback and everything it closes over. If the producer outlives the consumer (a global service's Subject, a router event stream, a window event listener) and you never unsubscribe, the consumer cannot be garbage collected. In Angular this manifests as detached components lingering in memory, event handlers firing on dead components, and change detection running for views that no longer exist."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Component, DestroyRef, inject } from '@angular/core';\nimport { takeUntilDestroyed } from '@angular/core/rxjs-interop';\n\n@Component({ /* ... */ })\nexport class SafeComponent {\n  private ref = inject(DestroyRef);\n  constructor(private store: StoreService) {\n    // store.state$ is a long-lived BehaviorSubject in a singleton service.\n    this.store.state$\n      .pipe(takeUntilDestroyed(this.ref))\n      .subscribe(state => this.render(state));\n  }\n  private render(state: unknown) { /* ... */ }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "You do NOT need to unsubscribe from streams that complete on their own within the component's lifetime (a single HttpClient call, of, forkJoin). You MUST unsubscribe from anything that can outlive the component: service Subjects, interval/timer, fromEvent, router streams, and reactive form valueChanges."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The following practices are what separate resilient reactive code from pipelines that leak, duplicate requests, and swallow errors. Each maps directly to one of the failure modes covered earlier, and together they form the checklist a senior engineer applies in review."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Prefer the async pipe (or takeUntilDestroyed) over manual subscribe; let the framework own teardown.",
+            "Flatten dependent async work with the RIGHT operator: switchMap for latest-wins reads, exhaustMap or concatMap for writes, mergeMap for independent parallel work.",
+            "Keep pipelines pure: no side effects except in tap and finalize; never mutate shared state mid-stream.",
+            "Cache shared HTTP results with shareReplay({ bufferSize: 1, refCount: true }) to avoid duplicate requests.",
+            "Handle errors at the right boundary: catchError inside flattening operators to keep the outer stream alive; recover with a fallback or rethrow deliberately.",
+            "Name Observable variables with a trailing $ so subscription vs stream is obvious at a glance.",
+            "Put takeUntil/takeUntilDestroyed last, immediately before subscribe.",
+            "Model state with BehaviorSubject exposed as .asObservable(); test timing with TestScheduler marbles."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The senior mental checklist for any pipeline: Who subscribes? When does it complete or get torn down? Is it cold or hot? Which flattening semantics do I need? Where do errors go? Answer those four and most RxJS bugs disappear before they are written."
+        }
+      ]
+    },
+    {
+      "id": "operator-cheatsheet",
+      "heading": "Operator Selection Cheat Sheet",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A quick lookup for the decision you actually face in interviews and code review: given the behavior you want, which operator expresses it."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "I want to...",
+            "Use"
+          ],
+          "rows": [
+            [
+              "React to only the latest of rapid triggers (search)",
+              "switchMap"
+            ],
+            [
+              "Run independent async work in parallel",
+              "mergeMap"
+            ],
+            [
+              "Process triggers strictly in order, one at a time",
+              "concatMap"
+            ],
+            [
+              "Ignore new triggers while one is running (submit)",
+              "exhaustMap"
+            ],
+            [
+              "Wait for pauses before acting",
+              "debounceTime"
+            ],
+            [
+              "Rate-limit high-frequency events",
+              "throttleTime"
+            ],
+            [
+              "Recompute when any of several inputs change",
+              "combineLatest"
+            ],
+            [
+              "Wait for several one-shot requests to all finish",
+              "forkJoin"
+            ],
+            [
+              "Recover from an error with a fallback",
+              "catchError"
+            ],
+            [
+              "Cache and share one HTTP response",
+              "shareReplay"
+            ],
+            [
+              "Auto-unsubscribe on component destroy",
+              "takeUntilDestroyed"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Memorize the four flattening operators as a matched set. Nearly every senior RxJS interview includes 'walk me through the difference between switchMap, mergeMap, concatMap, and exhaustMap, and when you would use each.'"
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "flatten-marbles",
+      "title": "switchMap vs mergeMap vs concatMap (ASCII marbles)",
+      "type": "ascii",
+      "content": "Outer source (each letter starts an inner request that takes ~3 frames):\nsource:      --a------b--c----------\n\nInner emissions: a -> a1,a2 ; b -> b1,b2 ; c -> c1,c2\n\nswitchMap  (cancel prior inner when a new outer arrives):\n             ----a1-a2----b1-XX-c1-c2   (b cancelled by c)\n             (only the latest inner survives)\n\nmergeMap   (run all inners concurrently, interleaved):\n             ----a1-a2----b1-(b2 c1)-c2\n             (nothing cancelled, order not guaranteed)\n\nconcatMap  (queue inners, strict FIFO, one at a time):\n             ----a1-a2------b1-b2--c1-c2\n             (c waits until b finishes; order preserved)\n\nexhaustMap (ignore new outer while an inner is active):\n             ----a1-a2------b1-b2------\n             (c dropped because b was still running)"
+    },
+    {
+      "id": "choose-flatten",
+      "title": "Choosing a flattening operator",
+      "type": "mermaid",
+      "content": "flowchart TD\n  A[Emit inner Observables per trigger] --> B{Order matters?}\n  B -- No, only latest --> C[switchMap: cancel previous]\n  B -- No, run in parallel --> D[mergeMap: concurrent]\n  B -- Yes, strict sequence --> E{Drop or queue extras?}\n  E -- Queue all in order --> F[concatMap: FIFO one at a time]\n  E -- Ignore while busy --> G[exhaustMap: drop new triggers]\n  C --> H[Typeahead / latest read]\n  D --> I[Parallel independent requests]\n  F --> J[Autosave queue / ordered writes]\n  G --> K[Double-submit-safe button]"
+    },
+    {
+      "id": "observable-lifecycle",
+      "title": "Observable subscription lifecycle",
+      "type": "mermaid",
+      "content": "flowchart LR\n  A[Observable blueprint] -->|subscribe| B[Producer starts]\n  B --> C[next value]\n  C --> C\n  C --> D{Terminal?}\n  D -->|complete| E[teardown runs]\n  D -->|error| E\n  D -->|unsubscribe| E\n  E --> F[Resources released]"
+    },
+    {
+      "id": "subject-multicast",
+      "title": "Subject multicasting one source to many observers",
+      "type": "ascii",
+      "content": "Imperative pushes            Subject (multicast hub)         Observers\n\n  s.next(1) --------+\n  s.next(2) --------+----->  [ Subject / BehaviorSubject ] --+--> Observer A\n  s.next(3) --------+                                        +--> Observer B\n                                                             +--> Observer C\n\nSubject:         A,B,C receive only values AFTER they subscribe\nBehaviorSubject: new subscriber immediately gets the CURRENT value\nReplaySubject(n): new subscriber gets the last n buffered values\nAsyncSubject:    all subscribers get only the FINAL value on complete()"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-observable-vs-promise",
+      "question": "How does an Observable differ from a Promise?",
+      "answer": "A Promise represents a single eventual value and is eager: it starts executing the moment it is created, regardless of whether anyone awaits it. An Observable represents a stream of zero, one, or many values over time and is lazy: nothing runs until you subscribe. Observables are also cancellable via unsubscribe, whereas a Promise cannot be cancelled once started. Observables can be re-subscribed to run the producer again, while a Promise resolves once and caches its result. Observables carry three channels (next, error, complete) and compose through a rich operator pipeline. In practice you reach for Observables when you need streams, cancellation, or composition, and Promises for a single async result.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": [
+        "observables",
+        "promises",
+        "fundamentals"
+      ],
+      "followUps": [
+        "When would you convert an Observable to a Promise with firstValueFrom?",
+        "Why is laziness useful for HTTP requests?"
+      ]
+    },
+    {
+      "id": "q-cold-vs-hot",
+      "question": "Explain cold vs hot Observables and why it causes duplicate HTTP requests.",
+      "answer": "A cold Observable creates a fresh producer for every subscriber, so each subscription runs an independent execution. A hot Observable shares one producer across all subscribers, who only see values emitted after they subscribe. HttpClient.get returns a cold Observable, so if you bind the same Observable to two async pipes or subscribe twice, the request fires once per subscriber, producing duplicate network calls. The fix is to multicast with share or shareReplay, which subscribes to the source once and shares the result. Subjects and fromEvent are effectively hot. The tell in an interview is asking why the same stream triggers two requests: the answer is that it is cold and unicast.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": [
+        "cold-vs-hot",
+        "http",
+        "multicasting"
+      ],
+      "followUps": [
+        "How does shareReplay convert cold to hot?",
+        "Why does fromEvent behave as hot?"
+      ]
+    },
+    {
+      "id": "q-nested-subscribe",
+      "question": "Why is a nested subscribe (subscribing inside a subscribe callback) considered an anti-pattern?",
+      "answer": "Nesting subscribes abandons the compositional model that makes RxJS valuable. The inner subscription is not tied to the outer one, so cancellation does not propagate: switching or destroying the outer stream leaves inner subscriptions running, causing leaks and race conditions. Because the inner work is not part of the pipe, you cannot apply operators to coordinate it, and error handling becomes fragmented. It also recreates callback hell, the very problem reactive programming solves. The correct approach is a flattening operator (switchMap, concatMap, mergeMap, or exhaustMap) that subscribes to the inner Observable within the pipeline and flattens its values, preserving cancellation and composition. This keeps a single managed subscription and lets teardown cascade correctly.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": [
+        "anti-pattern",
+        "flattening",
+        "composition"
+      ],
+      "followUps": [
+        "Which flattening operator replaces a nested subscribe for a dependent lookup?",
+        "How does cancellation propagate with switchMap?"
+      ]
+    },
+    {
+      "id": "q-flattening-four",
+      "question": "Compare switchMap, mergeMap, concatMap, and exhaustMap.",
+      "answer": "All four flatten a higher-order Observable but differ in how they treat a new inner Observable while a prior one is active. switchMap keeps only the latest inner, unsubscribing (cancelling) any previous one, ideal for typeahead where stale requests are useless. mergeMap runs all inners concurrently with no cancellation and interleaved results, ideal for independent parallel work. concatMap queues inners and runs them strictly one at a time in order, ideal for ordered writes like an autosave queue. exhaustMap ignores new outer emissions while an inner is still running, ideal for a submit button where extra clicks should be dropped. Concisely: switchMap cancels the old, exhaustMap ignores the new, concatMap queues, and mergeMap runs everything at once.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": [
+        "switchmap",
+        "mergemap",
+        "concatmap",
+        "exhaustmap"
+      ],
+      "followUps": [
+        "Which do you use for a login button and why?",
+        "How do you cap mergeMap concurrency?"
+      ]
+    },
+    {
+      "id": "q-switchmap-vs-exhaustmap-save",
+      "question": "A save button double-fires on rapid clicks. Should you use switchMap or exhaustMap, and why?",
+      "answer": "Use exhaustMap. On a save (a write), switchMap would cancel the in-flight request when the second click arrives, but cancelling a POST/PUT is dangerous: the request may already have reached the server, so you end up with an ambiguous or partially applied write while the client thinks it was cancelled. exhaustMap instead ignores the second click entirely while the first save is still running, which is exactly the double-submit guard you want. Once the save completes, the button becomes responsive again. concatMap would be the alternative if you genuinely want every click queued and executed in order, but for a plain save button that should ignore accidental double-clicks, exhaustMap is the correct default. The general rule: switchMap for reads, exhaustMap or concatMap for writes.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": [
+        "exhaustmap",
+        "switchmap",
+        "writes"
+      ],
+      "followUps": [
+        "When would concatMap be better than exhaustMap for a button?",
+        "Why is cancelling a POST risky?"
+      ]
+    },
+    {
+      "id": "q-typeahead-operators",
+      "question": "Walk through building a typeahead search and the role of debounceTime, distinctUntilChanged, and switchMap.",
+      "answer": "Start from the input's value stream. debounceTime(300) waits for the user to pause typing so you do not fire a request per keystroke, emitting only the last value of each burst. distinctUntilChanged then drops it if the stabilized text equals the previous query, avoiding a redundant request when someone types and deletes back to the same term. switchMap maps the term to the HTTP search Observable and, crucially, cancels the previous in-flight request when a new term arrives, so a slow earlier response can never overwrite the results of a newer query. You wrap the inner request in catchError so a single failed search does not kill the outer stream. The order matters: debounce and dedupe first to minimize requests, then switchMap for latest-wins cancellation.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": [
+        "typeahead",
+        "debouncetime",
+        "distinctuntilchanged",
+        "switchmap"
+      ],
+      "followUps": [
+        "Why put catchError inside switchMap rather than after it?",
+        "What breaks if you use mergeMap instead of switchMap here?"
+      ]
+    },
+    {
+      "id": "q-combinelatest-not-emitting",
+      "question": "Why might combineLatest never emit even though its sources are producing values?",
+      "answer": "combineLatest only emits once EVERY source has emitted at least one value; until then it stays silent. If one source is a stream that has not yet produced anything (a BehaviorSubject would, but a plain Subject or a filtered stream might not), the whole combination is stalled waiting for that first value. This surprises people who expect it to emit as soon as any source emits. Fixes include seeding lagging sources with startWith to guarantee an initial value, using a BehaviorSubject so the current value is always available, or reconsidering whether withLatestFrom (which only samples on the primary source) fits better. Once all sources have emitted, combineLatest emits on every subsequent emission from any source.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": [
+        "combinelatest",
+        "startwith",
+        "timing"
+      ],
+      "followUps": [
+        "How does startWith fix a stalled combineLatest?",
+        "When is withLatestFrom a better fit?"
+      ]
+    },
+    {
+      "id": "q-forkjoin-completion",
+      "question": "Why does forkJoin sometimes emit nothing, and what does it require from its sources?",
+      "answer": "forkJoin waits for ALL of its source Observables to COMPLETE, then emits a single value containing each source's LAST emitted value, analogous to Promise.all. If any source never completes (a hot Subject, an interval, a reactive form's valueChanges), forkJoin will never emit because it is still waiting for completion. Likewise, if any source completes without ever emitting, forkJoin emits nothing (or in some versions completes empty). And if any source errors, forkJoin errors immediately. This makes forkJoin appropriate only for one-shot completing streams like individual HttpClient calls. For streams that stay open, use combineLatest instead. The classic bug is passing forkJoin something that never completes and wondering why the subscribe callback never runs.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": [
+        "forkjoin",
+        "completion",
+        "http"
+      ],
+      "followUps": [
+        "When do you choose combineLatest over forkJoin?",
+        "What happens if one forkJoin source errors?"
+      ]
+    },
+    {
+      "id": "q-sharereplay-refcount",
+      "question": "Explain the shareReplay refCount option and the memory-leak gotcha.",
+      "answer": "shareReplay multicasts a source and replays the last bufferSize values to new and late subscribers, commonly used to cache an HTTP response. The refCount option controls whether the underlying source subscription is torn down when the subscriber count drops to zero. With refCount:false (the pre-RxJS-7 default) the source stays subscribed forever even after all consumers unsubscribe; over an infinite source like interval or a WebSocket this is a memory leak that keeps producing and buffering values nobody consumes. With refCount:true the shared subscription is disposed when the last subscriber leaves and re-established when a new one arrives. The recommended cache configuration is shareReplay({ bufferSize: 1, refCount: true }) unless you deliberately want a permanent, always-warm cache.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": [
+        "sharereplay",
+        "refcount",
+        "memory-leak"
+      ],
+      "followUps": [
+        "When would you intentionally use refCount:false?",
+        "What is the difference between share and shareReplay?"
+      ]
+    },
+    {
+      "id": "q-subject-types",
+      "question": "Contrast Subject, BehaviorSubject, ReplaySubject, and AsyncSubject.",
+      "answer": "All four are both Observer and Observable and multicast to their subscribers. A plain Subject has no initial value and delivers only values emitted after a subscriber joins. A BehaviorSubject requires a seed value, always holds a current value (readable via getValue), and immediately delivers that current value to every new subscriber, making it the natural choice for state. A ReplaySubject buffers the last N values (optionally within a time window) and replays them to late subscribers, useful for caches and recent history. An AsyncSubject emits only its final value, and only when it completes, which suits a one-shot result computed at the end of a process. The choice hinges on what a late subscriber should receive: nothing, the current value, the last N, or only the final value on completion.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": [
+        "subjects",
+        "behaviorsubject",
+        "replaysubject",
+        "asyncsubject"
+      ],
+      "followUps": [
+        "Why expose a BehaviorSubject as .asObservable()?",
+        "When is AsyncSubject actually useful?"
+      ]
+    },
+    {
+      "id": "q-unsubscribe-when",
+      "question": "Which subscriptions must you unsubscribe from, and which are safe to leave?",
+      "answer": "You must unsubscribe from any stream that can outlive the consumer: never-completing sources like interval, timer, fromEvent, global service Subjects, router event streams, and reactive form valueChanges. Failing to do so leaks the subscriber and everything it closes over, including the component. You do not strictly need to unsubscribe from streams that complete on their own within the component's lifetime, such as a single HttpClient call, of, from, or forkJoin, because completion tears the subscription down automatically. That said, using the async pipe or takeUntilDestroyed everywhere is good hygiene and removes the need to reason case by case. In Angular 16+ takeUntilDestroyed ties teardown to the lifecycle; before that, the takeUntil(destroy$) pattern with a Subject fired in ngOnDestroy is standard.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": [
+        "unsubscribe",
+        "memory-leak",
+        "lifecycle"
+      ],
+      "followUps": [
+        "How does the async pipe manage teardown?",
+        "Why must takeUntil be the last operator?"
+      ]
+    },
+    {
+      "id": "q-catcherror-placement",
+      "question": "Where should catchError go in a typeahead pipeline and why does placement matter?",
+      "answer": "Placement of catchError determines whether an error kills the whole stream or just the failed inner request. In a typeahead, put catchError INSIDE the switchMap, wrapping the inner HTTP call, so a single failed search returns a fallback (for example, an empty results array) while the outer keystroke stream stays alive and keeps handling future searches. If instead you place catchError AFTER switchMap at the outer level, the first failed request errors the entire pipeline, the outer stream terminates, and the typeahead stops responding permanently. The general principle is to catch as close to the failing operation as possible when you want the surrounding stream to survive. catchError must return a replacement Observable: return of(fallback) to recover or throwError to rethrow.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": [
+        "catcherror",
+        "error-handling",
+        "switchmap"
+      ],
+      "followUps": [
+        "What must catchError return?",
+        "How do you rethrow after logging?"
+      ]
+    },
+    {
+      "id": "q-retry-backoff",
+      "question": "How do you implement retry with exponential backoff in RxJS 7?",
+      "answer": "Use the config form of retry: retry({ count, delay }). The delay callback receives the error and the 1-based attempt number and returns an Observable that fires when the next retry should occur; returning timer(Math.pow(2, attempt) * baseMs) yields exponential backoff. retry resubscribes to the SOURCE, so each attempt re-runs its side effects, which for an HttpClient call means a fresh request rather than a replay of a buffered value. This config form replaces the older, more verbose retryWhen operator, which was deprecated in RxJS 7. Follow retry with a catchError to handle the terminal failure after all attempts are exhausted, for instance returning a fallback or rethrowing a domain-specific error. You can also add jitter inside the delay callback to avoid thundering-herd retries.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": [
+        "retry",
+        "backoff",
+        "error-handling"
+      ],
+      "followUps": [
+        "Why is retryWhen deprecated?",
+        "How would you add jitter to the backoff?"
+      ]
+    },
+    {
+      "id": "q-map-vs-scan",
+      "question": "What is the difference between map, scan, and reduce?",
+      "answer": "map transforms each value independently with a pure function and emits one output per input, with no memory of prior values. scan is the streaming reduce: it maintains an accumulator across emissions and emits the running accumulator on every input, which makes it ideal for live counters, running totals, and in-stream state machines. reduce is scan's terminal cousin: it accumulates across the whole stream but emits only ONCE, when the source completes, giving you the final aggregate. So use map for stateless per-value transforms, scan when you want the intermediate running values in the UI, and reduce when you only care about the final total of a completing stream. A common mistake is using reduce on a never-completing source, which then never emits.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": [
+        "map",
+        "scan",
+        "reduce"
+      ],
+      "followUps": [
+        "Why does reduce never emit on an infinite stream?",
+        "How would you build a running average with scan?"
+      ]
+    },
+    {
+      "id": "q-debounce-vs-throttle",
+      "question": "When do you use debounceTime versus throttleTime?",
+      "answer": "debounceTime waits for a quiet gap: it holds the latest value and emits it only after the source has been silent for the specified duration, so a burst of rapid events collapses to just the last one. It is ideal for typeahead search and validation where you want to act after the user stops. throttleTime rate-limits: it emits a value then ignores subsequent values for the window duration, so a high-frequency stream is thinned to at most one emission per window (by default the leading value). It suits scroll, resize, and mousemove handlers where you want periodic sampling rather than the final value. The key distinction: debounce answers 'act once activity stops,' while throttle answers 'act at most this often during activity.'",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": [
+        "debouncetime",
+        "throttletime",
+        "timing"
+      ],
+      "followUps": [
+        "What does throttleTime emit by default, leading or trailing?",
+        "Why is debounceTime wrong for scroll sampling?"
+      ]
+    },
+    {
+      "id": "q-distinct-objects",
+      "question": "Why does distinctUntilChanged often fail to dedupe objects, and how do you fix it?",
+      "answer": "distinctUntilChanged compares consecutive values with strict equality (===) by default, which for objects and arrays compares references, not contents. Two structurally identical but distinct object instances are therefore treated as different, so nothing gets deduped. This bites when a stream emits fresh object literals that are logically the same. The fixes are to supply a custom comparator function as distinctUntilChanged's argument (for example comparing a serialized form or specific fields), to map the stream to a primitive key before deduping, or to use distinctUntilKeyChanged with the relevant key when you only care about one property. For deep equality you can pass a comparator backed by a structural-equality helper, though mapping to a stable primitive is usually cleaner and cheaper.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": [
+        "distinctuntilchanged",
+        "equality",
+        "gotcha"
+      ],
+      "followUps": [
+        "How does distinctUntilKeyChanged simplify this?",
+        "When is a serialized-key comparison acceptable?"
+      ]
+    },
+    {
+      "id": "q-async-pipe",
+      "question": "What does the async pipe do and why prefer it over manual subscription?",
+      "answer": "The async pipe subscribes to an Observable (or Promise) in the template, unwraps and renders its latest value, marks the component for change detection when a new value arrives, and automatically unsubscribes when the view is destroyed. Preferring it over manual subscribe eliminates the most common leak source because teardown is guaranteed by the framework, and it keeps components declarative by pushing subscription management into the template. It also naturally supports the single-source-of-truth view-model pattern where you compose a vm$ stream and bind it once. The main caveats are that binding the same cold Observable to multiple async pipes fires the source multiple times (use shareReplay), and that you should structure a single vm$ with combineLatest rather than sprinkling many async pipes that each re-subscribe.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": [
+        "async-pipe",
+        "angular",
+        "change-detection"
+      ],
+      "followUps": [
+        "How do you avoid multiple async pipes re-subscribing?",
+        "How does the async pipe interact with OnPush change detection?"
+      ]
+    },
+    {
+      "id": "q-of-vs-from",
+      "question": "What is the difference between of and from for an array?",
+      "answer": "of treats each argument as a single emission, so of([1, 2, 3]) emits ONE value, the array itself, then completes. from iterates its argument, so from([1, 2, 3]) emits three separate values, 1 then 2 then 3, then completes. from also accepts Promises, iterables, and other Observable-like inputs, converting them into a stream, whereas of only wraps the literal arguments you pass. The practical gotcha is expecting of(myArray) to stream the elements; it does not, and you need from(myArray) for that. If you have several discrete values, of(1, 2, 3) is the right tool; if you have a collection to iterate, use from.",
+      "difficulty": "easy",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": [
+        "of",
+        "from",
+        "creation"
+      ],
+      "followUps": [
+        "How does from handle a Promise?",
+        "What does of() with no arguments emit?"
+      ]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-typeahead",
+      "title": "Debounced Typeahead Search",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "prompt": "Build a typeahead search stream from a search input's value changes. Requirements: do not fire a request on every keystroke, skip requests for unchanged terms, cancel stale in-flight requests when a newer term arrives, ignore empty queries, and ensure a single failed request does not permanently break the stream. Expose a results$ Observable suitable for the async pipe.",
+      "hints": [
+        "Chain debounceTime and distinctUntilChanged BEFORE the request to minimize and dedupe calls.",
+        "Use switchMap so a new term cancels the previous in-flight HTTP request.",
+        "Put catchError INSIDE the switchMap so one failure returns a fallback without killing the outer stream."
+      ],
+      "solutionCode": "import { Observable, of } from 'rxjs';\nimport {\n  debounceTime, distinctUntilChanged, filter,\n  switchMap, catchError, map, startWith\n} from 'rxjs';\n\ninterface SearchState<T> {\n  loading: boolean;\n  results: T[];\n  error: boolean;\n}\n\nexport function createTypeahead<T>(\n  term$: Observable<string>,\n  search: (q: string) => Observable<T[]>\n): Observable<SearchState<T>> {\n  return term$.pipe(\n    map(t => t.trim()),\n    debounceTime(300),\n    distinctUntilChanged(),\n    filter(q => q.length >= 2),\n    switchMap(q =>\n      search(q).pipe(\n        map(results => ({ loading: false, results, error: false })),\n        startWith({ loading: true, results: [], error: false }),\n        catchError(() =>\n          of({ loading: false, results: [], error: true })\n        )\n      )\n    ),\n    startWith({ loading: false, results: [], error: false })\n  );\n}\n\n// Template: <ul *ngIf=\"(state$ | async) as s\">...</ul> with s.loading / s.error branches.",
+      "solutionLanguage": "typescript",
+      "explanation": "The pipeline processes keystrokes in the order that minimizes work and maximizes correctness. map trims whitespace so 'ada ' and 'ada' are treated identically. debounceTime(300) collapses each burst of typing into a single value emitted only after the user pauses, so we never issue a request per keystroke. distinctUntilChanged drops the emission if the stabilized term equals the previous one, avoiding a redundant request when the user types and deletes back to the same text. filter enforces a minimum length so empty or one-character queries are ignored. switchMap maps the term to the search Observable and cancels any previous in-flight request when a newer term arrives, which is what prevents a slow earlier response from overwriting fresher results. The inner startWith emits a loading state immediately, and the inner catchError returns an error state instead of letting a failed search terminate the outer stream, so subsequent searches keep working. The outer startWith seeds an initial empty state so the async pipe has something to render before the user types.",
+      "relatedTopic": "rxjs"
+    },
+    {
+      "id": "ch-double-submit",
+      "title": "Double-Submit-Safe Save Button",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "prompt": "Wire a save button so that rapid double-clicks do not fire two save requests. While a save is in progress, additional clicks must be ignored, not queued and not cancelled. When the save completes (success or error), the button should accept a new click. Also drive a saving flag for the UI and surface errors without breaking the stream.",
+      "hints": [
+        "exhaustMap ignores new source emissions while an inner Observable is still active.",
+        "Do NOT use switchMap here: cancelling an in-flight write leaves server state ambiguous.",
+        "Use finalize to reset the saving flag on complete, error, OR unsubscribe."
+      ],
+      "solutionCode": "import { Observable, of } from 'rxjs';\nimport { exhaustMap, tap, catchError, finalize, map } from 'rxjs';\n\ninterface SaveResult<R> {\n  ok: boolean;\n  data?: R;\n  error?: unknown;\n}\n\nexport function createSaveHandler<P, R>(\n  clicks$: Observable<void>,\n  getPayload: () => P,\n  save: (p: P) => Observable<R>,\n  setSaving: (v: boolean) => void\n): Observable<SaveResult<R>> {\n  return clicks$.pipe(\n    exhaustMap(() => {\n      setSaving(true);\n      return save(getPayload()).pipe(\n        map<R, SaveResult<R>>(data => ({ ok: true, data })),\n        catchError(error => of<SaveResult<R>>({ ok: false, error })),\n        finalize(() => setSaving(false))\n      );\n    })\n  );\n}\n\n// Every extra click while saving is silently dropped by exhaustMap.",
+      "solutionLanguage": "typescript",
+      "explanation": "exhaustMap is the correct operator because it subscribes to the inner save Observable and then IGNORES any further source emissions until that inner Observable completes. This means a second, third, or tenth rapid click while the first save is still running is simply dropped, which is exactly the double-submit guard we want for a plain save button. We deliberately avoid switchMap, which would cancel the in-flight request on the second click; cancelling a POST or PUT is risky because the request may already have been processed by the server, leaving the client and server in disagreement about whether the write happened. We set the saving flag when the inner Observable starts and reset it in finalize, which runs on completion, error, or unsubscription, so the UI flag is always cleaned up even if the component is destroyed mid-save. The inner catchError converts a failure into an error result value rather than terminating the outer clicks stream, so the button remains usable after a failed save. map wraps successful responses in a consistent result shape. Because exhaustMap only lets one inner run at a time, the finalize reliably re-enables the button before the next click can start a new save.",
+      "relatedTopic": "rxjs"
+    },
+    {
+      "id": "ch-forkjoin-merge",
+      "title": "Combine Multiple HTTP Calls and Merge Results",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "prompt": "A dashboard needs the current user, their permissions, and their recent orders, each from a separate endpoint. Fire all three requests in parallel, wait for all of them to finish, and merge the responses into a single view-model object. Ensure that a failure in any one call yields a well-defined partial result rather than a hard crash of the whole dashboard.",
+      "hints": [
+        "forkJoin runs the sources in parallel and emits once when ALL complete.",
+        "HttpClient calls complete after one emission, which is exactly what forkJoin needs.",
+        "Wrap each call in catchError so one failed endpoint degrades gracefully to a default."
+      ],
+      "solutionCode": "import { Observable, forkJoin, of } from 'rxjs';\nimport { catchError, map } from 'rxjs';\n\ninterface User { id: string; name: string; }\ninterface Order { id: string; total: number; }\ninterface DashboardVm {\n  user: User | null;\n  permissions: string[];\n  orders: Order[];\n}\n\nexport function loadDashboard(\n  getUser: () => Observable<User>,\n  getPermissions: () => Observable<string[]>,\n  getOrders: () => Observable<Order[]>\n): Observable<DashboardVm> {\n  return forkJoin({\n    user: getUser().pipe(catchError(() => of(null))),\n    permissions: getPermissions().pipe(catchError(() => of([] as string[]))),\n    orders: getOrders().pipe(catchError(() => of([] as Order[]))),\n  }).pipe(\n    map(({ user, permissions, orders }) => ({ user, permissions, orders }))\n  );\n}\n\n// Bind in the template with (dashboard$ | async) as vm.",
+      "solutionLanguage": "typescript",
+      "explanation": "forkJoin is the right combinator here because it subscribes to all provided sources concurrently and emits a single combined value only after every source has COMPLETED, mirroring Promise.all. HttpClient methods return cold Observables that complete after one emission, so they satisfy forkJoin's completion requirement, and using the object form of forkJoin gives us a nicely named result object instead of a positional array. The critical robustness detail is wrapping each individual call in its own catchError that returns a sensible default (null user, empty permissions, empty orders); without this, a single failing endpoint would cause forkJoin itself to error and emit nothing, taking down the entire dashboard. By catching per-source, a failure degrades gracefully to a partial view-model while the other data still renders. The final map simply reshapes the emitted object into the DashboardVm contract, though here it is largely a pass-through kept for clarity and future transformation. Because forkJoin waits for all three, the UI shows a single consistent snapshot rather than three staggered updates. If any of these sources were long-lived and did not complete, forkJoin would never emit and we would switch to combineLatest instead.",
+      "relatedTopic": "rxjs"
+    },
+    {
+      "id": "ch-backoff",
+      "title": "Retry With Exponential Backoff",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "prompt": "Make a flaky HTTP GET resilient: retry up to three times on failure with exponential backoff (roughly 0.5s, 1s, 2s) plus a little random jitter, but do not retry client errors like HTTP 400 or 404. After all retries are exhausted, surface a clear terminal error. Return the resulting Observable.",
+      "hints": [
+        "Use the RxJS 7 config form retry({ count, delay }); the delay callback returns an Observable to wait on.",
+        "Compute the wait as timer(base * 2^attempt + jitter) using the 1-based attempt number.",
+        "Inspect the error status in delay and rethrow immediately (via throwError) to skip retrying non-retryable errors."
+      ],
+      "solutionCode": "import { Observable, timer, throwError } from 'rxjs';\nimport { retry, catchError } from 'rxjs';\n\nfunction isRetryable(error: any): boolean {\n  const status = error?.status ?? 0;\n  // Retry network/5xx; do NOT retry 4xx client errors.\n  return status === 0 || status >= 500;\n}\n\nexport function withBackoff<T>(\n  request$: Observable<T>,\n  maxRetries = 3,\n  baseMs = 500\n): Observable<T> {\n  return request$.pipe(\n    retry({\n      count: maxRetries,\n      delay: (error, attempt) => {\n        if (!isRetryable(error)) {\n          return throwError(() => error); // stop retrying 4xx immediately\n        }\n        const backoff = baseMs * Math.pow(2, attempt - 1);\n        const jitter = Math.random() * baseMs;\n        return timer(backoff + jitter);\n      },\n    }),\n    catchError(err =>\n      throwError(() => new Error('Request failed after retries: ' + (err?.message ?? err)))\n    )\n  );\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "The RxJS 7 retry config form is central here: retry({ count, delay }) resubscribes to the source on error up to count times, and the delay callback controls WHEN each retry happens by returning an Observable that the operator waits on before resubscribing. Because retry resubscribes to the source, each attempt issues a genuinely fresh HTTP request rather than replaying a cached value, which is what we want for a transient failure. We compute the wait as base * 2^(attempt-1) using the 1-based attempt number so the delays grow exponentially (0.5s, 1s, 2s), and we add random jitter to avoid a thundering herd where many clients retry in lockstep. The isRetryable guard distinguishes retryable failures (network errors and 5xx) from client errors (4xx); for a non-retryable error the delay callback returns throwError, which immediately aborts the retry loop instead of wasting attempts on a request that will never succeed. Once retries are exhausted the error propagates to the outer catchError, which wraps it in a clear, domain-specific Error so callers get an actionable message rather than a raw HTTP error. This composes cleanly because each operator has a single responsibility: retry owns the resubscription policy, timer owns timing, and catchError owns the terminal outcome.",
+      "relatedTopic": "rxjs"
+    },
+    {
+      "id": "ch-autosave-queue",
+      "title": "Autosave Queue With concatMap",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "prompt": "Implement an autosave queue for a document editor. Edits arrive faster than the server can persist them. Requirements: never lose an edit, apply saves strictly in the order they were produced (so the last write wins on the server), never run two saves concurrently, and collapse redundant identical consecutive states. Expose a stream of save acknowledgements.",
+      "hints": [
+        "concatMap queues inner Observables and runs them one at a time in FIFO order.",
+        "Do NOT use switchMap (drops queued edits) or mergeMap (concurrent, unordered) for an ordered write queue.",
+        "Add distinctUntilChanged before concatMap to skip saving identical consecutive snapshots."
+      ],
+      "solutionCode": "import { Observable, of } from 'rxjs';\nimport { concatMap, distinctUntilChanged, catchError, map } from 'rxjs';\n\ninterface DocState { version: number; body: string; }\ninterface Ack { version: number; ok: boolean; error?: unknown; }\n\nexport function createAutosaveQueue(\n  edits$: Observable<DocState>,\n  save: (s: DocState) => Observable<void>\n): Observable<Ack> {\n  return edits$.pipe(\n    distinctUntilChanged(\n      (a, b) => a.body === b.body // skip identical consecutive snapshots\n    ),\n    concatMap(state =>\n      save(state).pipe(\n        map<void, Ack>(() => ({ version: state.version, ok: true })),\n        catchError(error =>\n          of<Ack>({ version: state.version, ok: false, error })\n        )\n      )\n    )\n  );\n}\n\n// concatMap guarantees each save finishes before the next begins, preserving order.",
+      "solutionLanguage": "typescript",
+      "explanation": "concatMap is the correct operator for an autosave queue because it subscribes to each inner save Observable and does not start the next one until the current one COMPLETES, giving strict FIFO ordering and guaranteeing that no edit is dropped. This matters for writes: if we used switchMap, a new edit would cancel the in-flight save and the server could end up missing intermediate writes or, worse, applying them out of order; if we used mergeMap, saves would run concurrently and could reach the server in the wrong order, so the final persisted state might not reflect the last edit. concatMap serializes them, so the last write reliably wins on the server. distinctUntilChanged with a body comparator sits before concatMap to collapse identical consecutive snapshots, avoiding pointless network calls when the document content has not actually changed between emissions. The inner catchError converts a failed save into a negative acknowledgement value rather than terminating the whole queue, so one transient failure does not stop future autosaves. map turns each successful save into a positive ack carrying the version, giving the UI a stream it can use to show 'saved' indicators. Because concatMap buffers pending edits, bursts of rapid typing are absorbed and drained in order as the server keeps up.",
+      "relatedTopic": "rxjs"
+    }
+  ],
+  "references": [
+    {
+      "label": "RxJS Official Documentation",
+      "url": "https://rxjs.dev/"
+    },
+    {
+      "label": "Angular rxjs-interop (takeUntilDestroyed)",
+      "url": "https://angular.dev/ecosystem/rxjs-interop"
+    },
+    {
+      "label": "Angular University: RxJS Higher-Order Mapping Operators",
+      "url": "https://blog.angular-university.io/rxjs-higher-order-mapping/"
+    },
+    {
+      "label": "Learn RxJS (operator recipes and references)",
+      "url": "https://www.learnrxjs.io/"
+    },
+    {
+      "label": "ReactiveX Operator Reference",
+      "url": "https://reactivex.io/documentation/operators.html"
+    }
+  ]
+}

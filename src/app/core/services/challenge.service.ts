@@ -1,6 +1,6 @@
 import { Injectable, computed, inject, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
-import { Observable, of, shareReplay, tap, catchError } from 'rxjs';
+import { Observable, of, shareReplay, tap, catchError, forkJoin, map } from 'rxjs';
 import { Challenge } from '../models/content.model';
 
 @Injectable({ providedIn: 'root' })
@@ -18,9 +18,16 @@ export class ChallengeService {
   load(): Observable<Challenge[]> {
     if (this._loaded()) return of(this._challenges());
     if (!this.stream) {
-      this.stream = this.http.get<Challenge[]>('assets/data/challenges.json').pipe(
+      // Hand-authored challenges and imported open-licensed practice exercises
+      // live in separate files (provenance); merge them into one list here.
+      const authored$ = this.http.get<Challenge[]>('assets/data/challenges.json')
+        .pipe(catchError(() => of([] as Challenge[])));
+      const imported$ = this.http.get<Challenge[]>('assets/data/challenges.imported.json')
+        .pipe(catchError(() => of([] as Challenge[])));
+      this.stream = forkJoin({ authored: authored$, imported: imported$ }).pipe(
+        map(({ authored, imported }) => [...authored, ...imported]),
         tap(list => { this._challenges.set(list); this._loaded.set(true); }),
-        catchError(() => { this._loaded.set(true); return of([]); }),
+        catchError(() => { this._loaded.set(true); return of([] as Challenge[]); }),
         shareReplay(1),
       );
     }

@@ -66,12 +66,29 @@ contract in [`src/app/core/models/content.model.ts`](src/app/core/models/content
 A single generic renderer (`topic-detail`) renders any topic that matches the schema.
 
 ```bash
-npm run content:index      # regenerate the catalog (index.json) from topic files
-npm run content:validate   # check every topic against the senior-content minimums
+npm run content:index             # regenerate the catalog (index.json) from topic files
+npm run content:validate          # check every topic against the senior-content minimums
+npm run content:import-exercises  # import open-licensed practice exercises (see below)
 ```
 
 To add a topic: drop a new `topics/<id>.json` file, run `content:index`, and it appears in
 the sidebar, search, dashboard and interview pool automatically.
+
+### Imported practice exercises
+
+`content:import-exercises` fetches practice exercises from the **Exercism JavaScript
+track** (MIT-licensed) and transforms them into the app's `Challenge` schema, writing:
+
+- `src/assets/data/challenges.imported.json` — the imported set (kept separate from the
+  hand-authored `challenges.json` so provenance is never blurred)
+- `src/assets/data/ATTRIBUTION.md` — license and attribution
+
+`ChallengeService` loads and merges both files at runtime, so imported exercises appear
+in the Challenges UI alongside the authored ones. The importer only uses permissively
+licensed (MIT) upstream content that allows redistribution with attribution; it does not
+scrape or embed content from gated platforms. Re-run the command to refresh; edit the
+`ALLOWLIST` in [`scripts/import-exercises.mjs`](scripts/import-exercises.mjs) to change
+which exercises are pulled.
 
 ## Project structure
 
