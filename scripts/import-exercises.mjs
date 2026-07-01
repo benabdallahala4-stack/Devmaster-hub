@@ -115,9 +115,11 @@ async function importOne(meta) {
     console.warn(`  - skip ${slug} (missing ${!instructions ? 'instructions' : 'solution'})`);
     return null;
   }
-  const [intro, hintsMd] = await Promise.all([
+  const [intro, hintsMd, starter, tests] = await Promise.all([
     fetchText(`${base}/.docs/introduction.md`),
     fetchText(`${base}/.docs/hints.md`),
+    fetchText(`${base}/${slug}.js`),          // starter stub
+    fetchText(`${base}/${slug}.spec.js`),     // Jest test suite (drives the in-browser runner)
   ]);
 
   let hints = parseHints(hintsMd);
@@ -140,6 +142,10 @@ async function importOne(meta) {
     solutionLanguage: 'javascript',
     explanation: buildExplanation(name, slug, mdToText(intro)),
     relatedTopic: 'js-algorithms',
+    // Interactive runner fields (present only when the track ships a stub + tests).
+    ...(starter ? { starterCode: starter.trim() } : {}),
+    ...(tests ? { testCode: tests.trim() } : {}),
+    sourceUrl: `${REPO}/${slug}`,
   };
 }
 

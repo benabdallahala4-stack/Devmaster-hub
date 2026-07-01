@@ -58,6 +58,10 @@ export interface Challenge {
   solutionLanguage: string;
   explanation: string;
   relatedTopic?: string;
+  /** Present on imported exercises: a runnable Jest-style test suite + starter stub. */
+  testCode?: string;
+  starterCode?: string;
+  sourceUrl?: string;
 }
 
 export interface TopicContent {
