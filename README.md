@@ -6,6 +6,8 @@
 
 Built with Angular 18 · Signals · Standalone components · Lazy loading · PWA
 
+**▶ Live: https://devmaster-hub.vercel.app**
+
 </div>
 
 ---
@@ -62,6 +64,27 @@ npm run build        # outputs to dist/devmaster-hub (with service worker)
 
 > The service worker is only active in production builds. To test offline, serve the
 > `dist/devmaster-hub/browser` folder with any static server and reload once.
+
+### Deployment
+
+Static SPA — deploys anywhere. On **Vercel** it's zero-config: [`vercel.json`](vercel.json)
+sets the output directory (`dist/devmaster-hub/browser`) and the SPA rewrite so deep links
+survive a refresh. Pushing to `main` auto-deploys.
+
+## Companion app — CareerFlow
+
+DevMaster Hub is the interview-prep half of a two-app suite. Its companion,
+**[CareerFlow](https://github.com/benabdallahala4-stack/CareerFlow)**
+([live](https://careerflow-eta-azure.vercel.app)), tracks your job hunt and deep-links here
+to start a mock interview tailored to a specific role:
+
+```
+/interview?category=Backend&level=senior&autostart=1
+```
+
+Interview Mode reads the `category`, `level`, and `autostart` query params — category is
+matched case-insensitively against the real question set, with graceful fallback on unknown
+values. See [`interview.component.ts`](src/app/features/interview/interview.component.ts).
 
 ## Content pipeline
 
