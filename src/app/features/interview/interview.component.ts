@@ -1,7 +1,7 @@
 import {
   ChangeDetectionStrategy, Component, OnDestroy, OnInit, computed, effect, inject, signal,
 } from '@angular/core';
-import { RouterLink } from '@angular/router';
+import { ActivatedRoute, RouterLink } from '@angular/router';
 import { ContentService } from '../../core/services/content.service';
 import { InterviewService, Score } from '../../core/services/interview.service';
 import { Difficulty } from '../../core/models/content.model';
@@ -20,11 +20,17 @@ type Phase = 'setup' | 'active' | 'summary';
 })
 export class InterviewComponent implements OnInit, OnDestroy {
   private readonly content = inject(ContentService);
+  private readonly route = inject(ActivatedRoute);
   readonly svc = inject(InterviewService);
 
   readonly phase = signal<Phase>('setup');
   readonly elapsed = signal(0);
   private timer?: ReturnType<typeof setInterval>;
+
+  // Deep-link prefill (e.g. from CareerFlow: /interview?category=Backend&level=senior&autostart=1).
+  private deepLinkApplied = false;
+  private autostartRequested = false;
+  private pendingCategory: string | null = null;
 
   readonly levels: { id: Difficulty | 'all'; label: string }[] = [
     { id: 'all', label: 'All levels' },
@@ -47,10 +53,34 @@ export class InterviewComponent implements OnInit, OnDestroy {
       this.svc.current();
       if (this.phase() === 'active') this.restartTimer();
     }, { allowSignalWrites: true });
+
+    // Apply the deep-linked category (matched against the real category list) and optional
+    // autostart once the question pool has loaded.
+    effect(() => {
+      if (!this.svc.loaded() || this.deepLinkApplied) return;
+      this.deepLinkApplied = true;
+      if (this.pendingCategory) {
+        const match = this.svc.categories().find(c => c.toLowerCase() === this.pendingCategory);
+        if (match) this.svc.filters.update(f => ({ ...f, category: match }));
+      }
+      if (this.autostartRequested && this.availableCount()) this.start();
+    }, { allowSignalWrites: true });
   }
 
   ngOnInit(): void {
+    this.applyDeepLink(this.route.snapshot.queryParamMap);
     this.content.loadCatalog().subscribe(() => this.svc.ensureLoaded());
+  }
+
+  /** Prefill filters from query params. Level applies immediately; category is matched
+   *  against the real category list once the pool loads. Unknown values are ignored. */
+  private applyDeepLink(params: import('@angular/router').ParamMap): void {
+    const rawLevel = params.get('level')?.toLowerCase();
+    if (rawLevel && ['junior', 'mid', 'senior'].includes(rawLevel)) {
+      this.svc.filters.update(f => ({ ...f, level: rawLevel as Difficulty }));
+    }
+    this.pendingCategory = params.get('category')?.trim().toLowerCase() || null;
+    this.autostartRequested = ['1', 'true', 'yes'].includes(params.get('autostart')?.toLowerCase() ?? '');
   }
 
   ngOnDestroy(): void { this.stopTimer(); }
