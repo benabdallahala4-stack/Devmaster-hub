@@ -32,10 +32,15 @@
           @for (tag of topic()!.tags; track tag) { <span class="td__tag">#{{ tag }}</span> }
         </div>
       </div>
-      <button class="btn td__complete" [class.btn--primary]="!done()" [class.is-done]="done()" (click)="toggleComplete()">
-        <app-icon [name]="done() ? 'check' : 'target'" [size]="16" />
-        {{ done() ? 'Completed' : 'Mark complete' }}
-      </button>
+      <div class="td__hero-aside">
+        <div class="td__ring" [title]="completionPct() + '% complete — mark questions Known and solve challenges to fill this'">
+          <app-progress-ring [value]="completion()" [size]="76" caption="complete" />
+        </div>
+        <button class="btn td__complete" [class.btn--primary]="!done()" [class.is-done]="done()" (click)="toggleComplete()">
+          <app-icon [name]="done() ? 'check' : 'target'" [size]="16" />
+          {{ done() ? 'Completed' : 'Mark complete' }}
+        </button>
+      </div>
     </header>
 
     <div class="td__layout">

@@ -1,0 +1,760 @@
+{
+  "id": "websockets-realtime",
+  "title": "WebSockets & Real-Time",
+  "category": "Backend",
+  "subcategory": "Realtime",
+  "difficulty": "senior",
+  "tags": [
+    "websockets",
+    "server-sent-events",
+    "real-time",
+    "pub-sub-backplane",
+    "sticky-sessions",
+    "heartbeats",
+    "reconnection",
+    "socket-io"
+  ],
+  "description": "A staff-level treatment of real-time delivery on the web: how to choose between polling, SSE, and WebSockets; the WebSocket wire protocol and its keepalive and close semantics; and how to scale stateful connections horizontally with a Redis or Kafka pub/sub backplane, sticky sessions, presence, and reconnection with message replay.",
+  "estReadMinutes": 31,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Real-Time Is a Push Problem on a Pull Protocol",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "HTTP was designed around a request/response pull model: the client asks, the server answers, the connection is done. Real-time systems invert that expectation. The server has news the moment it happens (a chat message, a stock tick, a build finished, a cursor moved) and it needs to deliver that news to already-connected clients without waiting for them to ask. Every real-time technology on the web is, at heart, a different trick for turning a pull protocol into a push channel."
+        },
+        {
+          "type": "paragraph",
+          "text": "At the senior level the interesting question is almost never 'how do I open a WebSocket' — the browser API is three lines. The interesting questions are about trade-offs and operations: which transport fits this workload, how do I keep a million idle sockets alive without melting the server, how do I fan a message out to the right subset of connections when those connections are spread across fifty stateless application nodes behind a load balancer, and what happens to in-flight messages when a client's train goes into a tunnel and it reconnects thirty seconds later."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Mental model: a WebSocket (or SSE stream) is a long-lived, stateful piece of server memory bound to one TCP connection on one specific node. Everything hard about real-time at scale comes from that statefulness colliding with a stateless, horizontally scaled, load-balanced world."
+        }
+      ]
+    },
+    {
+      "id": "why-realtime",
+      "heading": "Why Not Just Poll?",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The naive way to simulate push is short polling: the client asks 'anything new?' every few seconds on a fresh HTTP request. It works, it is trivial, and it is the right answer for low-frequency, latency-tolerant updates. But it scales badly for genuine real-time because you pay full HTTP request overhead (headers, TLS handshake amortization, connection setup) on every poll, most polls return nothing, and your latency floor is the poll interval. Ten thousand clients polling once per second is ten thousand requests per second of mostly-empty responses."
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "Latency: short polling's best-case latency is half the poll interval on average; real push delivers in one network RTT.",
+            "Waste: the overwhelming majority of poll responses are '304 Not Modified' or empty bodies — pure overhead.",
+            "Server load: request rate scales with client count times poll frequency, independent of how often data actually changes.",
+            "Battery and mobile: constant polling drains phones and keeps radios awake; a single idle socket is far cheaper."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The progression from short polling to long polling to SSE to WebSockets is a progression toward keeping a connection open so the server can speak first. Each step trades some simplicity and HTTP-friendliness for lower latency and less waste. Knowing where a given workload sits on that spectrum is the core judgment call, and picking WebSockets for something that only needs server-to-client updates a few times a minute is a classic case of over-engineering."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Rule of thumb: if updates are rare and staleness of a few seconds is fine, poll. If you need low-latency server-to-client push, reach for SSE. If you need low-latency bidirectional messaging (chat, collaboration, games, trading), reach for WebSockets."
+        }
+      ]
+    },
+    {
+      "id": "delivery-spectrum",
+      "heading": "The Delivery-Options Spectrum",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "There are four mainstream options plus two newer ones. Short polling repeatedly issues normal requests. Long polling issues a request that the server holds open until it has data (or a timeout), then the client immediately re-requests — approximating push over plain HTTP. Server-Sent Events (SSE) opens one long-lived HTTP response of MIME type text/event-stream down which the server writes named, ID-tagged events; it is unidirectional (server to client) with built-in auto-reconnect and Last-Event-ID replay. WebSockets upgrade a single TCP connection to a full-duplex, low-overhead frame protocol carrying arbitrary binary or text both ways."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Transport",
+            "Direction",
+            "Reconnect",
+            "Per-message overhead",
+            "Best use case"
+          ],
+          "rows": [
+            [
+              "Short polling",
+              "Client pulls repeatedly",
+              "N/A (new request each time)",
+              "Full HTTP request+response",
+              "Rare updates, simple, high staleness tolerance"
+            ],
+            [
+              "Long polling",
+              "Server holds request, then push",
+              "Client re-requests each cycle",
+              "Full HTTP per message (held)",
+              "Push over plain HTTP, legacy proxies, fallback"
+            ],
+            [
+              "Server-Sent Events",
+              "Server to client only",
+              "Automatic, with Last-Event-ID",
+              "Tiny (a few bytes framing over one stream)",
+              "Live feeds, notifications, dashboards, log tailing"
+            ],
+            [
+              "WebSocket",
+              "Full-duplex both ways",
+              "Manual (app or library must reconnect)",
+              "Minimal (2-14 byte frame header)",
+              "Chat, collaboration, games, trading, low-latency two-way"
+            ]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "WebTransport and WebRTC data channels are the newer, less ubiquitous options. WebTransport runs over HTTP/3 (QUIC) and offers multiplexed, optionally unreliable and unordered streams — attractive for games and media where head-of-line blocking hurts — but browser and infrastructure support is still maturing. WebRTC data channels give peer-to-peer, low-latency, optionally unreliable delivery (built on SCTP over DTLS) and are the right tool for direct client-to-client media and data, at the cost of significant signaling and NAT-traversal complexity. For most server-mediated business real-time, the choice remains SSE versus WebSocket."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A crucial and often-missed detail: SSE and WebSockets are not competitors in every case. SSE is a first-class, standardized, auto-reconnecting server-push channel that plays well with HTTP/2 multiplexing. If your traffic is genuinely one-directional (server to client), SSE is frequently the simpler and more robust choice, with WebSockets reserved for true bidirectional needs."
+        }
+      ]
+    },
+    {
+      "id": "ws-protocol",
+      "heading": "The WebSocket Protocol: Handshake, Frames, and Close",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A WebSocket connection begins life as an ordinary HTTP/1.1 GET request that asks to be upgraded. The client sends Connection: Upgrade and Upgrade: websocket headers plus a random Sec-WebSocket-Key. The server, if it agrees, replies 101 Switching Protocols and echoes a Sec-WebSocket-Accept computed by SHA-1 hashing the key concatenated with a fixed GUID (defined in RFC 6455). After that 101, the same TCP connection is no longer HTTP — both sides speak the WebSocket framing protocol."
+        },
+        {
+          "type": "code",
+          "language": "http",
+          "code": "GET /chat HTTP/1.1\nHost: example.com\nUpgrade: websocket\nConnection: Upgrade\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\nSec-WebSocket-Version: 13\nOrigin: https://example.com\n\nHTTP/1.1 101 Switching Protocols\nUpgrade: websocket\nConnection: Upgrade\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        },
+        {
+          "type": "paragraph",
+          "text": "Data travels in frames. Each frame has an opcode: continuation (0x0), text (0x1), binary (0x2), close (0x8), ping (0x9), and pong (0xA). Frames from the client to the server MUST be masked with a random 32-bit key (a defense against cache-poisoning attacks on intermediaries); server-to-client frames are not masked. Large messages can be split across multiple frames using the FIN bit and continuation opcodes. Ping and pong are control frames used for keepalive: either side may send a ping, and the peer must answer with a pong echoing the same payload."
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "Close codes signal why a connection ended: 1000 normal closure, 1001 going away (page unload/server shutdown), 1006 abnormal (no close frame, e.g. TCP dropped), 1009 message too big, 1011 unexpected server error.",
+            "wss:// is WebSocket over TLS on port 443 — always use it in production; besides confidentiality it dramatically improves the odds of traversing corporate proxies that would mangle plaintext ws://.",
+            "The Origin header is checked by the server during the handshake to defend against Cross-Site WebSocket Hijacking, since browsers do not apply the same-origin policy to WebSocket connections the way they do to fetch."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The 1006 close code is special: it is synthesized locally and never sent on the wire. If you see 1006, it means the TCP connection died without a clean WebSocket close handshake — a dropped network, a killed proxy connection, or a crashed peer. Your reconnection logic must treat 1006 as the common, expected case, not an exception."
+        }
+      ]
+    },
+    {
+      "id": "sse-vs-ws",
+      "heading": "SSE vs WebSocket: Choosing the Right Push Channel",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "SSE (the EventSource API) is the forgotten workhorse of server push. It is plain HTTP: the server responds with Content-Type: text/event-stream and keeps the response body open, writing UTF-8 text events in a tiny line-based format. The browser's EventSource automatically reconnects if the stream drops and automatically sends the last received event id back in a Last-Event-ID header, letting the server resume from where the client left off. That built-in reconnect-and-resume is a genuinely valuable feature you would otherwise have to build by hand on WebSockets."
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "SSE is unidirectional (server to client only). Client-to-server messages still go over normal HTTP requests. If your app is mostly consuming a feed with occasional actions, that is often perfectly fine.",
+            "SSE is text-only (UTF-8); binary must be base64-encoded, inflating payloads. WebSockets carry native binary frames.",
+            "SSE rides HTTP, so it inherits auth cookies, compression, HTTP/2 multiplexing, and existing proxy/CDN handling with almost no special infrastructure.",
+            "WebSockets are full-duplex and lower per-message overhead, essential for chat, multiplayer, collaborative editing, and anything where the client emits frequently."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Over HTTP/1.1, browsers cap concurrent connections per origin at around six, and every open SSE stream consumes one of those slots — open several SSE streams and you can starve the rest of the page's requests. Over HTTP/2 this evaporates because streams are multiplexed on one connection, which is a strong reason to serve SSE over HTTP/2."
+        },
+        {
+          "type": "paragraph",
+          "text": "A practical decision rule: default to SSE when the data flow is one-way and you value HTTP-native simplicity and free reconnection; choose WebSockets when you truly need bidirectional, high-frequency, or binary messaging. Many teams reach for WebSockets reflexively and then reimplement reconnection, replay, and heartbeats that SSE would have given them for free — while others pick SSE for a chat app and then bolt a second channel on for sending, ending up with more moving parts than one WebSocket would have needed."
+        }
+      ]
+    },
+    {
+      "id": "ws-example",
+      "heading": "Example: A WebSocket Server and Client with Ping/Pong Keepalive",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Here is a minimal but production-shaped WebSocket server using the Node.js ws library. The critical detail is the heartbeat: idle TCP connections can silently die (a laptop lid closes, a NAT table entry expires) without either side being notified. The server periodically pings every client and terminates any that failed to answer the previous ping, reclaiming dead sockets that would otherwise leak memory forever."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { WebSocketServer, WebSocket } from 'ws';\n\ninterface Live extends WebSocket { isAlive: boolean; }\n\nconst wss = new WebSocketServer({ port: 8080 });\n\nwss.on('connection', (raw, req) => {\n  const ws = raw as Live;\n  ws.isAlive = true;\n\n  // Peer answered our ping -> it is still there.\n  ws.on('pong', () => { ws.isAlive = true; });\n\n  ws.on('message', (data, isBinary) => {\n    // Echo to every other open client (naive single-node broadcast).\n    for (const client of wss.clients) {\n      if (client !== ws && client.readyState === WebSocket.OPEN) {\n        client.send(data, { binary: isBinary });\n      }\n    }\n  });\n\n  ws.on('close', (code) => console.log('closed', code));\n  ws.send(JSON.stringify({ type: 'welcome' }));\n});\n\n// Heartbeat: every 30s, drop anyone who did not pong since last sweep.\nconst interval = setInterval(() => {\n  for (const raw of wss.clients) {\n    const ws = raw as Live;\n    if (!ws.isAlive) { ws.terminate(); continue; }\n    ws.isAlive = false;   // will be set true again by the pong handler\n    ws.ping();\n  }\n}, 30_000);\n\nwss.on('close', () => clearInterval(interval));"
+        },
+        {
+          "type": "paragraph",
+          "text": "The browser client is deliberately resilient: it reconnects with exponential backoff and jitter after any close, because in the real world sockets drop constantly and a naive tight reconnect loop can hammer a recovering server into the ground (a self-inflicted thundering herd)."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "function connect(url: string): void {\n  const ws = new WebSocket(url);\n  let backoff = 1000;\n\n  ws.onopen = () => { backoff = 1000; console.log('connected'); };\n\n  ws.onmessage = (ev) => {\n    const msg = JSON.parse(ev.data);\n    render(msg);\n  };\n\n  ws.onclose = (ev) => {\n    console.warn('closed', ev.code);\n    // Exponential backoff with jitter, capped at 30s.\n    const wait = Math.min(backoff, 30_000) * (0.5 + Math.random());\n    backoff *= 2;\n    setTimeout(() => connect(url), wait);\n  };\n\n  ws.onerror = () => ws.close();\n}\n\nconnect('wss://example.com/chat');"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Note the asymmetry: the ws library exposes protocol-level ping/pong control frames on the server, but the browser WebSocket API does NOT let JavaScript send or observe pings. Browser clients therefore usually rely on the server's pings to keep the connection warm, plus an application-level heartbeat message if they need to detect a dead server themselves."
+        }
+      ]
+    },
+    {
+      "id": "sse-example",
+      "heading": "Example: A Server-Sent Events Endpoint with Resume",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "An SSE endpoint is just an HTTP handler that never ends. You set the content type, flush headers, and then write text/event-stream frames whenever you have something to say. Each event may carry an id: line; the browser remembers the last id it saw and sends it back as the Last-Event-ID header on reconnect, so the server can replay anything the client missed while disconnected."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "import express from 'express';\nconst app = express();\n\napp.get('/events', (req, res) => {\n  res.writeHead(200, {\n    'Content-Type': 'text/event-stream',\n    'Cache-Control': 'no-cache, no-transform',\n    'Connection': 'keep-alive'\n  });\n\n  // Resume: replay events the client missed after a drop.\n  const lastId = Number(req.headers['last-event-id'] ?? 0);\n  for (const ev of getEventsSince(lastId)) {\n    res.write(`id: ${ev.id}\\n`);\n    res.write(`event: ${ev.type}\\n`);\n    res.write(`data: ${JSON.stringify(ev.payload)}\\n\\n`);\n  }\n\n  const onEvent = (ev) => {\n    res.write(`id: ${ev.id}\\n`);\n    res.write(`data: ${JSON.stringify(ev.payload)}\\n\\n`);\n  };\n  bus.on('event', onEvent);\n\n  // Comment lines (starting with ':') act as keepalive pings.\n  const ka = setInterval(() => res.write(': keepalive\\n\\n'), 15_000);\n\n  req.on('close', () => { clearInterval(ka); bus.off('event', onEvent); });\n});"
+        },
+        {
+          "type": "paragraph",
+          "text": "The browser side is trivially simple, and that simplicity is the point — reconnection and resume are handled by the platform, not your code."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "const es = new EventSource('/events');\nes.onmessage = (e) => render(JSON.parse(e.data));\nes.addEventListener('priceUpdate', (e) => updateTicker(JSON.parse(e.data)));\nes.onerror = () => console.warn('SSE dropped; browser will auto-reconnect');"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The `retry:` field lets the server suggest a reconnect delay in milliseconds (e.g. `retry: 5000`), and a comment line every 15 seconds keeps intermediaries from closing an idle stream. With id-tagged events plus getEventsSince(), you get at-least-once redelivery and gap-free resume with almost no client code."
+        }
+      ]
+    },
+    {
+      "id": "scaling",
+      "heading": "Scaling Stateful Connections Across Many Nodes",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A single process can hold tens or hundreds of thousands of idle WebSocket connections — the limits are file descriptors, memory per connection, and the epoll/kqueue event loop, not CPU. But one process is one failure domain, so real deployments run many nodes behind a load balancer. The instant you have more than one node, you hit the defining problem of real-time scale: the two users in a chat room may be connected to different nodes, and Node A has no idea Node B even exists, let alone which sockets it holds."
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "Sticky sessions: because a WebSocket is bound to one node for its lifetime, the load balancer must route the same client back to the same node — for the handshake and, critically, for any HTTP long-polling fallback that shares the session. This is done by IP hash or a routing cookie.",
+            "Layer 4 vs Layer 7: an L4 (TCP) load balancer is cheap and transparent and works fine for wss because it never inspects the payload; an L7 balancer can route by path/header and terminate TLS but must explicitly understand the Upgrade handshake to pass WebSockets through.",
+            "Connection limits: raise OS file-descriptor limits (ulimit -n), tune ephemeral port ranges, and remember each node's ceiling is the real capacity unit you scale.",
+            "Backplane: to fan a message out to sockets on other nodes, every node subscribes to a shared pub/sub bus. When Node A receives a message for room R, it publishes to the bus; every node (including A) that has subscribers in R delivers to its local sockets."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The backplane is the heart of horizontal real-time. Redis Pub/Sub is the classic choice — low latency, simple, fire-and-forget. Redis Streams or Kafka are used when you need durability, replay, and consumer offsets (so a node that was down can catch up). Socket.IO ships an adapter that does exactly this Redis fan-out for you. The trade-off is delivery semantics: plain Redis Pub/Sub is at-most-once (a message published while a node is momentarily disconnected is simply lost), whereas Streams/Kafka give you at-least-once with the cost of tracking offsets and de-duplicating."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "A subtle scaling trap: naive backplane fan-out publishes every message to every node, and every node filters for locally-relevant rooms. At high room counts this becomes O(nodes) network amplification. Mitigations include sharding rooms across backplane channels/topics so a node only subscribes to channels it actually has members in, or using a routing layer that knows which node holds which room."
+        }
+      ]
+    },
+    {
+      "id": "presence-rooms",
+      "heading": "Rooms, Presence, Broadcast, and Delivery Guarantees",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A room (or channel/topic) is a named set of connections you can broadcast to as a unit — a chat room, a document, a game lobby. On a single node a room is just a Set of sockets. Across nodes, room membership is distributed: each node knows only its local members, and broadcast means 'deliver to my local members of R, and publish to the backplane so peer nodes deliver to theirs.' Presence — the live list of who is online in a room — is the same problem plus expiry: you track members in a shared store (often Redis keys with TTLs refreshed by heartbeats) so that a crashed client is eventually shown as offline."
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "Broadcast: local fan-out to Set members plus one backplane publish; peers receive and fan out locally. Avoid re-publishing what you received from the backplane or you create loops.",
+            "Presence: store membership in Redis with per-member TTL; refresh on heartbeat; a missed heartbeat lets the key expire and triggers a 'user left' event. Beware split-brain where a node dies with members still registered.",
+            "Ordering: TCP guarantees order within one connection, so messages from a single node to a single client arrive in order; but two messages fanned through the backplane from different publishers have no global order unless you impose one (e.g. a per-room sequence number).",
+            "Delivery guarantees: WebSocket send() gives you at-most-once by default (a message in flight during a disconnect is lost). At-least-once requires acks and replay; exactly-once requires idempotency keys on top."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Reconnection and resume are where delivery guarantees become real. When a client reconnects, it should tell the server the last message id it durably processed; the server replays everything after that from a per-room buffer (a Redis Stream, a capped list, or a Kafka topic). This is exactly what SSE's Last-Event-ID formalizes, and what you must build by hand for WebSockets. Without replay, every reconnect — and reconnects are constant on mobile — creates a gap the user perceives as lost messages."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Backpressure matters as much as delivery. If a slow client cannot drain messages as fast as you produce them, its send buffer grows without bound and eventually OOMs the node. Watch ws.bufferedAmount (browser) or the socket's write buffer (server); when it exceeds a threshold, drop the client, coalesce updates, or switch that client to a slower/sampled feed. Flow control is not optional at scale."
+        }
+      ]
+    },
+    {
+      "id": "auth-heartbeats",
+      "heading": "Authentication and Detecting Dead Connections",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Authenticating a WebSocket is trickier than a normal request because the browser WebSocket constructor does not let you set arbitrary headers — so you cannot simply attach an Authorization: Bearer header. The common patterns are: pass a short-lived token as a query parameter or via the Sec-WebSocket-Protocol (subprotocol) header during the handshake and validate it before accepting the 101; or rely on the cookie the browser sends automatically with the Upgrade request (guarding against CSWSH by strictly checking the Origin header). The handshake is the one place you get full HTTP semantics, so authenticate there."
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "Token in handshake: validate a signed, short-TTL token before returning 101; reject with an HTTP 401/403 during the upgrade so a rejected client never gets an open socket.",
+            "Per-message auth / re-validation: a socket may live for hours, long after its token expires. For sensitive systems, carry a token expiry and require periodic re-authentication over the socket, or check authorization per privileged action rather than only at connect time.",
+            "Avoid tokens in the URL when possible: query strings land in server and proxy access logs. Prefer the subprotocol header or a one-time ticket exchanged over a normal authenticated HTTPS request just before connecting."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Detecting dead connections is the other perennial operational problem. TCP will not tell you promptly that the peer vanished; without keepalive a half-open connection can linger for minutes to hours, holding memory and, worse, making presence lie about who is online. The fix is heartbeats: protocol ping/pong on the server (as in the earlier example), or application-level heartbeat messages when you need the browser to detect a dead server (since the browser API hides pings). Set a timeout: if no pong or heartbeat arrives within, say, two intervals, declare the connection dead and reclaim it."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Do not confuse the TCP keepalive socket option with WebSocket ping/pong. OS TCP keepalive defaults are typically two hours before the first probe — useless for real-time. WebSocket ping/pong (or an app heartbeat) at a 15-30s cadence is what actually detects dead peers in a timeframe users and your memory footprint care about."
+        }
+      ]
+    },
+    {
+      "id": "libs-protocols",
+      "heading": "Libraries and Higher-Level Protocols",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Raw WebSockets are a transport, not a messaging system. Above them sit libraries and subprotocols that supply the features you would otherwise rebuild: reconnection, rooms, acknowledgements, fallbacks, and the pub/sub backplane."
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "ws (Node.js): a thin, fast, spec-compliant raw WebSocket server/client. You get frames and ping/pong; everything else (rooms, reconnect, backplane) is yours to build. Ideal when you want full control.",
+            "Socket.IO: a batteries-included layer over WebSockets with automatic reconnection, rooms/namespaces, acknowledgements, and a Redis adapter for multi-node fan-out. It is NOT raw WebSockets — it has its own handshake and framing and needs a Socket.IO client — but it removes most of the tedium. It also transparently falls back to HTTP long polling where WebSockets are blocked.",
+            "STOMP: a simple text-based messaging protocol often run over WebSockets (e.g. Spring's WebSocket support), giving you SUBSCRIBE/SEND semantics and destinations that map naturally onto a message broker.",
+            "MQTT: a lightweight publish/subscribe protocol designed for IoT and constrained/lossy networks, with QoS levels (0 at-most-once, 1 at-least-once, 2 exactly-once) and retained messages. It can run over TCP or over WebSockets for browser clients."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Choosing a library is a lock-in and operations decision, not just a features decision. Socket.IO clients only talk to Socket.IO servers; MQTT presumes a broker; STOMP presumes a STOMP-aware broker. If you may need to interoperate with third parties or standard tooling, plain wss + a documented JSON protocol is the most portable choice."
+        }
+      ]
+    },
+    {
+      "id": "mistakes",
+      "heading": "Common Mistakes at Real-Time Scale",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The failures here are rarely about the WebSocket API itself; they are about treating a stateful, long-lived, distributed system as if it were stateless request/response. The recurring mistakes:"
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "Deploying more than one node with NO backplane — messages only reach users who happen to share a node, so the app 'mostly works' in dev and silently drops cross-node messages in production.",
+            "Forgetting sticky sessions, so a reconnect or a long-polling fallback lands on a different node than the session lives on and the connection mysteriously fails.",
+            "No heartbeats, so dead connections accumulate, memory climbs, and presence reports ghosts who left hours ago.",
+            "A tight reconnect loop with no backoff, turning a brief outage into a self-inflicted DDoS as every client reconnects in lockstep the instant the server recovers.",
+            "No message replay on reconnect, so every mobile tunnel or wifi handoff loses messages and users blame the product.",
+            "Ignoring backpressure, letting one slow consumer balloon a server-side buffer until the node runs out of memory.",
+            "Authenticating only at connect and never re-checking, so a socket outlives its token's validity for hours."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The single most expensive mistake is picking WebSockets before you have a backplane and sticky-session story. A real-time feature that demos perfectly on one node and then loses half its messages the day you scale to two is the classic senior-interview trap — and a real outage. Design the fan-out before you design the socket."
+        }
+      ]
+    },
+    {
+      "id": "bestpractices",
+      "heading": "Best Practices Checklist",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A pragmatic senior default set for shipping and operating real-time systems:"
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "Pick the simplest transport that meets the need: poll for rare updates, SSE for one-way push (free reconnect + resume), WebSockets for genuine bidirectional/high-frequency messaging.",
+            "Always use wss:// (TLS) in production, and strictly validate the Origin header during the handshake to prevent Cross-Site WebSocket Hijacking.",
+            "Authenticate in the handshake with a short-lived token (subprotocol header or one-time ticket, not a long-lived token in the URL); re-validate for long-lived sockets.",
+            "Run protocol ping/pong (or app heartbeats) at 15-30s and terminate peers that miss two beats; never rely on TCP keepalive for liveness.",
+            "Design the backplane first: Redis Pub/Sub for fire-and-forget fan-out, Redis Streams/Kafka when you need durability and replay; shard channels to avoid O(nodes) amplification.",
+            "Configure sticky sessions at the load balancer and raise file-descriptor limits per node; treat per-node connection count as your capacity unit.",
+            "Give every message an id and keep a per-room replay buffer so reconnecting clients resume without gaps.",
+            "Monitor and enforce backpressure via bufferedAmount / write-buffer thresholds; drop, coalesce, or downsample slow clients.",
+            "Handle graceful shutdown: on deploy, send close code 1001 and let clients reconnect with backoff to drained nodes."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "If you can articulate transport choice, the upgrade handshake, keepalive, sticky sessions plus a pub/sub backplane, and reconnection-with-replay, you have covered the spine of every senior real-time interview and every real-time incident review."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "ws-handshake",
+      "title": "WebSocket Upgrade Handshake",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n    participant C as Client\n    participant S as Server\n    C->>S: GET /chat HTTP 1.1 Upgrade websocket\n    C->>S: Sec-WebSocket-Key nonce\n    S->>S: Verify Origin and compute Accept\n    S-->>C: 101 Switching Protocols\n    S-->>C: Sec-WebSocket-Accept hash\n    Note over C,S: TCP now speaks WebSocket frames\n    C->>S: text frame masked\n    S-->>C: text frame unmasked\n    S->>C: ping\n    C-->>S: pong\n    C->>S: close 1000\n    S-->>C: close 1000"
+    },
+    {
+      "id": "backplane-fanout",
+      "title": "Multi-Node Fan-Out via Redis Pub/Sub Backplane",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n    participant A as Alice socket on Node1\n    participant N1 as Node1\n    participant R as Redis PubSub\n    participant N2 as Node2\n    participant B as Bob socket on Node2\n    A->>N1: send message to room chat\n    N1->>N1: deliver to local room members\n    N1->>R: PUBLISH room chat message\n    R-->>N2: message on channel room chat\n    R-->>N1: message on channel room chat\n    N2->>B: deliver to local room members\n    Note over N1: skip re-publish of received msg\n    N1->>N1: ignore own echo no loop"
+    },
+    {
+      "id": "scale-topology",
+      "title": "Real-Time Scaling Topology",
+      "type": "ascii",
+      "content": "                 Clients (wss)\n          |          |          |\n          v          v          v\n   +--------------------------------+\n   |  L7 Load Balancer (sticky by   |\n   |  cookie/IP; passes Upgrade)    |\n   +--------------------------------+\n      |            |            |\n      v            v            v\n  +-------+    +-------+    +-------+\n  | Node1 |    | Node2 |    | Node3 |   <- stateful sockets\n  +-------+    +-------+    +-------+\n      |            |            |\n      +-----+------+------+-----+\n            v             v\n      +-----------+  +-----------+\n      | Redis     |  | Streams/  |\n      | Pub/Sub   |  | Kafka     |  <- backplane + replay\n      | (fan-out) |  | (durable) |\n      +-----------+  +-----------+"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q1",
+      "question": "Walk through the WebSocket handshake. How does an HTTP connection become a WebSocket?",
+      "answer": "It starts as an ordinary HTTP/1.1 GET carrying Connection: Upgrade, Upgrade: websocket, a random Sec-WebSocket-Key, and Sec-WebSocket-Version: 13. If the server agrees it replies 101 Switching Protocols and echoes a Sec-WebSocket-Accept value computed by SHA-1 hashing the client's key concatenated with a fixed RFC 6455 GUID and base64-encoding it. That proves the server actually understood the WebSocket handshake rather than blindly reflecting headers. After the 101, the same TCP connection stops speaking HTTP and starts exchanging WebSocket frames in full duplex. The server should also validate the Origin header at this point, because browsers do not apply same-origin policy to WebSockets.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [
+        "handshake",
+        "protocol"
+      ],
+      "followUps": [
+        "What is Sec-WebSocket-Accept for?",
+        "Why check Origin during the handshake?"
+      ]
+    },
+    {
+      "id": "q2",
+      "question": "When would you choose SSE over WebSockets, and vice versa?",
+      "answer": "Choose SSE when the data flow is one-directional (server to client): live feeds, notifications, dashboards, log tailing. SSE is plain HTTP with a text/event-stream body, so it inherits cookies, compression, HTTP/2 multiplexing, and proxy handling, and it gives you automatic reconnection plus Last-Event-ID resume for free. Choose WebSockets when you need genuine bidirectional or high-frequency messaging, or native binary frames: chat, collaborative editing, multiplayer games, trading. A common anti-pattern is reaching for WebSockets for a one-way feed and then reimplementing reconnection and replay that SSE already provides, or picking SSE for a chat app and bolting a second channel on for sends. The direction and frequency of the traffic is the deciding factor.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": true,
+      "tags": [
+        "sse",
+        "tradeoffs"
+      ],
+      "followUps": [
+        "What is the HTTP/1.1 six-connection limit issue with SSE?",
+        "How does Last-Event-ID enable resume?"
+      ]
+    },
+    {
+      "id": "q3",
+      "question": "Why do you need sticky sessions and a pub/sub backplane to scale WebSockets?",
+      "answer": "A WebSocket is a stateful connection pinned to one specific node's memory for its whole lifetime, so the load balancer must send the same client back to the same node (sticky sessions), otherwise a reconnect or a long-polling fallback lands on a node that has no record of the session. But stickiness alone does not let two users on different nodes talk to each other, because each node only knows its own sockets. The backplane solves that: every node subscribes to a shared pub/sub bus (Redis, Kafka), and when one node receives a message for a room it publishes to the bus so every node with members in that room delivers to its local sockets. Without the backplane your app works on one node and silently drops cross-node messages in production. So stickiness fixes routing to the right node, and the backplane fixes fan-out across nodes.",
+      "difficulty": "hard",
+      "category": "Backend",
+      "tricky": true,
+      "tags": [
+        "scaling",
+        "backplane",
+        "sticky-sessions"
+      ],
+      "followUps": [
+        "What breaks if you have a backplane but no sticky sessions?",
+        "When would you use Kafka instead of Redis Pub/Sub?"
+      ]
+    },
+    {
+      "id": "q4",
+      "question": "How do you detect that a WebSocket connection is dead?",
+      "answer": "TCP will not promptly tell you the peer vanished; a half-open connection can linger for minutes to hours, leaking memory and making presence report ghosts. The fix is heartbeats: the server periodically sends a WebSocket ping control frame and expects a pong; if a client misses two consecutive intervals you terminate it. On Node's ws library you track an isAlive flag set true on each pong and cleared before each ping sweep, terminating any socket still false. Because the browser WebSocket API hides ping/pong from JavaScript, clients that must detect a dead server use an application-level heartbeat message instead. Crucially you should not rely on OS TCP keepalive, whose default first probe is often two hours away — useless for real-time. A 15-30 second heartbeat cadence is the practical norm.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": true,
+      "tags": [
+        "heartbeats",
+        "liveness"
+      ],
+      "followUps": [
+        "Why can't browser JS send WebSocket pings?",
+        "How does heartbeat cadence relate to presence accuracy?"
+      ]
+    },
+    {
+      "id": "q5",
+      "question": "How do you handle reconnection and avoid losing messages?",
+      "answer": "Reconnects are constant, especially on mobile, so the client must reconnect automatically with exponential backoff and jitter to avoid a thundering herd when a server recovers. To avoid losing messages, give every message a monotonic id and keep a per-room replay buffer (a Redis Stream, a capped list, or a Kafka topic). On reconnect the client tells the server the last id it durably processed, and the server replays everything after that, closing the gap. SSE formalizes exactly this with Last-Event-ID and the server's getEventsSince logic; with raw WebSockets you build it yourself. Plain socket send is at-most-once, so anything in flight during the disconnect is lost unless you have this replay path. This turns 'my messages disappear when I go through a tunnel' into a non-issue.",
+      "difficulty": "hard",
+      "category": "Backend",
+      "tricky": true,
+      "tags": [
+        "reconnection",
+        "replay",
+        "delivery"
+      ],
+      "followUps": [
+        "Where do you store the replay buffer and how big?",
+        "How do you make replay idempotent for the client?"
+      ]
+    },
+    {
+      "id": "q6",
+      "question": "How do you authenticate a WebSocket connection?",
+      "answer": "The browser WebSocket constructor cannot set arbitrary headers, so you cannot simply attach Authorization: Bearer. The robust patterns are: exchange a short-lived one-time ticket over a normal authenticated HTTPS request and pass it via the Sec-WebSocket-Protocol subprotocol header (or, less ideally, a query parameter) during the handshake, and validate it before returning 101; or rely on the cookie the browser sends automatically with the Upgrade request while strictly checking Origin to prevent Cross-Site WebSocket Hijacking. Authenticate in the handshake because that is the one place you still have full HTTP semantics and can reject with a 401 before any socket opens. For long-lived sockets, carry a token expiry and re-validate periodically or authorize per privileged action, since a socket can outlive its token by hours. Avoid putting long-lived tokens in the URL because query strings leak into access logs.",
+      "difficulty": "hard",
+      "category": "Backend",
+      "tricky": true,
+      "tags": [
+        "auth",
+        "security",
+        "handshake"
+      ],
+      "followUps": [
+        "What is Cross-Site WebSocket Hijacking?",
+        "How do you re-authenticate a socket that outlives its token?"
+      ]
+    },
+    {
+      "id": "q7",
+      "question": "What ordering guarantees do you get in a multi-node real-time system, and where does head-of-line blocking bite?",
+      "answer": "Within a single TCP connection, delivery is ordered, so messages from one node to one client arrive in the order sent. But once you fan messages through a backplane from multiple publishers on multiple nodes, there is no global order unless you impose one, for example a per-room sequence number assigned at a single point. Head-of-line blocking bites because TCP is a strict in-order byte stream: if one packet is lost, everything queued behind it stalls until retransmission, even messages that were independent. This is why latency-sensitive workloads like games sometimes prefer WebTransport or WebRTC data channels, which allow unreliable and unordered delivery to sidestep the stall. So ordering is free per-connection, must be engineered globally, and strict ordering can itself become a latency liability.",
+      "difficulty": "hard",
+      "category": "Backend",
+      "tricky": true,
+      "tags": [
+        "ordering",
+        "head-of-line",
+        "backplane"
+      ],
+      "followUps": [
+        "How would you assign a global per-room order?",
+        "Why does WebTransport help with head-of-line blocking?"
+      ]
+    },
+    {
+      "id": "q8",
+      "question": "What are WebSocket close codes and why does 1006 matter?",
+      "answer": "Close codes tell you why a connection ended. 1000 is a normal, clean closure; 1001 means going away (page unload or server shutdown); 1009 message too big; 1011 an unexpected server error. 1006 is special: it means abnormal closure with no close frame received, and it is synthesized locally — it is never sent on the wire. Seeing 1006 means the TCP connection died without a clean WebSocket close handshake: a dropped network, a killed proxy connection, or a crashed peer. Because 1006 is the common real-world case on flaky networks, your reconnection logic must treat it as expected rather than exceptional. Using clean codes like 1001 on graceful shutdown lets clients reconnect calmly to a drained node.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [
+        "close-codes",
+        "protocol"
+      ],
+      "followUps": [
+        "What code should a server send on graceful deploy?",
+        "How do you differentiate a clean close from a dropped connection?"
+      ]
+    },
+    {
+      "id": "q9",
+      "question": "What is backpressure in a real-time system and how do you handle it?",
+      "answer": "Backpressure arises when a client cannot consume messages as fast as the server produces them. The unsent data accumulates in a per-connection send buffer that grows without bound and can eventually exhaust the node's memory — one slow phone can take down a server. You detect it by watching the buffer: ws.bufferedAmount in the browser or the socket's write-buffer size on the server. When it crosses a threshold you must act: drop the slow client, coalesce or batch pending updates, or downgrade that client to a sampled or lower-frequency feed. For durable pipelines, a Kafka-style backplane with consumer offsets naturally applies backpressure because slow consumers just fall behind on their own offset rather than buffering in your process. Flow control is not optional at scale; ignoring it is a latent out-of-memory outage.",
+      "difficulty": "hard",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [
+        "backpressure",
+        "flow-control"
+      ],
+      "followUps": [
+        "What does bufferedAmount tell you?",
+        "How do Kafka offsets provide backpressure?"
+      ]
+    },
+    {
+      "id": "q10",
+      "question": "Compare short polling, long polling, SSE, and WebSockets.",
+      "answer": "Short polling issues a fresh normal HTTP request every interval; simple, but wasteful and its latency floor is the interval. Long polling holds the request open until data or timeout, then re-requests, approximating push over plain HTTP — useful as a proxy-friendly fallback but still one full request per message. SSE keeps one HTTP response open and streams text/event-stream frames server-to-client, with automatic reconnect and Last-Event-ID resume, tiny per-message overhead, and great HTTP/2 friendliness — but it is unidirectional and text-only. WebSockets upgrade one connection to full-duplex binary/text frames with minimal 2-14 byte headers, ideal for bidirectional high-frequency traffic, at the cost of manual reconnection and needing sticky sessions plus a backplane to scale. The progression trades HTTP simplicity for lower latency and less waste.",
+      "difficulty": "easy",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [
+        "polling",
+        "sse",
+        "comparison"
+      ],
+      "followUps": [
+        "Which is the best proxy-friendly fallback?",
+        "Why is SSE better on HTTP/2 than HTTP/1.1?"
+      ]
+    },
+    {
+      "id": "q11",
+      "question": "What is a room or channel, and how does broadcast work across nodes?",
+      "answer": "A room (or channel/topic) is a named set of connections you broadcast to as a unit — a chat room, a document, a game lobby. On one node a room is just a Set of sockets and broadcast is a loop over that Set. Across nodes membership is distributed: each node knows only its local members. Broadcast therefore means deliver to my local members of room R, then publish once to the backplane so every peer node delivers to its own local members of R. You must avoid re-publishing messages you received from the backplane, or you create an infinite fan-out loop. Socket.IO's Redis adapter implements exactly this pattern. Presence — who is in the room — is the same distribution problem plus TTL-based expiry so crashed clients eventually drop off.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [
+        "rooms",
+        "broadcast",
+        "presence"
+      ],
+      "followUps": [
+        "How do you prevent backplane echo loops?",
+        "How is presence expiry implemented?"
+      ]
+    },
+    {
+      "id": "q12",
+      "question": "What delivery guarantees does a raw WebSocket give, and how do you strengthen them?",
+      "answer": "A raw WebSocket send() is at-most-once: if the connection drops while a message is in flight, that message is simply lost, and the transport does not redeliver it. To reach at-least-once you add application-level acknowledgements plus a replay buffer — the receiver acks message ids, the sender retransmits unacked messages after reconnect. To reach effectively-exactly-once you layer idempotency keys so the receiver can de-duplicate replays. The backplane choice interacts here: plain Redis Pub/Sub is also at-most-once (messages published while a node is briefly disconnected are lost), whereas Redis Streams or Kafka give at-least-once with durable offsets. So guarantees are a stack: transport at-most-once, acks+replay for at-least-once, idempotency for de-dup.",
+      "difficulty": "hard",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [
+        "delivery",
+        "guarantees"
+      ],
+      "followUps": [
+        "Why is plain Redis Pub/Sub at-most-once?",
+        "How do idempotency keys give exactly-once semantics?"
+      ]
+    },
+    {
+      "id": "q13",
+      "question": "L4 vs L7 load balancing for WebSockets — what changes?",
+      "answer": "An L4 (TCP) load balancer forwards raw connections without inspecting the payload, so wss traffic passes through transparently; it is cheap and fast but cannot route by URL path or header and typically cannot terminate TLS for you. An L7 balancer understands HTTP and can route by path, terminate TLS, and add headers, but it must be explicitly configured to recognize and pass through the Connection: Upgrade / Upgrade: websocket handshake — many defaults will otherwise break or buffer the upgrade. Either way you need sticky sessions so a given client returns to the node holding its socket, implemented via IP hash (common at L4) or a routing cookie (common at L7). Choose L7 when you want path-based routing and TLS offload for WebSocket endpoints; choose L4 when you want minimal overhead and full transparency.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [
+        "load-balancing",
+        "layer4-vs-layer7"
+      ],
+      "followUps": [
+        "Why must an L7 LB understand the Upgrade header?",
+        "How is stickiness done at L4 vs L7?"
+      ]
+    },
+    {
+      "id": "q14",
+      "question": "When would you use MQTT or STOMP instead of raw WebSockets?",
+      "answer": "Raw WebSockets are only a transport; MQTT and STOMP are messaging protocols that add semantics on top. MQTT is a lightweight publish/subscribe protocol built for IoT and constrained, lossy networks, offering QoS levels (0 at-most-once, 1 at-least-once, 2 exactly-once), retained messages, and last-will notifications; it runs over TCP or over WebSockets for browsers and presumes an MQTT broker. STOMP is a simple text framing giving SUBSCRIBE/SEND to broker destinations, often run over WebSockets in Spring apps to bridge browsers to a message broker. You pick them when you want broker-backed pub/sub semantics, QoS, or IoT device compatibility rather than hand-rolling those on raw frames. The trade-off is a broker dependency and protocol lock-in versus the portability of plain wss with a documented JSON protocol.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [
+        "mqtt",
+        "stomp",
+        "protocols"
+      ],
+      "followUps": [
+        "What do MQTT QoS levels mean?",
+        "Why is STOMP common in Spring WebSocket apps?"
+      ]
+    },
+    {
+      "id": "q15",
+      "question": "How does a browser EventSource resume after a dropped SSE stream?",
+      "answer": "EventSource reconnects automatically after a drop — you write no reconnection code. If the server tagged events with id: lines, the browser remembers the last id it received and, on reconnect, sends it back in a Last-Event-ID request header. The server reads that header and replays every event after that id (a getEventsSince query against a buffer or store) before resuming the live stream, so the client sees no gap. The server can also send a retry: field to suggest the reconnect delay in milliseconds, and periodic comment lines (starting with a colon) keep intermediaries from closing an idle stream. This built-in reconnect-and-resume is a major reason to prefer SSE for one-way feeds, since it is exactly the machinery you would otherwise hand-build on WebSockets.",
+      "difficulty": "medium",
+      "category": "Backend",
+      "tricky": true,
+      "tags": [
+        "sse",
+        "reconnection",
+        "resume"
+      ],
+      "followUps": [
+        "What is the retry field for?",
+        "Why do comment keepalive lines matter for SSE?"
+      ]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch1",
+      "title": "Build a Chat WebSocket Server with Rooms and Heartbeat",
+      "difficulty": "medium",
+      "category": "Backend",
+      "prompt": "Implement a single-node chat server on top of the Node.js ws library. Clients send JSON messages: {type:'join', room} to join a room, and {type:'msg', room, text} to broadcast to everyone in that room. Support multiple rooms, track room membership, broadcast a message only to sockets in the same room, and include a ping/pong heartbeat that terminates any socket that fails to answer within one interval. Clean up membership on disconnect.",
+      "hints": [
+        "Keep a Map<string, Set<WebSocket>> from room name to its member sockets, and add/remove on join and close.",
+        "Use the 'pong' event to set an isAlive flag true, and a setInterval that pings everyone and terminates any socket whose flag is still false from the last sweep.",
+        "On broadcast, iterate only the Set for that room and skip sockets whose readyState is not OPEN."
+      ],
+      "solutionCode": "import { WebSocketServer, WebSocket } from 'ws';\n\ninterface Client extends WebSocket { isAlive: boolean; rooms: Set<string>; }\n\nconst wss = new WebSocketServer({ port: 8080 });\nconst rooms = new Map<string, Set<Client>>();\n\nfunction join(ws: Client, room: string) {\n  ws.rooms.add(room);\n  if (!rooms.has(room)) rooms.set(room, new Set());\n  rooms.get(room)!.add(ws);\n}\n\nfunction leaveAll(ws: Client) {\n  for (const room of ws.rooms) {\n    const set = rooms.get(room);\n    if (set) { set.delete(ws); if (set.size === 0) rooms.delete(room); }\n  }\n  ws.rooms.clear();\n}\n\nfunction broadcast(room: string, payload: unknown) {\n  const set = rooms.get(room);\n  if (!set) return;\n  const data = JSON.stringify(payload);\n  for (const client of set) {\n    if (client.readyState === WebSocket.OPEN) client.send(data);\n  }\n}\n\nwss.on('connection', (raw) => {\n  const ws = raw as Client;\n  ws.isAlive = true;\n  ws.rooms = new Set();\n  ws.on('pong', () => { ws.isAlive = true; });\n\n  ws.on('message', (buf) => {\n    let m: any;\n    try { m = JSON.parse(buf.toString()); } catch { return; }\n    if (m.type === 'join' && typeof m.room === 'string') {\n      join(ws, m.room);\n      broadcast(m.room, { type: 'system', room: m.room, text: 'a user joined' });\n    } else if (m.type === 'msg' && ws.rooms.has(m.room)) {\n      broadcast(m.room, { type: 'msg', room: m.room, text: String(m.text) });\n    }\n  });\n\n  ws.on('close', () => leaveAll(ws));\n});\n\n// Heartbeat: drop anyone who did not pong since the last sweep.\nconst hb = setInterval(() => {\n  for (const raw of wss.clients) {\n    const ws = raw as Client;\n    if (!ws.isAlive) { leaveAll(ws); ws.terminate(); continue; }\n    ws.isAlive = false;\n    ws.ping();\n  }\n}, 30_000);\n\nwss.on('close', () => clearInterval(hb));",
+      "solutionLanguage": "typescript",
+      "explanation": "The server models rooms as a Map from room name to a Set of member sockets, which makes join, leave, and per-room broadcast all cheap set operations. Each connection carries its own Set of joined rooms so that on disconnect we can remove it from exactly the rooms it belonged to, and we delete empty rooms to avoid a slow memory leak of dead room objects. Broadcast iterates only the target room's Set and skips any socket that is not in the OPEN state, avoiding exceptions from sending to half-closed sockets. The heartbeat is the operationally critical part: every 30 seconds we ping every client and, before the next sweep, terminate any client that did not answer the previous ping, which reclaims connections killed by network drops or NAT timeouts that TCP would not report for hours. We set isAlive false right before pinging and rely on the pong handler to flip it back true, so a missed pong leaves it false and marks the socket for termination. This is a correct single-node design; to scale it across nodes you would add a Redis pub/sub backplane so a broadcast publishes to a channel that every node subscribes to and re-fans to its own local room members, plus sticky sessions at the load balancer.",
+      "relatedTopic": "websockets-realtime"
+    },
+    {
+      "id": "ch2",
+      "title": "Scale the Chat Server Across N Nodes with a Redis Pub/Sub Backplane",
+      "difficulty": "hard",
+      "category": "Backend",
+      "prompt": "Take the single-node chat server and make it correct across N horizontally-scaled nodes behind a load balancer. Two users in the same room may be connected to different nodes. Add a Redis pub/sub backplane so a message published on any node reaches every socket in that room on every node, without infinite echo loops and without double-delivering to the originating node's local members. Explain the sticky-session and delivery-guarantee implications.",
+      "hints": [
+        "Use two Redis clients: one connection dedicated to SUBSCRIBE (a subscriber connection cannot issue normal commands) and one for PUBLISH.",
+        "Tag each published payload with the originating node's id so a node can decide whether it already delivered locally, or simply always deliver locally AND publish, then on receiving from Redis only deliver locally.",
+        "Remember sticky sessions route a client back to its node; the backplane is only for cross-node fan-out, not for routing new connections."
+      ],
+      "solutionCode": "import { WebSocketServer, WebSocket } from 'ws';\nimport { createClient } from 'redis';\nimport { randomUUID } from 'crypto';\n\ninterface Client extends WebSocket { rooms: Set<string>; }\n\nconst NODE_ID = randomUUID();\nconst wss = new WebSocketServer({ port: 8080 });\nconst rooms = new Map<string, Set<Client>>();\n\nconst pub = createClient();\nconst sub = pub.duplicate();\nawait pub.connect();\nawait sub.connect();\n\nfunction localBroadcast(room: string, data: string) {\n  const set = rooms.get(room);\n  if (!set) return;\n  for (const c of set) if (c.readyState === WebSocket.OPEN) c.send(data);\n}\n\n// One shared channel; payload names the room. (Shard by room for high scale.)\nawait sub.subscribe('chat', (raw) => {\n  const env = JSON.parse(raw);\n  if (env.origin === NODE_ID) return;         // we already delivered locally\n  localBroadcast(env.room, JSON.stringify(env.msg));\n});\n\nfunction publish(room: string, msg: unknown) {\n  const data = JSON.stringify(msg);\n  localBroadcast(room, data);                  // deliver to our own members now\n  pub.publish('chat', JSON.stringify({ origin: NODE_ID, room, msg }));\n}\n\nwss.on('connection', (raw) => {\n  const ws = raw as Client;\n  ws.rooms = new Set();\n  ws.on('message', (buf) => {\n    let m: any; try { m = JSON.parse(buf.toString()); } catch { return; }\n    if (m.type === 'join') {\n      ws.rooms.add(m.room);\n      if (!rooms.has(m.room)) rooms.set(m.room, new Set());\n      rooms.get(m.room)!.add(ws);\n    } else if (m.type === 'msg' && ws.rooms.has(m.room)) {\n      publish(m.room, { type: 'msg', room: m.room, text: String(m.text) });\n    }\n  });\n  ws.on('close', () => {\n    for (const r of ws.rooms) rooms.get(r)?.delete(ws);\n    ws.rooms.clear();\n  });\n});",
+      "solutionLanguage": "typescript",
+      "explanation": "The core change is that broadcasting is split into a local fan-out plus a backplane publish. When a node receives a chat message it immediately delivers to its own local members of the room and also publishes an envelope to the shared Redis 'chat' channel; every node, including the sender, is subscribed. To prevent double-delivery and echo loops, the envelope carries the originating node's id, and a node ignores any message stamped with its own id because it already delivered those locally — every other node delivers to its local members. This is why we use two Redis connections: a Redis client in subscriber mode cannot issue normal commands, so PUBLISH needs its own connection, obtained here with duplicate(). Sticky sessions remain essential even with the backplane: the load balancer must keep routing each client back to the node that holds its socket, because the backplane only fans messages out, it does not move connections; without stickiness a reconnect or long-polling fallback would hit a node with no session. On delivery guarantees, plain Redis Pub/Sub is at-most-once and fire-and-forget, so a message published while a node is momentarily disconnected from Redis is lost with no replay; if you need at-least-once with catch-up you would switch the backplane to Redis Streams or Kafka and track per-node consumer offsets, and give each message an id so reconnecting clients can request replay. Finally, a single shared channel makes every node see every message, which is O(nodes) amplification at scale; sharding rooms across many channels so a node only subscribes to channels for rooms it actually hosts keeps the fan-out proportional to real membership.",
+      "relatedTopic": "websockets-realtime"
+    }
+  ],
+  "references": [
+    {
+      "label": "MDN: The WebSocket API (WebSockets)",
+      "url": "https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API"
+    },
+    {
+      "label": "MDN: Using server-sent events",
+      "url": "https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events"
+    },
+    {
+      "label": "RFC 6455: The WebSocket Protocol",
+      "url": "https://datatracker.ietf.org/doc/html/rfc6455"
+    },
+    {
+      "label": "Socket.IO: Using multiple nodes (adapters & scaling)",
+      "url": "https://socket.io/docs/v4/using-multiple-nodes/"
+    },
+    {
+      "label": "Ably: WebSockets at scale (challenges of scaling realtime)",
+      "url": "https://ably.com/topic/the-challenge-of-scaling-websockets"
+    },
+    {
+      "label": "MDN: Writing WebSocket servers",
+      "url": "https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers"
+    }
+  ]
+}

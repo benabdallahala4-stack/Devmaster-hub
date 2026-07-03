@@ -44,6 +44,11 @@ export const routes: Routes = [
         loadComponent: () => import('./features/logic/logic-detail.component').then(m => m.LogicDetailComponent),
       },
       {
+        path: 'review',
+        title: 'Review Queue · DevMaster Hub',
+        loadComponent: () => import('./features/review/review.component').then(m => m.ReviewComponent),
+      },
+      {
         path: 'progress',
         title: 'Progress · DevMaster Hub',
         loadComponent: () => import('./features/progress/progress.component').then(m => m.ProgressComponent),

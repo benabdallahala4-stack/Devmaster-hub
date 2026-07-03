@@ -1,0 +1,846 @@
+{
+  "id": "regular-expressions",
+  "title": "Regular Expressions",
+  "category": "Computer Science",
+  "subcategory": "Fundamentals",
+  "difficulty": "mid",
+  "tags": [
+    "regular-expressions",
+    "regex",
+    "finite-automata",
+    "backtracking",
+    "redos",
+    "javascript",
+    "pattern-matching",
+    "unicode"
+  ],
+  "description": "A staff-depth but approachable tour of regular expressions: the pattern language and its roots in finite automata, every core construct (classes, anchors, quantifiers, groups, lookaround, flags), Unicode-aware matching, and the engine and performance realities that separate a working pattern from a catastrophic-backtracking outage.",
+  "estReadMinutes": 27,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "What a Regular Expression Actually Is",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A regular expression is a compact pattern language for describing sets of strings. Instead of writing procedural code that walks characters one by one, you declare a shape - \"an optional minus sign, then one or more digits\" - and an engine decides whether a given input matches that shape, and where. That declarative quality is what makes regex simultaneously powerful and dangerous: a few characters can express a rich language, but the same terseness hides real computational cost."
+        },
+        {
+          "type": "paragraph",
+          "text": "The name comes from formal language theory. A true regular language is exactly the set of languages recognizable by a finite automaton, and classical regular expressions (concatenation, alternation, and the Kleene star) describe precisely those languages. In practice, the regex dialects shipped in JavaScript, Java, Python, and PCRE add features - backreferences and lookaround - that push them beyond the theoretical class of regular languages, which is why they cannot always be run as a plain automaton."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Mental model: a regex is a specification for a matching machine. Some engines literally compile it into a finite automaton (RE2, Go); others simulate a backtracking search (JavaScript, Java, PCRE). The construct you write is the same, but the runtime cost can differ by orders of magnitude."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// A regex literal and its equivalent constructor form\nconst re1 = /-?\\d+/;                 // literal\nconst re2 = new RegExp('-?\\\\d+');    // constructor: note doubled backslashes\n\nre1.test('-42');   // true\nre1.test('hello'); // false\n'age -42 next'.match(re1)[0]; // '-42'"
+        },
+        {
+          "type": "paragraph",
+          "text": "Examples here are JavaScript-first, because its engine is ubiquitous and its quirks are instructive. Where Java, PCRE, Python, or Google's RE2 differ, it is called out explicitly."
+        }
+      ]
+    },
+    {
+      "id": "why",
+      "heading": "Why Learn Regex Deeply Instead of Copy-Pasting",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Regex is one of the highest-leverage skills a senior engineer can have: it turns fragile hand-written parsers into one-liners for log processing, input validation, search-and-replace refactors, tokenizers, and data extraction. The tooling is universal - grep, sed, editors, every mainstream language, and most databases speak some dialect - so the investment compounds across your whole career."
+        },
+        {
+          "type": "paragraph",
+          "text": "But regex is also a classic source of production incidents. A pattern that works on your test strings can hang a server for seconds or minutes on a crafted input, because backtracking engines can take exponential time. Stack Overflow, Cloudflare, and many others have suffered real outages from a single mis-written regular expression. Understanding the engine, not just the syntax, is what separates a safe pattern from a latent denial-of-service."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Validation and parsing: emails, phone numbers, log lines, config, structured text.",
+            "Refactoring at scale: capture-and-rewrite across a codebase with named groups.",
+            "Search: fuzzy and structured search in editors, CLIs, and databases.",
+            "Security: understanding ReDoS so your own patterns do not become an attack surface."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Copy-pasting a regex from the internet without understanding it is how ReDoS and subtly-wrong validation get shipped. Every character in a pattern is a decision with performance and correctness consequences."
+        }
+      ]
+    },
+    {
+      "id": "concept-automata",
+      "heading": "From Finite Automata to Engines: NFA vs DFA",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Formally, a regular expression can be compiled into a nondeterministic finite automaton (NFA) via Thompson's construction, and an NFA can be converted into a deterministic finite automaton (DFA). A DFA has exactly one active state at a time and processes each input character in constant time, giving linear O(n) matching regardless of pattern complexity. This is the theoretical guarantee that makes regex attractive."
+        },
+        {
+          "type": "paragraph",
+          "text": "Most popular engines, however, do not run a DFA. Backtracking engines (JavaScript, Java, Python, PCRE, .NET) simulate the NFA by trying one path and, on failure, rewinding to the last choice point to try another. This is what enables features that pure automata cannot express - backreferences and lookaround - but it is also what allows exponential blow-up on adversarial input. RE2 and Go's regexp deliberately keep to the automaton model and therefore run in linear time, at the cost of forbidding backreferences."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Property",
+            "Backtracking NFA (JS, Java, PCRE)",
+            "Automaton / DFA (RE2, Go)"
+          ],
+          "rows": [
+            [
+              "Time complexity",
+              "O(2^n) worst case",
+              "O(n) guaranteed"
+            ],
+            [
+              "Backreferences",
+              "Supported",
+              "Not supported (impossible in linear time)"
+            ],
+            [
+              "Lookaround",
+              "Full support",
+              "Limited / none"
+            ],
+            [
+              "ReDoS exposure",
+              "Yes",
+              "No"
+            ],
+            [
+              "Capture reporting",
+              "Rich, ordered",
+              "Supported with tighter semantics"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Rule of thumb: if the input can come from an untrusted source and the engine is a backtracking one, treat every nested quantifier as a potential outage. If you need hard latency guarantees on untrusted input, prefer an RE2-based engine."
+        }
+      ]
+    },
+    {
+      "id": "concept-atoms",
+      "heading": "Atoms: Literals, Character Classes, and Anchors",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The smallest matching units are atoms. A literal matches itself: /cat/ matches the substring \"cat\". A character class in square brackets matches any single one of the listed characters: /[aeiou]/ matches a single vowel, and ranges like [a-z] or [0-9] are shorthand. A leading caret inside the class negates it: [^0-9] matches any single non-digit."
+        },
+        {
+          "type": "paragraph",
+          "text": "Shorthand classes cover the common cases: \\d (digit), \\w (word character: letters, digits, underscore), \\s (whitespace), and their negations \\D, \\W, \\S. The dot . matches any character except a line terminator (unless the s / dotAll flag is set)."
+        },
+        {
+          "type": "paragraph",
+          "text": "Anchors match positions, not characters. ^ asserts start of input (or start of line with the m flag), $ asserts end. The word boundary \\b matches the zero-width position between a \\w and a non-\\w character, and \\B is its negation. Because anchors are zero-width, they consume no input - a common source of confusion when reasoning about match length."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "/^\\d{3}-\\d{4}$/.test('123-4567');   // true  (whole string is the pattern)\n/[^aeiou]/.test('xyz');              // true  (x is a non-vowel)\n'the cat sat'.match(/\\bcat\\b/)[0];   // 'cat' (word boundaries)\n/\\bcat\\b/.test('category');          // false (no boundary after 'cat')\n/cat/.test('category');              // true  (unanchored substring match)"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Inside a character class most metacharacters lose their special meaning: [.] matches a literal dot, not any character. But -, ^, and ] are still special positionally, so escape them or place them carefully: [-.] or [\\^]."
+        }
+      ]
+    },
+    {
+      "id": "concept-quantifiers",
+      "heading": "Quantifiers: Greedy, Lazy, and Possessive",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Quantifiers control repetition. * means zero or more, + means one or more, ? means zero or one, and {n}, {n,}, {n,m} give exact and bounded counts. By default quantifiers are greedy: they consume as much as possible, then backtrack to give characters back only if the rest of the pattern demands it."
+        },
+        {
+          "type": "paragraph",
+          "text": "Appending ? makes a quantifier lazy (also called reluctant): it consumes as little as possible and expands only when forced. The distinction is the single most common source of \"my regex matched too much\" bugs. Consider extracting the first HTML tag from <a><b>: greedy /<.+>/ matches the whole string, while lazy /<.+?>/ matches just <a>."
+        },
+        {
+          "type": "paragraph",
+          "text": "Some engines (Java, PCRE, and .NET) also support possessive quantifiers, written with a trailing + (for example a++ or (?:...)*+). A possessive quantifier grabs as much as it can and never gives any of it back - it disables backtracking for that segment, which is a key ReDoS mitigation. JavaScript did not historically support possessive quantifiers, so the portable JS alternative is careful pattern design or atomic-group emulation via a lookahead plus backreference."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Token",
+            "Meaning",
+            "Example match"
+          ],
+          "rows": [
+            [
+              ".",
+              "Any char except newline (unless s flag)",
+              "/a.c/ matches 'abc', 'a c'"
+            ],
+            [
+              "\\d \\w \\s",
+              "Digit / word char / whitespace",
+              "\\d matches '7'"
+            ],
+            [
+              "[abc] [^abc]",
+              "Class / negated class",
+              "[a-z] matches 'q'"
+            ],
+            [
+              "^ $ \\b",
+              "Start / end / word boundary (zero-width)",
+              "\\bword\\b"
+            ],
+            [
+              "* + ?",
+              "0+, 1+, 0-or-1 (greedy)",
+              "a+ matches 'aaa'"
+            ],
+            [
+              "{n} {n,} {n,m}",
+              "Exact / at-least / bounded count",
+              "\\d{2,4}"
+            ],
+            [
+              "*? +? ??",
+              "Lazy variants (as few as possible)",
+              "<.+?> matches '<a>'"
+            ],
+            [
+              "*+ ++ ?+",
+              "Possessive (no giving back; not in legacy JS)",
+              "a++"
+            ],
+            [
+              "| (?:...) (?<n>...)",
+              "Alternation / non-capturing / named group",
+              "(?:cat|dog)"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Greedy vs lazy changes WHICH string matches, not merely performance. Possessive/atomic changes WHETHER backtracking is allowed, which is a performance and ReDoS concern. Keep the two ideas separate."
+        }
+      ]
+    },
+    {
+      "id": "concept-groups",
+      "heading": "Groups: Capturing, Non-Capturing, Named, and Backreferences",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Parentheses do two jobs. They group subpatterns so a quantifier or alternation applies to the whole unit, and by default they also capture the matched text into a numbered slot ($1, $2, ...) for later use. When you only need grouping and not capture, use a non-capturing group (?:...) - it is slightly faster and keeps your capture numbering clean."
+        },
+        {
+          "type": "paragraph",
+          "text": "Named groups (?<name>...) give captures readable names, retrieved via match.groups.name, which makes patterns self-documenting and refactor-safe. Backreferences (\\1, or \\k<name> for named) match the same text a group already captured, letting you assert that two parts of the string are identical - for example detecting a doubled word. Backreferences are exactly the feature that makes a pattern non-regular in the formal sense, and the reason RE2 cannot support them."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Named groups + replace with a rearranged format\nconst iso = '2026-07-01';\niso.replace(/(?<y>\\d{4})-(?<m>\\d{2})-(?<d>\\d{2})/, '$<d>/$<m>/$<y>');\n// -> '01/07/2026'\n\n// Access captures by name\nconst m = /(?<area>\\d{3})-(?<line>\\d{4})/.exec('555-1234');\nm.groups.area; // '555'\nm.groups.line; // '1234'\n\n// Backreference: find a doubled word\n/\\b(\\w+)\\s+\\1\\b/.test('the the cat'); // true  (\\1 re-matches 'the')\n/\\b(\\w+)\\s+\\1\\b/.test('the cat');     // false"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Prefer non-capturing groups (?:...) when you do not need the captured text. It documents intent and avoids shifting the numbers of the groups you do care about."
+        }
+      ]
+    },
+    {
+      "id": "concept-lookaround",
+      "heading": "Alternation and Lookaround",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Alternation with the pipe | expresses \"this or that\": /cat|dog/ matches either word. Alternation has very low precedence, so /^cat|dog$/ means \"starts with cat OR ends with dog\", not \"the whole string is cat or dog\". Wrap it: /^(?:cat|dog)$/. The engine tries alternatives left to right and takes the first that lets the overall match succeed."
+        },
+        {
+          "type": "paragraph",
+          "text": "Lookaround assertions are zero-width: they test a condition at the current position without consuming characters. Positive lookahead (?=...) asserts what follows; negative lookahead (?!...) asserts what does not. Lookbehind (?<=...) and negative lookbehind (?<!...) do the same for what precedes. Lookahead has been in JavaScript since the beginning; lookbehind arrived in ES2018 and is now broadly supported, but older or embedded engines may lack it, and some engines only allow fixed-width lookbehind."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Password rule: at least one lowercase, one uppercase, one digit, min length 8\nconst strong = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\\d).{8,}$/;\nstrong.test('Passw0rd');  // true\nstrong.test('password');  // false (no uppercase, no digit)\n\n// Lookahead/lookbehind for a thousands separator (insert commas)\n'1234567'.replace(/\\B(?=(\\d{3})+(?!\\d))/g, ','); // '1,234,567'\n\n// Negative lookbehind: match 'foo' not preceded by 'bar'\n'barfoo foo'.match(/(?<!bar)foo/g); // ['foo'] (the standalone one)"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Unbounded lookaround (variable-length assertions containing quantifiers) can be a performance trap and is not supported in every engine. Keep lookbehind fixed-width where portability matters."
+        }
+      ]
+    },
+    {
+      "id": "concept-flags",
+      "heading": "Flags and Unicode-Aware Matching",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Flags modify how the whole pattern is applied. In JavaScript they are appended after the closing slash (/pattern/gi) or passed as the second constructor argument. The most important ones are g (find all, stateful via lastIndex), i (case-insensitive), m (multiline: ^ and $ match line boundaries), s (dotAll: . also matches newlines), u (Unicode mode), and y (sticky: match only at lastIndex)."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Flag",
+            "Name",
+            "Effect"
+          ],
+          "rows": [
+            [
+              "g",
+              "global",
+              "Find all matches; enables matchAll and stateful lastIndex tracking"
+            ],
+            [
+              "i",
+              "ignoreCase",
+              "Case-insensitive matching"
+            ],
+            [
+              "m",
+              "multiline",
+              "^ and $ anchor to line starts/ends, not just string ends"
+            ],
+            [
+              "s",
+              "dotAll",
+              ". also matches line terminators (newlines)"
+            ],
+            [
+              "u",
+              "unicode",
+              "Treat pattern as Unicode code points; enables \\p{...} and \\u{...}"
+            ],
+            [
+              "y",
+              "sticky",
+              "Anchor each match attempt at lastIndex; no scanning ahead"
+            ],
+            [
+              "d",
+              "hasIndices",
+              "Provide start/end indices for each capture group"
+            ]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Unicode mode (u) is essential for correct handling of non-ASCII text. Without it, an emoji or an astral-plane character is treated as two separate UTF-16 code units, so /./ can match half of a character. With u you also gain Unicode property escapes like \\p{L} (any letter), \\p{N} (any number), and \\p{Emoji}, which are far more robust than hand-rolled ranges."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Without u, . sees surrogate halves; with u it sees code points\n'\\u{1F600}'.match(/./u).length;          // 1 code point matched\n\n// Unicode property escapes (require the u flag)\n/\\p{L}+/u.test('caf\\u00e9');             // true (letters incl. accented)\n/^\\p{Lu}/u.test('\\u00c9cole');           // true (starts with uppercase letter)\n\n// Sticky flag: match only exactly at lastIndex, used in tokenizers\nconst t = /\\d+/y; t.lastIndex = 3;\nt.test('abc123');                        // true, anchored at index 3"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "For any pattern touching human-language text or user input, default to the u flag. It fixes a whole class of silent surrogate-pair bugs and unlocks \\p{...} categories."
+        }
+      ]
+    },
+    {
+      "id": "example-patterns",
+      "heading": "Real Patterns and the Email Validation Trap",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Everyday patterns are useful, but each has caveats. A whitespace-collapsing replace, an ISO date matcher, or a URL extractor are all reasonable one-liners. The infamous exception is email: the full RFC 5322 grammar for a valid address is so baroque (quoted local parts, comments, domain literals) that a \"correct\" regex is thousands of characters long and still cannot confirm the mailbox exists."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Collapse runs of whitespace to a single space\n'  a   b\\t c '.replace(/\\s+/g, ' ').trim();  // 'a b c'\n\n// A pragmatic (not RFC-complete) email sanity check\nconst emailish = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;\nemailish.test('dev@example.com');  // true\nemailish.test('not-an-email');     // false\n\n// Extract all http/https URLs (deliberately simple)\nconst text = 'see https://a.dev and http://b.io/x';\ntext.match(/https?:\\/\\/[^\\s]+/g);  // ['https://a.dev', 'http://b.io/x']\n\n// ISO-8601 date with validation left to Date\n'2026-07-01'.match(/^\\d{4}-\\d{2}-\\d{2}$/); // structural check only"
+        },
+        {
+          "type": "paragraph",
+          "text": "The right architecture for email is: use a simple structural check like the one above to catch obvious typos, then verify deliverability by sending a confirmation link. The regex is a UX nicety, not a source of truth. Trying to encode all of RFC 5322 in a pattern buys you a maintenance liability and still rejects some valid addresses while accepting undeliverable ones."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "\"Validate an email with a regex\" is a classic trap. No regex can decide whether an address is real, deliverable, or even spec-complete without becoming unmaintainable. Validate structure loosely, confirm ownership out of band."
+        }
+      ]
+    },
+    {
+      "id": "mistake-redos",
+      "heading": "Catastrophic Backtracking and ReDoS",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The single most dangerous regex mistake is a pattern that backtracks exponentially. It happens when a quantified group can match the same input in many ways and the overall match ultimately fails, forcing the engine to explore every combination. The canonical example is a nested quantifier like (a+)+$ applied to a long string of a's followed by a non-a: the inner + and outer + can partition the a's in exponentially many ways, and each partition must be tried before the anchor fails."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// VULNERABLE: nested quantifiers over overlapping input\nconst bad = /^(a+)+$/;\n// bad.test('aaaaaaaaaaaaaaaaaaaaaaaaaaX') can take seconds -> minutes.\n// The 'X' guarantees final failure, forcing full backtracking search.\n\n// Other classic red flags:\nconst bad2 = /^(\\w+\\s?)*$/;      // overlapping \\w and \\s? explode\nconst bad3 = /(.*a){20}/;        // repeated greedy .* is a red flag"
+        },
+        {
+          "type": "paragraph",
+          "text": "The rewrite strategies are: (1) make the repetition unambiguous so only one partition is possible; (2) use possessive quantifiers or atomic groups (?>...) where the engine supports them, so the engine cannot backtrack into the group; (3) replace nested quantifiers with a single quantifier over a precise class; and (4) anchor early and use specific character classes instead of . so failures are detected quickly."
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// SAFE rewrite of /^(a+)+$/ - a single, unambiguous quantifier\nconst good = /^a+$/;\ngood.test('aaaaaaaaaaaaaaaaaaaaaaaaaaX'); // false, fast (linear)\n\n// Atomic group (engines that support it, e.g. Java/PCRE/.NET):\n//   /^(?>a+)+$/  prevents the inner group from giving characters back.\n// In JavaScript, emulate an atomic group with lookahead + backreference:\n//   /^(?=(a+))\\1$/  captures the greedy run once, no re-partitioning."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Signature of a ReDoS-prone pattern: a quantifier applied to a group that itself contains a quantifier over an overlapping character set - (a+)+, (a*)*, (a|a)*, (\\w+\\s*)+. If untrusted input can reach it, treat it as a live vulnerability."
+        }
+      ]
+    },
+    {
+      "id": "bestpractice",
+      "heading": "Best Practices for Safe, Fast, Maintainable Regex",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Good regex practice is mostly about defense and clarity. Anchor patterns as early and tightly as possible so obvious non-matches fail fast. Prefer specific character classes over . so the engine backtracks less. Avoid nested and overlapping quantifiers; when repetition is unavoidable, make it unambiguous. On untrusted input with a backtracking engine, cap input length, add a timeout, or move to an RE2-based engine that guarantees linear time."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Anchor early: ^ and specific prefixes let non-matches fail in O(1).",
+            "Prefer [^\"]* over .* inside delimiters - it removes ambiguity and backtracking.",
+            "Use non-capturing groups (?:...) unless you need the capture; name the ones you keep.",
+            "Never build a monster pattern to 'fully validate' semantic data like emails or URLs.",
+            "Test adversarially: feed long repeated inputs and inputs that end in a guaranteed failure.",
+            "For untrusted input on a backtracking engine, bound input length and/or use RE2."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// Instead of a fragile 'quoted string' matcher that backtracks:\n//   BAD:  /\"(.*)\"/           // .* is greedy and ambiguous inside quotes\n//   GOOD: /\"([^\"\\\\]*(?:\\\\.[^\"\\\\]*)*)\"/  // unambiguous 'unrolled loop'\nconst quoted = /\"([^\"\\\\]*(?:\\\\.[^\"\\\\]*)*)\"/;\nquoted.test('say \"hi\" now'); // true, matches the quoted span with no blow-up"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The safest regex is a simple, anchored, unambiguous one that you can read aloud. If a pattern is hard to reason about, it is probably also hard for the engine - and that is where outages live."
+        }
+      ]
+    },
+    {
+      "id": "concept-engines-tooling",
+      "heading": "Engine Differences, Performance, and Tooling",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Dialects diverge in meaningful ways. PCRE (used by PHP, nginx, and many CLIs) is feature-rich with atomic groups, possessive quantifiers, recursion, and conditionals. Java's java.util.regex is backtracking with possessive and atomic support. JavaScript is backtracking, lacks recursion, gained lookbehind in ES2018, and added the v flag for set operations. Google's RE2 (and Go's standard regexp, built on it) is a linear-time automaton engine that intentionally omits backreferences and most lookaround to guarantee no ReDoS."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Engine",
+            "Model",
+            "Backreferences",
+            "Notable"
+          ],
+          "rows": [
+            [
+              "JavaScript",
+              "Backtracking NFA",
+              "Yes",
+              "Lookbehind since ES2018; u and v flags; no recursion"
+            ],
+            [
+              "Java",
+              "Backtracking NFA",
+              "Yes",
+              "Possessive quantifiers and atomic groups"
+            ],
+            [
+              "PCRE",
+              "Backtracking NFA",
+              "Yes",
+              "Recursion, conditionals, atomic groups - very expressive"
+            ],
+            [
+              "Python re",
+              "Backtracking NFA",
+              "Yes",
+              "regex module adds features; standard re is ReDoS-prone"
+            ],
+            [
+              "RE2 / Go",
+              "Automaton (DFA/NFA)",
+              "No",
+              "Linear time guarantee; no backreferences/lookaround"
+            ]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "For performance, remember that compiling a regex has a cost - hoist RegExp objects out of hot loops rather than recompiling per iteration. Anchoring and specific classes reduce work. For debugging, regex101.com is the standard tool: it explains each token, shows the match, visualizes capture groups, and - crucially - reports a step count and warns about catastrophic backtracking before it reaches production."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Choosing an engine is a security decision. If you must run patterns from untrusted sources or over untrusted input with hard latency SLOs, an RE2-based engine removes the entire ReDoS class of bugs by construction."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "redos-blowup",
+      "title": "Catastrophic Backtracking of (a+)+ on 'aaaa...X'",
+      "type": "ascii",
+      "content": "Input: a a a a X        Pattern: ^(a+)+$\n\nThe engine must decide how the outer (...)+ splits the run of a's,\nand for each split how the inner a+ groups them. Every partition is\ntried before the trailing X forces failure.\n\n  (aaaa)               1 group\n  (aaa)(a)             2 groups\n  (aa)(aa)\n  (aa)(a)(a)\n  (a)(aaa)\n  (a)(aa)(a)\n  (a)(a)(aa)\n  (a)(a)(a)(a)         ... all compositions of n\n\nNumber of partitions grows like 2^(n-1)  ->  EXPONENTIAL.\nn=25 a's + X can take seconds; n=35 can take minutes.\n\nFix: /^a+$/  has ONE way to match  ->  O(n) linear, fails fast."
+    },
+    {
+      "id": "nfa-match-flow",
+      "title": "NFA-Style Match Flow for /-?\\d+/",
+      "type": "mermaid",
+      "content": "flowchart LR\n  S((start)) --> A{minus?}\n  A -- yes --> B[consume '-']\n  A -- no --> C[skip]\n  B --> D{digit?}\n  C --> D\n  D -- yes --> E[consume digit]\n  E --> D\n  D -- no had one plus --> F((accept))\n  D -- no had zero --> G((reject))"
+    },
+    {
+      "id": "greedy-vs-lazy",
+      "title": "Greedy vs Lazy on '<a><b>' with <.+> vs <.+?>",
+      "type": "ascii",
+      "content": "Input:  < a > < b >\n\nGREEDY  /<.+>/ :\n  '.+' grabs everything: a><b   then backtracks to the LAST '>'\n  Match = <a><b>            (as much as possible)\n\nLAZY    /<.+?>/ :\n  '.+?' takes one char, tries '>', expands only if forced\n  Match = <a>              (as little as possible)\n\nSame input, same quantifier target - the '?' flips WHICH match wins."
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-what-is-regex",
+      "question": "What is a regular expression, and how does it relate to finite automata?",
+      "answer": "A regular expression is a declarative pattern language for describing sets of strings. In formal language theory, classical regexes (concatenation, alternation, and Kleene star) describe exactly the regular languages, which are the languages recognizable by a finite automaton. A regex can be compiled into an NFA via Thompson's construction and then determinized into a DFA that matches in linear time. Practical regex dialects add features like backreferences and lookaround that go beyond true regular languages, which is why many engines cannot run as a simple automaton. So the theoretical model gives the linear-time ideal, while real engines trade that guarantee for extra expressive power.",
+      "difficulty": "easy",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": [
+        "regex",
+        "finite-automata",
+        "theory"
+      ],
+      "followUps": [
+        "What features make a regex non-regular?",
+        "Why can a DFA match in linear time?"
+      ]
+    },
+    {
+      "id": "q-greedy-vs-lazy",
+      "question": "Explain greedy vs lazy quantifiers. When does the difference actually matter?",
+      "answer": "Greedy quantifiers (*, +, ?, {n,m}) consume as much input as possible and then backtrack, giving characters back only when the rest of the pattern requires it. Lazy quantifiers, formed by adding ? (for example +? or *?), consume as little as possible and expand only when forced. The difference determines which substring wins the match, not just performance: /<.+>/ on \"<a><b>\" matches the whole string, while /<.+?>/ matches only \"<a>\". It matters any time a quantifier is followed by something that also appears inside the quantified region, such as delimiters. A common bug is using greedy .* between delimiters and accidentally spanning multiple records. Choosing the right one - or better, a specific negated class like [^>]* - avoids both the correctness bug and unnecessary backtracking.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": [
+        "quantifiers",
+        "greedy",
+        "lazy"
+      ],
+      "followUps": [
+        "How would you rewrite /<.+>/ without a lazy quantifier?",
+        "Does lazy matching improve performance?"
+      ]
+    },
+    {
+      "id": "q-catastrophic-backtracking",
+      "question": "What is catastrophic backtracking, and how do you detect and fix it?",
+      "answer": "Catastrophic backtracking is when a backtracking regex engine explores exponentially many ways to match input before ultimately failing, causing the match to take seconds or minutes. It arises from nested or overlapping quantifiers such as (a+)+, (a*)*, or (\\w+\\s*)+, especially when the overall match must fail (for instance because of a trailing anchor or an unmatchable character). Each additional input character can double the work, so a few dozen characters can hang a thread. You detect it by testing with long repeated inputs that end in a guaranteed failure, and tools like regex101 report a step-count explosion. You fix it by removing ambiguity (one unambiguous quantifier), using atomic groups (?>...) or possessive quantifiers where supported, applying the unrolled-loop technique, or switching to an RE2-based engine that cannot backtrack. This is the root cause of the ReDoS denial-of-service class.",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": [
+        "redos",
+        "backtracking",
+        "security"
+      ],
+      "followUps": [
+        "Rewrite /^(a+)+$/ safely.",
+        "How does an atomic group prevent the blow-up?"
+      ]
+    },
+    {
+      "id": "q-re2-linear",
+      "question": "Why is RE2 linear-time, and why does it not support backreferences?",
+      "answer": "RE2 (and Go's standard regexp, which is built on it) implements matching as a finite automaton simulation rather than a backtracking search. It tracks the set of all currently-possible NFA states as it scans the input once, so each character costs work proportional only to the pattern size, giving O(n) time in the length of the input with no exponential blow-up. Backreferences require the engine to remember and re-match arbitrary previously-captured text, which makes the language non-regular and provably cannot be recognized by a finite automaton in linear time - it needs the very backtracking that causes ReDoS. RE2 therefore deliberately omits backreferences (and most lookaround) as the price of its guarantee. This makes RE2 the right choice when running patterns over untrusted input under strict latency requirements, at the cost of some expressiveness.",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": [
+        "re2",
+        "linear-time",
+        "engines"
+      ],
+      "followUps": [
+        "What else does RE2 omit for its guarantee?",
+        "When would you accept losing backreferences?"
+      ]
+    },
+    {
+      "id": "q-lookbehind-support",
+      "question": "Is lookbehind universally supported, and what are its limitations across engines?",
+      "answer": "No - lookbehind support varies significantly by engine and is a portability trap. In JavaScript, lookbehind ((?<=...) and (?<!...)) only arrived in ES2018 and is unavailable in older runtimes, though modern engines support it and even allow variable-length lookbehind. Many other engines, such as PCRE and Java historically, only allow fixed-width (or bounded) lookbehind, so a lookbehind containing an unbounded quantifier is rejected or behaves differently. RE2 and Go offer little to no lookbehind at all. Because of this fragmentation, you should keep lookbehind fixed-width when a pattern must run across engines, and verify support in the specific runtime you target. When portability is critical, it is often safer to restructure the match to use a captured group or a lookahead instead.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": [
+        "lookbehind",
+        "lookaround",
+        "portability"
+      ],
+      "followUps": [
+        "How would you emulate a fixed-width lookbehind with a capture group?",
+        "Which engines allow variable-length lookbehind?"
+      ]
+    },
+    {
+      "id": "q-word-boundary",
+      "question": "What exactly does \\b match, and what are its edge cases?",
+      "answer": "The word boundary \\b is a zero-width assertion that matches the position between a word character (\\w: [A-Za-z0-9_]) and a non-word character, or at the start/end of the string adjacent to a word character. It consumes nothing. The classic edge cases stem from \\w's narrow definition: the underscore is a word character, so \\bfoo\\b will not match inside foo_bar the way you might expect, and hyphens or apostrophes are non-word, so \"don't\" has a boundary before the apostrophe. Crucially, without the u flag and Unicode-aware definitions, \\w is ASCII-only, so accented letters like e-acute count as non-word characters and produce boundaries in the middle of words. In JavaScript you need the u flag (and often \\p{...} classes) to reason about boundaries in non-English text. \\B is simply the negation - it matches every position that is not a word boundary.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": [
+        "word-boundary",
+        "anchors",
+        "unicode"
+      ],
+      "followUps": [
+        "Why does \\bfoo\\b behave oddly with 'foo_bar'?",
+        "How do you get Unicode-aware boundaries in JS?"
+      ]
+    },
+    {
+      "id": "q-email-regex-trap",
+      "question": "Why is 'validate an email with a regex' considered a trap?",
+      "answer": "Because a regex can only check the syntactic shape of an address, and the true RFC 5322 grammar is enormously complex - it permits quoted local parts, comments, domain literals, and more - so a fully compliant pattern is thousands of characters long, unreadable, and unmaintainable. Even then it cannot tell you the mailbox exists, the domain accepts mail, or the user owns the address, which is what you actually care about. Overly strict patterns also reject valid but unusual addresses, frustrating real users, while lenient ones accept undeliverable garbage. The correct approach is a loose structural sanity check (something like something@something.something) to catch typos, followed by an out-of-band confirmation such as a verification email. The regex is a UX affordance, not a source of truth, so investing in a monster pattern is wasted effort and a maintenance liability.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": [
+        "email",
+        "validation",
+        "pitfalls"
+      ],
+      "followUps": [
+        "What structural check is 'good enough' for email?",
+        "How do you actually confirm an email is real?"
+      ]
+    },
+    {
+      "id": "q-capturing-vs-noncapturing",
+      "question": "What is the difference between capturing, non-capturing, and named groups?",
+      "answer": "A capturing group ( ... ) both groups a subpattern and stores the text it matched into a numbered slot accessible as $1, $2, or via the match array. A non-capturing group (?: ... ) only groups - it applies a quantifier or alternation to a subpattern without allocating a capture, which is marginally faster and, more importantly, keeps your capture numbering stable when you add or remove grouping. A named group (?<name> ... ) is a capturing group with a readable label, retrieved via match.groups.name and referenced in replacements as $<name>, making patterns self-documenting and refactor-safe. Best practice is to name the captures you actually use and make everything else non-capturing so the pattern communicates intent and does not silently shift group numbers.",
+      "difficulty": "easy",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": [
+        "groups",
+        "capturing",
+        "named-groups"
+      ],
+      "followUps": [
+        "When would you prefer named groups over numbered ones?",
+        "Does non-capturing improve performance meaningfully?"
+      ]
+    },
+    {
+      "id": "q-flags",
+      "question": "Walk through the JavaScript regex flags and what each one changes.",
+      "answer": "JavaScript supports several flags that alter matching. g (global) finds all matches and enables matchAll and stateful lastIndex tracking. i (ignoreCase) makes matching case-insensitive. m (multiline) makes ^ and $ anchor to line boundaries rather than only the whole string. s (dotAll) makes . also match newline characters. u (unicode) treats the pattern as code points and unlocks \\p{...} property escapes and \\u{...} code-point escapes. y (sticky) forces each attempt to start exactly at lastIndex, useful in tokenizers. d (hasIndices) reports the start and end index of each capture. The g and y flags are stateful through lastIndex, which is a common source of bugs when a single RegExp object is reused across calls.",
+      "difficulty": "easy",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": [
+        "flags",
+        "javascript"
+      ],
+      "followUps": [
+        "What bug does reusing a /g/ regex cause?",
+        "When is the sticky flag preferable to global?"
+      ]
+    },
+    {
+      "id": "q-lastindex-gotcha",
+      "question": "What is the lastIndex gotcha with the global flag in JavaScript?",
+      "answer": "When a RegExp has the g or y flag, it keeps a mutable lastIndex property that advances after each successful test or exec call, so the same object is stateful across calls. If you reuse a single global regex - for example calling re.test(x) repeatedly in a loop or across function calls - subsequent calls resume from the previous lastIndex, producing alternating true/false results or skipping matches. This is a frequent, confusing bug. The fixes are: do not add g when you only need a boolean test; create a fresh regex per use or reset lastIndex to 0 before each independent search; or use non-stateful APIs like String.prototype.match (without g on the same object) or matchAll, which is designed for iterating all matches cleanly. Understanding that g makes the object stateful is the key insight.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": [
+        "lastindex",
+        "global-flag",
+        "javascript"
+      ],
+      "followUps": [
+        "How does matchAll avoid the lastIndex problem?",
+        "Why does re.test alternate results in a loop?"
+      ]
+    },
+    {
+      "id": "q-anchors",
+      "question": "What are anchors, and how do ^ and $ change under the multiline flag?",
+      "answer": "Anchors are zero-width assertions that match positions rather than characters. By default ^ matches the start of the entire input and $ matches the end of the entire input. With the m (multiline) flag, ^ and $ additionally match at the start and end of each line, that is, immediately after and before newline characters. This is essential when processing multi-line text such as logs or files, where you want each line anchored independently. Because anchors consume no input, they do not appear in the matched substring; they only constrain where a match may occur, which is why anchoring early is a cheap way to make non-matches fail fast. Some engines also offer \\A and \\z, which always mean absolute string start and end regardless of the multiline flag.",
+      "difficulty": "easy",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": [
+        "anchors",
+        "multiline",
+        "flags"
+      ],
+      "followUps": [
+        "How do \\A and \\z differ from ^ and $ in engines that have them?",
+        "Why does anchoring improve performance?"
+      ]
+    },
+    {
+      "id": "q-atomic-possessive",
+      "question": "What are atomic groups and possessive quantifiers, and how do they prevent ReDoS?",
+      "answer": "An atomic group (?>...) matches its contents and then throws away all internal backtracking positions, so once the engine leaves the group it will never re-enter to try a different internal split. A possessive quantifier (a++, a*+, a?+) is the shorthand equivalent applied to a single quantifier: it grabs the maximum and never gives any characters back. Both work by disabling the backtracking that causes catastrophic blow-up: if the group cannot re-partition its input, the exponential search space collapses. They are the standard fix for patterns like (a+)+, converting them into a single unambiguous pass. The caveat is engine support - Java, PCRE, and .NET support them, but JavaScript historically did not, so in JS you emulate an atomic group with a lookahead-plus-backreference trick, /(?=(a+))\\1/, or redesign the pattern to be unambiguous.",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": [
+        "atomic-groups",
+        "possessive",
+        "redos"
+      ],
+      "followUps": [
+        "How do you emulate an atomic group in JavaScript?",
+        "Do possessive quantifiers change which string matches?"
+      ]
+    },
+    {
+      "id": "q-unicode-mode",
+      "question": "Why should you use the u flag, and what does it enable?",
+      "answer": "Without the u flag, JavaScript regexes operate on UTF-16 code units, so a character outside the Basic Multilingual Plane - an emoji or many CJK extension characters - is seen as two separate surrogate halves. That means . can match half a character, character classes behave incorrectly, and quantifier counts are wrong for such input. The u flag switches the engine to interpret the pattern and input by Unicode code point, fixing surrogate-pair handling. It also unlocks \\u{...} code-point escapes and \\p{...} / \\P{...} Unicode property escapes such as \\p{L} for letters, \\p{N} for numbers, and script properties, which are far more accurate and readable than hand-built ranges. For any pattern touching human-language text or untrusted input, defaulting to u prevents a whole category of silent bugs. The newer v flag extends this further with set operations on classes.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": [
+        "unicode",
+        "flags",
+        "internationalization"
+      ],
+      "followUps": [
+        "What does the v flag add beyond u?",
+        "Give an example where missing u causes a bug."
+      ]
+    },
+    {
+      "id": "q-anchor-early-perf",
+      "question": "What performance techniques reduce regex cost, and why do they work?",
+      "answer": "The biggest wins come from reducing the engine's search space. Anchoring early (starting with ^ or a required literal prefix) lets the engine reject non-matching positions in constant time instead of scanning. Using specific negated character classes like [^\"]* instead of .* inside delimiters removes ambiguity, so the engine does not need to backtrack to find the right boundary. Avoiding nested and overlapping quantifiers eliminates the exponential paths entirely. Compiling the RegExp once and hoisting it out of hot loops avoids repeated compilation cost. Bounding quantifiers ({0,100} instead of *) caps worst-case work on untrusted input. Finally, unbounded lookaround should be avoided because it can force expensive re-scanning. Each technique works by making failures cheap and matches unambiguous, which is exactly what keeps a backtracking engine linear in practice.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": [
+        "performance",
+        "optimization",
+        "anchoring"
+      ],
+      "followUps": [
+        "Why is [^\"]* better than .* inside quotes?",
+        "How much does hoisting RegExp compilation save?"
+      ]
+    },
+    {
+      "id": "q-tooling",
+      "question": "How do you test and debug a complex regex safely before shipping it?",
+      "answer": "The standard tool is regex101.com, which lets you pick the engine flavor (PCRE, JavaScript, Python, Go/RE2, Java), see a token-by-token explanation, highlight matches and capture groups against sample input, and - most importantly - reports the step count and warns when a pattern shows catastrophic backtracking. Beyond the interactive tool, write unit tests that include adversarial inputs: long runs of repeated characters, inputs that end in a guaranteed failure to trigger worst-case backtracking, and Unicode edge cases, plus the empty string and boundary positions. For untrusted input, add an input-length cap and, where possible, a match timeout, or run the pattern in an RE2-based engine. Treating the regex like any other code - with tests, review, and a performance check - is what keeps a clever pattern from becoming a production incident.",
+      "difficulty": "easy",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": [
+        "tooling",
+        "testing",
+        "regex101"
+      ],
+      "followUps": [
+        "What adversarial inputs should a regex test suite include?",
+        "How can you enforce a timeout on regex matching?"
+      ]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-parse-logs",
+      "title": "Parse Structured Log Lines with Named Groups",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "prompt": "You are given access-log lines in the format:\n127.0.0.1 - - [01/Jul/2026:13:55:36 +0000] \"GET /api/users HTTP/1.1\" 200 1234\nWrite a JavaScript function parseLog(line) that uses a single regex with NAMED capture groups to extract ip, timestamp, method, path, protocol, status (as a number), and size (as a number). Return null for lines that do not match. Then map an array of lines to parsed objects.",
+      "hints": [
+        "Use named groups (?<name>...) and read them from match.groups.",
+        "Use a negated class like [^\"]+ for the request line instead of a greedy .+ to avoid backtracking.",
+        "Convert status and size with Number() after matching; anchor the pattern with ^ and $."
+      ],
+      "solutionCode": "const LOG_RE = new RegExp(\n  '^(?<ip>\\\\S+) \\\\S+ \\\\S+ ' +\n  '\\\\[(?<timestamp>[^\\\\]]+)\\\\] ' +\n  '\"(?<method>[A-Z]+) (?<path>[^\"\\\\s]+) (?<protocol>HTTP/\\\\d\\\\.\\\\d)\" ' +\n  '(?<status>\\\\d{3}) (?<size>\\\\d+)$'\n);\n\nfunction parseLog(line) {\n  const m = LOG_RE.exec(line);\n  if (!m) return null;\n  const g = m.groups;\n  return {\n    ip: g.ip,\n    timestamp: g.timestamp,\n    method: g.method,\n    path: g.path,\n    protocol: g.protocol,\n    status: Number(g.status),\n    size: Number(g.size),\n  };\n}\n\nconst lines = [\n  '127.0.0.1 - - [01/Jul/2026:13:55:36 +0000] \"GET /api/users HTTP/1.1\" 200 1234',\n  'garbage line that should not match',\n];\n\nconst parsed = lines.map(parseLog).filter(Boolean);\nconsole.log(parsed[0].status);   // 200 (a number)\nconsole.log(parsed[0].path);     // '/api/users'\nconsole.log(parsed.length);      // 1",
+      "solutionLanguage": "javascript",
+      "explanation": "The pattern is anchored with ^ and $ so the whole line must conform, which lets non-matching lines fail fast and return null. Named groups make the code self-documenting: instead of remembering that group 4 is the path, we read match.groups.path, which also survives future edits to the pattern. The request line uses [^\"\\s]+ for the path and a specific HTTP/\\d\\.\\d for the protocol rather than a greedy .+, which removes ambiguity and prevents the engine from backtracking across the quotes - an important habit for avoiding ReDoS on log data that may be attacker-influenced. The status and size groups capture digits as text, and we convert them with Number() after matching so the returned object has the correct types. Building the RegExp from concatenated strings keeps the long pattern readable while compiling it once and hoisting it out of the mapping loop for performance. Finally, lines.map(parseLog).filter(Boolean) cleanly drops the lines that did not match.",
+      "relatedTopic": "regular-expressions"
+    },
+    {
+      "id": "ch-fix-redos",
+      "title": "Identify and Safely Rewrite a ReDoS-Vulnerable Pattern",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "prompt": "A code review surfaces this validator, meant to check that a string is a comma-separated list of one-or-more words with optional surrounding spaces:\nconst re = /^(\\s*\\w+\\s*,?)*$/;\nExplain why it is vulnerable to catastrophic backtracking, demonstrate the blow-up conceptually, and provide a safe rewrite in JavaScript that accepts the same valid inputs but cannot explode. Include a small test harness.",
+      "hints": [
+        "Look for a quantifier applied to a group that itself contains quantifiers over overlapping characters (\\s* and \\w+).",
+        "Ambiguity is the enemy: many ways to split the same input across the outer * cause exponential backtracking on failure.",
+        "Rewrite as an unambiguous 'first item then repeated (separator item)' structure, or split on commas and validate each part."
+      ],
+      "solutionCode": "// VULNERABLE: (\\s*\\w+\\s*,?)* has overlapping, ambiguous repetition.\n// On input like 'a a a a a ... !' (many words, no comma, ending in a\n// non-matching char) the outer * can partition the run of characters\n// in exponentially many ways before failing at '!'.\nconst vulnerable = /^(\\s*\\w+\\s*,?)*$/;\n\n// SAFE rewrite: unambiguous structure - one item, then zero or more\n// (comma + item). Each piece can match the input in exactly one way.\nconst safe = /^\\s*\\w+\\s*(?:,\\s*\\w+\\s*)*$/;\n\n// Even simpler and allocation-clear: split on commas, validate parts.\nfunction isWordList(input) {\n  if (input.trim() === '') return false;\n  return input.split(',').every((part) => /^\\s*\\w+\\s*$/.test(part));\n}\n\n// Test harness\nconsole.log(safe.test('one, two, three')); // true\nconsole.log(safe.test('  a ,b,  c '));      // true\nconsole.log(safe.test('one,,two'));         // false (empty item)\nconsole.log(safe.test('one two'));          // false (missing comma)\nconsole.log(isWordList('one, two'));        // true\nconsole.log(isWordList('one,,two'));        // false\n\n// The 'safe' pattern fails almost instantly on an adversarial input\n// such as ('a '.repeat(50) + '!') because there is no ambiguous\n// partitioning for the engine to explore.",
+      "solutionLanguage": "javascript",
+      "explanation": "The original pattern is dangerous because the outer * repeats a group that already contains multiple quantifiers over overlapping character sets: \\s* can match the same spaces that \\w+ borders, and the optional comma means one textual item can be decomposed by the engine in many different ways. When the input is a long run of words that ultimately fails to match - for example because it ends in an illegal character - the engine must try every one of those exponentially many partitions before concluding failure, which is the definition of catastrophic backtracking and a live ReDoS vector on untrusted input. The safe rewrite removes the ambiguity by expressing the grammar explicitly: exactly one leading item, followed by zero or more occurrences of a comma-plus-item, using a non-capturing group so numbering stays clean. Because each character of the input can be consumed by exactly one part of the pattern, there is nothing for the engine to backtrack over and matching stays linear. The alternative isWordList function sidesteps regex repetition entirely by splitting on commas and validating each part with a trivial, non-ambiguous pattern, which is often the most readable and safest option. The test harness confirms the rewrite accepts the same valid inputs, rejects empty items and missing separators, and - crucially - returns immediately on the adversarial input that would have hung the original.",
+      "relatedTopic": "regular-expressions"
+    }
+  ],
+  "references": [
+    {
+      "label": "MDN - Regular Expressions Guide",
+      "url": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Regular_expressions"
+    },
+    {
+      "label": "regex101 - Online Regex Tester and Debugger",
+      "url": "https://regex101.com/"
+    },
+    {
+      "label": "OWASP - Regular Expression Denial of Service (ReDoS)",
+      "url": "https://owasp.org/www-community/attacks/Regular_expression_Denial_of_Service_-_ReDoS"
+    },
+    {
+      "label": "Google RE2 - Syntax and Design Wiki",
+      "url": "https://github.com/google/re2/wiki/Syntax"
+    },
+    {
+      "label": "Russ Cox - Regular Expression Matching Can Be Simple And Fast",
+      "url": "https://swtch.com/~rsc/regexp/regexp1.html"
+    },
+    {
+      "label": "MDN - Cheatsheet of Regex Syntax",
+      "url": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Regular_expressions/Cheatsheet"
+    }
+  ]
+}

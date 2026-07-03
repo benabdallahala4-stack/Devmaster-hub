@@ -3,11 +3,12 @@ import { Challenge } from '../../core/models/content.model';
 import { IconComponent } from './icon.component';
 import { CodeBlockComponent } from './code-block.component';
 import { DifficultyBadgeComponent } from './difficulty-badge.component';
+import { CodeRunnerComponent } from '../../features/challenges/code-runner.component';
 
 @Component({
   selector: 'app-challenge-view',
   standalone: true,
-  imports: [IconComponent, CodeBlockComponent, DifficultyBadgeComponent],
+  imports: [IconComponent, CodeBlockComponent, DifficultyBadgeComponent, CodeRunnerComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="cv">
@@ -35,6 +36,12 @@ import { DifficultyBadgeComponent } from './difficulty-badge.component';
               <app-icon name="chevron-down" [size]="15" /> Reveal hint {{ revealedHints() + 1 }}
             </button>
           }
+        </div>
+      }
+
+      @if (challenge().testCode) {
+        <div class="cv__runner">
+          <app-code-runner [starterCode]="challenge().starterCode ?? ''" [testCode]="challenge().testCode!" />
         </div>
       }
 

@@ -93,6 +93,7 @@ export class CommandPaletteComponent {
     { label: 'Start Interview Mode', icon: 'brain', path: '/interview' },
     { label: 'Challenges', icon: 'challenges', path: '/challenges' },
     { label: 'Logic & Problem Solving', icon: 'target', path: '/logic' },
+    { label: 'Review queue', icon: 'refresh', path: '/review' },
     { label: 'Your progress', icon: 'progress', path: '/progress' },
     { label: 'Settings', icon: 'settings', path: '/settings' },
   ];

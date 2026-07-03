@@ -1,0 +1,1045 @@
+{
+  "id": "data-modeling",
+  "title": "Data Modeling",
+  "category": "Computer Science",
+  "subcategory": "Data",
+  "difficulty": "senior",
+  "tags": [
+    "data-modeling",
+    "normalization",
+    "denormalization",
+    "er-modeling",
+    "star-schema",
+    "single-table-design",
+    "surrogate-keys",
+    "schema-evolution"
+  ],
+  "description": "A staff-level treatment of the modeling craft itself: turning a domain into conceptual, logical, and physical models; normalizing to 3NF/BCNF and denormalizing deliberately for reads; and choosing keys, relationships, inheritance strategies, temporal patterns, and access-pattern-first NoSQL designs. Covers relational DDL, document embedding, DynamoDB single-table design, and OLTP-versus-OLAP dimensional modeling with the trade-offs that separate a working schema from a durable one.",
+  "estReadMinutes": 31,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Data Modeling Is a Design Discipline, Not a CREATE TABLE",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Data modeling is the act of deciding what facts your system will remember, how those facts relate, and how they will be represented so that reads and writes stay correct and cheap as the system grows. It is upstream of any particular database engine: the same order-and-customer domain can be expressed as a normalized relational schema, a nested document, a wide DynamoDB item collection, or a star schema in a warehouse. The engine matters, but the model is the part you cannot cheaply undo, because data outlives code and every consumer, report, and integration hardens around the shape you chose."
+        },
+        {
+          "type": "paragraph",
+          "text": "This topic is deliberately about the modeling methodology rather than storage internals: indexes, B-trees, isolation levels, and NoSQL vs SQL selection are covered elsewhere. Here we care about entities and relationships, the discipline of normalization and the judgement of denormalization, key selection, inheritance and temporal patterns, access-pattern-first design, and the deep split between transactional (OLTP) and analytical (OLAP) modeling. The senior skill is not knowing the rules but knowing when each rule stops paying for itself."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Mental model: a data model is a contract about meaning. Normalization protects that meaning by storing each fact once; denormalization trades some of that protection for read speed; access-pattern-first design starts from the queries and works backward to the shape. Every model lives somewhere on that spectrum, and the job is to place it consciously."
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "Three levels of abstraction: conceptual, logical, and physical models.",
+            "ER modeling: entities, attributes, relationships, cardinality, and participation.",
+            "Relational normalization (1NF-BCNF), the anomalies each form removes, and deliberate denormalization.",
+            "Keys: natural vs surrogate, composite, foreign keys, and UUID vs auto-increment vs ULID.",
+            "Modeling relationships (1:1, 1:N, M:N) and inheritance (single/class/concrete table).",
+            "Temporal data, slowly changing dimensions, soft deletes, and audit columns.",
+            "Access-pattern-first NoSQL: document embedding vs referencing, DynamoDB single-table design.",
+            "OLTP vs OLAP: 3NF vs star/snowflake schemas, facts and dimensions, and schema evolution."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "why-modeling-matters",
+      "heading": "Why a Bad Model Is the Most Expensive Mistake You Can Make",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A poorly chosen algorithm can be swapped in an afternoon; a poorly chosen data model calcifies. Once terabytes of rows exist and a dozen services read them, changing the shape requires a migration, a backfill, dual-writes, and a coordinated cutover across teams that did not write the original schema. The cost of a modeling mistake is therefore not the mistake itself but the compounded price of every downstream system that trusted it, multiplied by the volume of data already committed to the wrong shape."
+        },
+        {
+          "type": "paragraph",
+          "text": "The classic failure is modeling the screen instead of the domain. A developer sees an order form with a customer name and address and stores those strings directly on the order row. Six months later the customer moves, the name is misspelled in half the orders, and there is no single place to fix it because the fact 'this customer's address' was scattered across millions of rows. Modeling the domain first, so an order references a customer and the address lives once where it belongs, means the same change is a one-row update."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Modeling decision",
+            "Cheap to change early",
+            "Ruinous to change late"
+          ],
+          "rows": [
+            [
+              "Primary key type (int vs UUID)",
+              "Alter one empty table",
+              "Rewrite every FK, index, and API contract"
+            ],
+            [
+              "Embed vs reference in a document",
+              "Edit one JSON shape",
+              "Re-shape every stored document and every query"
+            ],
+            [
+              "Store address on order vs customer",
+              "Move one column",
+              "Backfill and reconcile millions of rows"
+            ],
+            [
+              "Soft delete vs hard delete",
+              "Add a column",
+              "Retrofit is_deleted filters into every query and index"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The most dangerous phrase in modeling is 'we'll fix it later'. Data has inertia proportional to its volume and its number of consumers. Decisions that are trivial on an empty schema become multi-quarter migration projects once production data and downstream integrations depend on them."
+        }
+      ]
+    },
+    {
+      "id": "three-levels",
+      "heading": "Conceptual, Logical, and Physical Models",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Mature modeling proceeds through three levels of abstraction, each answering a different question. The conceptual model asks what things exist and how they relate, in the language of the business, with no technology in sight: 'a Customer places Orders, each Order contains Products.' The logical model refines this into attributes, keys, and precise cardinalities while staying independent of any engine: entities become tables-in-principle, relationships become foreign keys or join tables, and every attribute gets a semantic type. The physical model is the concrete DDL for a specific engine, with column types, indexes, partitioning, and storage options."
+        },
+        {
+          "type": "paragraph",
+          "text": "Skipping levels is the usual cause of pain. Teams that jump straight to physical DDL bake engine quirks and premature optimizations into the domain, and they lose the conceptual model that new engineers and stakeholders need to reason about the system. Teams that never descend to physical detail ship elegant diagrams that ignore the realities of null handling, index locality, and query patterns. The value is in the descent: each level is a checkpoint where a different audience validates a different concern."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Level",
+            "Question it answers",
+            "Audience",
+            "Artifact"
+          ],
+          "rows": [
+            [
+              "Conceptual",
+              "What entities exist and how do they relate?",
+              "Business, product, architects",
+              "High-level ER diagram, no attributes"
+            ],
+            [
+              "Logical",
+              "What are the attributes, keys, and cardinalities?",
+              "Data modelers, senior engineers",
+              "Attributed ER model, normalized to a target NF"
+            ],
+            [
+              "Physical",
+              "How is it stored in this engine?",
+              "Engineers, DBAs",
+              "DDL: types, indexes, partitions, constraints"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A useful test: your conceptual model should be understandable by a non-technical stakeholder, and your physical model should be runnable by a database. If your conceptual diagram has index hints or your physical schema has undefined cardinalities, you have collapsed the levels and will pay for it."
+        }
+      ]
+    },
+    {
+      "id": "er-modeling",
+      "heading": "ER Modeling: Entities, Attributes, Relationships, Cardinality",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Entity-Relationship modeling is the shared vocabulary. An entity is a thing the system remembers (Customer, Order, Product); an attribute is a property of that thing (email, total, sku); a relationship connects entities (a Customer places an Order). Cardinality specifies how many of each side can participate: one-to-one, one-to-many, or many-to-many. Participation (optional vs mandatory) says whether an instance must take part: an Order must have a Customer (mandatory), but a Customer need not have Orders (optional)."
+        },
+        {
+          "type": "paragraph",
+          "text": "Two heuristics carry most of the weight. First, nouns in the domain description tend to be entities and verbs tend to be relationships; 'a customer places orders' yields Customer, Order, and a places relationship. Second, an attribute that can repeat or that has its own attributes is really a hidden entity: 'order line items' is not an attribute of Order but a separate entity in a one-to-many relationship. Missing this is how developers end up with comma-separated values stuffed into a single column."
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "text": "Cardinality read as (min,max) on each side:\n\nCustomer (1,1) ---- places ---- (0,N) Order\n  \"each Order has exactly one Customer;\n   each Customer has zero or more Orders\"\n\nOrder (1,1) ---- contains ---- (1,N) OrderLine\n  \"an Order has at least one line;\n   a line belongs to exactly one Order\"\n\nProduct (0,N) ---- appears_in ---- (0,N) Order   [M:N -> needs a join entity]"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "When you find a many-to-many relationship, resolve it into an associative (join) entity before you reach physical design. That entity is frequently where the interesting attributes live: the quantity and unit price of a product on an order belong on the OrderLine, not on Product or Order."
+        }
+      ]
+    },
+    {
+      "id": "normalization",
+      "heading": "Normalization: Removing Anomalies One Form at a Time",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Normalization is the process of decomposing tables so that each fact is stored exactly once, driven by functional dependencies (what determines what). Its purpose is to eliminate three anomalies: an update anomaly (a fact stored in many rows must be changed in many places, risking inconsistency), an insertion anomaly (you cannot record one fact without inventing another, such as being unable to add a product with no order), and a deletion anomaly (removing one row silently loses an unrelated fact). Each normal form removes a specific class of redundancy."
+        },
+        {
+          "type": "paragraph",
+          "text": "First normal form requires atomic column values and no repeating groups: no comma-separated lists, no address1/address2/address3 columns. Second normal form removes partial dependencies on a composite key, so every non-key attribute depends on the whole key, not part of it. Third normal form removes transitive dependencies, where a non-key attribute depends on another non-key attribute. Boyce-Codd (BCNF) is a stricter 3NF: every determinant must be a candidate key, which closes an edge case 3NF permits when there are overlapping candidate keys."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Normal form",
+            "Removes",
+            "Example of the fix"
+          ],
+          "rows": [
+            [
+              "1NF",
+              "Repeating groups and non-atomic values",
+              "Split 'phones: 555-1, 555-2' into a Phone table with one row per number"
+            ],
+            [
+              "2NF",
+              "Partial dependency on part of a composite key",
+              "In (order_id, product_id) -> product_name, move product_name to Product; it depends only on product_id"
+            ],
+            [
+              "3NF",
+              "Transitive dependency (non-key -> non-key)",
+              "customer_zip -> customer_city; move city to a Zip table so it is not derived from a non-key attribute"
+            ],
+            [
+              "BCNF",
+              "A determinant that is not a candidate key",
+              "If (student, subject) -> teacher but teacher -> subject, decompose so teacher (a determinant) becomes a key of its own table"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The colloquial goal is '3NF: every non-key attribute depends on the key, the whole key, and nothing but the key.' Reaching 3NF/BCNF is the default for OLTP systems because it makes writes safe and each fact single-sourced. Higher forms (4NF/5NF) address multi-valued and join dependencies and are rarely a practical concern."
+        }
+      ]
+    },
+    {
+      "id": "relational-ddl",
+      "heading": "A Normalized Relational Schema in DDL",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Here is a 3NF e-commerce core. Note the surrogate primary keys, the foreign keys enforcing referential integrity, the join table order_lines that resolves the many-to-many between orders and products, and audit columns. Each fact lives once: a product's name is in products, a customer's email is in customers, and an order line's captured price is on the line (a deliberate historical snapshot, because the product's current price may change)."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "text": "CREATE TABLE customers (\n    id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n    email         CITEXT NOT NULL UNIQUE,          -- natural key, unique constraint\n    display_name  TEXT   NOT NULL,\n    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),\n    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()\n);\n\nCREATE TABLE products (\n    id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n    sku           TEXT   NOT NULL UNIQUE,          -- natural business key\n    name          TEXT   NOT NULL,\n    price_cents   INTEGER NOT NULL CHECK (price_cents >= 0),\n    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()\n);\n\nCREATE TABLE orders (\n    id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n    customer_id   BIGINT NOT NULL REFERENCES customers(id),\n    status        TEXT   NOT NULL DEFAULT 'pending'\n                    CHECK (status IN ('pending','paid','shipped','cancelled')),\n    placed_at     TIMESTAMPTZ NOT NULL DEFAULT now(),\n    -- idempotency key so a retried checkout does not create a duplicate order\n    idempotency_key UUID NOT NULL,\n    UNIQUE (customer_id, idempotency_key)\n);\n\n-- Join table resolving the M:N between orders and products.\nCREATE TABLE order_lines (\n    order_id      BIGINT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,\n    product_id    BIGINT NOT NULL REFERENCES products(id),\n    quantity      INTEGER NOT NULL CHECK (quantity > 0),\n    unit_price_cents INTEGER NOT NULL,   -- snapshot: price AT TIME of order\n    PRIMARY KEY (order_id, product_id)   -- composite natural key of the association\n);"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "unit_price_cents on the line is not a normalization failure. The current product price and the price a customer actually paid are two different facts; capturing the paid price is temporal correctness, not redundancy. The test is whether the value is derivable: current price is derivable from products, but historical paid price is not."
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "Every table has a single-column surrogate PK for stable references.",
+            "Natural business keys (email, sku) get UNIQUE constraints, not PK status.",
+            "order_lines uses a composite PK (order_id, product_id) as its natural key.",
+            "The (customer_id, idempotency_key) unique constraint makes checkout idempotent."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "keys",
+      "heading": "Choosing Primary Keys: Natural, Surrogate, and the UUID Question",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A natural key is a value from the domain that uniquely identifies a row (email, SKU, ISBN); a surrogate key is a system-generated value with no business meaning (an auto-increment integer, a UUID, a ULID). The senior default is a surrogate primary key with a unique constraint on the natural key. Natural keys change (people change email, products get re-SKU'd), and when a primary key changes you must cascade that change through every foreign key that references it, which is exactly the fragility a surrogate key avoids."
+        },
+        {
+          "type": "paragraph",
+          "text": "Among surrogate keys the trade-off is index locality versus distributability. A bigint auto-increment produces monotonically increasing keys that append to the right edge of the B-tree, giving excellent write locality and small keys, but it leaks row counts, is guessable, and forces a round-trip to the database to learn the id. A random UUID (v4) is globally unique and generatable client-side, but its randomness scatters inserts across the whole index, causing page splits and cache churn. Time-ordered identifiers (UUIDv7, ULID) recover most of the locality of an integer while keeping global uniqueness and client-side generation."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Key strategy",
+            "Index locality",
+            "Generated where",
+            "Watch out for"
+          ],
+          "rows": [
+            [
+              "Natural key as PK",
+              "Depends on value",
+              "Domain",
+              "Changes cascade through all FKs; may be wide/composite"
+            ],
+            [
+              "Surrogate + natural UNIQUE",
+              "Good (surrogate)",
+              "System",
+              "Two keys to maintain (the recommended default)"
+            ],
+            [
+              "Auto-increment BIGINT",
+              "Excellent (append-only)",
+              "DB round-trip",
+              "Enumerable, leaks volume, hard to merge across shards"
+            ],
+            [
+              "UUID v4 (random)",
+              "Poor (scattered inserts)",
+              "Client",
+              "Page splits, cache churn, 16 bytes wide"
+            ],
+            [
+              "UUIDv7 / ULID (time-sorted)",
+              "Good (near-sequential)",
+              "Client",
+              "Prefix leaks creation time; still 16 bytes"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Do not reach for random UUIDv4 as a clustered primary key on a high-write table without measuring. The insert scatter fragments the index and inflates write amplification. If you need client-generated global uniqueness, prefer UUIDv7 or ULID so the keys stay roughly time-ordered and preserve B-tree locality."
+        }
+      ]
+    },
+    {
+      "id": "relationships",
+      "heading": "Modeling 1:1, 1:N, and M:N Relationships",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A one-to-many relationship is the workhorse: put the foreign key on the many side (an order_line has an order_id). A one-to-one relationship is rarer and usually signals either an optional extension you want to split out for locality (a user and a seldom-read user_profile) or two things that should honestly be one table; model it as a shared or unique foreign key. A many-to-many relationship cannot be represented by a foreign key on either side, so it requires a third table, the join or associative table, whose primary key is the pair of foreign keys."
+        },
+        {
+          "type": "paragraph",
+          "text": "The join table is not a mechanical artifact; it is where relationship attributes live. In students-enroll-in-courses, the enrollment table naturally carries the grade and the enrollment date. Forgetting that a join table can hold attributes is a common junior error that later forces an awkward retrofit. When the association itself becomes an entity with its own lifecycle and identity, promote it to a first-class entity with its own surrogate key."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "text": "-- 1:N  -> FK lives on the many side\nALTER TABLE order_lines ADD COLUMN order_id BIGINT REFERENCES orders(id);\n\n-- 1:1  -> unique FK splits an optional extension out for locality\nCREATE TABLE user_profiles (\n    user_id   BIGINT PRIMARY KEY REFERENCES users(id),  -- PK = FK enforces 1:1\n    bio       TEXT,\n    avatar_url TEXT\n);\n\n-- M:N  -> associative table; PK is the pair, attributes live here\nCREATE TABLE enrollments (\n    student_id BIGINT NOT NULL REFERENCES students(id),\n    course_id  BIGINT NOT NULL REFERENCES courses(id),\n    grade      TEXT,\n    enrolled_at TIMESTAMPTZ NOT NULL DEFAULT now(),\n    PRIMARY KEY (student_id, course_id)\n);"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Rule of thumb: if you ever want to say something about the relationship itself (when, how many, at what price, with what grade), it deserves an associative table with attributes, even if the raw cardinality looks like a simple link."
+        }
+      ]
+    },
+    {
+      "id": "inheritance",
+      "heading": "Modeling Inheritance and Polymorphism",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Relational tables have no native inheritance, so an object hierarchy (a Payment that can be a CardPayment or a BankTransfer) must be mapped to one of three patterns. Single-table inheritance puts all subtypes in one wide table with a discriminator column and many nullable columns. Class-table inheritance (joined) has a base table plus one table per subtype joined by a shared key. Concrete-table inheritance gives each concrete subtype its own standalone table with all columns duplicated and no base table."
+        },
+        {
+          "type": "paragraph",
+          "text": "The trade-off is between query simplicity, storage cleanliness, and the ability to enforce constraints. Single-table is fast to query (no joins) but sprays nullable columns and cannot enforce that a card payment has a card number. Class-table is the cleanest normalized form and enforces per-subtype NOT NULL, but every read joins. Concrete-table avoids joins and nulls but makes 'all payments regardless of type' queries a painful UNION and duplicates shared columns. For a small, stable set of subtypes with mostly shared columns, single-table often wins; for divergent subtypes with real constraints, class-table wins."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Strategy",
+            "Tables",
+            "Pros",
+            "Cons"
+          ],
+          "rows": [
+            [
+              "Single-table",
+              "1 wide table + discriminator",
+              "No joins; trivial polymorphic query",
+              "Nullable columns; weak constraints; wide rows"
+            ],
+            [
+              "Class-table (joined)",
+              "Base + one per subtype",
+              "Normalized; enforces per-subtype NOT NULL",
+              "Every read joins base to subtype"
+            ],
+            [
+              "Concrete-table",
+              "One per concrete subtype",
+              "No joins; no nulls per table",
+              "Cross-type query needs UNION; duplicated columns"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Ask how often you query across all subtypes versus one subtype at a time. Frequent 'give me every payment' queries favor single-table; workloads that touch one subtype at a time and need strong per-type invariants favor class-table."
+        }
+      ]
+    },
+    {
+      "id": "temporal",
+      "heading": "Temporal Data, Slowly Changing Dimensions, and Soft Deletes",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Most real domains care not only about the current state but about how state changed over time. Bitemporal modeling distinguishes two independent time axes: valid time (when a fact was true in the real world) and transaction time (when the database recorded it). A salary that took effect on January 1 but was entered on January 15, then corrected on February 1, needs both axes to answer 'what did we believe the salary was, as of what date' correctly, which is essential for audits and back-dated corrections."
+        },
+        {
+          "type": "paragraph",
+          "text": "In dimensional warehouses this shows up as slowly changing dimensions. SCD Type 1 overwrites the old value and keeps no history. SCD Type 2 inserts a new row with effective_from/effective_to and a current flag, preserving full history so a fact joined to the dimension reflects the attribute value as of the fact's date. SCD Type 3 keeps a limited previous-value column. Soft deletes are a related pattern: instead of DELETE, set deleted_at, preserving the row for audit and referential integrity, at the cost that every query and unique index must now account for the flag."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "text": "-- SCD Type 2 dimension: full history via effective dating\nCREATE TABLE dim_customer (\n    customer_sk   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- surrogate\n    customer_id   BIGINT NOT NULL,        -- natural/business key, repeats across versions\n    tier          TEXT   NOT NULL,\n    effective_from DATE  NOT NULL,\n    effective_to   DATE  NOT NULL DEFAULT DATE '9999-12-31',\n    is_current    BOOLEAN NOT NULL DEFAULT true\n);\n\n-- Soft delete + audit columns pattern\nALTER TABLE orders\n    ADD COLUMN deleted_at TIMESTAMPTZ,          -- NULL = live row\n    ADD COLUMN created_by BIGINT,\n    ADD COLUMN updated_by BIGINT;\n\n-- Uniqueness must respect the soft-delete flag (partial index)\nCREATE UNIQUE INDEX uq_active_email\n    ON customers(email) WHERE deleted_at IS NULL;"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Soft deletes are not free. Every query must filter WHERE deleted_at IS NULL or risk returning ghosts, unique constraints must become partial indexes, and foreign keys can now point at logically-deleted parents. Adopt soft deletes deliberately where audit or recovery demands them, not reflexively on every table."
+        }
+      ]
+    },
+    {
+      "id": "denormalization",
+      "heading": "Deliberate Denormalization for Reads",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Normalization optimizes for write correctness; denormalization trades some of that for read speed by storing derived or duplicated data. Done deliberately it is a legitimate and often necessary tool: a precomputed order_total column avoids summing line items on every read, a materialized count avoids an expensive aggregate, and a duplicated customer_name on an order avoids a join on a hot list view. The discipline is to denormalize only after measuring, to know exactly which fact is now duplicated, and to own the mechanism that keeps the copies consistent."
+        },
+        {
+          "type": "paragraph",
+          "text": "The cost is that you have moved work from read time to write time and taken on a consistency obligation. When the source of truth changes, every copy must be updated, whether by a trigger, an application-layer write, a transactional outbox, or an asynchronous recompute. The failure mode is a stale copy that silently disagrees with the source. The rule is: normalize until it hurts, denormalize until it works, and never denormalize a fact you cannot keep in sync."
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "Denormalize for a measured read hotspot, not on speculation.",
+            "Prefer derived/aggregate columns (order_total) that a single writer owns.",
+            "Keep the normalized source of truth; the denormalized copy is a cache.",
+            "Choose an explicit sync mechanism: trigger, app write, outbox, or recompute job.",
+            "Document the invariant so the next engineer knows the copy exists and why."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The healthiest denormalization treats the duplicate as a rebuildable cache over a normalized truth. If you can, at any time, drop and recompute the denormalized value from first-normalized sources, you have kept an escape hatch and bounded the blast radius of a sync bug."
+        }
+      ]
+    },
+    {
+      "id": "nosql-modeling",
+      "heading": "Access-Pattern-First Modeling for NoSQL",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Relational modeling normalizes first and lets an ad-hoc query language join at read time. NoSQL modeling inverts this: you enumerate your access patterns first, then design the data shape so each pattern is a single cheap operation. In document stores the core decision is embed vs reference. Embed data that is read together and owned by the parent (order lines inside an order); reference data that is shared, large, or independently updated (a customer referenced by many orders). Embedding trades duplication and larger documents for read locality; referencing trades a second lookup for a single source of truth."
+        },
+        {
+          "type": "paragraph",
+          "text": "DynamoDB pushes this to its logical extreme with single-table design: heterogeneous entity types share one table, using a generic partition key (PK) and sort key (SK) plus overloaded secondary indexes so that one query can fetch an order and all its lines in a single request. The technique is to model item collections, where related items share a partition key and are differentiated by sort-key prefixes. This is powerful and dense, but it means access patterns must be known up front and new patterns may require a migration, which is the opposite of the relational promise of flexible ad-hoc querying."
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "text": "// Document model (embed lines, reference customer)\n{\n  \"_id\": \"order_01H9X\",\n  \"customerId\": \"cust_42\",        // reference: shared, updated independently\n  \"status\": \"paid\",\n  \"placedAt\": \"2026-06-30T10:00:00Z\",\n  \"lines\": [                       // embed: read together, owned by the order\n    { \"sku\": \"SKU-1\", \"name\": \"Keyboard\", \"qty\": 1, \"unitPriceCents\": 7999 },\n    { \"sku\": \"SKU-9\", \"name\": \"Mouse\",    \"qty\": 2, \"unitPriceCents\": 2999 }\n  ],\n  \"totalCents\": 13997             // denormalized aggregate for the list view\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Embedding has a hard ceiling. Unbounded arrays (a user's every event, a post's every comment) will eventually blow past document size limits and make every read fetch data you did not want. Embed bounded, co-accessed data; reference unbounded or independently-growing collections."
+        }
+      ]
+    },
+    {
+      "id": "dynamodb-single-table",
+      "heading": "A DynamoDB Single-Table Example",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Below is one item collection modeling a customer, their orders, and each order's lines in a single table. The partition key groups everything for a customer; the sort key uses type prefixes so a single Query on PK = CUSTOMER#42 with SK beginning ORDER# returns all of that customer's orders, and PK = ORDER#01H9X with SK beginning LINE# returns that order's lines. A global secondary index overloads the same table to support a second access pattern, such as fetching all orders in a given status."
+        },
+        {
+          "type": "code",
+          "language": "json",
+          "text": "// One DynamoDB table, heterogeneous items, overloaded PK/SK\n[\n  { \"PK\": \"CUSTOMER#42\", \"SK\": \"PROFILE#42\",\n    \"type\": \"Customer\", \"email\": \"ada@example.com\", \"tier\": \"gold\" },\n\n  { \"PK\": \"CUSTOMER#42\", \"SK\": \"ORDER#01H9X\",\n    \"type\": \"Order\", \"status\": \"paid\", \"totalCents\": 13997,\n    \"GSI1PK\": \"STATUS#paid\", \"GSI1SK\": \"ORDER#01H9X\" },\n\n  { \"PK\": \"ORDER#01H9X\", \"SK\": \"LINE#SKU-1\",\n    \"type\": \"OrderLine\", \"name\": \"Keyboard\", \"qty\": 1, \"unitPriceCents\": 7999 },\n\n  { \"PK\": \"ORDER#01H9X\", \"SK\": \"LINE#SKU-9\",\n    \"type\": \"OrderLine\", \"name\": \"Mouse\", \"qty\": 2, \"unitPriceCents\": 2999 }\n]\n\n// Access patterns satisfied by single Query calls:\n//  1. Customer + all their orders : PK = CUSTOMER#42\n//  2. All lines of one order      : PK = ORDER#01H9X, SK begins_with LINE#\n//  3. All paid orders (via GSI1)  : GSI1PK = STATUS#paid"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Dimension",
+            "Relational (3NF)",
+            "DynamoDB single-table"
+          ],
+          "rows": [
+            [
+              "Query flexibility",
+              "Ad-hoc joins at read time",
+              "Only pre-modeled access patterns"
+            ],
+            [
+              "Where the work happens",
+              "Read time (joins, aggregates)",
+              "Write time (duplication, denormalized)"
+            ],
+            [
+              "Consistency of duplicates",
+              "One source of truth",
+              "App owns keeping copies in sync"
+            ],
+            [
+              "New query pattern",
+              "Write new SQL",
+              "Often a migration / new GSI + backfill"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Single-table design is a specialized tool that trades flexibility for single-digit-millisecond reads at scale on known patterns. If your access patterns are still shifting or you need ad-hoc analytics, its rigidity works against you. Model the patterns first, and only then decide the table is worth its complexity."
+        }
+      ]
+    },
+    {
+      "id": "event-immutable",
+      "heading": "Event and Immutable Modeling",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A different modeling stance stores facts as an append-only sequence of immutable events rather than a mutable current-state row. Instead of an orders row whose status column is overwritten, you append OrderPlaced, OrderPaid, OrderShipped events, and the current state is a fold over that history. This is the modeling side of event sourcing: the events are the source of truth, and any read model (a current-state table, a search index, a report) is a derived projection that can be rebuilt from the log."
+        },
+        {
+          "type": "paragraph",
+          "text": "Immutable modeling shines where the history itself is the valuable asset: audit trails, financial ledgers, and any domain that must answer 'how did we get here' and never lose a prior state. The cost is that reads now require folding events or maintaining projections, that events are a permanent public contract you must version carefully, and that deleting data for privacy laws is genuinely hard when the log is append-only. It is a deliberate trade, not a default, and it pairs naturally with the denormalized read models discussed earlier."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "You do not need full event sourcing to benefit from immutable thinking. Append-only audit tables, insert-only ledgers, and SCD Type 2 dimensions all borrow the same idea: never destroy a prior fact, add a new one and mark the old one superseded."
+        }
+      ]
+    },
+    {
+      "id": "oltp-vs-olap",
+      "heading": "OLTP vs OLAP: 3NF Operational Schemas vs Star Schemas",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Transactional (OLTP) and analytical (OLAP) systems have opposite modeling goals, and forcing one schema to serve both is a classic failure. OLTP workloads are many small reads and writes touching a few rows, so they favor 3NF: normalized, write-safe, single-sourced. OLAP workloads scan and aggregate millions of rows across a few large queries, so they favor the star schema: a central fact table of measurements surrounded by denormalized dimension tables, joined by surrogate keys. The star deliberately denormalizes dimensions because a warehouse is read-mostly and the update anomalies that normalization prevents rarely apply to a load-once dimension."
+        },
+        {
+          "type": "paragraph",
+          "text": "A fact table holds the numeric measurements of a business process (a sale: quantity, amount) plus foreign keys to dimensions; it is long and narrow and grows forever. A dimension table holds the descriptive context (who, what, when, where) and is short and wide. A snowflake schema normalizes dimensions into sub-dimensions (splitting product into product and category tables), trading some star simplicity for storage; the plain star keeps dimensions flat for fewer joins. Kimball's dimensional modeling is the canonical methodology here."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "text": "-- Star schema: one fact, several denormalized dimensions\nCREATE TABLE dim_date (\n    date_sk    INTEGER PRIMARY KEY,     -- e.g. 20260701\n    full_date  DATE NOT NULL,\n    day_of_week TEXT, month TEXT, quarter TEXT, year INTEGER\n);\nCREATE TABLE dim_product (\n    product_sk BIGINT PRIMARY KEY,      -- surrogate; supports SCD Type 2\n    sku        TEXT, name TEXT, category TEXT, brand TEXT   -- flattened (denormalized)\n);\nCREATE TABLE dim_customer (\n    customer_sk BIGINT PRIMARY KEY,\n    customer_id BIGINT, tier TEXT, region TEXT\n);\n\nCREATE TABLE fact_sales (\n    sale_sk       BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n    date_sk       INTEGER NOT NULL REFERENCES dim_date(date_sk),\n    product_sk    BIGINT  NOT NULL REFERENCES dim_product(product_sk),\n    customer_sk   BIGINT  NOT NULL REFERENCES dim_customer(customer_sk),\n    quantity      INTEGER NOT NULL,     -- additive measure\n    amount_cents  BIGINT  NOT NULL      -- additive measure\n);\n-- Typical query: SUM(amount_cents) by month and category\n--   -> two small dimension joins + one big fact scan, no deep join chains."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Aspect",
+            "OLTP (3NF)",
+            "OLAP (star schema)"
+          ],
+          "rows": [
+            [
+              "Optimized for",
+              "Small transactional reads/writes",
+              "Large aggregate scans"
+            ],
+            [
+              "Normalization",
+              "Normalized (3NF/BCNF)",
+              "Denormalized dimensions"
+            ],
+            [
+              "Shape",
+              "Many narrow related tables",
+              "One fact + few wide dimensions"
+            ],
+            [
+              "Redundancy",
+              "Minimized",
+              "Accepted (read-mostly, load-once)"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "schema-evolution",
+      "heading": "Schema Evolution and Migrations",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A model is never finished; the real skill is evolving it without downtime while old and new code run side by side. The core technique is the expand-contract (parallel-change) migration: first expand by adding the new structure in a backward-compatible way (a new nullable column, a new table), then migrate by dual-writing and backfilling, then contract by removing the old structure only after every reader has moved. This turns a scary rename into a sequence of individually safe, reversible steps."
+        },
+        {
+          "type": "paragraph",
+          "text": "The dangerous migrations are the ones that break running code or lock large tables: renaming a column in one shot, adding a NOT NULL column with no default on a huge table, or dropping a column a deployed service still reads. Additive, backward-compatible changes are cheap; destructive changes must wait until nothing depends on the old shape. Version your migrations, make them forward-only in production, and treat a data backfill as a first-class, resumable, idempotent job rather than a one-off script."
+        },
+        {
+          "type": "list",
+          "ordered": true,
+          "items": [
+            "Expand: add the new column/table, nullable and backward compatible.",
+            "Dual-write: application writes both old and new shapes.",
+            "Backfill: copy historical data into the new shape, idempotently and in batches.",
+            "Switch reads: point consumers at the new shape once backfill is verified.",
+            "Contract: drop the old column/table after all readers have migrated."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Never combine an expand and a contract in the same deploy. If the new code and old code overlap in production (they always do during a rollout), a schema that only one of them understands guarantees errors. Separate the steps across deploys."
+        }
+      ]
+    },
+    {
+      "id": "mistakes",
+      "heading": "Common Data Modeling Mistakes",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Most production data pain traces back to a small set of recurring modeling errors. They are easy to make under deadline pressure and expensive to unwind once data accumulates, so recognizing them early is a high-leverage senior skill."
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "Modeling the UI instead of the domain: storing a denormalized screen snapshot so the same fact scatters across rows.",
+            "Comma-separated values or JSON blobs where a proper child table belongs, defeating queries and integrity.",
+            "Using a mutable natural key (email) as a primary key, so a change cascades through every foreign key.",
+            "Reflexive random UUIDv4 clustered PKs on hot-write tables, fragmenting the index; reach for UUIDv7/ULID.",
+            "Premature denormalization with no sync mechanism, producing copies that silently drift from the truth.",
+            "Unbounded embedded arrays in documents that eventually exceed size limits and bloat every read.",
+            "Serving analytics from the OLTP schema, so heavy scans contend with transactional latency.",
+            "Adding a NOT NULL column with no default to a large table, locking it and breaking in-flight code."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The meta-mistake is treating the model as an implementation detail owned by whoever is writing the current feature. The model is a long-lived shared contract; it deserves review, a conceptual diagram, and explicit reasoning about which facts are single-sourced and which are deliberately duplicated."
+        }
+      ]
+    },
+    {
+      "id": "bestpractices",
+      "heading": "Senior Best Practices for Durable Models",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A durable model is one that survives new features, new consumers, and orders-of-magnitude data growth without a rewrite. The practices below are what separate a schema that ages gracefully from one that becomes a migration liability."
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "Model the domain first (conceptual), then attribute it (logical), then implement it (physical).",
+            "Default to a surrogate PK with a UNIQUE constraint on the natural business key.",
+            "Normalize to 3NF/BCNF for OLTP; denormalize only for measured read hotspots with an owned sync path.",
+            "Resolve every M:N into an associative table and let relationship attributes live there.",
+            "Capture temporal facts (paid price, SCD Type 2, audit columns) rather than overwriting history.",
+            "Choose keys with index locality in mind: UUIDv7/ULID over random UUIDv4 on hot-write tables.",
+            "Separate OLTP and OLAP: serve analytics from a star schema, not the transactional tables.",
+            "Evolve with expand-contract migrations and treat backfills as idempotent, resumable jobs."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The unifying principle: decide consciously where each fact lives, how many times it is stored, and who is responsible for keeping copies consistent. A model whose author can answer those three questions for every column is a model that will last."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "er-normalized",
+      "title": "Normalized e-commerce ER model (3NF)",
+      "type": "mermaid",
+      "content": "erDiagram\n    CUSTOMER ||--o{ ORDER : places\n    ORDER ||--|{ ORDER_LINE : contains\n    PRODUCT ||--o{ ORDER_LINE : appears_in\n    CUSTOMER {\n        bigint id PK\n        citext email UK\n        text display_name\n    }\n    ORDER {\n        bigint id PK\n        bigint customer_id FK\n        text status\n        uuid idempotency_key\n    }\n    PRODUCT {\n        bigint id PK\n        text sku UK\n        int price_cents\n    }\n    ORDER_LINE {\n        bigint order_id PK\n        bigint product_id PK\n        int quantity\n        int unit_price_cents\n    }"
+    },
+    {
+      "id": "star-schema",
+      "title": "Star schema: fact_sales and its dimensions",
+      "type": "mermaid",
+      "content": "erDiagram\n    DIM_DATE ||--o{ FACT_SALES : dates\n    DIM_PRODUCT ||--o{ FACT_SALES : describes\n    DIM_CUSTOMER ||--o{ FACT_SALES : identifies\n    FACT_SALES {\n        bigint sale_sk PK\n        int date_sk FK\n        bigint product_sk FK\n        bigint customer_sk FK\n        int quantity\n        bigint amount_cents\n    }\n    DIM_DATE {\n        int date_sk PK\n        date full_date\n        text month\n    }\n    DIM_PRODUCT {\n        bigint product_sk PK\n        text category\n        text brand\n    }\n    DIM_CUSTOMER {\n        bigint customer_sk PK\n        text tier\n        text region\n    }"
+    },
+    {
+      "id": "embed-vs-reference",
+      "title": "Document modeling: embed vs reference decision",
+      "type": "ascii",
+      "content": "                 Is the data read together AND owned by the parent?\n                                    |\n            +-----------------------+-----------------------+\n            | YES                                           | NO\n            v                                               v\n     Is it bounded in size?                        Is it shared / large /\n            |                                       updated independently?\n     +------+------+                                        |\n     | YES         | NO                                     v\n     v             v                                   REFERENCE\n  EMBED       REFERENCE                            (store an id, look up)\n(order lines) (event stream)\n\n  Embed  -> one read, duplication, larger doc\n  Reference -> extra lookup, single source of truth"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-conceptual-logical-physical",
+      "question": "What is the difference between a conceptual, logical, and physical data model, and why work through all three?",
+      "answer": "A conceptual model captures what entities exist and how they relate in business language, with no attributes or technology, so stakeholders can validate the domain. A logical model refines this into attributes, keys, and precise cardinalities while staying engine-independent, and is where you normalize to a target normal form. A physical model is the concrete DDL for a specific engine, adding column types, indexes, partitions, and constraints. Working through all three is valuable because each level is a checkpoint for a different audience and concern: the business validates the conceptual model, data modelers validate the logical one, and engineers validate the physical one. Skipping to physical DDL bakes engine quirks into the domain and loses the shared vocabulary; never descending to physical detail produces elegant diagrams that ignore null handling and index locality. The descent itself is the discipline.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": [
+        "conceptual",
+        "logical",
+        "physical",
+        "methodology"
+      ],
+      "followUps": [
+        "Where does normalization happen in these three levels?",
+        "Who is the audience for each level?"
+      ]
+    },
+    {
+      "id": "q-normal-forms",
+      "question": "Walk through 1NF, 2NF, and 3NF and the specific anomaly each one removes.",
+      "answer": "1NF requires atomic values and no repeating groups, so you cannot store a comma-separated list or address1/address2/address3 columns; it removes the ambiguity of multi-valued cells. 2NF removes partial dependencies on part of a composite key, ensuring every non-key attribute depends on the whole key; for example, in (order_id, product_id) the product_name depends only on product_id and must move to a Product table. 3NF removes transitive dependencies where one non-key attribute determines another, such as customer_zip determining customer_city, which should live in its own table. The anomalies these prevent are update anomalies (a duplicated fact must be changed in many places), insertion anomalies (you cannot record one fact without inventing another), and deletion anomalies (removing a row loses an unrelated fact). The colloquial summary is that every non-key attribute must depend on the key, the whole key, and nothing but the key. Reaching 3NF is the standard target for OLTP systems.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": [
+        "normalization",
+        "1nf",
+        "2nf",
+        "3nf",
+        "anomalies"
+      ],
+      "followUps": [
+        "What anomaly does a denormalized table reintroduce?",
+        "Is 3NF always the right target?"
+      ]
+    },
+    {
+      "id": "q-3nf-vs-bcnf",
+      "question": "What does BCNF fix that 3NF does not, and can you give an example?",
+      "answer": "BCNF is a stricter form of 3NF: it requires that every determinant (the left side of a functional dependency) is a candidate key. 3NF permits an edge case where a non-prime attribute determines part of a candidate key when there are overlapping candidate keys, and BCNF closes that gap. The classic example is a table (student, subject, teacher) where each teacher teaches exactly one subject and a student takes a subject from one teacher: the dependencies are (student, subject) -> teacher and teacher -> subject. This is in 3NF because subject is a prime attribute, but teacher is a determinant that is not a candidate key, so it violates BCNF; you decompose into (teacher -> subject) and (student, teacher). In practice most schemas designed to 3NF are already in BCNF, because the violating case requires overlapping composite candidate keys with an inter-key dependency, which is uncommon. That rarity is exactly why 3NF is the usual spoken target while BCNF is the precise one.",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": [
+        "bcnf",
+        "3nf",
+        "functional-dependency",
+        "candidate-key"
+      ],
+      "followUps": [
+        "When might decomposing to BCNF lose a functional dependency?",
+        "Why is 3NF the more common spoken target?"
+      ]
+    },
+    {
+      "id": "q-when-denormalize",
+      "question": "When should you deliberately denormalize, and what obligation does it create?",
+      "answer": "You should denormalize only for a measured read hotspot, not on speculation, after normalization has proven too slow for a specific access pattern. Legitimate cases include precomputed aggregates like an order_total, materialized counts to avoid expensive scans, and duplicating a rarely-changing attribute to avoid a join on a hot list view. Denormalization moves work from read time to write time and creates a consistency obligation: whenever the source of truth changes, every duplicated copy must be updated via a trigger, application write, transactional outbox, or asynchronous recompute. The failure mode is a stale copy that silently disagrees with the source, so the copy should ideally be a rebuildable cache over a normalized truth. The guiding rule is to normalize until it hurts, denormalize until it works, and never denormalize a fact you cannot keep in sync. Documenting the invariant so the next engineer knows the duplicate exists is part of doing it responsibly.",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": [
+        "denormalization",
+        "read-optimization",
+        "consistency",
+        "trade-offs"
+      ],
+      "followUps": [
+        "What sync mechanisms keep denormalized copies consistent?",
+        "How do you bound the blast radius of a sync bug?"
+      ]
+    },
+    {
+      "id": "q-natural-vs-surrogate",
+      "question": "Natural key or surrogate key for a primary key, and why?",
+      "answer": "The senior default is a surrogate primary key with a UNIQUE constraint on the natural business key. A natural key is a domain value like email or SKU that identifies a row, while a surrogate is a system-generated value with no business meaning. The problem with a natural key as the primary key is that natural keys change: people change email, products get re-SKU'd, and when a primary key changes you must cascade that change through every foreign key referencing it, which is exactly the fragility to avoid. Natural keys can also be wide or composite, bloating every index and FK. Using a surrogate PK gives stable, narrow references while the UNIQUE constraint on the natural key still enforces business uniqueness. The trade-off is maintaining two keys instead of one, which is a cheap price for immunity to natural-key churn. This is why the recommended pattern is surrogate PK plus natural UNIQUE, not one or the other.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": [
+        "surrogate-key",
+        "natural-key",
+        "primary-key",
+        "foreign-key"
+      ],
+      "followUps": [
+        "When is a composite natural key acceptable as a PK?",
+        "How does a changing natural key cascade through FKs?"
+      ]
+    },
+    {
+      "id": "q-uuid-locality",
+      "question": "Why can a random UUIDv4 primary key hurt write performance, and what fixes it?",
+      "answer": "A random UUIDv4 is generated from random bits, so consecutive inserts land at random positions across the entire primary-key B-tree rather than appending to one edge. This scatters writes across many index pages, causing frequent page splits, poor buffer-cache hit rates, and inflated write amplification, which degrades insert throughput on high-write tables. An auto-increment integer avoids this because monotonically increasing keys append to the rightmost page, giving excellent locality, but it requires a database round-trip and leaks row counts. The fix that keeps client-side generation and global uniqueness is a time-ordered identifier such as UUIDv7 or ULID, whose high-order bits encode a timestamp so new keys sort near each other and preserve B-tree locality much like an integer. The residual trade-offs are that these are still 16 bytes wide and their prefix leaks creation time. The rule is to avoid reflexively clustering on random UUIDv4 for hot-write tables and prefer UUIDv7/ULID when you need client-generated keys.",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": [
+        "uuid",
+        "ulid",
+        "index-locality",
+        "primary-key",
+        "write-amplification"
+      ],
+      "followUps": [
+        "What does a UUIDv7 prefix leak?",
+        "When is an auto-increment bigint still the better choice?"
+      ]
+    },
+    {
+      "id": "q-mn-modeling",
+      "question": "How do you model a many-to-many relationship, and what commonly goes wrong?",
+      "answer": "A many-to-many relationship cannot be represented by a foreign key on either side, so it requires a third table, the associative or join table, whose primary key is the pair of foreign keys to the two related entities. For example, students-enroll-in-courses becomes an enrollments table keyed on (student_id, course_id). The common error is treating the join table as a purely mechanical link and forgetting that it can and often should carry relationship attributes: the grade and enrollment date belong on the enrollment, and the quantity and unit price of a product on an order belong on the order line. Missing this forces an awkward retrofit later when someone needs to record a property of the relationship itself. When the association gains its own lifecycle and identity, it should be promoted to a first-class entity with its own surrogate key. The heuristic is: if you can say anything about the relationship, it deserves an associative table with attributes.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": [
+        "many-to-many",
+        "join-table",
+        "associative-entity",
+        "relationships"
+      ],
+      "followUps": [
+        "When do you promote a join table to a first-class entity?",
+        "What is the primary key of a pure join table?"
+      ]
+    },
+    {
+      "id": "q-embed-vs-reference",
+      "question": "In a document database, how do you decide whether to embed or reference?",
+      "answer": "Embed data that is read together with and owned by the parent, and reference data that is shared, large, or updated independently. Embedding order lines inside an order gives a single read and read-locality because the lines are always fetched with the order and have no independent life. Referencing a customer from an order is right because the customer is shared across many orders and changes on its own schedule, so a single source of truth beats duplication. The trade-off is that embedding duplicates data and grows the document, while referencing costs a second lookup. A critical constraint is that embedded arrays must be bounded: an unbounded array such as a user's every event or a post's every comment will eventually exceed the document size limit and make every read fetch data you did not want. The heuristic is to embed bounded, co-accessed, parent-owned data and reference unbounded or independently-growing collections.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": [
+        "document-model",
+        "embedding",
+        "referencing",
+        "nosql"
+      ],
+      "followUps": [
+        "What is the danger of an unbounded embedded array?",
+        "How does this differ from relational normalization?"
+      ]
+    },
+    {
+      "id": "q-single-table-design",
+      "question": "What is DynamoDB single-table design and what are its trade-offs?",
+      "answer": "Single-table design stores heterogeneous entity types in one DynamoDB table using a generic partition key and sort key plus overloaded secondary indexes, so that related items form item collections that a single Query can retrieve together. For example, a customer, their orders, and each order's lines share partition keys with type-prefixed sort keys, letting one request fetch an order and all its lines. Its strength is single-digit-millisecond reads at scale for known access patterns, because the data is pre-joined and denormalized at write time. The trade-off is rigidity: access patterns must be enumerated up front, work and duplication move to write time, the application owns keeping duplicated copies consistent, and a genuinely new query pattern often requires a new GSI plus a backfill migration. This is the opposite of the relational promise of flexible ad-hoc querying, so single-table design fits stable, well-understood, high-scale access patterns and works against you when the patterns are still shifting or you need ad-hoc analytics.",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": [
+        "dynamodb",
+        "single-table-design",
+        "access-patterns",
+        "nosql"
+      ],
+      "followUps": [
+        "How does an overloaded GSI add a second access pattern?",
+        "When would you avoid single-table design?"
+      ]
+    },
+    {
+      "id": "q-star-vs-3nf",
+      "question": "Why do analytics warehouses use star schemas instead of the 3NF that OLTP systems use?",
+      "answer": "OLTP and OLAP have opposite goals. OLTP workloads are many small reads and writes touching a few rows, so they favor 3NF for write safety and single-sourced facts, where update, insertion, and deletion anomalies matter. OLAP workloads scan and aggregate millions of rows across a few large queries, so they favor a star schema: a central fact table of numeric measurements surrounded by denormalized dimension tables joined by surrogate keys. The star deliberately denormalizes dimensions because a warehouse is read-mostly and load-once, so the anomalies normalization prevents rarely apply, while flat wide dimensions eliminate deep join chains that would cripple aggregate scans. A fact table is long and narrow and grows forever; dimensions are short and wide and hold descriptive context. A snowflake variant normalizes dimensions into sub-dimensions to save storage at the cost of more joins. Serving analytics from the OLTP schema is a classic mistake because heavy scans contend with transactional latency and the normalized shape makes aggregates slow.",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": [
+        "olap",
+        "oltp",
+        "star-schema",
+        "dimensional-modeling",
+        "data-warehouse"
+      ],
+      "followUps": [
+        "What distinguishes a fact table from a dimension table?",
+        "When is a snowflake schema worth the extra joins?"
+      ]
+    },
+    {
+      "id": "q-inheritance",
+      "question": "How do you map object inheritance to relational tables, and how do you choose a strategy?",
+      "answer": "There are three strategies. Single-table inheritance puts all subtypes in one wide table with a discriminator column and many nullable columns, giving no-join polymorphic queries but weak constraints and wide rows. Class-table (joined) inheritance has a base table plus one table per subtype joined by a shared key, which is the cleanest normalized form and can enforce per-subtype NOT NULL, at the cost that every read joins. Concrete-table inheritance gives each concrete subtype its own standalone table with duplicated shared columns, avoiding joins and nulls but making cross-type queries a painful UNION. The choice hinges on how often you query across all subtypes versus one at a time, and how much you need per-subtype constraints. A small, stable set of subtypes with mostly shared columns and frequent 'all of them' queries favors single-table; divergent subtypes with real invariants and mostly single-type access favor class-table. There is no universally correct answer, only a fit to the query mix and constraint needs.",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": [
+        "inheritance",
+        "single-table",
+        "class-table",
+        "concrete-table",
+        "polymorphism"
+      ],
+      "followUps": [
+        "Which strategy best enforces per-subtype constraints?",
+        "Which makes 'query all subtypes' cheapest?"
+      ]
+    },
+    {
+      "id": "q-scd",
+      "question": "What are slowly changing dimensions and how do SCD Types 1, 2, and 3 differ?",
+      "answer": "Slowly changing dimensions describe how a data warehouse handles changes to descriptive dimension attributes over time, such as a customer changing tier or region. SCD Type 1 simply overwrites the old value and keeps no history, which is simple but loses the ability to report on the past accurately. SCD Type 2 inserts a new row for the changed entity with effective_from and effective_to dates and a current flag, preserving full history so a fact joined to the dimension reflects the attribute value as of the fact's date; this is the workhorse for accurate historical reporting and relies on a surrogate key so multiple versions of the same business entity can coexist. SCD Type 3 keeps a limited previous-value column, capturing only the prior value rather than full history. The choice depends on whether you need full history (Type 2), no history (Type 1), or just the immediately preceding value (Type 3). Type 2 is the most common in serious warehouses because point-in-time accuracy is usually the point of the warehouse.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": [
+        "scd",
+        "dimensional-modeling",
+        "temporal",
+        "data-warehouse"
+      ],
+      "followUps": [
+        "Why does SCD Type 2 require a surrogate key?",
+        "How does a fact pick the correct dimension version?"
+      ]
+    },
+    {
+      "id": "q-bitemporal",
+      "question": "What is bitemporal modeling and when do you need it?",
+      "answer": "Bitemporal modeling tracks two independent time dimensions for each fact: valid time, which is when the fact was true in the real world, and transaction time, which is when the database recorded it. You need both when you must answer questions like 'what did we believe the salary was, as of what date' or handle back-dated corrections and audits. Consider a salary that took effect January 1 but was entered January 15 and then corrected February 1; a single timestamp cannot distinguish when it was true from when it was known, but two axes can reconstruct exactly what the system believed at any past moment. This is essential in finance, insurance, and any regulated domain where retroactive changes and audit reconstruction are required. The cost is added complexity in every query and constraint, so bitemporal modeling is applied deliberately to the entities that genuinely need it rather than universally. It is a specialized generalization of the simpler temporal patterns like effective dating and SCD Type 2.",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": [
+        "bitemporal",
+        "valid-time",
+        "transaction-time",
+        "temporal",
+        "audit"
+      ],
+      "followUps": [
+        "How does valid time differ from transaction time?",
+        "How does this relate to SCD Type 2?"
+      ]
+    },
+    {
+      "id": "q-soft-delete",
+      "question": "What are the hidden costs of soft deletes versus hard deletes?",
+      "answer": "A soft delete replaces a physical DELETE with setting a flag like deleted_at, preserving the row for audit, recovery, and referential integrity. The hidden costs are pervasive: every query must now filter WHERE deleted_at IS NULL or it will return ghost rows, unique constraints must become partial indexes so that a deleted email can be reused, and foreign keys can now point at logically-deleted parents, which application logic must handle. Soft-deleted rows also accumulate and can bloat tables and indexes over time, and analytics must decide whether to include them. A hard delete is simpler and keeps the table clean but permanently loses the data, which is unacceptable when audit or undo is required and can break FKs if not cascaded carefully. The right choice is deliberate: adopt soft deletes where audit or recovery genuinely demands them, not reflexively on every table, and design the partial indexes and query filters up front rather than retrofitting them. Retrofitting soft deletes into a mature schema is expensive precisely because every query and index must be revisited.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": [
+        "soft-delete",
+        "hard-delete",
+        "partial-index",
+        "audit"
+      ],
+      "followUps": [
+        "Why must unique constraints become partial indexes under soft delete?",
+        "How do soft-deleted parents affect foreign keys?"
+      ]
+    },
+    {
+      "id": "q-idempotency-audit",
+      "question": "How do idempotency keys and audit columns fit into a data model?",
+      "answer": "An idempotency key is a client-supplied unique token stored on a row, usually with a unique constraint scoped to an actor, so that a retried operation does not create a duplicate. Modeling checkout with a UNIQUE (customer_id, idempotency_key) constraint means a retried request that reuses the same key collides on insert and safely returns the existing order instead of creating a second one, which is essential for at-least-once delivery and network retries. Audit columns such as created_at, updated_at, created_by, and updated_by capture the provenance and timeline of each row, answering who changed what and when without a separate audit system for simple cases. Both are cheap to add early and painful to retrofit, because backfilling created_at or a created_by for historical rows is often impossible. They belong in the model as first-class concerns rather than afterthoughts. Together they support correctness under retries and the accountability that operations and compliance require.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": [
+        "idempotency",
+        "audit-columns",
+        "provenance",
+        "retries"
+      ],
+      "followUps": [
+        "Why scope the idempotency key uniqueness to an actor?",
+        "Why are audit columns hard to backfill?"
+      ]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-normalize-to-3nf",
+      "title": "Normalize a messy denormalized table to 3NF",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "prompt": "You inherit a single flat table capturing orders. It stores, per row: order_id, order_date, customer_email, customer_name, customer_city, customer_zip, and a comma-separated product_list like 'SKU-1:2, SKU-9:1'. Product names and prices are also duplicated into each row. Identify the anomalies, then produce a 3NF schema (DDL) with proper keys and foreign keys, and explain what each decomposition removes.",
+      "hints": [
+        "Start with 1NF: the comma-separated product_list violates atomicity and hides a one-to-many (really many-to-many) relationship.",
+        "Look for transitive dependencies: customer_zip determines customer_city, and customer_email determines customer_name and city.",
+        "Separate the price a customer paid (a temporal snapshot on the line) from the product's current price (which belongs to the product)."
+      ],
+      "solutionCode": "-- Anomalies in the flat table:\n--   * Update anomaly: a customer's name/city is duplicated in every order row.\n--   * Insertion anomaly: cannot record a product without an order.\n--   * Deletion anomaly: deleting the last order for a customer loses the customer.\n--   * 1NF violation: comma-separated product_list is non-atomic.\n--   * Transitive dependency: zip -> city; email -> name, city.\n\n-- 3NF decomposition:\nCREATE TABLE zips (\n    zip   TEXT PRIMARY KEY,\n    city  TEXT NOT NULL                        -- removes zip -> city transitive dep\n);\n\nCREATE TABLE customers (\n    id       BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n    email    CITEXT NOT NULL UNIQUE,          -- natural key -> UNIQUE\n    name     TEXT   NOT NULL,\n    zip      TEXT   NOT NULL REFERENCES zips(zip)  -- city derived from zip\n);\n\nCREATE TABLE products (\n    id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n    sku          TEXT NOT NULL UNIQUE,\n    name         TEXT NOT NULL,\n    price_cents  INTEGER NOT NULL              -- current price lives once\n);\n\nCREATE TABLE orders (\n    id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n    customer_id  BIGINT NOT NULL REFERENCES customers(id),\n    order_date   DATE   NOT NULL\n);\n\n-- Resolves the M:N hidden in product_list; snapshots the paid price.\nCREATE TABLE order_lines (\n    order_id          BIGINT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,\n    product_id        BIGINT NOT NULL REFERENCES products(id),\n    quantity          INTEGER NOT NULL CHECK (quantity > 0),\n    unit_price_cents  INTEGER NOT NULL,        -- temporal snapshot, not redundant\n    PRIMARY KEY (order_id, product_id)\n);",
+      "solutionLanguage": "sql",
+      "explanation": "The flat table suffers all three classic anomalies because multiple independent facts are crammed into one row. First we reach 1NF by exploding the comma-separated product_list into an order_lines table with one row per product per order, which also exposes that orders-to-products is really a many-to-many resolved by that associative table. Then we remove the transitive dependency zip -> city by moving city into a zips table keyed by zip, so the city fact lives exactly once. We split customer identity into a customers table so a customer's name and zip are stored once rather than duplicated across every order, eliminating the update anomaly, and the customers table can now exist independently, fixing the insertion and deletion anomalies. Products get their own table so a product's current price and name are single-sourced. Crucially, unit_price_cents stays on the order line because the price a customer actually paid is a distinct temporal fact from the product's current price and is not derivable, so keeping it is temporal correctness rather than a normalization failure. Surrogate integer primary keys give stable references while UNIQUE constraints on email and sku preserve the natural business keys.",
+      "relatedTopic": "data-modeling"
+    },
+    {
+      "id": "ch-relational-vs-dynamo",
+      "title": "Model an order domain in both relational and DynamoDB single-table designs",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "prompt": "Model a small e-commerce domain (customers, orders, order lines) twice: once as a normalized relational schema and once as a DynamoDB single-table design that supports three access patterns: (1) fetch a customer and all their orders, (2) fetch one order and all its lines, (3) fetch all orders in a given status. Then compare where the work happens and what each design gives up.",
+      "hints": [
+        "Relational: one table per entity, surrogate PKs, a join/child table for order lines, and let SQL join at read time.",
+        "DynamoDB: overload PK and SK with type prefixes so related items share a partition and form item collections.",
+        "For access pattern 3, add a GSI whose partition key is STATUS# so paid orders can be queried without scanning."
+      ],
+      "solutionCode": "-- ===== Relational (normalized, joins at read time) =====\nCREATE TABLE customers (\n    id     BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n    email  CITEXT NOT NULL UNIQUE,\n    name   TEXT NOT NULL\n);\nCREATE TABLE orders (\n    id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n    customer_id  BIGINT NOT NULL REFERENCES customers(id),\n    status       TEXT NOT NULL,\n    total_cents  BIGINT NOT NULL\n);\nCREATE TABLE order_lines (\n    order_id    BIGINT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,\n    product_id  BIGINT NOT NULL,\n    quantity    INTEGER NOT NULL,\n    unit_price_cents INTEGER NOT NULL,\n    PRIMARY KEY (order_id, product_id)\n);\nCREATE INDEX ix_orders_status ON orders(status);   -- pattern 3\n\n-- Access patterns via joins:\n--  1. SELECT * FROM customers c JOIN orders o ON o.customer_id=c.id WHERE c.id=?\n--  2. SELECT * FROM order_lines WHERE order_id=?\n--  3. SELECT * FROM orders WHERE status=?\n\n-- ===== DynamoDB single-table (pre-joined, work at write time) =====\n-- items (PK, SK, plus GSI1PK/GSI1SK on order items):\n-- { PK:'CUSTOMER#42', SK:'PROFILE#42', type:'Customer', email, name }\n-- { PK:'CUSTOMER#42', SK:'ORDER#01H9X', type:'Order', status:'paid',\n--     total_cents:13997, GSI1PK:'STATUS#paid', GSI1SK:'ORDER#01H9X' }\n-- { PK:'ORDER#01H9X', SK:'LINE#SKU-1', type:'OrderLine', qty:1, unitPriceCents:7999 }\n-- { PK:'ORDER#01H9X', SK:'LINE#SKU-9', type:'OrderLine', qty:2, unitPriceCents:2999 }\n--\n-- Access patterns via single Query calls:\n--  1. Query PK='CUSTOMER#42'                 -> profile + all orders\n--  2. Query PK='ORDER#01H9X', SK begins LINE# -> all lines of one order\n--  3. Query GSI1 where GSI1PK='STATUS#paid'   -> all paid orders",
+      "solutionLanguage": "sql",
+      "explanation": "The two designs sit at opposite ends of the work-placement spectrum. The relational schema normalizes each entity into its own table with surrogate primary keys and a composite-keyed order_lines child table, and it relies on the query planner to join at read time; adding a new access pattern usually means writing new SQL and perhaps an index, with no change to the stored shape. The DynamoDB design instead enumerates the three access patterns first and shapes the data so each is a single Query: a shared partition key CUSTOMER#42 with type-prefixed sort keys makes a customer and all their orders one item collection, ORDER#01H9X with LINE# sort keys makes an order and its lines another, and an overloaded GSI keyed on STATUS# serves the status lookup without scanning. The relational version keeps one source of truth and pays for flexibility with read-time joins, while the DynamoDB version pre-joins and denormalizes at write time to buy single-digit-millisecond reads at scale, but the application must keep any duplicated attributes consistent and a genuinely new access pattern may require a new GSI plus a backfill. Choose relational when access patterns are still evolving or you need ad-hoc queries and analytics, and single-table when the patterns are stable, well understood, and must scale cheaply. The core lesson is that NoSQL modeling is access-pattern-first and moves work to write time, whereas relational modeling is normalization-first and defers work to read time.",
+      "relatedTopic": "data-modeling"
+    }
+  ],
+  "references": [
+    {
+      "label": "Kimball Group: Dimensional Modeling Techniques",
+      "url": "https://www.kimballgroup.com/data-warehouse-business-intelligence-resources/kimball-techniques/dimensional-modeling-techniques/"
+    },
+    {
+      "label": "Designing Data-Intensive Applications (Kleppmann) - Data Models & Query Languages",
+      "url": "https://dataintensive.net/"
+    },
+    {
+      "label": "PostgreSQL Documentation: Data Types and Constraints",
+      "url": "https://www.postgresql.org/docs/current/ddl-constraints.html"
+    },
+    {
+      "label": "Alex DeBrie: The What, Why, and When of Single-Table Design with DynamoDB",
+      "url": "https://www.alexdebrie.com/posts/dynamodb-single-table/"
+    },
+    {
+      "label": "AWS: NoSQL Design for DynamoDB",
+      "url": "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/bp-general-nosql-design.html"
+    },
+    {
+      "label": "Database Normalization Guide (1NF-BCNF)",
+      "url": "https://en.wikipedia.org/wiki/Database_normalization"
+    }
+  ]
+}

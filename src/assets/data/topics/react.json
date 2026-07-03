@@ -1,516 +1,987 @@
 {
   "id": "react",
-  "title": "React",
+  "title": "React.js",
   "category": "Frontend",
-  "subcategory": "Framework",
+  "subcategory": "Library",
   "difficulty": "senior",
-  "tags": ["react", "hooks", "reconciliation", "performance", "state-management", "server-components"],
-  "description": "A senior-level tour of React's mental model: how rendering and reconciliation actually work, the rules and traps of hooks, state architecture, concurrent features, and the performance work that matters in real apps.",
-  "estReadMinutes": 31,
+  "tags": [
+    "react",
+    "hooks",
+    "rsc",
+    "next-js",
+    "state-management",
+    "performance",
+    "reconciliation",
+    "suspense"
+  ],
+  "description": "A staff-level tour of modern React (18/19) covering the rendering model, hooks semantics and pitfalls, reconciliation, state management trade-offs, React Server Components with the Next.js App Router, and concurrent-feature performance work. Written for engineers who must reason about correctness and cost, not just make things render.",
+  "estReadMinutes": 32,
   "sections": [
     {
       "id": "intro",
-      "heading": "Introduction",
+      "heading": "What React Actually Is",
       "kind": "intro",
       "blocks": [
         {
           "type": "paragraph",
-          "text": "React is a library for building user interfaces by describing the UI as a pure function of state: UI = f(state). You write components that return a description of what the screen should look like (JSX, which compiles to React.createElement calls), and React's reconciler figures out the minimal set of DOM mutations needed to make the real DOM match that description. The core insight is that you stop imperatively touching the DOM and instead declare the target state; React owns the transition."
+          "text": "React is a library for describing UI as a pure function of state. You do not imperatively mutate the DOM; you return a description (elements) of what the UI should look like for the current props and state, and React reconciles that description against the previous one to compute the minimal set of DOM mutations. Everything else in React, hooks, concurrency, Server Components, is machinery to make that model efficient, composable, and correct under real-world constraints."
+        },
+        {
+          "type": "paragraph",
+          "text": "At senior level the interesting questions are rarely 'how do I use useState'. They are: why does this component re-render, why is this closure stale, what runs on the server versus the client, and what is the actual cost of the abstraction I just reached for. This topic is organized around those questions."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Mental model to hold throughout: render is not commit. Rendering computes the element tree (may run multiple times, may be thrown away). Commit applies DOM changes and runs effects. Concurrent React can pause, resume, and discard renders, so render functions must be pure."
         },
         {
           "type": "list",
           "items": [
-            "Components are functions from props (and internal state) to an element tree. Same inputs, same output - rendering should be pure.",
-            "A render is React calling your component function. It does not necessarily touch the DOM; it produces a new virtual tree that the reconciler diffs.",
-            "Hooks (useState, useEffect, ...) let function components hold state and run side effects across renders, attached to the component instance by call order.",
-            "State changes schedule a re-render. React batches updates, diffs the new tree against the previous one, and commits only the differences to the DOM."
+            "UI = f(state): components are functions from props/state to element trees.",
+            "React 18 introduced concurrent rendering (interruptible, prioritized renders).",
+            "React 19 stabilized Actions, use(), useOptimistic, and shipped alongside the React Compiler.",
+            "Server Components move component execution to the server, changing where code and data live."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "why-declarative",
+      "heading": "Why Declarative + Virtual DOM Won",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Before React, UI code was a maze of imperative mutations: find a node, toggle a class, append a child, keep it consistent with three other pieces of state. The bug class was 'the DOM and the data drifted apart'. React's insight is to make the DOM a derived value. You never update the DOM; you update state and re-derive. Consistency becomes structural rather than something you defend by hand."
+        },
+        {
+          "type": "paragraph",
+          "text": "The Virtual DOM is the enabling trick: keep a lightweight JS representation of the tree, diff the new tree against the old, and apply only the differences. The VDOM is not fast in absolute terms; a hand-tuned imperative update is faster. It is fast enough while being dramatically simpler to reason about, and it unlocks features that raw DOM code cannot easily offer: interruptible rendering, offscreen prerendering, and the same component model on server and client."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Interview trap: 'the Virtual DOM makes React fast' is imprecise. The VDOM makes React predictable and composable; performance comes from batching, bailout heuristics, and letting you avoid unnecessary work. Say that."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Declarative code is testable: given state, the output is deterministic.",
+            "Diffing lets React own scheduling, enabling concurrent features.",
+            "The same programming model spans DOM, native (React Native), and server rendering."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "jsx-rendering",
+      "heading": "JSX, Elements, and the Render/Commit Split",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "JSX is syntax sugar. <Button onClick={fn}>Save</Button> compiles (via the automatic runtime) to jsx(Button, { onClick: fn, children: 'Save' }). The result is a plain object, a React element, describing what to render. It is not a DOM node and does nothing until React renders it. This is why elements are cheap to create and why you can return them, store them, and pass them around freely."
+        },
+        {
+          "type": "code",
+          "language": "tsx",
+          "code": "// JSX ...\nconst el = <Button variant=\"primary\">Save</Button>;\n\n// ...compiles to (React 17+ automatic runtime):\nimport { jsx as _jsx } from 'react/jsx-runtime';\nconst el2 = _jsx(Button, { variant: 'primary', children: 'Save' });\n\n// el is just: { $$typeof: Symbol(react.element), type: Button, props: {...} }"
+        },
+        {
+          "type": "paragraph",
+          "text": "Two phases matter. Render phase: React calls your component functions to produce the element tree and diffs it. This phase must be pure, no side effects, no DOM reads, because concurrent React may run it multiple times or abandon it. Commit phase: React applies the computed mutations to the real DOM and then runs layout effects (synchronously) and passive effects (after paint). Distinguishing these is the key to explaining useEffect vs useLayoutEffect and why side effects belong in effects, not in the render body."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Never mutate props, refs, or module-level state during render, and never trigger network calls there. In StrictMode React intentionally double-invokes render and effect setup in development to surface impure code. Bugs that only appear in prod builds are often impurity StrictMode already tried to warn you about."
+        }
+      ]
+    },
+    {
+      "id": "hooks-rules",
+      "heading": "Hooks and the Rules of Hooks",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Hooks are how function components get memory and lifecycle. The Rules of Hooks are not stylistic: call hooks only at the top level of a component or another hook, never inside conditions, loops, or after an early return. The reason is mechanical. React stores hook state in a per-component linked list and matches each hook call to its slot by call order, not by name. If the order changes between renders, useState number two on this render lines up with useEffect number two from last render, and everything corrupts."
+        },
+        {
+          "type": "code",
+          "language": "tsx",
+          "code": "// WRONG: conditional hook changes call order between renders\nfunction Profile({ id }: { id?: string }) {\n  if (!id) return null;           // early return before hooks\n  const [user, setUser] = useState(null); // sometimes call #1, sometimes never\n  // ...\n}\n\n// RIGHT: hooks unconditional, branch on the value afterwards\nfunction ProfileFixed({ id }: { id?: string }) {\n  const [user, setUser] = useState<User | null>(null);\n  useEffect(() => { if (id) loadUser(id).then(setUser); }, [id]);\n  if (!id) return null;\n  return <div>{user?.name}</div>;\n}"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Top-level only: no hooks in if/for/&&/ternary/try or after return.",
+            "Call from React functions only: components or custom hooks, not plain utilities.",
+            "Order must be stable across every render of a given component instance.",
+            "The eslint-plugin-react-hooks rules (rules-of-hooks + exhaustive-deps) catch most violations at lint time."
           ]
         },
         {
           "type": "callout",
           "variant": "info",
-          "text": "The single most useful mental model: a component re-renders when its state changes, its parent re-renders, or its context value changes. 'Re-render' means React calls the function again - it does NOT mean the DOM was touched. Conflating these two is the source of most React performance confusion."
+          "text": "Because identity is positional, you can safely call the same hook many times (useState twice) but never conditionally. This constraint is exactly what lets hooks be simple functions instead of requiring a registration ceremony."
         }
       ]
     },
     {
-      "id": "why-it-matters",
-      "heading": "Why It Matters",
-      "kind": "why",
+      "id": "state-batching",
+      "heading": "useState, Batching, and Functional Updates",
+      "kind": "concept",
       "blocks": [
         {
           "type": "paragraph",
-          "text": "React dominates the frontend job market and underpins Next.js, React Native, and most large web apps. At a senior level the value is not memorizing API names but understanding the execution model: when components render, why effects fire, how closures capture values, and where the reconciler can and cannot help you. Almost every production React bug - a stale value in a callback, an infinite effect loop, a list that reorders wrong, a sluggish input - traces back to a misunderstanding of one of those mechanics."
+          "text": "useState returns the current value and a setter. State is per-instance and persists across renders. Two subtleties dominate interviews: batching and the functional updater. In React 18, all state updates are batched by default, including those inside promises, setTimeout, and native event handlers (this was not true in React 17, where only React event handlers batched). Multiple setState calls in the same tick produce a single re-render."
+        },
+        {
+          "type": "code",
+          "language": "tsx",
+          "code": "function Counter() {\n  const [count, setCount] = useState(0);\n\n  // BUG: reads a stale `count` three times -> increments by 1, not 3\n  const wrongTriple = () => {\n    setCount(count + 1);\n    setCount(count + 1);\n    setCount(count + 1);\n  };\n\n  // CORRECT: functional updater sees the latest queued value\n  const rightTriple = () => {\n    setCount(c => c + 1);\n    setCount(c => c + 1);\n    setCount(c => c + 1); // +3\n  };\n\n  return <button onClick={rightTriple}>{count}</button>;\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Use the functional form whenever the next state depends on the previous state, or when the setter is captured in a closure (an event listener, an effect, a debounce) where count could be stale. Prefer it by default in shared hooks; it removes count from your effect dependency arrays and eliminates a whole class of stale-value bugs."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "State updates are asynchronous with respect to the surrounding code. Reading count immediately after setCount(count + 1) gives the old value; the new value is only visible on the next render. If you truly need to opt out of batching (rare, e.g. measuring the DOM between two updates), flushSync exists but forces a synchronous re-render and hurts performance."
+        }
+      ]
+    },
+    {
+      "id": "effects",
+      "heading": "useEffect: Dependencies, Cleanup, and When Not To",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "useEffect synchronizes a component with an external system: subscriptions, timers, network requests, non-React widgets, the document title. The dependency array declares what the effect reads from render scope; React re-runs the effect (after running the previous cleanup) whenever a dependency changes by Object.is. An empty array means 'set up once, clean up on unmount'. Omitting the array runs it after every render. Lying about dependencies to silence the linter reintroduces stale closures."
+        },
+        {
+          "type": "code",
+          "language": "tsx",
+          "code": "// Fetch with cleanup + AbortController to avoid race conditions and state\n// updates after unmount.\nfunction useUser(id: string) {\n  const [user, setUser] = useState<User | null>(null);\n  const [error, setError] = useState<Error | null>(null);\n\n  useEffect(() => {\n    const controller = new AbortController();\n    setUser(null);\n    setError(null);\n\n    fetch(`/api/users/${id}`, { signal: controller.signal })\n      .then(r => {\n        if (!r.ok) throw new Error(`HTTP ${r.status}`);\n        return r.json();\n      })\n      .then((data: User) => setUser(data))\n      .catch((e: unknown) => {\n        if (e instanceof DOMException && e.name === 'AbortError') return; // ignore\n        setError(e as Error);\n      });\n\n    return () => controller.abort(); // cancel in-flight request on id change/unmount\n  }, [id]);\n\n  return { user, error };\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "The most senior thing you can say about effects is when NOT to use one. You do not need an effect to transform data for rendering (compute it during render, memoize if expensive), to reset state on prop change (use a key), to handle a user event (put the logic in the handler), or to derive state from props (derive it, do not mirror it into state). Effects are for synchronizing with systems outside React. Most 'effect bugs' are effects that should not have existed."
         },
         {
           "type": "list",
           "items": [
-            "Correctness: understanding render timing and closures prevents stale-state bugs that pass code review and detonate in production.",
-            "Performance: knowing what triggers a render (and what memoization actually buys you) is the difference between a snappy app and one that drops frames on every keystroke.",
-            "Architecture: choosing where state lives - local, lifted, context, or an external store - determines how the app scales and how often it re-renders.",
-            "Hiring signal: interviewers probe the rules of hooks, useEffect dependencies, and reconciliation keys precisely because they separate people who memorized syntax from people who understand the model."
+            "Compute during render, do not stuff derived data into state via an effect.",
+            "Reset component state by giving it a new key, not an effect that watches props.",
+            "Event-specific logic belongs in the event handler, not in an effect that reacts to state.",
+            "If an effect only exists to notify a parent, lift the call into the handler instead."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "useEffect runs after paint (passive); useLayoutEffect runs synchronously after DOM mutation but before paint. Use useLayoutEffect only to read layout (measure a node) and mutate the DOM before the browser paints, e.g. positioning a tooltip, to avoid a visible flicker. It blocks paint, so overuse hurts perceived performance."
+        }
+      ]
+    },
+    {
+      "id": "custom-hooks",
+      "heading": "Custom Hooks: useDebounce",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A custom hook is just a function that calls hooks and follows the Rules of Hooks. It packages stateful logic for reuse. Crucially, two components using the same hook do NOT share state; each call site gets its own state. Custom hooks are the primary unit of logic reuse in modern React, replacing HOCs and render props for most cases."
+        },
+        {
+          "type": "code",
+          "language": "tsx",
+          "code": "import { useEffect, useState } from 'react';\n\n// Returns a value that only updates after `delay` ms of no changes.\nexport function useDebounce<T>(value: T, delay = 300): T {\n  const [debounced, setDebounced] = useState(value);\n\n  useEffect(() => {\n    const t = setTimeout(() => setDebounced(value), delay);\n    return () => clearTimeout(t); // cancel prior timer on each change\n  }, [value, delay]);\n\n  return debounced;\n}\n\n// Usage: type-ahead search that only fires after the user pauses.\nfunction Search() {\n  const [query, setQuery] = useState('');\n  const debouncedQuery = useDebounce(query, 400);\n\n  useEffect(() => {\n    if (!debouncedQuery) return;\n    // fetch results for debouncedQuery (add AbortController in real code)\n  }, [debouncedQuery]);\n\n  return <input value={query} onChange={e => setQuery(e.target.value)} />;\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Good custom hooks have a narrow, honest name (useDebounce, useOnScreen, useLocalStorage), return a stable API, and keep effects internal. If a hook returns callbacks, memoize them with useCallback so consumers can safely depend on them."
+        }
+      ]
+    },
+    {
+      "id": "refs",
+      "heading": "useRef vs State",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "useRef gives you a mutable container (ref.current) that persists across renders but whose mutation does NOT trigger a re-render. Two uses: holding a DOM node (ref on a JSX element), and storing mutable values that should survive renders without causing them, timer ids, previous values, the latest callback, whether a component is mounted."
+        },
+        {
+          "type": "code",
+          "language": "tsx",
+          "code": "// Store the latest callback in a ref so an interval never goes stale,\n// without re-subscribing on every render (Dan Abramov's pattern).\nfunction useInterval(callback: () => void, delay: number | null) {\n  const savedCallback = useRef(callback);\n\n  useEffect(() => { savedCallback.current = callback; }, [callback]);\n\n  useEffect(() => {\n    if (delay === null) return;\n    const id = setInterval(() => savedCallback.current(), delay);\n    return () => clearInterval(id);\n  }, [delay]);\n}"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Use state when the value should be reflected in the UI and drive re-renders.",
+            "Use a ref when the value is instrumental, not visual (ids, latest-value caches, DOM handles).",
+            "Never read/write ref.current during render to compute output; it breaks purity and concurrency."
           ]
         },
         {
           "type": "callout",
           "variant": "warning",
-          "text": "A common senior anti-pattern is reaching for useMemo/useCallback/memo everywhere. Memoization has a cost (allocation, comparison, cognitive overhead) and only pays off in specific situations. Measure first; the default should be no memoization."
+          "text": "Common mistake: using a ref to avoid a re-render for a value the UI actually depends on. The screen then shows stale data. Refs are for values the render output does not read."
         }
       ]
     },
     {
-      "id": "components-jsx",
-      "heading": "Components, JSX, and Rendering",
-      "kind": "concept",
+      "id": "memoization",
+      "heading": "useMemo, useCallback, React.memo, and the Compiler",
+      "kind": "bestpractice",
       "blocks": [
         {
           "type": "paragraph",
-          "text": "JSX is syntactic sugar. <Button color=\"red\">Buy</Button> compiles to React.createElement(Button, { color: 'red' }, 'Buy') (or the jsx runtime equivalent), which returns a plain object - an element - describing what to render. Elements are cheap, immutable descriptions; they are not DOM nodes. Rendering is the process of calling component functions to produce these element trees, and committing is the separate phase where React applies DOM changes."
+          "text": "These three tools reduce work, but each has a cost (memory + comparison + code noise) and none is free. useMemo caches a computed value. useCallback caches a function identity. React.memo skips re-rendering a component when its props are shallow-equal to the previous render. They only help when the thing you are memoizing is genuinely expensive or when a stable identity is needed to make a downstream React.memo or effect dependency work."
         },
         {
-          "type": "heading",
-          "text": "A render is just a function call"
+          "type": "table",
+          "headers": [
+            "Tool",
+            "Caches",
+            "Primary use",
+            "When it does nothing"
+          ],
+          "rows": [
+            [
+              "useMemo",
+              "A computed value",
+              "Skip expensive recomputation between renders",
+              "Cheap computations; deps change every render"
+            ],
+            [
+              "useCallback",
+              "A function reference",
+              "Give a stable prop to a memo'd child or a stable effect dep",
+              "Child is not memoized; function recreated deps churn"
+            ],
+            [
+              "React.memo",
+              "A component's render output",
+              "Skip re-render when props are shallow-equal",
+              "Props include new object/array/function each render"
+            ]
+          ]
         },
         {
           "type": "code",
           "language": "tsx",
-          "code": "function Greeting({ name }: { name: string }) {\n  // This function body runs top-to-bottom on every render.\n  const greeting = `Hello, ${name}`;\n  return <h1>{greeting}</h1>;\n}\n\n// <Greeting name=\"Ada\" /> is React.createElement(Greeting, { name: 'Ada' })\n// React calls Greeting({ name: 'Ada' }), gets back an <h1> element,\n// diffs it against the previous tree, and updates the DOM text if it changed."
-        },
-        {
-          "type": "paragraph",
-          "text": "Because the body re-runs every render, anything you declare inside is recreated each time: new object literals, new arrays, new inline functions all have new identities. That is fine for correctness (React handles it) but matters when those values are passed to memoized children or used as effect dependencies, because identity changes defeat referential-equality checks."
+          "code": "const ExpensiveList = React.memo(function ExpensiveList({\n  items, onSelect,\n}: { items: Item[]; onSelect: (id: string) => void }) {\n  return <ul>{items.map(i => <li key={i.id} onClick={() => onSelect(i.id)}>{i.label}</li>)}</ul>;\n});\n\nfunction Parent({ items }: { items: Item[] }) {\n  // Without useCallback, onSelect is a NEW function each render, so React.memo\n  // above never bails out. useCallback stabilizes the identity.\n  const onSelect = useCallback((id: string) => { console.log(id); }, []);\n  const sorted = useMemo(() => [...items].sort((a, b) => a.label.localeCompare(b.label)), [items]);\n  return <ExpensiveList items={sorted} onSelect={onSelect} />;\n}"
         },
         {
           "type": "callout",
-          "variant": "danger",
-          "text": "Rendering must be pure: no mutating props or state, no side effects (network calls, subscriptions, DOM writes) during render. React may call your component multiple times, bail out, or discard the result - especially under Strict Mode and concurrent rendering. Side effects belong in event handlers or effects, never in the render body."
+          "variant": "success",
+          "text": "React 19's React Compiler auto-memoizes at build time by analyzing your code, making most manual useMemo/useCallback unnecessary. In a compiler-enabled codebase, write plain idiomatic code; only reach for manual memoization where the compiler bails out (it tells you). Do not pre-optimize by memoizing everything by hand."
+        },
+        {
+          "type": "paragraph",
+          "text": "When NOT to memoize: cheap computations, values that change every render anyway (memo overhead with no bailout), and components that are already fast. Premature memoization adds indirection, hides bugs (stale deps), and can even slow things down. Measure with the Profiler first; memoize the hot path, not everything."
         }
       ]
     },
     {
-      "id": "hooks",
-      "heading": "Hooks: State, Effects, and Memoization",
-      "kind": "concept",
-      "blocks": [
-        {
-          "type": "paragraph",
-          "text": "Hooks give function components persistent state and lifecycle-like behavior. React tracks hooks per component instance by their call order, which is why the Rules of Hooks exist: call hooks only at the top level and only from React functions, never inside conditions, loops, or nested functions. Violating call order corrupts which state belongs to which hook."
-        },
-        {
-          "type": "heading",
-          "text": "useState and the updater form"
-        },
-        {
-          "type": "code",
-          "language": "tsx",
-          "code": "function Counter() {\n  const [count, setCount] = useState(0);\n\n  // BAD: reads the count captured by THIS render's closure.\n  // Clicking once schedules three updates all based on the same 0 -> ends at 1.\n  const tripleBad = () => {\n    setCount(count + 1);\n    setCount(count + 1);\n    setCount(count + 1);\n  };\n\n  // GOOD: updater form receives the latest pending state -> ends at 3.\n  const tripleGood = () => {\n    setCount(c => c + 1);\n    setCount(c => c + 1);\n    setCount(c => c + 1);\n  };\n\n  return <button onClick={tripleGood}>{count}</button>;\n}"
-        },
-        {
-          "type": "heading",
-          "text": "useEffect: synchronizing with external systems"
-        },
-        {
-          "type": "code",
-          "language": "tsx",
-          "code": "function UserProfile({ userId }: { userId: string }) {\n  const [user, setUser] = useState<User | null>(null);\n\n  useEffect(() => {\n    let cancelled = false;\n    fetch(`/api/users/${userId}`)\n      .then(r => r.json())\n      .then(data => { if (!cancelled) setUser(data); });\n    // Cleanup runs before the next effect and on unmount.\n    // It prevents a slow response for an old userId from overwriting a new one.\n    return () => { cancelled = true; };\n  }, [userId]); // re-run only when userId changes\n\n  return user ? <h1>{user.name}</h1> : <Spinner />;\n}"
-        },
-        {
-          "type": "paragraph",
-          "text": "useMemo caches a computed value, useCallback caches a function identity, and useRef holds a mutable box that survives renders without triggering them. useMemo(() => expensiveCompute(a, b), [a, b]) recomputes only when a or b change; useCallback(fn, deps) is exactly useMemo(() => fn, deps). useRef is for values you want to persist but not render on (timers, previous values, imperative DOM handles)."
-        },
-        {
-          "type": "code",
-          "language": "tsx",
-          "code": "function SearchResults({ query, items }: { query: string; items: Item[] }) {\n  // Recompute the filtered list only when query or items change,\n  // not on every unrelated parent re-render.\n  const filtered = useMemo(\n    () => items.filter(i => i.name.includes(query)),\n    [query, items]\n  );\n\n  // Stable identity so a memoized <Row> child does not re-render needlessly.\n  const onSelect = useCallback((id: string) => {\n    console.log('selected', id);\n  }, []);\n\n  // Mutable, render-free storage: a ref to the input element.\n  const inputRef = useRef<HTMLInputElement>(null);\n\n  return (\n    <>\n      <input ref={inputRef} />\n      {filtered.map(i => <Row key={i.id} item={i} onSelect={onSelect} />)}\n    </>\n  );\n}"
-        },
-        {
-          "type": "callout",
-          "variant": "info",
-          "text": "Rule of thumb: useState for values that drive the UI; useRef for values you need to remember but that should not trigger a render; useMemo/useCallback only to preserve referential identity for memoized children or effect deps, or to skip a genuinely expensive computation. Reaching for them by default is a smell."
-        }
-      ]
-    },
-    {
-      "id": "reconciliation",
+      "id": "reconciliation-keys",
       "heading": "Reconciliation and Keys",
       "kind": "concept",
       "blocks": [
         {
           "type": "paragraph",
-          "text": "When state changes, React renders a new element tree and reconciles it against the previous one to decide which DOM nodes to keep, update, or replace. The diff is heuristic and runs in O(n): React compares elements at the same position. If the type matches (both <li>, or both the same component), it updates that node in place and recurses into children. If the type differs, it tears down the old subtree and mounts a new one. For lists, React uses the key prop to match elements across renders by identity rather than by position."
-        },
-        {
-          "type": "heading",
-          "text": "Why index keys corrupt stateful lists"
+          "text": "Reconciliation is React's diffing algorithm. It compares the new element tree to the previous one. Rules: different element types (div vs span, ComponentA vs ComponentB) tear down the old subtree and rebuild; same type reuses the DOM node and updates props; lists use keys to match elements across renders. Keys tell React which item is which so it can move, keep, or remove DOM nodes and preserve component state and DOM focus."
         },
         {
           "type": "code",
           "language": "tsx",
-          "code": "// BAD: key={index}. If you prepend or reorder items, the keys 0,1,2...\n// still map to the same POSITIONS, so React reuses the wrong DOM nodes.\n// An <input> with text typed into row 0 keeps its text when a new row 0\n// is inserted, because React thinks it is the 'same' element.\n{todos.map((todo, index) => (\n  <TodoRow key={index} todo={todo} />\n))}\n\n// GOOD: a stable identity key tied to the data, not the position.\n{todos.map(todo => (\n  <TodoRow key={todo.id} todo={todo} />\n))}"
+          "code": "// WRONG: index as key. Insert at the top and every row's identity shifts.\n{items.map((item, i) => <Row key={i} item={item} />)}\n\n// RIGHT: stable, item-derived key preserves identity across reorders/inserts.\n{items.map(item => <Row key={item.id} item={item} />)}"
         },
         {
           "type": "paragraph",
-          "text": "Keys must be stable, unique among siblings, and tied to the item's identity - never the array index for lists that can reorder, insert, or delete, and never Math.random() (which forces a remount every render, destroying state and focus). Keys are local to their list; they do not need to be globally unique."
-        },
-        {
-          "type": "callout",
-          "variant": "warning",
-          "text": "A changing key on a component is a deliberate tool: setting key={userId} on a form remounts it (resetting all internal state) when the user switches. This is the idiomatic way to reset child state on prop change instead of syncing it with an effect."
-        }
-      ]
-    },
-    {
-      "id": "state-context",
-      "heading": "State Management and Context",
-      "kind": "concept",
-      "blocks": [
-        {
-          "type": "paragraph",
-          "text": "State should live as close to where it is used as possible. Start with local useState; lift it to the nearest common ancestor only when two components must share it; reach for Context to avoid prop-drilling a value through many layers; and reach for an external store (Redux Toolkit, Zustand, Jotai) or a server-cache library (TanStack Query, RTK Query) when state is global, frequently updated, or is really server data being cached on the client."
-        },
-        {
-          "type": "heading",
-          "text": "Context re-renders every consumer when its value changes"
-        },
-        {
-          "type": "code",
-          "language": "tsx",
-          "code": "// PITFALL: a new object every render means every consumer re-renders\n// on every provider render, even consumers that only read `user`.\nfunction App() {\n  const [user, setUser] = useState<User | null>(null);\n  const [theme, setTheme] = useState('light');\n  return (\n    <AppContext.Provider value={{ user, setUser, theme, setTheme }}>\n      <Routes />\n    </AppContext.Provider>\n  );\n}\n\n// BETTER: split contexts by change frequency and memoize the value,\n// so a theme toggle does not re-render components that only read the user.\nconst UserContext = createContext<UserCtx | null>(null);\nconst ThemeContext = createContext<ThemeCtx | null>(null);\n\nfunction App() {\n  const [user, setUser] = useState<User | null>(null);\n  const [theme, setTheme] = useState('light');\n  const userValue = useMemo(() => ({ user, setUser }), [user]);\n  const themeValue = useMemo(() => ({ theme, setTheme }), [theme]);\n  return (\n    <UserContext.Provider value={userValue}>\n      <ThemeContext.Provider value={themeValue}>\n        <Routes />\n      </ThemeContext.Provider>\n    </UserContext.Provider>\n  );\n}"
-        },
-        {
-          "type": "paragraph",
-          "text": "Context is a dependency-injection mechanism, not a state-management library. It does not bail out of re-renders for partial reads: any consumer of a context re-renders whenever that context's value changes by reference. For high-frequency state shared widely, an external store with selector-based subscriptions (so a component re-renders only when its selected slice changes) outperforms a single fat context."
-        },
-        {
-          "type": "callout",
-          "variant": "info",
-          "text": "A huge fraction of 'state' in real apps is actually server data: it lives in a database, is fetched, cached, and can go stale. Treat it as such with a query library that handles caching, deduplication, background refetch, and invalidation - do not hand-roll it in useEffect + useState."
-        }
-      ]
-    },
-    {
-      "id": "concurrent-suspense",
-      "heading": "Suspense, Concurrent Rendering, and Server Components",
-      "kind": "concept",
-      "blocks": [
-        {
-          "type": "paragraph",
-          "text": "Concurrent rendering lets React interrupt, pause, and resume rendering work so urgent updates (typing) are not blocked by expensive ones (rendering a huge list). The opt-in APIs are useTransition and useDeferredValue, which mark updates as non-urgent. Suspense lets a component 'suspend' while data or code loads, showing a fallback, and integrates with lazy() for code splitting and with data libraries that support it."
-        },
-        {
-          "type": "code",
-          "language": "tsx",
-          "code": "function Search() {\n  const [query, setQuery] = useState('');\n  const [isPending, startTransition] = useTransition();\n\n  function onChange(e: React.ChangeEvent<HTMLInputElement>) {\n    const next = e.target.value;\n    setQuery(next);                 // urgent: keep the input responsive\n    startTransition(() => {        // non-urgent: the heavy results render\n      setQuery(next);               // can be interrupted by more typing\n    });\n  }\n\n  return (\n    <>\n      <input value={query} onChange={onChange} />\n      {isPending && <Spinner />}\n      <Suspense fallback={<Skeleton />}>\n        <Results term={query} />\n      </Suspense>\n    </>\n  );\n}"
-        },
-        {
-          "type": "paragraph",
-          "text": "React Server Components (RSC), used by frameworks like Next.js App Router, run on the server and render to a serialized format the client hydrates. They can fetch data directly (await a query in the component), never ship their own JS to the client, and reduce bundle size - but they cannot use state or effects. Client Components (marked 'use client') handle interactivity. The boundary is a key architectural decision: push interactive leaves to the client, keep data-heavy shells on the server."
-        },
-        {
-          "type": "callout",
-          "variant": "info",
-          "text": "useDeferredValue vs useTransition: use a transition when you control the state setter and want to mark that update non-urgent; use useDeferredValue when you receive a value (e.g. a prop) and want a lagging copy for expensive rendering. Both let React keep the urgent path responsive."
-        }
-      ]
-    },
-    {
-      "id": "performance-example",
-      "heading": "Performance Example: Taming a Re-rendering List",
-      "kind": "example",
-      "blocks": [
-        {
-          "type": "paragraph",
-          "text": "Scenario: a dashboard with a 5,000-row table and a search box. Every keystroke updated a query string in a parent, which re-rendered the whole table - 5,000 Row components - on every character, dropping frames and lagging the input by hundreds of milliseconds. The fix combines memoization, stable callbacks, and virtualization."
-        },
-        {
-          "type": "heading",
-          "text": "memo + stable props + virtualization"
-        },
-        {
-          "type": "code",
-          "language": "tsx",
-          "code": "import { memo, useCallback, useMemo, useState } from 'react';\nimport { useVirtualizer } from '@tanstack/react-virtual';\n\n// 1) memo skips re-render when props are referentially equal.\nconst Row = memo(function Row({ item, onSelect }: RowProps) {\n  return <div onClick={() => onSelect(item.id)}>{item.name}</div>;\n});\n\nfunction Table({ items }: { items: Item[] }) {\n  const [query, setQuery] = useState('');\n  const parentRef = useRef<HTMLDivElement>(null);\n\n  // 2) Derive filtered list; recompute only when inputs change.\n  const filtered = useMemo(\n    () => items.filter(i => i.name.includes(query)),\n    [items, query]\n  );\n\n  // 3) Stable callback identity so memo on Row is not defeated.\n  const onSelect = useCallback((id: string) => openDetail(id), []);\n\n  // 4) Only render the ~20 rows actually on screen.\n  const rowVirtualizer = useVirtualizer({\n    count: filtered.length,\n    getScrollElement: () => parentRef.current,\n    estimateSize: () => 40,\n  });\n\n  return (\n    <>\n      <input value={query} onChange={e => setQuery(e.target.value)} />\n      <div ref={parentRef} style={{ height: 600, overflow: 'auto' }}>\n        <div style={{ height: rowVirtualizer.getTotalSize(), position: 'relative' }}>\n          {rowVirtualizer.getVirtualItems().map(v => (\n            <Row key={filtered[v.index].id} item={filtered[v.index]} onSelect={onSelect} />\n          ))}\n        </div>\n      </div>\n    </>\n  );\n}"
-        },
-        {
-          "type": "paragraph",
-          "text": "Outcome: virtualization alone dropped the per-keystroke work from 5,000 components to about 20 - the rows actually visible. memo plus a stable onSelect ensured those visible rows did not re-render unless their own item changed. Input latency fell from ~300ms to under one frame. Note that memo only helps because the props (item and onSelect) keep stable identities; without useCallback, a fresh onSelect each render would have made memo a pure cost with no benefit."
-        },
-        {
-          "type": "callout",
-          "variant": "success",
-          "text": "The biggest performance wins are usually structural (render fewer things via virtualization, move state down so fewer components re-render), not micro-optimizations. memo/useMemo are the finishing touches after you have fixed what renders, not the first lever."
-        }
-      ]
-    },
-    {
-      "id": "common-mistakes",
-      "heading": "Common Mistakes and Production Incidents",
-      "kind": "mistake",
-      "blocks": [
-        {
-          "type": "list",
-          "items": [
-            "Stale closures: a setInterval or event handler created in an effect captures the state from the render it was created in. Without correct deps or the updater form, it forever sees the initial value.",
-            "Missing or wrong useEffect dependencies: omitting a dep used inside the effect causes stale reads; the lint rule (react-hooks/exhaustive-deps) catches most of these and should not be blindly silenced.",
-            "Infinite effect loops: an effect that sets state on every run, with a dependency (often a new object/array literal) that changes every render, re-triggers itself forever.",
-            "Derived state stored in state: copying a prop into useState and trying to keep it in sync with an effect. Derive it during render or use a key to reset instead.",
-            "Index keys on reorderable lists: reused DOM nodes carry the wrong input text, focus, or animation state.",
-            "Premature memoization: memo/useMemo/useCallback applied everywhere, often with broken dependency arrays, adding cost and bugs without measured benefit.",
-            "Side effects during render: fetching, subscribing, or mutating refs in the render body, which breaks under Strict Mode double-invocation and concurrent rendering."
-          ]
-        },
-        {
-          "type": "code",
-          "language": "tsx",
-          "code": "// INCIDENT: a polling dashboard that froze on stale data.\nfunction Live({ symbol }: { symbol: string }) {\n  const [price, setPrice] = useState(0);\n  useEffect(() => {\n    // BUG: empty deps -> this effect captures symbol = its initial value\n    // forever. Switching symbol never re-subscribes; the interval also\n    // reads the stale `price` closure if used here.\n    const id = setInterval(() => fetchPrice(symbol).then(setPrice), 1000);\n    return () => clearInterval(id);\n  }, []); // <-- should be [symbol]\n  return <span>{price}</span>;\n}\n\n// FIX: depend on symbol so the subscription is recreated when it changes,\n// and use the updater form for any state derived from previous state.\nuseEffect(() => {\n  const id = setInterval(() => fetchPrice(symbol).then(setPrice), 1000);\n  return () => clearInterval(id);\n}, [symbol]);"
+          "text": "Why index keys break: with key={i}, inserting or reordering makes React think item at index 0 simply changed props, rather than a new item being inserted before it. It reuses the wrong DOM nodes and component instances. The visible symptoms are: input values attached to the wrong row, checkbox state jumping to another item, and lost focus. For static lists that never reorder, index keys are acceptable, but a stable id is always safer."
         },
         {
           "type": "callout",
           "variant": "danger",
-          "text": "A real production pattern: a team stored the logged-in user from a prop into local state with useState(props.user), then 'synced' it with useEffect. On fast user switching, the effect lagged a render behind, so the dashboard briefly rendered the previous user's private data. The fix was to stop mirroring the prop: read it directly, or remount via key={user.id}."
+          "text": "Changing a component's key intentionally resets it: <Form key={userId} /> throws away and recreates the form when userId changes, clearing all internal state. This is the idiomatic way to 'reset state when a prop changes', far better than an effect."
         }
       ]
     },
     {
-      "id": "best-practices",
-      "heading": "Best Practices",
-      "kind": "bestpractice",
-      "blocks": [
-        {
-          "type": "list",
-          "items": [
-            "Keep rendering pure: no side effects, mutations, or I/O in the render body. Put effects in useEffect, logic in event handlers.",
-            "Prefer derived values over stored state: if you can compute it from props/state during render, do not put it in useState.",
-            "Trust the exhaustive-deps lint rule; if a dependency is genuinely problematic, fix the design (updater form, refs, useEffectEvent) rather than silencing the warning.",
-            "Use the functional updater form (setX(prev => ...)) whenever the next state depends on the previous one.",
-            "Choose stable, identity-based keys for lists; use a changing key to intentionally reset a subtree.",
-            "Co-locate state, lift only when shared, split contexts by update frequency, and treat server data with a query/cache library.",
-            "Measure before memoizing: use the React DevTools Profiler to find what actually re-renders and what is slow, then apply memo/useMemo/virtualization surgically.",
-            "Push interactivity to leaf Client Components and keep data-fetching shells as Server Components where the framework supports RSC."
-          ]
-        },
-        {
-          "type": "table",
-          "headers": ["Need", "Reach for", "Avoid"],
-          "rows": [
-            ["Local UI state", "useState", "Context for everything"],
-            ["Persist value, no render", "useRef", "useState then ignoring renders"],
-            ["Expensive computation", "useMemo (after measuring)", "Memoizing every value"],
-            ["Stable callback for memo child", "useCallback", "Inline arrow defeating memo"],
-            ["Server data", "TanStack Query / RTK Query", "Hand-rolled useEffect fetch + cache"],
-            ["Reset child on prop change", "key={id}", "Copying prop into state + effect"]
-          ]
-        }
-      ]
-    },
-    {
-      "id": "note-render-commit",
-      "heading": "Render Phase vs Commit Phase",
-      "kind": "note",
+      "id": "controlled-uncontrolled",
+      "heading": "Controlled vs Uncontrolled Components",
+      "kind": "concept",
       "blocks": [
         {
           "type": "paragraph",
-          "text": "React works in two phases. The render phase calls your components to build the new tree and diff it; it is interruptible under concurrent rendering and must be side-effect-free, which is why Strict Mode intentionally double-invokes components and effects in development to surface impurity. The commit phase then applies DOM mutations and runs effects (useLayoutEffect synchronously after DOM mutation but before paint, useEffect asynchronously after paint). Understanding which phase your code runs in explains why side effects in render are dangerous and why layout-reading work belongs in useLayoutEffect."
+          "text": "A controlled input has its value driven by React state (value + onChange); React is the single source of truth. An uncontrolled input holds its own state in the DOM, and you read it via a ref (or on submit) with defaultValue setting the initial value. Controlled inputs give you validation-on-keystroke, formatting, and derived UI, at the cost of a render per keystroke. Uncontrolled inputs are lighter and closer to plain HTML, useful for large forms and file inputs (which are always uncontrolled)."
+        },
+        {
+          "type": "code",
+          "language": "tsx",
+          "code": "// Controlled: React owns the value.\nfunction Controlled() {\n  const [name, setName] = useState('');\n  return <input value={name} onChange={e => setName(e.target.value)} />;\n}\n\n// Uncontrolled: DOM owns the value; read on demand.\nfunction Uncontrolled() {\n  const ref = useRef<HTMLInputElement>(null);\n  const onSubmit = () => console.log(ref.current?.value);\n  return <input ref={ref} defaultValue=\"\" onBlur={onSubmit} />;\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Do not switch a single input from uncontrolled to controlled mid-life (value going from undefined to a string). React warns and behavior is confusing. Pick one; if controlled, initialize state to '' not undefined."
+        }
+      ]
+    },
+    {
+      "id": "context",
+      "heading": "Context API and Its Re-render Caveat",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Context passes a value down the tree without prop drilling. Every component that calls useContext(MyContext) re-renders whenever the Provider's value changes by Object.is, regardless of whether it uses the part that changed. This is the central caveat: Context is a broadcast, not a fine-grained subscription. Putting frequently changing state (like a live cursor position) in a wide-scoped context re-renders the whole subtree."
+        },
+        {
+          "type": "code",
+          "language": "tsx",
+          "code": "// BUG: new object identity every render -> every consumer re-renders always.\n<AuthContext.Provider value={{ user, login, logout }}>\n\n// FIX: memoize the value so it only changes when its contents change.\nconst value = useMemo(() => ({ user, login, logout }), [user, login, logout]);\n<AuthContext.Provider value={value}>"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Split contexts by change frequency: a stable 'dispatch' context + a volatile 'state' context.",
+            "Memoize the Provider value object to avoid gratuitous re-renders.",
+            "For high-frequency or selector-based needs, reach for Zustand/Jotai or use(Context) with a selector library.",
+            "Context is for dependency injection (theme, auth, locale), not a general state manager."
+          ]
         },
         {
           "type": "callout",
           "variant": "info",
-          "text": "useLayoutEffect runs before the browser paints, so use it for measuring DOM and synchronously adjusting layout (preventing visible flicker). useEffect runs after paint and is the right default for data fetching, subscriptions, and logging - work that does not need to block the frame."
+          "text": "Context does not have built-in selectors: you cannot subscribe to just one field. That is precisely why external stores (Zustand, Redux, Jotai) exist, they offer selector-based subscriptions so a component only re-renders when its slice changes."
+        }
+      ]
+    },
+    {
+      "id": "error-boundaries",
+      "heading": "Error Boundaries",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "An error boundary is a component that catches render-phase errors in its subtree and shows a fallback instead of crashing the whole app. As of React 19 there is still no hook form; boundaries must be class components implementing getDerivedStateFromError and/or componentDidCatch, or you use a library like react-error-boundary. They do NOT catch errors in event handlers, async code, or the server (handle those with try/catch)."
+        },
+        {
+          "type": "code",
+          "language": "tsx",
+          "code": "import { Component, type ReactNode } from 'react';\n\ninterface Props { fallback: ReactNode; children: ReactNode; }\ninterface State { hasError: boolean; }\n\nexport class ErrorBoundary extends Component<Props, State> {\n  state: State = { hasError: false };\n\n  static getDerivedStateFromError(): State { return { hasError: true }; }\n\n  componentDidCatch(error: Error, info: { componentStack: string }) {\n    reportToSentry(error, info.componentStack); // log to your telemetry\n  }\n\n  render() {\n    return this.state.hasError ? this.props.fallback : this.props.children;\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Place boundaries strategically: one at the app root for last-resort UI, plus finer boundaries around independent widgets (a chart, a comment thread) so one failing panel does not blank the page. Error boundaries pair naturally with Suspense fallbacks."
+        }
+      ]
+    },
+    {
+      "id": "state-management",
+      "heading": "State Management: Client vs Server State",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The most important distinction is client state vs server state. Server state (data fetched from an API) is asynchronous, shared, cached, and can go stale; it wants caching, revalidation, deduping, and background refetch, exactly what React Query (TanStack Query) or RTK Query provide. Client state (UI toggles, wizard steps, selected tab) is synchronous and local; Zustand, Jotai, Redux Toolkit, or plain useState/useReducer fit. A frequent architectural mistake is dumping fetched data into Redux and hand-rolling caching that React Query gives for free."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Library",
+            "Model",
+            "Best for",
+            "Trade-off"
+          ],
+          "rows": [
+            [
+              "Redux Toolkit",
+              "Single store, reducers, actions",
+              "Large apps needing structure, devtools, middleware",
+              "Boilerplate; overkill for small apps"
+            ],
+            [
+              "Zustand",
+              "Small hook-based store with selectors",
+              "Lightweight global client state, minimal ceremony",
+              "Fewer conventions; you design the structure"
+            ],
+            [
+              "Jotai",
+              "Atomic, bottom-up primitives",
+              "Fine-grained derived state, avoiding re-render sprawl",
+              "Atom graph can get hard to trace at scale"
+            ],
+            [
+              "React Query",
+              "Server-state cache (not a store)",
+              "Fetching, caching, revalidation of async data",
+              "Not for client UI state; adds a cache to reason about"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "language": "tsx",
+          "code": "// Server state with React Query: caching, dedupe, and refetch handled for you.\nimport { useQuery } from '@tanstack/react-query';\n\nfunction useProject(id: string) {\n  return useQuery({\n    queryKey: ['project', id],\n    queryFn: ({ signal }) => fetch(`/api/projects/${id}`, { signal }).then(r => r.json()),\n    staleTime: 30_000, // treat data as fresh for 30s; no refetch storms\n  });\n}\n\n// Client state with Zustand: selector-based, only re-renders on the slice used.\nimport { create } from 'zustand';\n\ninterface UiState { sidebarOpen: boolean; toggle: () => void; }\nconst useUi = create<UiState>(set => ({\n  sidebarOpen: true,\n  toggle: () => set(s => ({ sidebarOpen: !s.sidebarOpen })),\n}));"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Rule of thumb: use React Query (or RTK Query) for anything that came from the network; use useState/useReducer for local component state; reach for a global client store (Zustand/Jotai/Redux) only when unrelated components must share synchronous UI state."
+        }
+      ]
+    },
+    {
+      "id": "rsc-app-router",
+      "heading": "React Server Components and the Next.js App Router",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Server Components (RSCs) render on the server, never ship their code to the client, and can access server-only resources directly (database, filesystem, secrets) with async/await. They cannot use state, effects, refs, or browser APIs, they have no client runtime. Client Components (marked with the 'use client' directive at the top of the file) are the interactive parts: hooks, event handlers, browser APIs. In the Next.js App Router, components are Server Components by default; you opt into the client at the leaves of your tree."
+        },
+        {
+          "type": "code",
+          "language": "tsx",
+          "code": "// app/products/[id]/page.tsx  -- Server Component (default, can be async)\nimport { db } from '@/lib/db';\nimport { AddToCart } from './add-to-cart';\n\nexport default async function ProductPage({ params }: { params: { id: string } }) {\n  const product = await db.product.findUnique({ where: { id: params.id } }); // runs on server\n  return (\n    <article>\n      <h1>{product.name}</h1>\n      <p>{product.description}</p>\n      <AddToCart productId={product.id} /> {/* interactive island */}\n    </article>\n  );\n}\n\n// add-to-cart.tsx  -- Client Component\n'use client';\nimport { useState } from 'react';\n\nexport function AddToCart({ productId }: { productId: string }) {\n  const [qty, setQty] = useState(1); // state only allowed in client components\n  return <button onClick={() => addToCart(productId, qty)}>Add {qty}</button>;\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Server Actions ('use server') let client components call server functions directly as async functions, no manual API route. They power form submissions and mutations with progressive enhancement. Layouts wrap route segments and persist across navigations (their state is preserved), while pages are the leaf UI. Data flows server -> client as serializable props; you cannot pass functions or class instances from a Server to a Client Component (only Server Actions and plain data)."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Default to Server Components; add 'use client' only where you need interactivity.",
+            "Push 'use client' down to the leaves to keep the JS bundle small.",
+            "Server Components can import and render Client Components, but not vice-versa (a client file can only render server content passed as children).",
+            "'use server' marks server actions callable from the client; validate inputs, they are a public endpoint."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "You cannot pass non-serializable props (functions, Dates round-trip but class instances do not, Symbols) from a Server to a Client Component. Event handlers must originate inside the client component or be Server Actions. Getting this boundary wrong is the number one App Router error."
+        }
+      ]
+    },
+    {
+      "id": "suspense-concurrent",
+      "heading": "Suspense, useTransition, and useDeferredValue",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Suspense lets a component 'suspend' while data or code loads, showing a fallback until it is ready, and enables streaming SSR (the server sends the shell immediately and streams in slower parts). Concurrent features let React keep the UI responsive during heavy updates. useTransition marks a state update as non-urgent so React can interrupt it to handle urgent input; useDeferredValue defers re-rendering of a value derived from fast-changing state."
+        },
+        {
+          "type": "code",
+          "language": "tsx",
+          "code": "import { Suspense } from 'react';\n\n// Streaming: the page shell renders instantly; Comments streams in when ready.\nexport default function Page() {\n  return (\n    <>\n      <Header />\n      <Suspense fallback={<CommentsSkeleton />}>\n        <Comments /> {/* an async Server Component or a data-suspending client one */}\n      </Suspense>\n    </>\n  );\n}"
+        },
+        {
+          "type": "code",
+          "language": "tsx",
+          "code": "import { useState, useTransition, useDeferredValue, useMemo } from 'react';\n\nfunction Filter({ items }: { items: Item[] }) {\n  const [query, setQuery] = useState('');\n  const [isPending, startTransition] = useTransition();\n  const deferredQuery = useDeferredValue(query); // lags behind input under load\n\n  const results = useMemo(\n    () => items.filter(i => i.name.includes(deferredQuery)),\n    [items, deferredQuery],\n  );\n\n  return (\n    <>\n      {/* input stays responsive; the heavy filter render is deprioritized */}\n      <input value={query} onChange={e => startTransition(() => setQuery(e.target.value))} />\n      {isPending && <Spinner />}\n      <List results={results} />\n    </>\n  );\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "useTransition vs useDeferredValue: use useTransition when YOU own the state update and can wrap the setter (mark the update low priority). Use useDeferredValue when you receive a value you cannot control the update of (e.g. from props) and want to render a lagging copy. Both keep input responsive; they differ in where you can intervene."
+        }
+      ]
+    },
+    {
+      "id": "performance",
+      "heading": "Performance: Virtualization and Code Splitting",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Once correctness is solid, the big wins are: render fewer components, ship less JavaScript, and do heavy work off the critical path. Virtualization renders only the visible slice of a long list (react-window / TanStack Virtual) so 10,000 rows cost ~20 DOM nodes. Code splitting with React.lazy + Suspense (or Next.js dynamic imports) defers loading of routes and heavy components until needed, shrinking the initial bundle."
+        },
+        {
+          "type": "code",
+          "language": "tsx",
+          "code": "import { lazy, Suspense } from 'react';\n\n// Split a heavy, rarely-used editor out of the initial bundle.\nconst RichEditor = lazy(() => import('./RichEditor'));\n\nfunction Composer({ open }: { open: boolean }) {\n  if (!open) return null;\n  return (\n    <Suspense fallback={<EditorSkeleton />}>\n      <RichEditor />\n    </Suspense>\n  );\n}"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Virtualize any list beyond a few hundred rows; do not memo your way around a giant DOM.",
+            "Code-split at route boundaries and around heavy leaf components (editors, charts, maps).",
+            "Use the React Profiler to find the actual re-render hot spots before optimizing.",
+            "Prefer moving expensive work to the server (RSC) or a Web Worker over micro-optimizing renders."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Order of operations for a slow list: (1) fix accidental re-renders / stabilize props, (2) memoize the truly expensive row if needed, (3) virtualize. Virtualization is usually the highest-leverage change; memoization alone cannot fix a 10k-node DOM."
+        }
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: A Data Table Widget",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A realistic composition: server-state via React Query, a debounced search, an error boundary, and a virtualized body. This is the shape of a real feature and shows the tools working together rather than in isolation."
+        },
+        {
+          "type": "code",
+          "language": "tsx",
+          "code": "'use client';\nimport { useQuery } from '@tanstack/react-query';\nimport { useState } from 'react';\nimport { useDebounce } from '@/hooks/useDebounce';\nimport { ErrorBoundary } from '@/components/ErrorBoundary';\n\nfunction UsersTable() {\n  const [search, setSearch] = useState('');\n  const debounced = useDebounce(search, 350);\n\n  const { data, isLoading, isError } = useQuery({\n    queryKey: ['users', debounced],\n    queryFn: ({ signal }) =>\n      fetch(`/api/users?q=${encodeURIComponent(debounced)}`, { signal }).then(r => r.json()),\n    staleTime: 15_000,\n    placeholderData: prev => prev, // keep old rows while refetching (no flash)\n  });\n\n  return (\n    <div>\n      <input\n        value={search}\n        onChange={e => setSearch(e.target.value)}\n        placeholder=\"Search users\"\n      />\n      {isError && <p role=\"alert\">Failed to load users.</p>}\n      {isLoading ? <TableSkeleton /> : <VirtualizedRows rows={data.users} />}\n    </div>\n  );\n}\n\nexport default function UsersTablePage() {\n  return (\n    <ErrorBoundary fallback={<p>Something went wrong.</p>}>\n      <UsersTable />\n    </ErrorBoundary>\n  );\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Note placeholderData keeps the previous page's rows visible during a refetch so the table does not flash a spinner on every keystroke, a small detail that separates polished apps from janky ones."
+        }
+      ]
+    },
+    {
+      "id": "migration-notes",
+      "heading": "Migration Notes (17 -> 18 -> 19, and RSC)",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "17 -> 18: switch to createRoot; automatic batching now covers promises/timeouts (audit code that relied on separate renders); StrictMode double-invokes effects in dev, fix effects that are not idempotent.",
+            "18 -> 19: ReactDOM.render and legacy context are gone; forwardRef is largely unnecessary (ref is a regular prop for function components); adopt use(), Actions, and useOptimistic where they simplify code.",
+            "React Compiler: enable it and delete most manual useMemo/useCallback once verified; keep manual memo only where the compiler reports a bailout.",
+            "Adopting RSC: migrate incrementally by route in the App Router; move data fetching into async Server Components and reserve 'use client' for interactive leaves.",
+            "propTypes and defaultProps on function components are removed in 19; use TypeScript and default parameter values instead."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The most common 18 upgrade surprise is StrictMode running effect setup->cleanup->setup twice in development. If an effect breaks under that (double subscriptions, duplicate fetches), the effect was not correctly cleaning up, fix it rather than removing StrictMode."
         }
       ]
     }
   ],
   "diagrams": [
     {
-      "id": "render-pipeline",
-      "title": "From setState to DOM: Render and Commit",
+      "id": "render-commit-flow",
+      "title": "Render and Commit Pipeline",
       "type": "mermaid",
-      "content": "flowchart TD\n    A[setState / props change / context change] --> B[Schedule re-render]\n    B --> C[Render phase: call components -> new element tree]\n    C --> D[Reconcile: diff new vs previous tree]\n    D --> E{Differences?}\n    E -- none --> F[Bail out, no DOM work]\n    E -- some --> G[Commit phase: apply minimal DOM mutations]\n    G --> H[useLayoutEffect runs, before paint]\n    H --> I[Browser paints]\n    I --> J[useEffect runs, after paint]"
+      "content": "flowchart TD\n  A[State or props change] --> B[Render phase: call components]\n  B --> C[Produce new element tree]\n  C --> D[Reconcile: diff vs previous tree]\n  D --> E{Any changes?}\n  E -- No --> F[Bail out, no DOM work]\n  E -- Yes --> G[Commit phase: apply DOM mutations]\n  G --> H[Run useLayoutEffect sync]\n  H --> I[Browser paints]\n  I --> J[Run useEffect passive]"
     },
     {
-      "id": "state-decision",
-      "title": "Where Should This State Live?",
+      "id": "rsc-request-flow",
+      "title": "RSC Request Flow: Server to Client",
       "type": "mermaid",
-      "content": "flowchart TD\n    Q[New piece of state] --> S1{Used by one component?}\n    S1 -- yes --> L[useState locally]\n    S1 -- no --> S2{Shared by a few nearby components?}\n    S2 -- yes --> U[Lift to nearest common ancestor]\n    S2 -- no --> S3{Is it really server data?}\n    S3 -- yes --> SQ[Query / cache library]\n    S3 -- no --> S4{Read widely, changes rarely?}\n    S4 -- yes --> CTX[Context, split by frequency]\n    S4 -- no --> ST[External store with selectors]"
+      "content": "flowchart TD\n  A[Browser requests route] --> B[Next.js server runs Server Components]\n  B --> C[Fetch data, access DB and secrets]\n  C --> D[Serialize RSC payload plus client component refs]\n  D --> E[Stream HTML shell then chunks]\n  E --> F[Client receives payload]\n  F --> G[Hydrate only Client Components]\n  G --> H[Interactive UI, state and effects run]"
     },
     {
-      "id": "key-reconcile",
-      "title": "Keys Match List Items Across Renders",
+      "id": "hook-slots",
+      "title": "Why Hook Call Order Matters",
       "type": "ascii",
-      "content": "Prev render            Next render (item B removed)\n+-----------+          +-----------+\n| key=A  #1 |  ----->  | key=A  #1 |   reuse node #1\n+-----------+          +-----------+\n| key=B  #2 |   X      | key=C  #3 |   reuse node #3 (not #2!)\n+-----------+          +-----------+\n| key=C  #3 |  ----->  (B unmounted, its DOM node removed)\n+-----------+\nIndex keys would instead map by POSITION and reuse the wrong nodes."
+      "content": "Render N            Render N+1 (hook skipped by an if)\n[0] useState count  [0] useEffect  <- MISMATCH\n[1] useEffect       [1] useRef     <- corrupted\n[2] useRef          ...\nReact matches hooks by index, not name -> order MUST be stable."
     }
   ],
   "questions": [
     {
-      "id": "q-render-meaning",
-      "question": "What does it mean when a React component 're-renders', and does it always touch the DOM?",
-      "answer": "A re-render means React calls the component function again to produce a new element tree. It does NOT necessarily touch the DOM. After producing the new tree, React reconciles it against the previous tree and commits only the differences; if the new output is equivalent, the DOM is not mutated at all. This distinction matters because a component can render many times while causing zero DOM work, and conversely the expensive part of a render is usually the JavaScript of building and diffing the tree, not the DOM commit. Re-renders are triggered by a state change, a parent re-render, or a consumed context value changing.",
-      "difficulty": "mid",
-      "category": "Frontend",
-      "tricky": false,
-      "tags": ["rendering", "reconciliation"],
-      "followUps": ["What triggers a re-render?", "How does memo stop a re-render?"]
-    },
-    {
       "id": "q-rules-of-hooks",
-      "question": "What are the Rules of Hooks and why do they exist?",
-      "answer": "The rules are: only call hooks at the top level of a component or custom hook (never inside conditions, loops, or nested functions), and only call them from React function components or other hooks. They exist because React associates each hook's state with its call order on each render - the first useState call gets slot 0, the second gets slot 1, and so on. If you call hooks conditionally, the order changes between renders and React would hand slot 0's state to the wrong hook, corrupting state. Keeping calls unconditional and top-level guarantees a stable order so React can reliably map calls to their persistent state.",
+      "question": "Why can't you call hooks conditionally or in a loop?",
+      "answer": "React associates hook state with a component instance by call order, storing each hook's state in a positional linked list, not by any name or key. On every render it walks that list in the same sequence, matching the first useState call to slot 0, the second to slot 1, and so on. If a condition skips a hook on some renders, the indices shift and a later render's useState lines up with a previous render's useEffect slot, corrupting state. Keeping all hooks at the top level, unconditionally, guarantees the order is identical every render. You branch on values after the hooks run, not around the hook calls themselves. The eslint rules-of-hooks lint catches most violations.",
       "difficulty": "mid",
       "category": "Frontend",
       "tricky": false,
-      "tags": ["hooks", "rules-of-hooks"],
-      "followUps": ["How would you conditionally run logic that needs a hook?", "Why can the linter enforce this statically?"]
+      "tags": [
+        "hooks",
+        "rules-of-hooks"
+      ],
+      "followUps": [
+        "What data structure backs hook state?",
+        "Why is this different from class component state?"
+      ]
     },
     {
-      "id": "q-usememo-usecallback",
-      "question": "What is the difference between useMemo and useCallback, and when do they actually help?",
-      "answer": "useMemo(fn, deps) caches the return value of fn and recomputes it only when a dependency changes; useCallback(fn, deps) caches the function fn itself - it is exactly useMemo(() => fn, deps). They help in three cases: skipping a genuinely expensive computation between renders, preserving a stable referential identity so a memo-wrapped child does not re-render, and keeping a stable identity for a value used in another hook's dependency array. They do NOT help (and add cost) when applied to cheap computations whose result is not passed to a memoized consumer, because every render still allocates the closure and runs the dependency comparison. The default should be no memoization; add it after the Profiler shows a real problem.",
+      "id": "q-index-keys",
+      "question": "Why is using the array index as a key dangerous?",
+      "answer": "Keys identify which list item is which across renders so React can move, keep, or remove the right DOM nodes and component instances. With an index key, inserting or reordering shifts every index, so React thinks the item that is now at index 0 is the same one that was there before and merely changed props. It reuses the wrong DOM node and internal state. The visible symptoms are input values or checkbox states attached to the wrong row, and lost focus. For lists that never reorder or receive insertions, index keys are acceptable, but a stable id derived from the data is always safer. This is a very common source of subtle stateful-list bugs.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": [
+        "reconciliation",
+        "keys"
+      ],
+      "followUps": [
+        "When are index keys acceptable?",
+        "How does changing a key reset a component?"
+      ]
+    },
+    {
+      "id": "q-stale-closure",
+      "question": "What is a stale closure in a useEffect and how do you fix it?",
+      "answer": "A stale closure happens when an effect (or a callback it registers, like an interval or event listener) captures variables from the render scope in which it was created and keeps using those old values because the effect did not re-run. For example, an interval set up in an empty-deps effect will forever see the initial count. Fixes: include the value in the dependency array so the effect re-subscribes with fresh values; use the functional updater setCount(c => c + 1) so you never read the captured value; or store the latest value/callback in a ref and read ref.current inside the callback. The exhaustive-deps lint flags the missing dependency that usually causes this. The wrong fix is to disable the lint and lie about dependencies.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": [
+        "hooks",
+        "closures",
+        "useeffect"
+      ],
+      "followUps": [
+        "Show the ref-latest-callback pattern.",
+        "Why does the functional updater avoid the problem?"
+      ]
+    },
+    {
+      "id": "q-when-not-memoize",
+      "question": "When should you NOT memoize with useMemo/useCallback?",
+      "answer": "Memoization has real costs: extra memory to hold the cached value, a dependency comparison every render, and code noise that can hide stale-value bugs. Do not memoize cheap computations, because the comparison can cost more than recomputing. Do not useCallback a function passed to a child that is not wrapped in React.memo, since the child re-renders anyway. Do not memoize when the dependencies change every render, because you pay the cost and never get a cache hit. In React 19 with the Compiler enabled, most manual memoization is unnecessary because the compiler inserts it automatically where beneficial. Profile first and memoize the measured hot path rather than reflexively wrapping everything.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": [
+        "performance",
+        "memoization",
+        "react-compiler"
+      ],
+      "followUps": [
+        "What does the React Compiler change?",
+        "How do you find the real hot path?"
+      ]
+    },
+    {
+      "id": "q-context-rerenders",
+      "question": "Why does Context cause re-renders, and how do you mitigate it?",
+      "answer": "Every component that calls useContext re-renders whenever the Provider's value changes by Object.is, regardless of whether it reads the part that changed, because Context is a broadcast without selectors. A frequent bug is passing a fresh object literal as the value each render, which changes identity every time and forces all consumers to re-render unconditionally. Mitigations: memoize the Provider value with useMemo; split one context into a stable context (dispatch/actions) and a volatile context (fast-changing state) so consumers subscribe to only what they need; and for fine-grained needs use an external store like Zustand or Jotai that supports selector-based subscriptions. Context is best for dependency injection such as theme, auth, or locale, not as a general-purpose state manager.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": [
+        "context",
+        "performance"
+      ],
+      "followUps": [
+        "Why doesn't Context support selectors?",
+        "When would you split a context in two?"
+      ]
+    },
+    {
+      "id": "q-rsc-no-state",
+      "question": "Why can't a Server Component use state or effects?",
+      "answer": "Server Components execute once on the server to produce a serialized description of UI; their code never ships to the browser and there is no client runtime to hold state or schedule effects. State and effects are inherently interactive and client-side, they respond to user input and lifecycle over time, which only exists where React is running in the browser. So useState, useEffect, useRef, and browser APIs are unavailable in Server Components. Anything interactive must live in a Client Component marked with 'use client'. The benefit is that Server Components can be async, fetch data directly, access secrets, and add zero JavaScript to the bundle. You compose the two: Server Components render the static shell and pass serializable data down to Client Component islands.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": [
+        "rsc",
+        "next-js"
+      ],
+      "followUps": [
+        "What can you pass from a Server to a Client Component?",
+        "How do Server Actions fit in?"
+      ]
+    },
+    {
+      "id": "q-transition-vs-deferred",
+      "question": "useTransition vs useDeferredValue: when do you use each?",
+      "answer": "Both keep the UI responsive by deprioritizing non-urgent renders, but they intervene at different points. Use useTransition when you own the state update and can wrap the setter: startTransition(() => setState(...)) marks that update low priority so React can interrupt it to handle urgent input, and it gives you an isPending flag. Use useDeferredValue when you receive a value you cannot control the update of, such as a prop or a value set elsewhere; it returns a lagging copy that React updates at low priority while the original stays current for urgent uses. In short: useTransition wraps the update, useDeferredValue wraps the value. A typical search box uses one or the other to keep typing smooth while the expensive filtered list renders behind.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": [
+        "concurrent",
+        "suspense",
+        "performance"
+      ],
+      "followUps": [
+        "Which gives you an isPending flag?",
+        "Can you combine them?"
+      ]
+    },
+    {
+      "id": "q-batching-functional",
+      "question": "Why does calling setCount(count+1) three times only add one, and how does the functional updater fix it?",
+      "answer": "Within a single event, count is a constant captured from the current render; each setCount(count + 1) computes the same old value plus one, and because React 18 batches the updates into one re-render, the last write wins and you get plus one, not plus three. The functional updater setCount(c => c + 1) instead receives the latest queued state as its argument, so three calls chain to plus three regardless of batching. Use the functional form whenever the next state depends on the previous state or when the setter is captured in a closure that might be stale, such as inside a timer or effect. It also lets you drop the state value from effect dependency arrays. Batching itself is a performance feature: multiple updates in one tick cause a single render.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": [
+        "usestate",
+        "batching"
+      ],
+      "followUps": [
+        "When did automatic batching expand in React 18?",
+        "How does flushSync relate?"
+      ]
+    },
+    {
+      "id": "q-effect-cleanup",
+      "question": "Why do effects need cleanup functions, and what does aborting a fetch accomplish?",
+      "answer": "An effect's cleanup runs before the effect re-runs and on unmount, undoing whatever the effect set up: clearing timers, unsubscribing, or cancelling requests. Without cleanup you leak subscriptions and can update state on an unmounted component. For fetches, passing an AbortController signal and calling controller.abort() in cleanup cancels an in-flight request when the dependency changes or the component unmounts. This prevents race conditions where a slow earlier request resolves after a newer one and overwrites correct data with stale data, and it avoids state updates after unmount. In StrictMode's development double-invoke, correct cleanup is what makes the setup/cleanup/setup cycle harmless. Effects that lack cleanup are the usual cause of duplicate subscriptions and out-of-order data.",
       "difficulty": "senior",
       "category": "Frontend",
       "tricky": false,
-      "tags": ["hooks", "performance", "memoization"],
-      "followUps": ["Why does useCallback without memo on the child do nothing useful?", "What is the cost of useMemo?"]
+      "tags": [
+        "useeffect",
+        "cleanup",
+        "fetch"
+      ],
+      "followUps": [
+        "How does this interact with StrictMode?",
+        "What is the race condition it prevents?"
+      ]
     },
     {
-      "id": "q-keys",
-      "question": "Why should you not use the array index as a key for a list that can reorder?",
-      "answer": "React uses keys to match elements across renders so it can preserve and reuse DOM nodes and component state. The index ties identity to position, not to the data. If you insert, remove, or reorder items, the same indices now point at different data, so React reuses each positional node for a different item. The visible bugs are corrupted local state: typed text in an input, focus, selection, or animation state stays attached to the position while the data moves, so row 0's input keeps its text when a new item is prepended. A stable, data-derived key (like item.id) tells React the true identity, so it moves and reuses nodes correctly. Index keys are acceptable only for static lists that never reorder, insert, or delete.",
+      "id": "q-effect-vs-layouteffect",
+      "question": "What is the difference between useEffect and useLayoutEffect?",
+      "answer": "useEffect is a passive effect: it runs after the browser has painted, so it does not block visual updates and is the right default for data fetching, subscriptions, and logging. useLayoutEffect runs synchronously after React mutates the DOM but before the browser paints, so it can read layout (measure a node) and make DOM changes the user will see in the same frame, avoiding a visible flicker. Use it for things like measuring an element to position a tooltip or synchronizing scroll position. Because it blocks paint, overusing useLayoutEffect hurts perceived performance. On the server useLayoutEffect does not run and warns, so guard SSR code accordingly. Rule of thumb: default to useEffect and reach for useLayoutEffect only when you must read or write layout before paint.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": [
+        "useeffect",
+        "uselayouteffect"
+      ],
+      "followUps": [
+        "Why does useLayoutEffect warn during SSR?",
+        "Give a concrete flicker example."
+      ]
+    },
+    {
+      "id": "q-when-not-effect",
+      "question": "Name situations where you should NOT use an effect.",
+      "answer": "Effects synchronize with external systems; a lot of code that reaches for them should not. You do not need an effect to transform data for rendering, compute it during render and memoize if it is expensive. You do not need one to reset state when a prop changes, give the component a new key instead. You do not need one to handle a user event, put that logic in the event handler where the event happened. You do not need one to derive state from props, derive it inline rather than mirroring props into state that can drift. And you rarely need one just to notify a parent, call the parent's callback from the handler. Removing unnecessary effects eliminates whole classes of stale-closure and double-run bugs; react.dev's 'You Might Not Need an Effect' catalogs these.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": [
+        "useeffect",
+        "bestpractice"
+      ],
+      "followUps": [
+        "How do you reset state without an effect?",
+        "Why is mirroring props into state a bug?"
+      ]
+    },
+    {
+      "id": "q-ref-vs-state",
+      "question": "When do you use a ref instead of state?",
+      "answer": "Use state for values the UI renders and that should trigger a re-render when they change. Use a ref for values that must persist across renders but whose changes should not cause a re-render, such as a timer id, the previous value of a prop, a mutable latest-callback cache, or a handle to a DOM node. Mutating ref.current is synchronous and does not schedule a render, which is exactly why it suits instrumental values the render output does not read. The common mistake is putting UI-relevant data in a ref to avoid re-renders, which then shows stale content because nothing tells React to re-render. So the test is simple: if the screen depends on the value, use state; if it does not, a ref is appropriate.",
       "difficulty": "mid",
       "category": "Frontend",
       "tricky": false,
-      "tags": ["reconciliation", "keys"],
-      "followUps": ["When is an index key acceptable?", "What does key={Math.random()} do and why is it bad?"]
+      "tags": [
+        "useref",
+        "usestate"
+      ],
+      "followUps": [
+        "Why not read a ref during render?",
+        "How do you get a DOM node with a ref?"
+      ]
     },
     {
-      "id": "q-useeffect-deps",
-      "question": "How does useEffect's dependency array work, and what goes wrong if it is incorrect?",
-      "answer": "After each commit, React compares each dependency in the array to its value from the previous run using Object.is. If any changed, it runs the cleanup from the previous run (if present) and then the effect again; if none changed, the effect is skipped. An empty array means run once on mount; no array means run after every render. Incorrect deps cause two classic bugs: omitting a value the effect uses creates a stale closure that reads the value from the render where the effect was created (so it never updates), while including an unstable value (a new object/array/function literal created each render) makes the effect re-run every render, which can become an infinite loop if the effect also sets state. The exhaustive-deps lint rule flags both; the right fixes are stabilizing the value (useMemo/useCallback), using the updater form, or restructuring with refs or useEffectEvent.",
+      "id": "q-reconciliation",
+      "question": "How does React's reconciliation algorithm decide what to update?",
+      "answer": "Reconciliation diffs the newly rendered element tree against the previous one. If an element's type differs from before (a div replaced by a span, or ComponentA by ComponentB), React tears down the old subtree, including its state, and mounts a fresh one. If the type is the same, React keeps the existing DOM node and instance and updates only the changed props. For lists of children it uses keys to match elements across renders so it can reorder, insert, or remove nodes while preserving the right state and DOM identity. This heuristic is O(n) instead of the O(n cubed) of a general tree diff, trading theoretical optimality for speed. Understanding it explains why changing a key resets a component and why moving a component between parents can remount it.",
       "difficulty": "senior",
       "category": "Frontend",
       "tricky": false,
-      "tags": ["hooks", "useEffect", "dependencies"],
-      "followUps": ["How do you fix an effect that loops because of an object dependency?", "What does an empty dependency array imply about captured values?"]
+      "tags": [
+        "reconciliation",
+        "virtual-dom"
+      ],
+      "followUps": [
+        "Why is it O(n) not O(n^3)?",
+        "What happens when a component moves parents?"
+      ]
     },
     {
-      "id": "q-context-rerender",
-      "question": "Why can React Context cause performance problems, and how do you mitigate them?",
-      "answer": "Context does not support partial subscriptions: every component that consumes a context re-renders whenever the context's value changes by reference, regardless of which part of the value it reads. So a single fat context holding many unrelated values re-renders every consumer on every update, and if the provider passes a fresh object literal as value, every consumer re-renders on every provider render. Mitigations: memoize the provider value so its identity is stable, split one context into several smaller contexts grouped by how often they change (so a theme toggle does not re-render user consumers), and for high-frequency widely-shared state use an external store (Zustand, Redux, Jotai) whose selector-based subscriptions re-render a component only when its selected slice changes.",
+      "id": "q-controlled-uncontrolled",
+      "question": "Explain controlled vs uncontrolled components and when to use each.",
+      "answer": "A controlled input has its value bound to React state via value and onChange, making React the single source of truth; this enables instant validation, formatting, and derived UI at the cost of a re-render per keystroke. An uncontrolled input keeps its value in the DOM, you set an initial defaultValue and read the current value via a ref, typically on submit; it is lighter and closer to plain HTML. Use controlled for inputs whose value drives other UI or needs live validation, and uncontrolled for simple or very large forms where per-keystroke renders are wasteful. File inputs are always uncontrolled. A classic warning arises if you switch a single input from uncontrolled to controlled mid-life by letting value go from undefined to a string, so pick one and initialize controlled state to an empty string.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": [
+        "forms",
+        "controlled"
+      ],
+      "followUps": [
+        "Why are file inputs always uncontrolled?",
+        "Why is the undefined-to-value switch a problem?"
+      ]
+    },
+    {
+      "id": "q-error-boundaries",
+      "question": "What do error boundaries catch and what do they miss?",
+      "answer": "Error boundaries catch errors thrown during rendering, in lifecycle methods, and in constructors of the components below them, and they render a fallback UI instead of unmounting the whole tree. They are implemented as class components with getDerivedStateFromError (to render fallback) and componentDidCatch (to log), since there is still no hook equivalent in React 19; libraries like react-error-boundary wrap this. They do NOT catch errors in event handlers, asynchronous code such as setTimeout or promises, server-side rendering, or errors thrown in the boundary itself, handle those with ordinary try/catch. Best practice is a root boundary for last-resort UI plus finer boundaries around independent widgets so one failure does not blank the page, and they pair naturally with Suspense fallbacks.",
       "difficulty": "senior",
       "category": "Frontend",
       "tricky": false,
-      "tags": ["context", "state-management", "performance"],
-      "followUps": ["How do selector-based stores avoid this?", "When is one big context still fine?"]
+      "tags": [
+        "error-boundaries"
+      ],
+      "followUps": [
+        "How do you catch async/event errors?",
+        "Where should boundaries be placed?"
+      ]
     },
     {
-      "id": "q-suspense-transition",
-      "question": "What problem do useTransition and Suspense solve in concurrent React?",
-      "answer": "They let React keep urgent updates responsive while deprioritizing expensive ones. useTransition marks a state update as a non-urgent transition; React renders it at lower priority and can interrupt it if a more urgent update (like typing) arrives, and it exposes an isPending flag so you can show a subtle loading state without blocking the input. Suspense lets a component declaratively 'suspend' while data or lazily-loaded code is not ready, showing a fallback until it resolves, and it composes - a parent boundary can cover several suspending children. Together they enable patterns like keeping the previous results on screen while new ones load, instead of a hard, janky swap to a spinner that blocks interaction.",
+      "id": "q-server-vs-client-state",
+      "question": "Why distinguish server state from client state, and which tools fit each?",
+      "answer": "Server state is data owned by a backend: it is asynchronous, shared across clients, cached, and can become stale, so it needs deduping, caching, background revalidation, and request cancellation. React Query (TanStack Query) or RTK Query provide exactly that, so you should not hand-roll it in a Redux store. Client state is synchronous and local, UI toggles, selected tabs, wizard steps, and fits useState/useReducer, or a small global store like Zustand or Jotai when unrelated components must share it. A common architectural mistake is dumping fetched data into Redux and reinventing caching, staleness, and refetching. The rule of thumb: network data goes in a server-state cache, local UI state goes in component or a lightweight global store, and Redux Toolkit is warranted mainly when a large app benefits from its structure, devtools, and middleware.",
       "difficulty": "senior",
       "category": "Frontend",
       "tricky": false,
-      "tags": ["concurrent", "suspense", "transitions"],
-      "followUps": ["When would you use useDeferredValue instead of useTransition?", "How does Suspense integrate with code splitting?"]
+      "tags": [
+        "state-management",
+        "react-query"
+      ],
+      "followUps": [
+        "When is Redux Toolkit still the right call?",
+        "How does Jotai differ from Zustand?"
+      ]
     },
     {
-      "id": "q-server-components",
-      "question": "What are React Server Components and what can they not do?",
-      "answer": "Server Components run on the server and render to a serialized representation that the client uses to build the UI. Their benefits: they can fetch data directly (you can await a database or API call inside the component), they ship zero component JavaScript to the client (shrinking the bundle), and they can keep secrets and heavy dependencies server-side. Their limits: they cannot use state (useState), effects (useEffect), refs to DOM, browser-only APIs, or event handlers, because none of that exists during server rendering. Interactivity must live in Client Components marked with 'use client'. The architectural skill is drawing the boundary well: keep data-heavy, non-interactive shells as Server Components and push interactive leaves (forms, toggles) into small Client Components.",
-      "difficulty": "senior",
-      "category": "Frontend",
-      "tricky": false,
-      "tags": ["server-components", "rsc", "architecture"],
-      "followUps": ["How do you pass data from a Server Component to a Client Component?", "Why does pushing 'use client' to the root defeat the purpose?"]
-    },
-    {
-      "id": "q-derived-state",
-      "question": "Why is copying a prop into state with useState(props.x) and syncing it with useEffect an anti-pattern?",
-      "answer": "It creates two sources of truth for the same value and a lag between them. The state is initialized from the prop only on the first render; thereafter the prop and the copy can diverge. Syncing them with an effect runs after render and after paint, so there is a window where the component renders the old copied value even though the prop has already changed - which in real apps has leaked one user's data into another user's view during fast navigation. The correct approaches are: if the value can be derived, compute it during render instead of storing it; if you truly need to reset child state when the prop changes, give the component a key tied to that prop (key={id}) so React remounts it cleanly; only keep a true copy when the component must diverge from the prop intentionally (e.g. an editable draft) and then update it in event handlers, not effects.",
-      "difficulty": "senior",
-      "category": "Frontend",
-      "tricky": false,
-      "tags": ["derived-state", "anti-pattern"],
-      "followUps": ["How does key-based remounting reset state?", "When is keeping a local draft copy legitimate?"]
-    },
-    {
-      "id": "q-tricky-stale-closure",
-      "question": "Tricky: A counter uses setInterval inside useEffect with [] deps to increment count every second, but it gets stuck at 1. Why, and what are the fixes?",
-      "answer": "The effect runs once on mount and creates a closure over count from that first render, where count is 0. The interval callback forever computes setCount(0 + 1) = 1, so the value sticks at 1 - it never sees later values because the closure is frozen at mount. The cleanest fix is the functional updater form: setCount(c => c + 1), which asks React for the latest state instead of using the captured variable, so the empty deps array is now correct. Alternative fixes include adding count to the dependency array (but that tears down and recreates the interval every tick, which is wasteful and can drift timing), or storing the latest count in a ref updated each render and reading ref.current inside the interval. The updater form is preferred because it is the most direct expression of 'next depends on previous' and keeps the effect stable.",
+      "id": "q-virtual-dom-fast",
+      "question": "Is the Virtual DOM what makes React fast?",
+      "answer": "Not exactly, and this is a common misconception. A hand-tuned imperative DOM update is faster in raw terms than diffing a Virtual DOM; the VDOM adds overhead. What the VDOM buys is predictability and composability: you describe UI as a function of state and React figures out the minimal mutations, which makes code far easier to reason about and enables features like concurrent rendering, offscreen prerendering, and the same model on server and client. React's actual performance comes from batching updates, bailing out of unnecessary re-renders, and letting you avoid work. So the honest answer is that the VDOM makes React fast enough while being dramatically simpler, and genuine performance work is about rendering fewer components and shipping less JavaScript, not the diff itself.",
       "difficulty": "senior",
       "category": "Frontend",
       "tricky": true,
-      "tags": ["hooks", "stale-closure", "useEffect", "gotcha"],
-      "followUps": ["Why does adding count to deps fix correctness but hurt the timer?", "How would a ref-based fix look?"]
+      "tags": [
+        "virtual-dom",
+        "performance"
+      ],
+      "followUps": [
+        "What actually drives React performance?",
+        "What does the VDOM enable that raw DOM cannot?"
+      ]
     },
     {
-      "id": "q-tricky-batching",
-      "question": "Tricky: Inside one click handler you call setCount(count + 1) three times. Count is 0. What is it afterward, and how do you make it 3?",
-      "answer": "It becomes 1, not 3. React batches the three updates within the event handler, and each call passes the same value because all three read count from the same render's closure, where count is 0 - so all three schedule 'set count to 1'. The last write wins and the result is 1. To get 3, use the functional updater form: setCount(c => c + 1) three times. Each updater receives the latest pending state (0 -> 1 -> 2 -> 3) rather than the stale captured value, so the increments compose to 3. The deeper lesson is that state values are constants within a render; setState does not mutate the variable, it schedules the next render's value, and the updater form is how you build on the pending result rather than the captured snapshot. Since React 18, batching also applies in promises, timeouts, and native event handlers (automatic batching), not just React events.",
+      "id": "q-use-client-boundary",
+      "question": "What can and cannot cross the Server/Client Component boundary?",
+      "answer": "Data flows from Server Components to Client Components as serializable props: strings, numbers, booleans, arrays, plain objects, and Server Actions (functions marked 'use server'). You cannot pass arbitrary functions, class instances, Symbols, or other non-serializable values, event handlers must originate inside the client component or be Server Actions. A Server Component can import and render a Client Component, but a Client Component cannot import a Server Component; it can only render server content that is passed to it as children (the children slot pattern). The 'use client' directive marks the boundary at the top of a file, and everything imported by that file becomes part of the client bundle. Getting this boundary wrong, especially passing a function prop from server to client, is the most common App Router error.",
       "difficulty": "senior",
       "category": "Frontend",
       "tricky": true,
-      "tags": ["state", "batching", "closures", "gotcha"],
-      "followUps": ["What changed about batching in React 18?", "Why are state values constant within a render?"]
-    },
-    {
-      "id": "q-tricky-strict-mode",
-      "question": "Tricky: After upgrading, your team notices effects run twice in development and a 'fetch on mount' fires two requests. Is this a bug, and what is React telling you?",
-      "answer": "It is not a bug in React - it is Strict Mode intentionally mounting, unmounting, and remounting each component in development (and double-invoking render and effect setup/cleanup) to surface effects that are not resilient to being run more than once. The double request is React telling you the effect lacks proper cleanup or idempotency: a correctly written data-fetching effect either cancels the in-flight request in its cleanup (an AbortController or a cancelled flag) so the discarded mount's response is ignored, or is wrapped by a framework/query library that dedupes. The fix is not to disable Strict Mode (it only runs in dev and mirrors real concurrent behavior like remounting on Fast Refresh or offscreen restoration); the fix is to make the effect tolerate being set up and torn down repeatedly. If double invocation breaks your code, the code has a latent bug that production concurrency could also trigger.",
-      "difficulty": "senior",
-      "category": "Frontend",
-      "tricky": true,
-      "tags": ["strict-mode", "effects", "concurrent", "gotcha"],
-      "followUps": ["How do you make a fetch effect idempotent?", "Why does React only do this in development?"]
-    },
-    {
-      "id": "q-memo-defeated",
-      "question": "You wrapped a child in React.memo but it still re-renders every time the parent does. What is the likely cause?",
-      "answer": "memo does a shallow comparison of props and skips the re-render only if every prop is referentially equal to the previous render. If the parent passes a prop whose identity changes every render - most commonly an inline arrow function (onClick={() => ...}), an inline object (style={{ ... }}), or an inline array literal - the shallow comparison sees a 'new' value each time and re-renders the child anyway, so memo becomes pure overhead. The fix is to stabilize those props: wrap callbacks in useCallback, objects/arrays in useMemo, or hoist constant values out of the component. Another cause is passing children as a prop that is recreated each render. The lesson is that memo and stable prop identities are a package deal; one without the other does nothing.",
-      "difficulty": "senior",
-      "category": "Frontend",
-      "tricky": false,
-      "tags": ["memo", "performance", "referential-equality"],
-      "followUps": ["How does useCallback restore memo's benefit?", "What does memo's second argument let you do?"]
+      "tags": [
+        "rsc",
+        "next-js"
+      ],
+      "followUps": [
+        "What is the children slot pattern?",
+        "How do Server Actions replace API routes?"
+      ]
     }
   ],
   "challenges": [
     {
-      "id": "ch-use-debounce",
-      "title": "Build a Correct useDebouncedValue Hook",
+      "id": "ch-usefetch",
+      "title": "Build a useFetch hook with loading, error, and abort",
       "difficulty": "mid",
       "category": "Frontend",
-      "prompt": "Write a custom hook useDebouncedValue(value, delayMs) that returns a debounced copy of value: it updates to the latest value only after the input has stopped changing for delayMs. It must cancel the pending timer when value or delay changes (so rapid changes do not produce a burst of updates) and clean up on unmount. Avoid stale-closure and memory-leak bugs.",
+      "prompt": "Implement a generic useFetch<T>(url) hook that returns { data, error, loading }. It must refetch when the url changes, cancel any in-flight request on url change or unmount using AbortController, ignore abort errors, and never set state after the effect has been cleaned up. Keep it type-safe.",
       "hints": [
-        "Hold the debounced value in state and update it from inside a setTimeout.",
-        "Use useEffect with [value, delayMs] dependencies so each change schedules a fresh timer.",
-        "Return a cleanup function that clears the timer, so a new value cancels the previous pending update."
+        "Use an AbortController inside the effect and abort it in the cleanup function.",
+        "Distinguish AbortError (ignore it) from real errors before calling setError.",
+        "Reset loading to true and clear previous data/error at the start of each fetch."
       ],
-      "solutionCode": "import { useEffect, useState } from 'react';\n\nexport function useDebouncedValue<T>(value: T, delayMs: number): T {\n  const [debounced, setDebounced] = useState(value);\n\n  useEffect(() => {\n    // Schedule an update to the latest value after the quiet period.\n    const id = setTimeout(() => setDebounced(value), delayMs);\n    // Cleanup runs before the next effect (i.e. on the next value change)\n    // and on unmount, cancelling the pending update. This is what makes it\n    // a debounce rather than a throttle, and prevents leaks.\n    return () => clearTimeout(id);\n  }, [value, delayMs]);\n\n  return debounced;\n}\n\n// Usage: keep the input instant, debounce the expensive search.\nfunction Search() {\n  const [query, setQuery] = useState('');\n  const debouncedQuery = useDebouncedValue(query, 300);\n\n  // This effect only fires 300ms after the user stops typing.\n  useEffect(() => {\n    if (!debouncedQuery) return;\n    const controller = new AbortController();\n    fetch(`/api/search?q=${encodeURIComponent(debouncedQuery)}`, {\n      signal: controller.signal,\n    });\n    return () => controller.abort();\n  }, [debouncedQuery]);\n\n  return <input value={query} onChange={e => setQuery(e.target.value)} />;\n}",
+      "solutionCode": "import { useEffect, useState } from 'react';\n\ninterface FetchState<T> {\n  data: T | null;\n  error: Error | null;\n  loading: boolean;\n}\n\nexport function useFetch<T>(url: string): FetchState<T> {\n  const [state, setState] = useState<FetchState<T>>({\n    data: null,\n    error: null,\n    loading: true,\n  });\n\n  useEffect(() => {\n    const controller = new AbortController();\n    setState({ data: null, error: null, loading: true });\n\n    fetch(url, { signal: controller.signal })\n      .then(res => {\n        if (!res.ok) throw new Error(`HTTP ${res.status}`);\n        return res.json() as Promise<T>;\n      })\n      .then(data => setState({ data, error: null, loading: false }))\n      .catch((err: unknown) => {\n        if (err instanceof DOMException && err.name === 'AbortError') return;\n        setState({ data: null, error: err as Error, loading: false });\n      });\n\n    return () => controller.abort();\n  }, [url]);\n\n  return state;\n}",
       "solutionLanguage": "tsx",
-      "explanation": "The hook stores the debounced value in state and, on every change of value or delayMs, schedules a setTimeout to copy the latest value into that state. The crucial part is the cleanup function returned from useEffect: because cleanup runs before the next effect execution, any change to value cancels the previously scheduled timer, so only the final value after the quiet period actually commits - that is the definition of debouncing. Returning the cleanup also clears the timer on unmount, preventing a setState-after-unmount leak. Depending on [value, delayMs] keeps the closure fresh, so there is no stale-value bug. The usage example layers a second effect that fetches based on the debounced value and uses an AbortController to cancel in-flight requests when the query changes again, which makes the network layer resilient to Strict Mode double-invocation and out-of-order responses.",
-      "relatedTopic": "hooks"
+      "explanation": "The hook stores all three fields in a single state object so updates are atomic and consistent. On each render where url changes, the effect creates a fresh AbortController and immediately resets to a loading state, clearing stale data so the UI does not show the previous url's result. The fetch checks res.ok because fetch only rejects on network failure, not on HTTP error statuses, so a 404 must be turned into an error manually. In the catch we ignore AbortError, because aborting is our own intentional cancellation rather than a real failure, and only genuine errors update state. The cleanup returns controller.abort(), which cancels an in-flight request when url changes or the component unmounts; this prevents both race conditions where a slower earlier request overwrites a newer result and warnings from setting state after unmount, since an aborted fetch rejects with AbortError that we swallow. The dependency array is exactly [url], so the effect re-runs precisely when the input changes. In production you would layer React Query on top for caching and dedupe, but this shows the underlying mechanics.",
+      "relatedTopic": "react"
     },
     {
-      "id": "ch-fix-rerender",
-      "title": "Fix a List That Re-renders Every Row on Every Keystroke",
+      "id": "ch-debounced-search",
+      "title": "Build a debounced search box",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "prompt": "Create a SearchBox component that lets the user type freely (input stays instant) but only issues a search request after 400ms of no typing. Cancel outdated requests, show a loading indicator during the fetch, and avoid searching on an empty query.",
+      "hints": [
+        "Keep the input controlled by fast local state; derive a debounced value from it.",
+        "Debounce with a setTimeout cleared in the effect cleanup on every keystroke.",
+        "Fetch in an effect keyed on the debounced value, with an AbortController for cancellation."
+      ],
+      "solutionCode": "import { useEffect, useState } from 'react';\n\nfunction useDebounce<T>(value: T, delay = 400): T {\n  const [debounced, setDebounced] = useState(value);\n  useEffect(() => {\n    const t = setTimeout(() => setDebounced(value), delay);\n    return () => clearTimeout(t);\n  }, [value, delay]);\n  return debounced;\n}\n\nexport function SearchBox() {\n  const [query, setQuery] = useState('');\n  const [results, setResults] = useState<string[]>([]);\n  const [loading, setLoading] = useState(false);\n  const debounced = useDebounce(query, 400);\n\n  useEffect(() => {\n    if (!debounced.trim()) {\n      setResults([]);\n      return;\n    }\n    const controller = new AbortController();\n    setLoading(true);\n    fetch(`/api/search?q=${encodeURIComponent(debounced)}`, { signal: controller.signal })\n      .then(r => r.json() as Promise<string[]>)\n      .then(data => { setResults(data); setLoading(false); })\n      .catch((e: unknown) => {\n        if (e instanceof DOMException && e.name === 'AbortError') return;\n        setLoading(false);\n      });\n    return () => controller.abort();\n  }, [debounced]);\n\n  return (\n    <div>\n      <input value={query} onChange={e => setQuery(e.target.value)} placeholder=\"Search\" />\n      {loading && <span>Searching...</span>}\n      <ul>{results.map(r => <li key={r}>{r}</li>)}</ul>\n    </div>\n  );\n}",
+      "solutionLanguage": "tsx",
+      "explanation": "The input is controlled by query, updated on every keystroke, so typing feels instant with no lag. The useDebounce hook holds a separate debounced value that only catches up 400ms after the last change, because each keystroke resets the setTimeout via the cleanup clearing the previous timer. The search effect depends solely on debounced, so it fires only when the settled value changes, not on every character. It guards against empty or whitespace-only queries by clearing results and returning early, which avoids pointless requests. An AbortController cancels any in-flight request when a newer debounced value arrives, preventing a race where a slow earlier search resolves last and shows stale results; AbortError is ignored because it is our own cancellation. The loading flag gives the user feedback during the request and is cleared on both success and real error. This pattern generalizes to any type-ahead UI and is exactly what React Query's queryKey plus debounced input would express more declaratively.",
+      "relatedTopic": "react"
+    },
+    {
+      "id": "ch-fix-infinite-loop",
+      "title": "Fix an infinite-loop useEffect",
       "difficulty": "senior",
       "category": "Frontend",
-      "prompt": "You are given a TodoList where typing in the 'new todo' input re-renders all existing rows, and each row is moderately expensive. The rows do not depend on the input text at all. Identify why every row re-renders on each keystroke and refactor so that typing only re-renders the input, not the rows - without changing the visible behavior.",
+      "prompt": "The component below re-renders forever. Explain why and fix it without removing functionality. It should fetch once per userId and store the result.\n\nfunction Profile({ userId }) {\n  const [user, setUser] = useState(null);\n  const [options, setOptions] = useState({ include: 'posts' });\n  useEffect(() => {\n    fetchUser(userId, options).then(setUser);\n  }, [userId, options]);\n  return <div>{user?.name}</div>;\n}",
       "hints": [
-        "Putting the input's text in the same component that renders the list couples them: a keystroke re-renders the parent and therefore the rows.",
-        "Either move the input state into a separate child component, or memoize the rows with stable props.",
-        "memo only works if the props passed to each row keep a stable identity across renders."
+        "options is an object literal recreated with a new identity on every render.",
+        "Object dependencies are compared by reference (Object.is), not by contents.",
+        "Either move the constant out, memoize it, or depend on primitive fields."
       ],
-      "solutionCode": "import { memo, useCallback, useState } from 'react';\n\ntype Todo = { id: string; text: string; done: boolean };\n\n// 1) Each row is memoized: it re-renders only when its own props change.\nconst TodoRow = memo(function TodoRow({\n  todo,\n  onToggle,\n}: {\n  todo: Todo;\n  onToggle: (id: string) => void;\n}) {\n  return (\n    <li>\n      <input type=\"checkbox\" checked={todo.done} onChange={() => onToggle(todo.id)} />\n      {todo.text}\n    </li>\n  );\n});\n\n// 2) The input lives in its own component, so its keystroke state is\n//    isolated and never re-renders the list.\nfunction NewTodoInput({ onAdd }: { onAdd: (text: string) => void }) {\n  const [text, setText] = useState('');\n  return (\n    <input\n      value={text}\n      onChange={e => setText(e.target.value)}\n      onKeyDown={e => {\n        if (e.key === 'Enter' && text.trim()) {\n          onAdd(text.trim());\n          setText('');\n        }\n      }}\n    />\n  );\n}\n\nexport function TodoList() {\n  const [todos, setTodos] = useState<Todo[]>([]);\n\n  // 3) Stable callbacks so memo on TodoRow is not defeated.\n  const onAdd = useCallback((text: string) => {\n    setTodos(prev => [...prev, { id: crypto.randomUUID(), text, done: false }]);\n  }, []);\n\n  const onToggle = useCallback((id: string) => {\n    setTodos(prev =>\n      prev.map(t => (t.id === id ? { ...t, done: !t.done } : t))\n    );\n  }, []);\n\n  return (\n    <div>\n      <NewTodoInput onAdd={onAdd} />\n      <ul>\n        {todos.map(todo => (\n          <TodoRow key={todo.id} todo={todo} onToggle={onToggle} />\n        ))}\n      </ul>\n    </div>\n  );\n}",
+      "solutionCode": "import { useEffect, useMemo, useState } from 'react';\n\n// Option A: the options never change, so hoist them out of the component.\nconst OPTIONS = { include: 'posts' } as const;\n\nfunction Profile({ userId }: { userId: string }) {\n  const [user, setUser] = useState<User | null>(null);\n\n  useEffect(() => {\n    let active = true;\n    fetchUser(userId, OPTIONS).then(u => { if (active) setUser(u); });\n    return () => { active = false; };\n  }, [userId]); // OPTIONS is stable, no need to list it\n\n  return <div>{user?.name}</div>;\n}\n\n// Option B: if options really are dynamic, memoize by their primitive contents.\nfunction ProfileDynamic({ userId, include }: { userId: string; include: string }) {\n  const [user, setUser] = useState<User | null>(null);\n  const options = useMemo(() => ({ include }), [include]);\n\n  useEffect(() => {\n    let active = true;\n    fetchUser(userId, options).then(u => { if (active) setUser(u); });\n    return () => { active = false; };\n  }, [userId, options]);\n\n  return <div>{user?.name}</div>;\n}",
       "solutionLanguage": "tsx",
-      "explanation": "The original bug was that the input's text state lived in the same component that mapped over the todos, so every keystroke updated that state, re-rendered the component, and therefore re-rendered all the rows even though the rows do not use the text. Two complementary fixes apply. First, moving the input into its own NewTodoInput component isolates the high-frequency keystroke state: now typing only re-renders that small component, and the parent (and the list) is untouched until a todo is actually added. Second, wrapping each row in memo plus passing stable callbacks via useCallback ensures that even when the parent does re-render (on add or toggle), only the rows whose own todo object changed will re-render, because memo's shallow prop comparison sees identical todo and onToggle references for the unchanged rows. The functional updater form in setTodos keeps those callbacks dependency-free and stable. The key={todo.id} preserves row identity so toggling one row never disturbs another. Together these changes reduce per-keystroke work from O(number of todos) to O(1).",
-      "relatedTopic": "performance-example"
+      "explanation": "The loop happens because options is a fresh object literal created on every render, and React compares dependencies with Object.is, which treats two structurally identical objects as different when their references differ. So the effect runs, calls setUser, which triggers a re-render, which creates a new options object, which the effect sees as a changed dependency, and it runs again forever. The core lesson is that object, array, and function dependencies are compared by reference, not by value. Option A recognizes that the options are actually constant and hoists them to module scope, giving a stable identity so they can be dropped from the dependency array entirely and the effect keys only on userId. Option B handles the genuinely-dynamic case by wrapping the object in useMemo keyed on its primitive fields, so its identity only changes when include actually changes. Both versions also add an active flag in cleanup to ignore a resolved fetch after the effect re-runs or the component unmounts, preventing out-of-order updates. In a compiler-enabled React 19 codebase the memoization would often be inserted automatically, but understanding the reference-equality cause is what lets you diagnose these loops.",
+      "relatedTopic": "react"
+    },
+    {
+      "id": "ch-optimize-list",
+      "title": "Optimize a slow list with memo and virtualization",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "prompt": "A list of 10,000 rows re-renders every row on any state change and scrolls sluggishly. Improve it so that only visible rows are in the DOM and unaffected rows do not re-render. Assume each Row is moderately expensive.",
+      "hints": [
+        "Stabilize the row's callback props with useCallback so React.memo can bail out.",
+        "Wrap Row in React.memo to skip re-rendering rows whose props are unchanged.",
+        "Virtualize the list so only the visible window of rows is mounted."
+      ],
+      "solutionCode": "import { memo, useCallback, useState } from 'react';\nimport { useVirtualizer } from '@tanstack/react-virtual';\nimport { useRef } from 'react';\n\ninterface Item { id: string; label: string; }\n\nconst Row = memo(function Row({ item, onSelect }: { item: Item; onSelect: (id: string) => void }) {\n  return (\n    <div onClick={() => onSelect(item.id)} style={{ padding: 8 }}>\n      {item.label}\n    </div>\n  );\n});\n\nexport function BigList({ items }: { items: Item[] }) {\n  const [selected, setSelected] = useState<string | null>(null);\n  const parentRef = useRef<HTMLDivElement>(null);\n\n  // Stable identity so memo'd rows do not re-render when selection changes.\n  const onSelect = useCallback((id: string) => setSelected(id), []);\n\n  const virtualizer = useVirtualizer({\n    count: items.length,\n    getScrollElement: () => parentRef.current,\n    estimateSize: () => 36,\n    overscan: 8,\n  });\n\n  return (\n    <div ref={parentRef} style={{ height: 600, overflow: 'auto' }}>\n      <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>\n        {virtualizer.getVirtualItems().map(v => (\n          <div\n            key={items[v.index].id}\n            style={{ position: 'absolute', top: 0, transform: `translateY(${v.start}px)`, width: '100%' }}\n          >\n            <Row item={items[v.index]} onSelect={onSelect} />\n          </div>\n        ))}\n      </div>\n    </div>\n  );\n}",
+      "solutionLanguage": "tsx",
+      "explanation": "The original list is slow for two independent reasons, and the fix addresses both. First, all 10,000 rows are mounted in the DOM at once, which is expensive to lay out and scroll regardless of React; virtualization solves this by rendering only the visible window plus a small overscan, so the DOM holds roughly twenty nodes instead of ten thousand while a spacer div preserves the correct scroll height. Second, on any state change every Row re-renders because it is not memoized and, even if it were, an inline onSelect would be a new function each render and defeat the bailout. Wrapping Row in React.memo makes it skip re-rendering when its props are shallow-equal, and useCallback gives onSelect a stable identity so changing selected does not invalidate every row's props. The two techniques are complementary: memoization stops needless re-renders of the rows that are mounted, and virtualization stops most rows from being mounted at all. Virtualization is usually the higher-leverage change because memoization alone cannot fix a ten-thousand-node DOM. In a React Compiler codebase the memo and useCallback are often inserted automatically, but the virtualization is still required.",
+      "relatedTopic": "react"
     }
   ],
   "references": [
-    {"label": "React docs - Describing the UI and Render & Commit", "url": "https://react.dev/learn/render-and-commit"},
-    {"label": "React docs - Synchronizing with Effects", "url": "https://react.dev/learn/synchronizing-with-effects"},
-    {"label": "React docs - Reusing Logic with Custom Hooks", "url": "https://react.dev/learn/reusing-logic-with-custom-hooks"},
-    {"label": "React docs - Server Components", "url": "https://react.dev/reference/rsc/server-components"},
-    {"label": "React docs - useTransition and useDeferredValue", "url": "https://react.dev/reference/react/useTransition"}
+    {
+      "label": "React docs (react.dev)",
+      "url": "https://react.dev/learn"
+    },
+    {
+      "label": "You Might Not Need an Effect",
+      "url": "https://react.dev/learn/you-might-not-need-an-effect"
+    },
+    {
+      "label": "Next.js App Router documentation",
+      "url": "https://nextjs.org/docs/app"
+    },
+    {
+      "label": "React Server Components (Next.js)",
+      "url": "https://nextjs.org/docs/app/building-your-application/rendering/server-components"
+    },
+    {
+      "label": "TanStack Query documentation",
+      "url": "https://tanstack.com/query/latest/docs/framework/react/overview"
+    },
+    {
+      "label": "Overreacted: A Complete Guide to useEffect",
+      "url": "https://overreacted.io/a-complete-guide-to-useeffect/"
+    }
   ]
 }

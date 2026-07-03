@@ -1,0 +1,719 @@
+{
+  "id": "angular-lifecycle",
+  "title": "Angular Component Lifecycle",
+  "category": "Frontend",
+  "subcategory": "Components",
+  "difficulty": "senior",
+  "tags": [
+    "angular",
+    "lifecycle-hooks",
+    "change-detection",
+    "destroyref",
+    "after-render",
+    "signals",
+    "onpush",
+    "rxjs-cleanup"
+  ],
+  "description": "A staff-level tour of the Angular component lifecycle: the exact firing order of every hook, why constructor and ngOnInit differ, when view/content queries resolve, the v17+ render hooks (afterRender/afterNextRender), and modern cleanup with DestroyRef and takeUntilDestroyed. Focuses on production-grade decisions around OnPush, change-detection cost, SSR safety, and the shift toward signals and effect().",
+  "estReadMinutes": 29,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Why the Lifecycle Still Matters",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Angular gives every component and directive a well-defined lifecycle: a deterministic sequence of callbacks that run as the framework creates, updates, and destroys the view. Knowing the exact order and semantics of these hooks is the difference between code that quietly leaks subscriptions and reads undefined inputs, and code that initializes third-party libraries safely, cleans up on destroy, and plays well with OnPush and SSR."
+        },
+        {
+          "type": "paragraph",
+          "text": "In Angular 17/18/19 the picture has broadened. Beyond the classic eight hooks (ngOnChanges through ngOnDestroy), we now have render hooks (afterRender, afterNextRender) built for DOM measurement and third-party integration, DestroyRef and takeUntilDestroyed() for ergonomic teardown, and the signals reactivity model where effect() often replaces what used to require ngDoCheck or ngOnChanges."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "When each hook fires and in what order, from construction to destruction.",
+            "Why @Input values are undefined in the constructor but available in ngOnInit.",
+            "When @ViewChild/@ContentChild queries are safe to read.",
+            "How afterNextRender differs from ngAfterViewInit and why it is SSR-safe.",
+            "Modern teardown with DestroyRef / takeUntilDestroyed vs the manual destroy$ Subject.",
+            "How signals and effect() reshape the need for some lifecycle hooks."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Rule of thumb: the constructor is for dependency injection and field setup only. Any logic that depends on bound inputs or the rendered DOM belongs in a later hook (ngOnInit, ngAfterViewInit, or afterNextRender)."
+        }
+      ]
+    },
+    {
+      "id": "why-hooks-exist",
+      "heading": "Why Angular Splits Work Across Hooks",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Angular constructs a component instance before it has done any of the framework-level wiring: binding inputs, projecting content, or rendering the view. If all initialization happened in the constructor, you would routinely touch state that does not exist yet. The lifecycle hooks exist precisely to give you callbacks at the moments when specific pieces of state become valid."
+        },
+        {
+          "type": "paragraph",
+          "text": "The sequence mirrors how Angular actually builds a view. First it instantiates the class (constructor). Then it sets the initial inputs and calls ngOnChanges, followed by ngOnInit. During each change-detection pass it runs ngDoCheck, then the content hooks (projected ng-content), then the view hooks (the component's own template and children). Destruction runs ngOnDestroy last. Each phase unlocks a new set of guarantees."
+        },
+        {
+          "type": "paragraph",
+          "text": "This staging also enables performance strategies. Because Angular knows content queries resolve before view queries, and view queries resolve bottom-up (children before parents), it can guarantee the 'AfterViewInit' contract: by the time a parent's view is initialized, all of its children have been too. That ordering is what lets you safely measure or wire up child components."
+        },
+        {
+          "type": "table",
+          "headers": ["Concern", "Wrong place", "Right place"],
+          "rows": [
+            ["Injecting services", "ngOnInit", "constructor (or inject())"],
+            ["Reading @Input values", "constructor", "ngOnInit / ngOnChanges"],
+            ["Measuring rendered DOM", "ngOnInit", "afterNextRender / ngAfterViewInit"],
+            ["Reacting to input updates", "ngDoCheck", "ngOnChanges / effect()"],
+            ["Cleaning up subscriptions", "manual everywhere", "takeUntilDestroyed / DestroyRef"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "hook-sequence",
+      "heading": "The Full Hook Sequence",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "There are eight interface-based lifecycle hooks. Each has a matching interface (OnInit, OnChanges, and so on) that you should implement for type safety, though Angular only looks for the method by name. The order below is the canonical firing order for a single component during its first render and subsequent change-detection cycles."
+        },
+        {
+          "type": "table",
+          "headers": ["Hook", "When it fires", "Typical use"],
+          "rows": [
+            ["ngOnChanges", "Before ngOnInit, and again whenever a data-bound @Input reference changes. Receives a SimpleChanges map.", "React to input changes; compare previous vs current values."],
+            ["ngOnInit", "Once, after the first ngOnChanges (i.e., after inputs are set).", "Input-dependent initialization; fetch data; set up state."],
+            ["ngDoCheck", "On every change-detection run, immediately after ngOnChanges/ngOnInit.", "Custom or deep change detection Angular cannot catch on its own."],
+            ["ngAfterContentInit", "Once, after projected content (ng-content) has been initialized.", "Access @ContentChild / @ContentChildren for the first time."],
+            ["ngAfterContentChecked", "After every check of projected content.", "Respond to changes in projected content each cycle."],
+            ["ngAfterViewInit", "Once, after the component's view and child views are initialized.", "Access @ViewChild / @ViewChildren; wire up child components."],
+            ["ngAfterViewChecked", "After every check of the component's view and children.", "Respond to view changes each cycle (use sparingly)."],
+            ["ngOnDestroy", "Once, right before Angular destroys the component/directive.", "Unsubscribe, detach listeners, release third-party resources."]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "The '...Checked' hooks (ngDoCheck, ngAfterContentChecked, ngAfterViewChecked) run on EVERY change-detection pass, which can be many times per second. Keep them cheap and never trigger state changes inside them that would cause another check."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Component, Input, OnInit, OnChanges, DoCheck, AfterContentInit, AfterViewInit, OnDestroy, SimpleChanges } from '@angular/core';\n\n@Component({\n  selector: 'app-demo',\n  standalone: true,\n  template: `<p>{{ label }}</p><ng-content></ng-content>`\n})\nexport class DemoComponent\n  implements OnChanges, OnInit, DoCheck, AfterContentInit, AfterViewInit, OnDestroy {\n\n  @Input() label = '';\n\n  ngOnChanges(changes: SimpleChanges): void {\n    // Runs first, and on every @Input reference change.\n    console.log('ngOnChanges', changes);\n  }\n\n  ngOnInit(): void {\n    // Inputs are now set. Safe place for input-dependent init.\n    console.log('ngOnInit, label =', this.label);\n  }\n\n  ngDoCheck(): void {\n    // Every CD pass. Keep this cheap.\n  }\n\n  ngAfterContentInit(): void {\n    // Projected content (ContentChild) is available.\n  }\n\n  ngAfterViewInit(): void {\n    // The view and child views (ViewChild) are available.\n  }\n\n  ngOnDestroy(): void {\n    // Final cleanup.\n  }\n}"
+        }
+      ]
+    },
+    {
+      "id": "constructor-vs-ngoninit",
+      "heading": "Constructor vs ngOnInit",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The constructor is plain TypeScript: it runs when the class is instantiated with `new`. At that moment Angular has resolved and injected the constructor's dependencies, but it has NOT yet performed input binding. The component's @Input fields still hold their default (or undefined) values. That is why reading an input in the constructor gives you the wrong value."
+        },
+        {
+          "type": "paragraph",
+          "text": "ngOnInit runs later, after Angular has set the initial inputs (and after the first ngOnChanges). By ngOnInit the inputs reflect the values passed by the parent template, so any initialization that depends on them, such as building a query string from an @Input id or fetching data, belongs there."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "@Component({ selector: 'app-user', standalone: true, template: '' })\nexport class UserComponent implements OnInit {\n  @Input() userId!: string;\n\n  private readonly api = inject(UserApi);\n\n  constructor() {\n    // WRONG: userId is undefined here. Inputs are not bound yet.\n    console.log('ctor userId:', this.userId); // undefined\n  }\n\n  ngOnInit(): void {\n    // RIGHT: userId is now the value from the parent binding.\n    this.api.load(this.userId).subscribe(/* ... */);\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Prefer the inject() function over constructor parameter injection in modern Angular. It works in field initializers, is cleaner with inheritance, and is required to satisfy the injection-context rule for DestroyRef and takeUntilDestroyed."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Constructor: DI, simple field defaults, wiring that does not depend on inputs or DOM.",
+            "ngOnInit: input-dependent setup, initial data fetch, subscription setup.",
+            "Never do heavy or async work in the constructor; it makes the class hard to test and couples instantiation to side effects."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "onchanges-detail",
+      "heading": "ngOnChanges and SimpleChanges",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "ngOnChanges fires whenever the REFERENCE of a data-bound @Input changes. It receives a SimpleChanges object keyed by input name, where each entry is a SimpleChange with previousValue, currentValue, and a firstChange() helper. Because it triggers on reference change, mutating an object or array in place (without a new reference) will NOT fire ngOnChanges."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Component, Input, OnChanges, SimpleChanges } from '@angular/core';\n\n@Component({ selector: 'app-price', standalone: true, template: '{{ formatted }}' })\nexport class PriceComponent implements OnChanges {\n  @Input() amount = 0;\n  @Input() currency = 'USD';\n  formatted = '';\n\n  ngOnChanges(changes: SimpleChanges): void {\n    if (changes['amount']) {\n      const c = changes['amount'];\n      console.log('amount', c.previousValue, '->', c.currentValue, 'first?', c.firstChange);\n    }\n    // Recompute derived state whenever any relevant input changes.\n    if (changes['amount'] || changes['currency']) {\n      this.formatted = new Intl.NumberFormat('en-US', {\n        style: 'currency',\n        currency: this.currency\n      }).format(this.amount);\n    }\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "ngOnChanges only sees reference changes. If a parent mutates an array with push() and keeps the same reference, ngOnChanges will not fire. Pass a new reference (spread into a new array) or use signal inputs which track changes precisely."
+        },
+        {
+          "type": "paragraph",
+          "text": "In the signals era, the new signal-based input() offers a cleaner alternative. Rather than implementing ngOnChanges, you derive state with computed() or react with effect(). The input becomes a readable signal, and dependent computations update automatically without a lifecycle hook."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Component, input, computed } from '@angular/core';\n\n@Component({ selector: 'app-price', standalone: true, template: '{{ formatted() }}' })\nexport class PriceComponent {\n  amount = input(0);\n  currency = input('USD');\n\n  // Recomputes automatically when either input changes. No ngOnChanges needed.\n  formatted = computed(() =>\n    new Intl.NumberFormat('en-US', { style: 'currency', currency: this.currency() })\n      .format(this.amount())\n  );\n}"
+        }
+      ]
+    },
+    {
+      "id": "query-timing",
+      "heading": "@ViewChild / @ContentChild Availability Timing",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Queries resolve at specific lifecycle moments, and getting this wrong is a classic source of 'undefined' errors. Content queries (@ContentChild / @ContentChildren over projected ng-content) are resolved by ngAfterContentInit. View queries (@ViewChild / @ViewChildren over the component's own template) are resolved by ngAfterViewInit."
+        },
+        {
+          "type": "table",
+          "headers": ["Query", "First available in", "Notes"],
+          "rows": [
+            ["@ContentChild (static: false)", "ngAfterContentInit", "Default; for content that may appear conditionally."],
+            ["@ContentChild (static: true)", "ngOnInit", "Only for content always present, not behind *ngIf."],
+            ["@ViewChild (static: false)", "ngAfterViewInit", "Default; for view children that may be conditional."],
+            ["@ViewChild (static: true)", "ngOnInit", "Only for template refs always present."]
+          ]
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Component, ViewChild, ContentChild, ElementRef, AfterViewInit, AfterContentInit } from '@angular/core';\n\n@Component({\n  selector: 'app-panel',\n  standalone: true,\n  template: `<div #box>...</div><ng-content></ng-content>`\n})\nexport class PanelComponent implements AfterContentInit, AfterViewInit {\n  @ViewChild('box') box?: ElementRef<HTMLDivElement>;\n  @ContentChild(HeaderComponent) header?: HeaderComponent;\n\n  ngAfterContentInit(): void {\n    // header is resolved here (projected content).\n    console.log('projected header:', this.header);\n  }\n\n  ngAfterViewInit(): void {\n    // box is resolved here (own view). Reading it in ngOnInit would be undefined.\n    console.log('box width:', this.box?.nativeElement.offsetWidth);\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Signal queries (viewChild(), contentChild() in v17.2+) remove the timing guesswork: they return a signal you can read reactively, and afterNextRender/afterRender or a computed can respond once the query populates."
+        }
+      ]
+    },
+    {
+      "id": "render-hooks",
+      "heading": "Render Hooks: afterRender and afterNextRender",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Introduced in Angular 17, afterRender and afterNextRender run AFTER the DOM has been rendered and after all change detection for the current cycle has completed. They are the correct place for direct DOM measurement, manual layout, and initializing third-party libraries that need a real element in the document. afterNextRender runs exactly once after the next render; afterRender runs after every subsequent render."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "afterNextRender(cb): runs once, after the next render completes. Ideal for one-time setup like initializing a chart or map.",
+            "afterRender(cb): runs after every render. Use for continuous measurement; keep it fast and avoid triggering more change detection.",
+            "Both must be called in an injection context (constructor or a field initializer), not inside ngOnInit or a later hook, unless you pass an explicit Injector.",
+            "Both are SSR-safe: on the server there is no render, so they simply do not execute, preventing 'document is not defined' crashes."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Component, ElementRef, afterNextRender, afterRender, inject } from '@angular/core';\n\n@Component({ selector: 'app-measure', standalone: true, template: '<div>content</div>' })\nexport class MeasureComponent {\n  private readonly host = inject(ElementRef);\n\n  constructor() {\n    // Runs once after the first render. DOM is available; safe on SSR (skipped on server).\n    afterNextRender(() => {\n      const width = this.host.nativeElement.offsetWidth;\n      console.log('initial width', width);\n    });\n\n    // Runs after every render. Keep it cheap.\n    afterRender(() => {\n      // e.g., sync a canvas size to its container.\n    });\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "afterNextRender is the modern answer to 'my chart works in dev but crashes on SSR'. Because it never runs on the server, DOM-dependent third-party libraries initialize only in the browser where document exists."
+        }
+      ]
+    },
+    {
+      "id": "afternextrender-vs-afterviewinit",
+      "heading": "afterNextRender vs ngAfterViewInit",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Both hooks give you access to rendered DOM, but they differ in timing and environment. ngAfterViewInit fires when the component's view is initialized, which is still within the change-detection process and runs on the server during SSR. afterNextRender fires only in the browser after the browser has actually painted the frame, and it is guaranteed not to run during server rendering."
+        },
+        {
+          "type": "table",
+          "headers": ["Aspect", "ngAfterViewInit", "afterNextRender"],
+          "rows": [
+            ["Runs on SSR (server)", "Yes", "No (browser only)"],
+            ["Timing", "During change detection, view init", "After render/paint completes"],
+            ["Fires how often", "Once", "Once (afterRender = every render)"],
+            ["Best for", "Reading @ViewChild refs, wiring children", "DOM measurement, 3rd-party libs, layout"],
+            ["Injection context needed", "No", "Yes (or explicit Injector)"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The practical guidance: use ngAfterViewInit to access @ViewChild references and to interact with Angular child components. Use afterNextRender when you need the browser to have completed layout, when the code touches document/window directly, or when initializing a library that would break during SSR."
+        }
+      ]
+    },
+    {
+      "id": "destroyref-cleanup",
+      "heading": "Cleanup: DestroyRef and takeUntilDestroyed",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Historically, unsubscribing meant maintaining a private destroy$ = new Subject<void>(), piping every stream through takeUntil(this.destroy$), and calling this.destroy$.next(); this.destroy$.complete() in ngOnDestroy. It worked but was boilerplate-heavy and easy to forget. Angular 16 introduced DestroyRef and the takeUntilDestroyed() operator to replace it."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Component, inject, DestroyRef } from '@angular/core';\nimport { takeUntilDestroyed } from '@angular/core/rxjs-interop';\nimport { interval } from 'rxjs';\n\n@Component({ selector: 'app-clock', standalone: true, template: '{{ tick }}' })\nexport class ClockComponent {\n  tick = 0;\n  private readonly destroyRef = inject(DestroyRef);\n\n  constructor() {\n    // takeUntilDestroyed reads DestroyRef from the current injection context.\n    interval(1000)\n      .pipe(takeUntilDestroyed())\n      .subscribe(v => (this.tick = v));\n\n    // DestroyRef also lets you register imperative teardown callbacks.\n    this.destroyRef.onDestroy(() => console.log('component destroyed'));\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "takeUntilDestroyed() with no argument must be called in an injection context (constructor or field initializer). If you must subscribe later (e.g., inside ngOnInit or an event handler), capture a DestroyRef via inject() and pass it explicitly: takeUntilDestroyed(this.destroyRef)."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "@Component({ selector: 'app-search', standalone: true, template: '' })\nexport class SearchComponent implements OnInit {\n  private readonly destroyRef = inject(DestroyRef);\n  private readonly api = inject(SearchApi);\n\n  ngOnInit(): void {\n    // Outside the constructor injection context -> pass destroyRef explicitly.\n    this.api.results$\n      .pipe(takeUntilDestroyed(this.destroyRef))\n      .subscribe(r => this.render(r));\n  }\n\n  private render(_: unknown): void { /* ... */ }\n}"
+        }
+      ]
+    },
+    {
+      "id": "docheck-and-onpush",
+      "heading": "ngDoCheck, Change Detection Cost, and OnPush",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "ngDoCheck runs on every single change-detection pass, which can be extremely frequent, on every event, timer, or async task in the zone. That is why anything expensive inside ngDoCheck is a performance hazard: it is not called once per input change, but potentially dozens of times per second. Angular provides it as an escape hatch to detect changes it cannot catch automatically, such as mutations inside objects where the reference did not change (use KeyValueDiffers/IterableDiffers there)."
+        },
+        {
+          "type": "paragraph",
+          "text": "With ChangeDetectionStrategy.OnPush, Angular only checks a component when an @Input reference changes, an event fires from the template, an observable bound via the async pipe emits, or you manually call markForCheck(). Crucially, ngOnChanges still fires for reference changes, and the '...Checked' hooks still run when the component IS checked, just less often than under default strategy."
+        },
+        {
+          "type": "table",
+          "headers": ["Hook", "Default strategy", "OnPush strategy"],
+          "rows": [
+            ["ngOnChanges", "On every input reference change", "On every input reference change (same)"],
+            ["ngDoCheck", "Every CD pass", "Only when the component is checked"],
+            ["ngAfterViewChecked", "Every CD pass", "Only when the component is checked"],
+            ["ngOnDestroy", "On destroy", "On destroy (same)"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Never mutate component state that affects the template inside ngAfterViewChecked or ngAfterContentChecked. In development mode Angular's second check will detect the change and throw ExpressionChangedAfterItHasBeenCheckedError."
+        }
+      ]
+    },
+    {
+      "id": "signals-era",
+      "heading": "The Lifecycle in the Signals Era",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Signals shift much of the reactive work out of lifecycle hooks. Where you once used ngOnChanges to recompute derived state, you now use computed(). Where you used ngDoCheck to poll for changes, you use effect() to run side effects when specific signals change. This produces more precise, self-cleaning reactivity: an effect() created in an injection context tears itself down automatically when the component is destroyed."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Component, input, effect, signal } from '@angular/core';\n\n@Component({ selector: 'app-status', standalone: true, template: '{{ label() }}' })\nexport class StatusComponent {\n  online = input(false);\n  label = signal('unknown');\n\n  constructor() {\n    // Replaces an ngOnChanges branch: runs whenever `online` changes.\n    effect(() => {\n      this.label.set(this.online() ? 'Online' : 'Offline');\n    });\n  }\n}"
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "computed() replaces derived-state logic in ngOnChanges.",
+            "effect() replaces polling in ngDoCheck and many ngOnChanges side effects.",
+            "afterRender/afterNextRender remain the tool for DOM-level work; signals do not touch the DOM.",
+            "ngOnDestroy is still relevant for imperative teardown, but DestroyRef and auto-cleaning effects cover most cases."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Do not set signals inside effect() to derive values you could express with computed(). Reserve effect() for genuine side effects (logging, syncing to the DOM or a non-signal API); use computed() for pure derived state."
+        }
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: Chart Library Integration",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A realistic senior scenario: mount a third-party charting library (e.g., a canvas-based chart) that requires a live DOM element, update it when inputs change, and dispose of it cleanly. afterNextRender guarantees the element is painted and keeps the code SSR-safe; DestroyRef.onDestroy handles disposal without a manual destroy$ Subject."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import {\n  Component, ElementRef, input, effect, afterNextRender,\n  inject, DestroyRef, viewChild\n} from '@angular/core';\nimport Chart from 'chart.js/auto';\n\n@Component({\n  selector: 'app-sales-chart',\n  standalone: true,\n  template: '<canvas #canvas></canvas>'\n})\nexport class SalesChartComponent {\n  data = input<number[]>([]);\n  private readonly canvasRef = viewChild<ElementRef<HTMLCanvasElement>>('canvas');\n  private readonly destroyRef = inject(DestroyRef);\n  private chart?: Chart;\n\n  constructor() {\n    // Initialize once, after the browser has rendered the canvas. Skipped on SSR.\n    afterNextRender(() => {\n      const el = this.canvasRef()?.nativeElement;\n      if (!el) return;\n      this.chart = new Chart(el, {\n        type: 'line',\n        data: { labels: [], datasets: [{ label: 'Sales', data: this.data() }] }\n      });\n    });\n\n    // Push new data into the existing chart when the input signal changes.\n    effect(() => {\n      const values = this.data();\n      if (this.chart) {\n        this.chart.data.datasets[0].data = values;\n        this.chart.update();\n      }\n    });\n\n    // Deterministic cleanup: release the chart when the component is destroyed.\n    this.destroyRef.onDestroy(() => this.chart?.destroy());\n  }\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Notice the division of labor: afterNextRender owns DOM-dependent, one-time construction; effect() owns reactive updates from the input signal; DestroyRef.onDestroy owns teardown. No lifecycle interface is implemented, yet every phase is handled correctly and SSR is safe because afterNextRender never fires on the server."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "This pattern generalizes to maps, editors, drag-and-drop libs, and any imperative DOM widget: build in afterNextRender, sync in effect() (or ngOnChanges), destroy in DestroyRef.onDestroy or ngOnDestroy."
+        }
+      ]
+    },
+    {
+      "id": "example-interface-based",
+      "heading": "Example: A Classic Interface-Based Component",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Not every codebase uses signals yet. Here is the same responsibilities expressed with classic hooks, useful when maintaining Angular apps that predate signal inputs. Note the explicit ngOnChanges for input reactivity and DestroyRef for cleanup even in the classic style."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import {\n  Component, Input, OnChanges, OnInit, AfterViewInit, OnDestroy,\n  SimpleChanges, ViewChild, ElementRef, inject, DestroyRef\n} from '@angular/core';\nimport { takeUntilDestroyed } from '@angular/core/rxjs-interop';\nimport { fromEvent } from 'rxjs';\n\n@Component({\n  selector: 'app-editor',\n  standalone: true,\n  template: '<textarea #area></textarea>'\n})\nexport class EditorComponent implements OnChanges, OnInit, AfterViewInit, OnDestroy {\n  @Input() value = '';\n  @ViewChild('area') area?: ElementRef<HTMLTextAreaElement>;\n  private readonly destroyRef = inject(DestroyRef);\n\n  ngOnChanges(changes: SimpleChanges): void {\n    if (changes['value'] && this.area) {\n      this.area.nativeElement.value = this.value;\n    }\n  }\n\n  ngOnInit(): void {\n    // value input is set; safe to use for initial state decisions.\n  }\n\n  ngAfterViewInit(): void {\n    const el = this.area!.nativeElement;\n    el.value = this.value;\n    fromEvent(el, 'input')\n      .pipe(takeUntilDestroyed(this.destroyRef))\n      .subscribe(() => console.log('changed', el.value));\n  }\n\n  ngOnDestroy(): void {\n    // takeUntilDestroyed already handles the subscription; extra teardown here if needed.\n  }\n}"
+        }
+      ]
+    },
+    {
+      "id": "common-mistakes",
+      "heading": "Common Mistakes",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Most lifecycle bugs come from touching state before it exists or forgetting to clean up. These are the ones that repeatedly surface in code review."
+        },
+        {
+          "type": "list",
+          "style": "ordered",
+          "items": [
+            "Reading @Input in the constructor: inputs are undefined until ngOnInit. Move the logic to ngOnInit or ngOnChanges.",
+            "Reading @ViewChild in ngOnInit: view queries are not resolved until ngAfterViewInit (unless static: true and unconditional).",
+            "Doing DOM measurement in ngOnInit or ngAfterViewInit under SSR: use afterNextRender so it runs only in the browser.",
+            "Expensive work in ngDoCheck or ...Checked hooks: they run on every CD pass and will tank performance.",
+            "Forgetting to unsubscribe: leaks memory and causes stale callbacks; use takeUntilDestroyed or the async pipe.",
+            "Calling takeUntilDestroyed() outside an injection context without passing a DestroyRef: throws at runtime.",
+            "Mutating template-affecting state in ngAfterViewChecked: triggers ExpressionChangedAfterItHasBeenCheckedError in dev."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// ANTI-PATTERN: reads input in constructor and never cleans up.\n@Component({ selector: 'app-bad', standalone: true, template: '' })\nexport class BadComponent {\n  @Input() id!: string;\n  constructor(private api: Api) {\n    // id is undefined -> request hits /items/undefined\n    this.api.load(this.id).subscribe(); // never unsubscribed\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The BadComponent above fails twice: the request uses an undefined id (constructor timing) and leaks the subscription (no teardown). Both are caught by moving to ngOnInit and adding takeUntilDestroyed."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Keep the constructor for DI and defaults only; put input-dependent logic in ngOnInit.",
+            "Implement the lifecycle interfaces (OnInit, OnDestroy, etc.) for type safety and intent, even though Angular matches by method name.",
+            "Prefer signal inputs with computed()/effect() over ngOnChanges/ngDoCheck for new code.",
+            "Use afterNextRender for one-time DOM/3rd-party setup and afterRender only when you genuinely need per-render work.",
+            "Adopt takeUntilDestroyed()/DestroyRef instead of manual destroy$ Subjects; prefer the async pipe where possible so there is no subscription to manage.",
+            "Default new components to OnPush and keep ...Checked hooks empty or trivial.",
+            "Guard DOM/browser-only code so SSR does not crash; afterNextRender does this for you by not running on the server."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "A well-structured senior component often implements zero lifecycle interfaces: signal inputs replace ngOnChanges, effect() replaces ngDoCheck, afterNextRender replaces DOM work in ngAfterViewInit, and DestroyRef replaces ngOnDestroy."
+        }
+      ]
+    },
+    {
+      "id": "note-testing",
+      "heading": "Note: Testing Lifecycle Hooks",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "In tests, lifecycle hooks fire when you call fixture.detectChanges(). The first detectChanges() runs ngOnChanges (with initial inputs), ngOnInit, and the after-init hooks. Render hooks require the render phase, so afterNextRender callbacks run during fixture.detectChanges() in a browser-like test environment; when using zoneless or fakeAsync you may need to flush appropriately."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "When testing a component that reads inputs in ngOnInit, set the inputs BEFORE the first detectChanges(), otherwise ngOnInit will observe the defaults."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "hook-order-flow",
+      "title": "Lifecycle Hook Order: Creation to Destruction",
+      "type": "mermaid",
+      "content": "flowchart TD\n  A[constructor: DI only] --> B[ngOnChanges: inputs set]\n  B --> C[ngOnInit: input-dependent init]\n  C --> D[ngDoCheck]\n  D --> E[ngAfterContentInit]\n  E --> F[ngAfterContentChecked]\n  F --> G[ngAfterViewInit]\n  G --> H[ngAfterViewChecked]\n  H --> I{Change detected?}\n  I -->|Yes| D\n  I -->|No| J[afterRender / afterNextRender]\n  J --> K[ngOnDestroy]"
+    },
+    {
+      "id": "cleanup-flow",
+      "title": "Subscription Cleanup via DestroyRef / takeUntilDestroyed",
+      "type": "mermaid",
+      "content": "flowchart TD\n  A[Create observable] --> B{In injection context?}\n  B -->|Yes| C[pipe takeUntilDestroyed]\n  B -->|No| D[inject DestroyRef]\n  D --> E[pipe takeUntilDestroyed destroyRef]\n  C --> F[subscribe]\n  E --> F\n  F --> G[Component alive: emissions flow]\n  G --> H[Component destroyed]\n  H --> I[DestroyRef fires onDestroy]\n  I --> J[Stream completes, subscription released]"
+    },
+    {
+      "id": "cd-phases-ascii",
+      "title": "Content vs View Phase Ordering",
+      "type": "ascii",
+      "content": "Parent CD pass\n  |\n  |-- ngDoCheck\n  |\n  |-- CONTENT phase (projected ng-content)\n  |     ngAfterContentInit   (once)\n  |     ngAfterContentChecked (every pass)\n  |\n  |-- VIEW phase (own template + children)\n  |     children initialized first (bottom-up)\n  |     ngAfterViewInit    (once)\n  |     ngAfterViewChecked (every pass)\n  |\n  v\n render committed -> afterRender / afterNextRender"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-input-undefined-ctor",
+      "question": "Why is an @Input value undefined in the constructor but available in ngOnInit?",
+      "answer": "The constructor runs when Angular instantiates the component class, at which point it has resolved and injected dependencies but has not yet performed input binding. Angular sets the initial input values afterward, calling ngOnChanges first (with the initial SimpleChanges) and then ngOnInit. So in the constructor the @Input field still holds its declared default (often undefined), while by ngOnInit it reflects the value passed from the parent template. This is why input-dependent initialization must live in ngOnInit or ngOnChanges, never the constructor. Attempting to build a URL or fetch data from an input in the constructor produces requests against undefined values. The clean mental model is: constructor for DI, ngOnInit for input-driven setup.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["input", "constructor", "ngoninit"],
+      "followUps": ["What runs between the constructor and ngOnInit?", "How do signal inputs change this?"]
+    },
+    {
+      "id": "q-ctor-vs-oninit",
+      "question": "What belongs in the constructor versus ngOnInit?",
+      "answer": "The constructor should be limited to dependency injection and simple field defaults, work that does not depend on bound inputs or the rendered DOM. ngOnInit runs after inputs are set, so it is the home for input-dependent initialization such as fetching data keyed by an @Input id or deriving initial state. Keeping heavy or asynchronous work out of the constructor also makes the class easier to test, because instantiating it does not trigger side effects. In modern Angular you often use inject() in field initializers instead of constructor parameters, which further shrinks the constructor. A good heuristic: if the logic reads an input or touches the DOM, it does not belong in the constructor.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["constructor", "ngoninit", "dependency-injection"],
+      "followUps": ["Why prefer inject() over constructor injection?", "Can ngOnInit be async?"]
+    },
+    {
+      "id": "q-viewchild-timing",
+      "question": "When is a @ViewChild reference first available, and why not earlier?",
+      "answer": "A @ViewChild query with the default static: false resolves in ngAfterViewInit, because that is when the component's own view and its child views have been initialized. Reading it in ngOnInit or the constructor yields undefined, since the template has not been created yet at those points. If the queried element is always present and not behind a structural directive, you can set static: true to have it resolved by ngOnInit, but that is the exception. Content queries (@ContentChild) resolve earlier, in ngAfterContentInit, because projected content is wired before the host's own view. The ordering reflects how Angular builds views: content first, then the view bottom-up, so children are ready before the parent's AfterViewInit fires.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["viewchild", "contentchild", "query-timing"],
+      "followUps": ["What does static: true actually change?", "How do signal-based viewChild() queries behave?"]
+    },
+    {
+      "id": "q-content-vs-view",
+      "question": "What is the difference between ngAfterContentInit and ngAfterViewInit?",
+      "answer": "ngAfterContentInit fires once after Angular has projected external content into the component via ng-content, making @ContentChild and @ContentChildren queries available. ngAfterViewInit fires once after the component's own template and its child components have been fully initialized, making @ViewChild and @ViewChildren queries available. Content is initialized before the view, so ngAfterContentInit always runs before ngAfterViewInit. The '...Checked' counterparts (ngAfterContentChecked, ngAfterViewChecked) run after every change-detection pass, not just once. Understanding this split matters when you need to coordinate with either projected content or your own template children.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["aftercontentinit", "afterviewinit", "content-projection"],
+      "followUps": ["Why is content initialized before the view?", "When would you access ContentChildren?"]
+    },
+    {
+      "id": "q-afternextrender-vs-afterviewinit",
+      "question": "How does afterNextRender differ from ngAfterViewInit, especially under SSR?",
+      "answer": "ngAfterViewInit runs during Angular's change-detection process when the view is initialized, and it executes on the server during SSR, which can crash code that touches document or window. afterNextRender runs only in the browser, after the browser has actually rendered and painted the frame, and it is completely skipped on the server. That makes afterNextRender the correct hook for DOM measurement and initializing DOM-dependent third-party libraries, because it guarantees a real, laid-out element and SSR safety. ngAfterViewInit remains the right place to read @ViewChild references and interact with Angular child components. A further difference is that afterNextRender must be called in an injection context (constructor or field initializer) or given an explicit Injector, whereas ngAfterViewInit is just a method. In short: ngAfterViewInit for Angular view wiring, afterNextRender for browser DOM work.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["afternextrender", "afterviewinit", "ssr"],
+      "followUps": ["What is the difference between afterRender and afterNextRender?", "Why does afterNextRender need an injection context?"]
+    },
+    {
+      "id": "q-afterrender-vs-afternextrender",
+      "question": "When would you use afterRender versus afterNextRender?",
+      "answer": "afterNextRender registers a callback that runs exactly once, after the next render completes, which suits one-time setup like constructing a chart, map, or editor against a freshly painted DOM. afterRender registers a callback that runs after every render, suited to continuous work such as keeping a canvas sized to its container as layout changes. Because afterRender fires repeatedly, it must be kept cheap and must avoid causing further change detection, or you risk a render loop. Both are browser-only and SSR-safe, and both require an injection context. Most integrations use afterNextRender for construction plus effect() or ngOnChanges for updates, reserving afterRender for genuine per-frame measurement.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["afterrender", "afternextrender", "dom"],
+      "followUps": ["How do you avoid a render loop with afterRender?", "Can you have multiple afterRender callbacks with phases?"]
+    },
+    {
+      "id": "q-docheck-expensive",
+      "question": "Why is ngDoCheck expensive, and when is it justified?",
+      "answer": "ngDoCheck runs on every change-detection pass, not once per input change. Under the default strategy, change detection can run many times per second, triggered by any event, timer, XHR, or async task within the zone, so any non-trivial work in ngDoCheck multiplies accordingly and becomes a performance bottleneck. It is justified only when you must detect changes Angular cannot catch automatically, such as mutations inside an object or array where the reference did not change; in those cases you pair it with KeyValueDiffers or IterableDiffers and compute diffs efficiently. Under OnPush, ngDoCheck runs only when the component is actually checked, which reduces but does not eliminate the concern. For most needs, signal-based reactivity or immutable inputs with ngOnChanges is a better, cheaper choice than ngDoCheck.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["docheck", "change-detection", "performance"],
+      "followUps": ["What are IterableDiffers and KeyValueDiffers?", "How does OnPush change ngDoCheck frequency?"]
+    },
+    {
+      "id": "q-takeuntildestroyed-injection",
+      "question": "Does takeUntilDestroyed() require an injection context?",
+      "answer": "Yes, when called with no arguments. takeUntilDestroyed() implicitly reads a DestroyRef from the current injection context, which only exists in the constructor or a field initializer. If you call it there, it wires the stream to complete when the component is destroyed with no extra code. If you need to subscribe later, for example inside ngOnInit, an event handler, or a callback, you are outside the injection context, so you must capture a DestroyRef earlier via inject(DestroyRef) and pass it explicitly: takeUntilDestroyed(this.destroyRef). Failing to do either throws a runtime error about being outside an injection context. This is the same injection-context rule that governs inject(), effect(), and afterNextRender().",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["takeuntildestroyed", "destroyref", "injection-context"],
+      "followUps": ["What exactly is an injection context?", "How does DestroyRef.onDestroy differ from ngOnDestroy?"]
+    },
+    {
+      "id": "q-destroyref-vs-ngondestroy",
+      "question": "How does DestroyRef compare to implementing ngOnDestroy?",
+      "answer": "DestroyRef is an injectable token that lets you register teardown callbacks imperatively via destroyRef.onDestroy(cb), and it powers takeUntilDestroyed(). ngOnDestroy is the lifecycle method Angular calls right before destroying the component. Functionally they fire at the same moment, but DestroyRef is more composable: you can register cleanup from a service, a helper function, or a field initializer without the component needing to implement an interface, and you can register multiple independent callbacks. ngOnDestroy remains perfectly valid and is often clearest for a single, component-owned cleanup. Many modern components use DestroyRef (directly or through takeUntilDestroyed) and never implement ngOnDestroy at all.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["destroyref", "ngondestroy", "cleanup"],
+      "followUps": ["Can a service inject DestroyRef?", "When is DestroyRef.onDestroy called for a service?"]
+    },
+    {
+      "id": "q-onchanges-mutation",
+      "question": "Why might ngOnChanges not fire when you expect it to?",
+      "answer": "ngOnChanges only fires when the REFERENCE of a data-bound @Input changes, because Angular compares inputs by reference for change detection of bindings. If a parent mutates an object or array in place, for example by calling push() on an array while keeping the same reference, the reference is unchanged and ngOnChanges does not fire. The fix is to pass a new reference, such as spreading into a new array or object, or to switch to signal inputs which track updates precisely. This reference-equality behavior is also why OnPush components can miss in-place mutations. Immutability of inputs is the reliable pattern here.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["ngonchanges", "immutability", "simplechanges"],
+      "followUps": ["What is on the SimpleChange object?", "How do signal inputs detect changes?"]
+    },
+    {
+      "id": "q-simplechanges",
+      "question": "What information does the SimpleChanges object provide?",
+      "answer": "ngOnChanges receives a SimpleChanges map keyed by input property name. Each value is a SimpleChange containing previousValue, currentValue, and firstChange, plus an isFirstChange() method. previousValue holds the prior value (undefined on the first change), currentValue holds the new value, and firstChange indicates whether this is the very first assignment. Only the inputs that actually changed in that cycle appear as keys, so you should guard with a check like changes['amount'] before reading it. This lets you run logic conditionally, for example recomputing derived state only when a relevant input changed, or skipping side effects on the initial change.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["simplechanges", "ngonchanges", "inputs"],
+      "followUps": ["When is firstChange true?", "How do you handle multiple changed inputs?"]
+    },
+    {
+      "id": "q-onpush-hooks",
+      "question": "How does OnPush change detection affect the lifecycle hooks?",
+      "answer": "OnPush does not remove any hooks; it changes how often the checking-related ones run. Angular checks an OnPush component only when an @Input reference changes, an event fires from its template, an async-pipe-bound observable emits, or markForCheck() is called. ngOnChanges still fires on every input reference change exactly as under the default strategy. However, ngDoCheck, ngAfterContentChecked, and ngAfterViewChecked run only when the component is actually checked, which is far less frequently, improving performance. ngOnInit and the init hooks still run once, and ngOnDestroy still runs on destruction. So OnPush mainly throttles the '...Checked' and ngDoCheck hooks rather than skipping the one-time hooks.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["onpush", "change-detection", "hooks"],
+      "followUps": ["What triggers a check under OnPush?", "How does markForCheck differ from detectChanges?"]
+    },
+    {
+      "id": "q-signals-replace-hooks",
+      "question": "Which lifecycle hooks can signals and effect() replace?",
+      "answer": "Signals move much reactive work out of hooks. computed() replaces derived-state logic that used to live in ngOnChanges, recomputing automatically when any read signal changes. effect() replaces polling patterns in ngDoCheck and many side-effecting branches of ngOnChanges, running whenever its tracked signals change and cleaning itself up when the component is destroyed. Signal-based inputs, viewChild, and contentChild reduce reliance on ngOnChanges and query timing. What signals do not replace is DOM work, so afterRender/afterNextRender remain essential, and imperative teardown may still use ngOnDestroy or DestroyRef. A modern component can end up implementing no lifecycle interfaces at all.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["signals", "effect", "computed"],
+      "followUps": ["When should you use effect() vs computed()?", "Do effects need an injection context?"]
+    },
+    {
+      "id": "q-expression-changed-error",
+      "question": "What causes ExpressionChangedAfterItHasBeenCheckedError and how does it relate to lifecycle hooks?",
+      "answer": "This dev-mode error occurs when a value bound in the template changes AFTER Angular has already checked it in the same change-detection cycle. Angular runs a second verification pass in development, and if a binding differs from what it recorded, it throws. A common cause is mutating template-affecting state inside ngAfterViewChecked or ngAfterContentChecked, or in ngAfterViewInit, where the update happens after the parent view was already checked. The fix is to avoid changing bound state in those late hooks; move the logic earlier (ngOnInit or ngOnChanges), defer it with a microtask, or use signals so the update participates in the next cycle cleanly. It never appears in production builds because the verification pass is disabled there, which is exactly why relying on that behavior is dangerous.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["change-detection", "afterviewchecked", "errors"],
+      "followUps": ["Why is the second check dev-only?", "How do signals avoid this error?"]
+    },
+    {
+      "id": "q-async-pipe-cleanup",
+      "question": "How does the async pipe relate to lifecycle-based subscription cleanup?",
+      "answer": "The async pipe subscribes to an observable in the template and automatically unsubscribes when the component is destroyed, so it removes the need for manual teardown entirely for that stream. It also calls markForCheck() on emission, which makes it work well with OnPush. Compared to subscribing in ngOnInit and unsubscribing in ngOnDestroy (or using takeUntilDestroyed), the async pipe is the least error-prone because there is no subscription object for you to manage. The tradeoff is that logic reacting to emissions must be expressible in the template or via pipes, so imperative side effects still need a manual subscription with takeUntilDestroyed. Prefer the async pipe when you only need to display a stream's value.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["async-pipe", "cleanup", "rxjs"],
+      "followUps": ["Does the async pipe work under OnPush?", "When must you subscribe manually instead?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-fix-input-in-ctor",
+      "title": "Fix an @Input Read in the Constructor",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "prompt": "The component below fetches a user in its constructor using an @Input userId, but the request always hits /users/undefined and the subscription is never cleaned up. Fix both problems.",
+      "hints": [
+        "Inputs are not bound until after the constructor; which hook runs after inputs are set?",
+        "Move the input-dependent fetch to ngOnInit.",
+        "Use takeUntilDestroyed to release the subscription automatically."
+      ],
+      "solutionCode": "import { Component, Input, OnInit, inject, DestroyRef } from '@angular/core';\nimport { takeUntilDestroyed } from '@angular/core/rxjs-interop';\n\n@Component({ selector: 'app-user', standalone: true, template: '{{ name }}' })\nexport class UserComponent implements OnInit {\n  @Input() userId!: string;\n  name = '';\n\n  private readonly api = inject(UserApi);\n  private readonly destroyRef = inject(DestroyRef);\n\n  ngOnInit(): void {\n    // userId is now bound; safe to use it here.\n    this.api.load(this.userId)\n      .pipe(takeUntilDestroyed(this.destroyRef))\n      .subscribe(u => (this.name = u.name));\n  }\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "The original bug has two roots. First, the constructor runs before Angular performs input binding, so this.userId is undefined at that moment and the request targets /users/undefined; moving the fetch to ngOnInit guarantees the input has been set by the parent binding. Second, subscribing without any teardown leaks the subscription and can invoke a stale callback after the component is gone. Because ngOnInit is outside the constructor injection context, we capture DestroyRef via inject() at the field level and pass it to takeUntilDestroyed(this.destroyRef), which completes the stream when the component is destroyed. Using inject() keeps the constructor free of DI parameters and satisfies the injection-context rule. The result is correct timing and automatic cleanup with no manual destroy$ Subject. This mirrors the standard senior pattern for input-driven data loading.",
+      "relatedTopic": "angular-lifecycle"
+    },
+    {
+      "id": "ch-chart-afternextrender",
+      "title": "Integrate a Chart Library with afterNextRender and Cleanup",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "prompt": "Initialize a chart.js instance on a canvas so it works in the browser and does not crash during SSR, update it when the data input changes, and destroy it when the component is torn down.",
+      "hints": [
+        "DOM-dependent, SSR-unsafe setup belongs in afterNextRender, which never runs on the server.",
+        "Use a signal input plus effect() to push new data into the existing chart.",
+        "Register chart.destroy() with DestroyRef.onDestroy for deterministic cleanup."
+      ],
+      "solutionCode": "import { Component, ElementRef, input, effect, afterNextRender, inject, DestroyRef, viewChild } from '@angular/core';\nimport Chart from 'chart.js/auto';\n\n@Component({\n  selector: 'app-sales-chart',\n  standalone: true,\n  template: '<canvas #canvas></canvas>'\n})\nexport class SalesChartComponent {\n  data = input<number[]>([]);\n  private readonly canvasRef = viewChild<ElementRef<HTMLCanvasElement>>('canvas');\n  private readonly destroyRef = inject(DestroyRef);\n  private chart?: Chart;\n\n  constructor() {\n    afterNextRender(() => {\n      const el = this.canvasRef()?.nativeElement;\n      if (!el) return;\n      this.chart = new Chart(el, {\n        type: 'line',\n        data: { labels: [], datasets: [{ label: 'Sales', data: this.data() }] }\n      });\n    });\n\n    effect(() => {\n      const values = this.data();\n      if (this.chart) {\n        this.chart.data.datasets[0].data = values;\n        this.chart.update();\n      }\n    });\n\n    this.destroyRef.onDestroy(() => this.chart?.destroy());\n  }\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "This solution separates the three concerns of a DOM-widget integration. Construction goes in afterNextRender because the chart needs a painted canvas element and the library touches the DOM; afterNextRender runs once, only in the browser, so SSR renders the component's markup without ever invoking chart.js, avoiding 'document is not defined'. Reactive updates go in an effect() that reads the data() signal input, so whenever the parent supplies new data the effect pushes it into the existing chart and calls update() rather than rebuilding it. Cleanup goes in destroyRef.onDestroy, which calls chart.destroy() to release canvas contexts and event listeners when the component is torn down. All three run from the constructor's injection context, which is required for afterNextRender, effect(), and inject(DestroyRef). The component implements no lifecycle interface yet handles setup, updates, and teardown correctly. This is the idiomatic Angular 18/19 pattern for any imperative browser widget.",
+      "relatedTopic": "angular-lifecycle"
+    },
+    {
+      "id": "ch-replace-destroy-subject",
+      "title": "Replace a Manual destroy$ Subject with takeUntilDestroyed",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "prompt": "The component uses the legacy destroy$ Subject pattern to unsubscribe. Modernize it to use takeUntilDestroyed and remove the boilerplate.",
+      "hints": [
+        "takeUntilDestroyed() called in the constructor needs no argument.",
+        "For subscriptions created outside the constructor, pass a captured DestroyRef.",
+        "Delete the Subject, ngOnDestroy teardown, and the takeUntil pipe."
+      ],
+      "solutionCode": "import { Component, inject, DestroyRef } from '@angular/core';\nimport { takeUntilDestroyed } from '@angular/core/rxjs-interop';\nimport { interval } from 'rxjs';\n\n// BEFORE (legacy):\n// private destroy$ = new Subject<void>();\n// ngOnInit() { interval(1000).pipe(takeUntil(this.destroy$)).subscribe(...); }\n// ngOnDestroy() { this.destroy$.next(); this.destroy$.complete(); }\n\n@Component({ selector: 'app-clock', standalone: true, template: '{{ tick }}' })\nexport class ClockComponent {\n  tick = 0;\n  private readonly destroyRef = inject(DestroyRef);\n\n  constructor() {\n    // In the constructor: no argument needed, DestroyRef is read from context.\n    interval(1000)\n      .pipe(takeUntilDestroyed())\n      .subscribe(v => (this.tick = v));\n  }\n\n  startLater(): void {\n    // Outside the injection context: pass destroyRef explicitly.\n    interval(500)\n      .pipe(takeUntilDestroyed(this.destroyRef))\n      .subscribe(v => (this.tick = v));\n  }\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "The legacy pattern required declaring a Subject, piping every stream through takeUntil(this.destroy$), and implementing ngOnDestroy to call next() and complete() on the Subject, which is repetitive and easy to get wrong. takeUntilDestroyed() collapses all of that: when called in an injection context such as the constructor it reads the ambient DestroyRef and completes the stream automatically on destruction, so the Subject and the entire ngOnDestroy method can be deleted. For subscriptions that must be created later, outside the injection context, we capture DestroyRef once with inject() and pass it as takeUntilDestroyed(this.destroyRef); the startLater() method shows this variant. This removes an entire class of memory-leak bugs while shrinking the component. The rule to remember is that the no-argument form only works where an injection context exists. The modernized component is smaller, clearer, and implements no OnDestroy interface.",
+      "relatedTopic": "angular-lifecycle"
+    },
+    {
+      "id": "ch-react-to-input-changes",
+      "title": "React to Input Changes with ngOnChanges",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "prompt": "A component must recompute a formatted label whenever its amount or currency @Input changes, and log the transition of amount. Implement ngOnChanges correctly using SimpleChanges, then show the signals-based equivalent.",
+      "hints": [
+        "Guard each input with changes['name'] before reading it.",
+        "Recompute derived state when any relevant input changed.",
+        "The signals version uses computed() and needs no ngOnChanges."
+      ],
+      "solutionCode": "import { Component, Input, OnChanges, SimpleChanges, input, computed } from '@angular/core';\n\n// Classic ngOnChanges version\n@Component({ selector: 'app-price', standalone: true, template: '{{ formatted }}' })\nexport class PriceComponent implements OnChanges {\n  @Input() amount = 0;\n  @Input() currency = 'USD';\n  formatted = '';\n\n  ngOnChanges(changes: SimpleChanges): void {\n    if (changes['amount']) {\n      const c = changes['amount'];\n      console.log('amount', c.previousValue, '->', c.currentValue, 'first?', c.firstChange);\n    }\n    if (changes['amount'] || changes['currency']) {\n      this.formatted = new Intl.NumberFormat('en-US', {\n        style: 'currency', currency: this.currency\n      }).format(this.amount);\n    }\n  }\n}\n\n// Signals equivalent: no lifecycle hook needed\n@Component({ selector: 'app-price-signal', standalone: true, template: '{{ formatted() }}' })\nexport class PriceSignalComponent {\n  amount = input(0);\n  currency = input('USD');\n  formatted = computed(() =>\n    new Intl.NumberFormat('en-US', { style: 'currency', currency: this.currency() }).format(this.amount())\n  );\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "In the classic version, ngOnChanges receives a SimpleChanges map that contains only the inputs that changed in the current cycle, so each access is guarded with a truthiness check like changes['amount']. Reading the SimpleChange gives previousValue, currentValue, and firstChange, which we use to log the amount transition, and we recompute the formatted label whenever either amount or currency changed. A key subtlety is that ngOnChanges fires on reference changes only, so mutating an input object in place would not trigger it; scalar inputs like these are unaffected. The signals version eliminates the hook entirely: amount and currency become signal inputs, and formatted is a computed() that recomputes automatically whenever either signal changes, with change tracking handled precisely by the framework. The computed approach is more declarative, avoids the guard-clause boilerplate, and cannot forget to update a derived value. Both are valid, but new code should prefer the signals form.",
+      "relatedTopic": "angular-lifecycle"
+    }
+  ],
+  "references": [
+    { "label": "Angular Docs: Component lifecycle", "url": "https://angular.dev/guide/components/lifecycle" },
+    { "label": "Angular API: afterRender / afterNextRender", "url": "https://angular.dev/api/core/afterNextRender" },
+    { "label": "Angular API: DestroyRef", "url": "https://angular.dev/api/core/DestroyRef" },
+    { "label": "Angular API: takeUntilDestroyed", "url": "https://angular.dev/api/core/rxjs-interop/takeUntilDestroyed" },
+    { "label": "Angular Docs: Signals and effect()", "url": "https://angular.dev/guide/signals" },
+    { "label": "Angular Blog: Angular v17 render hooks", "url": "https://blog.angular.dev/introducing-angular-v17-4d7033312e4b" }
+  ]
+}

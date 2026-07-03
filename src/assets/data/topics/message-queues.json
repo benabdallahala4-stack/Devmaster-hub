@@ -1,0 +1,784 @@
+{
+  "id": "message-queues",
+  "title": "Message Queues & Async Messaging",
+  "category": "Messaging",
+  "subcategory": "Patterns",
+  "difficulty": "senior",
+  "tags": [
+    "message-queues",
+    "async-messaging",
+    "rabbitmq",
+    "sqs",
+    "delivery-guarantees",
+    "idempotency",
+    "dead-letter-queue",
+    "backpressure"
+  ],
+  "description": "A staff-level treatment of asynchronous messaging with brokers: queue versus publish/subscribe versus log semantics, RabbitMQ's exchange/binding model, cloud queues like SQS, and the delivery-guarantee realities (at-least-once plus idempotency, the exactly-once myth, DLQs, ordering, and backpressure) that separate a robust system from a fragile one.",
+  "estReadMinutes": 29,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Introduction",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A message queue is a piece of infrastructure that lets one part of a system hand work to another part without the two ever speaking directly. The producer writes a message and moves on; the broker holds it durably; a consumer reads it when it is ready. This single act of putting a buffer between sender and receiver changes the failure modes, the scaling story, and the operational shape of a distributed system more than almost any other design decision."
+        },
+        {
+          "type": "paragraph",
+          "text": "At senior level the interesting questions are not 'how do I publish a message' but 'what exactly did the broker promise me, and what happens when something goes wrong'. Did the message arrive at all? Did it arrive twice? In what order? What happens to a message that no consumer can process? How do I stop a fast producer from drowning a slow consumer? Answering these correctly requires understanding broker semantics precisely, because the comfortable abstraction of 'just send a message' hides at-least-once redelivery, poison messages, visibility timeouts, and consumer lag."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "This topic focuses on broker and queue semantics (RabbitMQ, SQS) and contrasts them with log-based systems like Kafka, which the platform covers separately. The mental models here, competing consumers, idempotent processing, and dead-lettering, apply across every messaging technology you will meet."
+        }
+      ]
+    },
+    {
+      "id": "why-async",
+      "heading": "Why Asynchronous Messaging",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Synchronous request/response couples the caller's fate to the callee's. If service B is slow, service A's threads block on it; if B is down, A's request fails. Asynchronous messaging breaks that coupling. A places a message on a queue and returns immediately; B processes it whenever it can. The three classic motivations are decoupling, load leveling, and resilience."
+        },
+        {
+          "type": "heading",
+          "level": 3,
+          "text": "Decoupling"
+        },
+        {
+          "type": "paragraph",
+          "text": "Producers and consumers do not need to know about each other, run at the same time, or scale together. You can add a new consumer of an event stream without touching the producer. You can replace a consumer's implementation, redeploy it, or take it offline for maintenance while the queue absorbs the backlog. This temporal and spatial decoupling is what makes event-driven architectures evolvable."
+        },
+        {
+          "type": "heading",
+          "level": 3,
+          "text": "Load leveling"
+        },
+        {
+          "type": "paragraph",
+          "text": "Traffic is bursty; capacity is finite. A queue acts as a shock absorber: a spike of 10,000 orders in one second is enqueued in one second and drained over the next minute by a consumer pool sized for the sustained rate rather than the peak. You trade latency (work is delayed) for stability (you never need to provision for the worst-case burst). This is sometimes called the queue-based load-leveling pattern."
+        },
+        {
+          "type": "heading",
+          "level": 3,
+          "text": "Resilience"
+        },
+        {
+          "type": "paragraph",
+          "text": "Because the broker persists messages, a consumer crash does not lose work; the message is redelivered. A downstream outage becomes a growing backlog rather than a cascade of failed user requests. The queue converts hard failures into soft, recoverable delays, provided you design the consumer to be safely retryable."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Async is not free. You inherit eventual consistency, harder debugging (no single stack trace spans the boundary), duplicate delivery, ordering complications, and the operational burden of monitoring queue depth and consumer lag. Reach for it when the coupling or load problem is real, not by default."
+        }
+      ]
+    },
+    {
+      "id": "queue-vs-pubsub-vs-log",
+      "heading": "Queue vs Publish/Subscribe vs Log",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Three messaging shapes dominate, and conflating them is the most common source of design errors. A queue is point-to-point: each message is delivered to exactly one of the consumers competing on that queue. Publish/subscribe is fan-out: each subscriber gets its own copy of every message. A log is an ordered, replayable, append-only record that consumers read by tracking an offset."
+        },
+        {
+          "type": "heading",
+          "level": 3,
+          "text": "Queue: point-to-point and competing consumers"
+        },
+        {
+          "type": "paragraph",
+          "text": "With a queue, you attach N consumers and they share the load: the broker hands each message to one consumer. This is the competing-consumers pattern, and it is how you scale throughput horizontally, add workers and the queue is drained faster. The defining property is that a successfully processed message is removed; it is work to be done once, by someone."
+        },
+        {
+          "type": "heading",
+          "level": 3,
+          "text": "Publish/subscribe: fan-out"
+        },
+        {
+          "type": "paragraph",
+          "text": "With pub/sub, the same event needs to reach several independent consumers, billing, analytics, and search all care about an 'order placed' event. Each gets the full stream. In RabbitMQ this is modeled by binding several queues to a fanout (or topic) exchange; each queue is an independent subscriber with its own competing-consumer pool inside it."
+        },
+        {
+          "type": "heading",
+          "level": 3,
+          "text": "Log: ordered, replayable"
+        },
+        {
+          "type": "paragraph",
+          "text": "A log (Kafka, Kinesis) does not delete a message when it is read. Messages are retained for a configured window, and each consumer group maintains its own offset. This makes the log replayable, you can reset an offset and reprocess history, and it makes ordering within a partition a first-class guarantee. The cost is that the log does not track per-message acknowledgement or redelivery the way a broker does; the consumer owns its offset."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Property",
+            "Queue (point-to-point)",
+            "Pub/Sub (fan-out)",
+            "Log (Kafka)"
+          ],
+          "rows": [
+            [
+              "Delivery model",
+              "One message to one of N consumers",
+              "Each message to every subscriber",
+              "Each message read by every consumer group"
+            ],
+            [
+              "After consumption",
+              "Message removed on ack",
+              "Copy removed per-subscriber on ack",
+              "Retained until retention expires"
+            ],
+            [
+              "Replay history",
+              "No (consumed messages are gone)",
+              "No",
+              "Yes (reset offset)"
+            ],
+            [
+              "Ordering",
+              "Best-effort, lost under parallelism",
+              "Best-effort per queue",
+              "Strict per partition"
+            ],
+            [
+              "Scaling consumers",
+              "Add workers, share load",
+              "Add subscribers for new uses",
+              "Up to partition count per group"
+            ],
+            [
+              "Tracks per-message ack",
+              "Yes (ack/nack)",
+              "Yes (per subscriber)",
+              "No (commits offsets)"
+            ],
+            [
+              "Typical tech",
+              "RabbitMQ queue, SQS",
+              "RabbitMQ fanout/topic, SNS",
+              "Kafka, Kinesis, Pulsar"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "How a queue differs from a log in one sentence: a queue is a to-do list the broker crosses items off as they are done, while a log is a ledger the broker never erases and each reader bookmarks their own place. The queue gives you per-message acknowledgement and dead-lettering for free; the log gives you ordering and replay for free."
+        }
+      ]
+    },
+    {
+      "id": "rabbitmq-model",
+      "heading": "The RabbitMQ Model",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "RabbitMQ implements AMQP 0-9-1, and its central insight is that producers never publish to a queue directly. A producer publishes to an exchange. The exchange, using bindings and the message's routing key, decides which queue(s) receive a copy. This indirection is what makes the same publish able to drive point-to-point, fan-out, or routed delivery depending on how you wire the exchange."
+        },
+        {
+          "type": "paragraph",
+          "text": "The full path is: producer -> exchange -> binding -> queue -> consumer. A binding is a rule connecting an exchange to a queue, often qualified by a routing key or pattern. When a message arrives at an exchange, the exchange evaluates its bindings and routes the message accordingly. If no binding matches, the message is dropped (or returned to the publisher if the mandatory flag is set)."
+        },
+        {
+          "type": "heading",
+          "level": 3,
+          "text": "Exchange types"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Exchange type",
+            "Routing rule",
+            "Use case"
+          ],
+          "rows": [
+            [
+              "direct",
+              "Deliver to queues whose binding key equals the routing key exactly",
+              "Route by a single discrete value, e.g. severity = error"
+            ],
+            [
+              "topic",
+              "Match routing key against binding patterns with * (one word) and # (zero or more words)",
+              "Hierarchical routing, e.g. order.eu.created to order.eu.* and order.#"
+            ],
+            [
+              "fanout",
+              "Ignore routing key, deliver to every bound queue",
+              "Broadcast / pub-sub fan-out to all subscribers"
+            ],
+            [
+              "headers",
+              "Match on message header attributes instead of routing key (x-match all/any)",
+              "Routing on multiple structured attributes where a string key is awkward"
+            ]
+          ]
+        },
+        {
+          "type": "heading",
+          "level": 3,
+          "text": "Acknowledgement and prefetch"
+        },
+        {
+          "type": "paragraph",
+          "text": "Once a consumer reads a message, the broker needs to know whether it was handled. With manual acknowledgement the consumer calls basic.ack after successfully processing, basic.nack or basic.reject to signal failure (optionally requeuing or dead-lettering). Until the ack arrives, the broker considers the message unacknowledged and will redeliver it if the consumer's channel closes. This is the foundation of at-least-once delivery."
+        },
+        {
+          "type": "paragraph",
+          "text": "Prefetch (QoS basic.qos prefetch_count) limits how many unacknowledged messages the broker pushes to a consumer at once. A prefetch of 1 means the broker sends one message and waits for the ack before sending the next, perfect load distribution but more round-trips. A high prefetch improves throughput but lets a single consumer hoard messages and worsens tail latency if it is slow. Prefetch is your primary flow-control and backpressure knob."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Auto-ack mode ( acknowledging on delivery, before processing) is a footgun. If the consumer crashes after receiving but before finishing, the message is gone, you have silently dropped work. Use manual ack and ack after the side effect is durable."
+        }
+      ]
+    },
+    {
+      "id": "rabbitmq-code",
+      "heading": "RabbitMQ Producer and Consumer (Manual Ack + Prefetch)",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Below is a minimal but production-shaped pair in Python using pika. The producer declares a durable topic exchange and publishes a persistent message with a routing key. The consumer declares a durable queue, binds it, sets a prefetch of 16 for bounded in-flight work, and acknowledges only after processing succeeds, nacking (without requeue, so the DLX takes over) on failure."
+        },
+        {
+          "type": "code",
+          "language": "python",
+          "code": "# producer.py\nimport json\nimport pika\n\nparams = pika.ConnectionParameters(host=\"localhost\")\nconnection = pika.BlockingConnection(params)\nchannel = connection.channel()\n\n# Durable topic exchange survives broker restarts\nchannel.exchange_declare(\n    exchange=\"orders\",\n    exchange_type=\"topic\",\n    durable=True,\n)\n\ndef publish_order(order_id: str, region: str, payload: dict) -> None:\n    routing_key = f\"order.{region}.created\"\n    channel.basic_publish(\n        exchange=\"orders\",\n        routing_key=routing_key,\n        body=json.dumps(payload).encode(),\n        properties=pika.BasicProperties(\n            delivery_mode=2,              # persistent: written to disk\n            message_id=order_id,          # used downstream for dedup\n            content_type=\"application/json\",\n        ),\n        mandatory=True,                   # error back if unroutable\n    )\n\npublish_order(\"ord-1001\", \"eu\", {\"id\": \"ord-1001\", \"total\": 4200})\nconnection.close()"
+        },
+        {
+          "type": "code",
+          "language": "python",
+          "code": "# consumer.py\nimport json\nimport pika\n\nparams = pika.ConnectionParameters(host=\"localhost\")\nconnection = pika.BlockingConnection(params)\nchannel = connection.channel()\n\nchannel.exchange_declare(exchange=\"orders\", exchange_type=\"topic\", durable=True)\n\n# Queue with a dead-letter exchange for poison messages\nchannel.queue_declare(\n    queue=\"orders.eu\",\n    durable=True,\n    arguments={\n        \"x-dead-letter-exchange\": \"orders.dlx\",\n        \"x-dead-letter-routing-key\": \"orders.eu.failed\",\n    },\n)\nchannel.queue_bind(queue=\"orders.eu\", exchange=\"orders\", routing_key=\"order.eu.*\")\n\n# Bounded in-flight work: at most 16 unacked messages per consumer\nchannel.basic_qos(prefetch_count=16)\n\ndef on_message(ch, method, properties, body):\n    try:\n        order = json.loads(body)\n        handle_order(order, message_id=properties.message_id)\n        ch.basic_ack(delivery_tag=method.delivery_tag)\n    except TransientError:\n        # Requeue for another attempt (broker redelivers)\n        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)\n    except Exception:\n        # Permanent failure -> do not requeue -> routed to DLX\n        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)\n\nchannel.basic_consume(queue=\"orders.eu\", on_message_callback=on_message, auto_ack=False)\nchannel.start_consuming()"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Note the discipline: ack only after handle_order returns, persistent messages plus a durable queue so a broker restart loses nothing, and requeue=False on permanent failures so poison messages flow to the dead-letter exchange instead of looping forever."
+        }
+      ]
+    },
+    {
+      "id": "delivery-guarantees",
+      "heading": "Delivery Guarantees and the Exactly-Once Myth",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Every messaging system makes one of three delivery promises. At-most-once: the message is delivered zero or one times, duplicates are impossible but loss is possible (ack-on-receive, fire-and-forget). At-least-once: the message is delivered one or more times, loss is impossible but duplicates are possible (ack-after-processing with redelivery). Exactly-once: delivered precisely once. The first two are real; the third, as an end-to-end network guarantee, is a myth."
+        },
+        {
+          "type": "paragraph",
+          "text": "The reason exactly-once delivery is impossible is the two-generals problem. After a consumer processes a message, it must tell the broker 'done'. That acknowledgement can be lost in flight. The broker, not knowing whether the consumer finished, has two choices: redeliver (risking a duplicate, at-least-once) or not redeliver (risking loss, at-most-once). There is no third option, because no amount of additional messages can make the final acknowledgement reliable, each new message is itself unreliable."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "When a vendor advertises 'exactly-once', read the fine print. They almost always mean exactly-once processing (effects applied once) achieved by at-least-once delivery plus deduplication inside a bounded scope, not a magical network guarantee. Kafka's exactly-once is transactional writes within Kafka; it does not extend to your external database or third-party API call."
+        },
+        {
+          "type": "paragraph",
+          "text": "Because at-most-once silently drops data, almost every serious system chooses at-least-once delivery and then makes the consumer idempotent so that duplicate deliveries are harmless. This combination, at-least-once plus idempotency, is the practical, achievable form of 'exactly-once effect'. Internalize this: you do not prevent duplicates at the transport layer; you neutralize them at the processing layer."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Guarantee",
+            "Duplicates?",
+            "Loss?",
+            "How achieved"
+          ],
+          "rows": [
+            [
+              "At-most-once",
+              "No",
+              "Possible",
+              "Ack on receive, no redelivery (fire-and-forget)"
+            ],
+            [
+              "At-least-once",
+              "Possible",
+              "No",
+              "Ack after processing, redeliver on missing ack"
+            ],
+            [
+              "Exactly-once (effect)",
+              "Neutralized",
+              "No",
+              "At-least-once delivery + idempotent consumer / dedup"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "idempotent-consumer",
+      "heading": "Idempotent Consumers and Dedup Keys",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "An idempotent consumer produces the same result whether it processes a message once or many times. The standard technique is a dedup table keyed by a stable message identifier, the producer-assigned message_id, a business key like order_id, or a hash of the payload. Before applying effects, the consumer atomically records that it has seen the key; if the key already exists, it skips the work."
+        },
+        {
+          "type": "paragraph",
+          "text": "The subtle requirement is atomicity: recording the dedup key and applying the side effect must succeed or fail together, otherwise a crash between them reintroduces a duplicate. The cleanest implementation does both in one database transaction. The example below uses a unique constraint on the dedup key so a duplicate insert fails fast, and wraps the business write in the same transaction."
+        },
+        {
+          "type": "code",
+          "language": "python",
+          "code": "# Idempotent consumer using a dedup table in the same transaction\nimport hashlib\n\n# Schema:\n#   CREATE TABLE processed_messages (\n#     dedup_key   TEXT PRIMARY KEY,\n#     processed_at TIMESTAMPTZ NOT NULL DEFAULT now()\n#   );\n\ndef dedup_key(message_id: str | None, body: bytes) -> str:\n    # Prefer an explicit id; fall back to a content hash\n    return message_id or hashlib.sha256(body).hexdigest()\n\ndef handle_order(order: dict, message_id: str | None, body: bytes, db) -> None:\n    key = dedup_key(message_id, body)\n    with db.transaction() as tx:\n        # Atomic claim: PRIMARY KEY conflict means we already did this\n        inserted = tx.execute(\n            \"INSERT INTO processed_messages (dedup_key) VALUES (%s) \"\n            \"ON CONFLICT (dedup_key) DO NOTHING\",\n            (key,),\n        )\n        if inserted.rowcount == 0:\n            # Duplicate delivery: effect already applied, safe to skip\n            return\n        # Same transaction as the dedup claim -> atomic\n        tx.execute(\n            \"INSERT INTO orders (id, total) VALUES (%s, %s)\",\n            (order[\"id\"], order[\"total\"]),\n        )\n    # Commit succeeded: now it is safe to ack the broker message"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Where you cannot share a transaction with the side effect (calling an external API), make the downstream operation itself idempotent by passing an idempotency key, or use the outbox/inbox pattern so the external call is driven by a transactional record. Naive 'check then act' without atomicity is a race, two redeliveries can both pass the check."
+        },
+        {
+          "type": "paragraph",
+          "text": "Dedup state cannot grow forever. Bound it: keep dedup keys for a window comfortably longer than the maximum possible redelivery delay (visibility timeout times max retries, plus broker downtime margin), then evict. SQS FIFO, for comparison, deduplicates automatically within a 5-minute window using a deduplication ID, which is a managed version of exactly this idea with a fixed horizon."
+        }
+      ]
+    },
+    {
+      "id": "dlq-poison",
+      "heading": "Dead-Letter Queues and Poison Messages",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A poison message is one that a consumer can never process successfully, malformed payload, a referenced entity that no longer exists, a bug in the handler. Under at-least-once with naive requeue, such a message is redelivered forever: the consumer fails, nacks with requeue, gets it back, fails again, an infinite loop that burns CPU and blocks the queue head for other work."
+        },
+        {
+          "type": "paragraph",
+          "text": "The cure is a dead-letter queue (DLQ). After a message has failed a maximum number of times, it is moved off the main queue to a DLQ where it sits for human inspection, alerting, or later replay. In RabbitMQ, dead-lettering is configured per queue via a dead-letter exchange; messages are dead-lettered when they are rejected with requeue=false, when they expire (TTL), or when the queue overflows. To enforce a retry cap you typically count redeliveries via a header and reject permanently once it exceeds the limit."
+        },
+        {
+          "type": "code",
+          "language": "python",
+          "code": "# DLQ configuration: main queue dead-letters to a DLX, plus a retry cap\nimport pika\n\nchannel = pika.BlockingConnection().channel()\n\n# 1) Dead-letter exchange and queue that hold poison messages\nchannel.exchange_declare(exchange=\"orders.dlx\", exchange_type=\"direct\", durable=True)\nchannel.queue_declare(queue=\"orders.dead\", durable=True)\nchannel.queue_bind(queue=\"orders.dead\", exchange=\"orders.dlx\",\n                   routing_key=\"orders.eu.failed\")\n\n# 2) Main queue routes rejects/expiries to the DLX\nchannel.queue_declare(\n    queue=\"orders.eu\",\n    durable=True,\n    arguments={\n        \"x-dead-letter-exchange\": \"orders.dlx\",\n        \"x-dead-letter-routing-key\": \"orders.eu.failed\",\n        \"x-delivery-limit\": 5,           # quorum queues: cap redeliveries\n    },\n)\n\nMAX_ATTEMPTS = 5\n\ndef on_message(ch, method, properties, body):\n    headers = (properties.headers or {})\n    # x-death accumulates each time a message is dead-lettered/redelivered\n    deaths = headers.get(\"x-death\", [])\n    attempts = deaths[0][\"count\"] if deaths else 0\n    try:\n        process(body)\n        ch.basic_ack(method.delivery_tag)\n    except Exception:\n        if attempts >= MAX_ATTEMPTS:\n            # Give up: requeue=False -> routed to the DLX\n            ch.basic_nack(method.delivery_tag, requeue=False)\n        else:\n            ch.basic_nack(method.delivery_tag, requeue=True)"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "A DLQ that nobody watches is a silent data-loss queue. Always alert on DLQ depth greater than zero, and build a documented replay path (fix the bug, re-publish from the DLQ to the main exchange). Treat DLQ growth as an incident signal, not a dumping ground."
+        }
+      ]
+    },
+    {
+      "id": "ordering-partitioning",
+      "heading": "Ordering, Partitioning, and Parallelism",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Ordering and parallelism are in direct tension. A single queue with a single consumer preserves order but caps throughput at one worker. The moment you add competing consumers to scale, messages are processed concurrently and global order is lost, consumer A might finish message 2 before consumer B finishes message 1. There is no way around this fundamental trade-off; you can have ordered, or parallel, but not globally both."
+        },
+        {
+          "type": "paragraph",
+          "text": "The resolution is to need order only within a key, not globally. Partition the stream by a key (customer id, account id) so that all messages for one key go to one partition and are processed in sequence, while different keys process in parallel. This is exactly Kafka's partition model and SQS FIFO's message group id. You preserve per-entity ordering (events for customer 42 stay in order) while scaling across entities."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "System",
+            "Ordering scope",
+            "How parallelism is bounded"
+          ],
+          "rows": [
+            [
+              "RabbitMQ single queue",
+              "FIFO with one consumer; lost with many",
+              "Consistent hash exchange to shard by key"
+            ],
+            [
+              "SQS standard",
+              "Best-effort, no guarantee",
+              "Unlimited consumers, no ordering"
+            ],
+            [
+              "SQS FIFO",
+              "Strict within a message group id",
+              "Parallelism = number of distinct groups"
+            ],
+            [
+              "Kafka",
+              "Strict within a partition",
+              "Parallelism = partitions per consumer group"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Before demanding ordering, ask whether your consumer can simply be order-insensitive. If events carry a version or timestamp and the consumer applies last-writer-wins or ignores stale updates, you may not need ordered delivery at all, which unlocks unconstrained parallelism."
+        }
+      ]
+    },
+    {
+      "id": "retries-backpressure",
+      "heading": "Retries, Backpressure, and Visibility Timeout",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Transient failures (a brief downstream blip, a lock timeout) deserve retries; permanent failures do not. Retry transient errors with exponential backoff and jitter so a thundering herd of consumers does not synchronize their retries and hammer a recovering dependency. A typical schedule: wait base * 2^attempt seconds plus a random jitter, capped at a ceiling, and after a maximum number of attempts, dead-letter."
+        },
+        {
+          "type": "code",
+          "language": "python",
+          "code": "import random\n\ndef backoff_delay(attempt: int, base: float = 0.5, cap: float = 60.0) -> float:\n    # Full-jitter exponential backoff: spreads retries to avoid herds\n    exp = min(cap, base * (2 ** attempt))\n    return random.uniform(0, exp)\n\n# attempt 0 -> up to 0.5s, attempt 3 -> up to 4s, attempt 7+ -> up to 60s"
+        },
+        {
+          "type": "heading",
+          "level": 3,
+          "text": "Backpressure and flow control"
+        },
+        {
+          "type": "paragraph",
+          "text": "Backpressure is how a slow consumer tells the system to slow down. In RabbitMQ the primary lever is prefetch: a low prefetch caps in-flight messages per consumer, so a struggling worker simply stops pulling new work and the queue grows rather than the worker's memory. The broker itself applies TCP backpressure to producers when memory or disk alarms trigger, pausing publishers until the system recovers. Designing for backpressure means letting the queue absorb the surge while bounding per-consumer concurrency."
+        },
+        {
+          "type": "heading",
+          "level": 3,
+          "text": "Visibility timeout"
+        },
+        {
+          "type": "paragraph",
+          "text": "SQS and other pull-based queues use a visibility timeout instead of an open channel. When a consumer receives a message, it becomes invisible to other consumers for the visibility-timeout duration. If the consumer deletes the message before the timeout, it is gone; if the consumer crashes or is too slow, the timeout expires and the message reappears for another consumer, that is how SQS achieves at-least-once. The implication: set the visibility timeout longer than your worst-case processing time, or extend it mid-flight, otherwise a slow message is redelivered while still being processed, causing duplicates."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "A too-short visibility timeout is a classic duplicate generator: the message reappears and a second consumer starts it while the first is still working. Monitor processing-time percentiles and keep the timeout safely above p99, or use the change-message-visibility API as a heartbeat for long jobs."
+        }
+      ]
+    },
+    {
+      "id": "cloud-and-choice",
+      "heading": "Cloud Queues and Choosing Broker vs Log",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "AWS SQS comes in two flavors. Standard queues offer nearly unlimited throughput, at-least-once delivery, and best-effort ordering, occasional duplicates and out-of-order delivery are expected, so consumers must be idempotent. FIFO queues guarantee strict ordering within a message group and exactly-once processing within a 5-minute dedup window, at the cost of much lower throughput per group. Choose Standard for high-volume idempotent work; choose FIFO only when per-key ordering or built-in dedup is genuinely required."
+        },
+        {
+          "type": "heading",
+          "level": 3,
+          "text": "When to choose a broker vs a log"
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "Choose a broker/queue (RabbitMQ, SQS) for task distribution and command processing: discrete units of work, competing consumers, per-message ack and retry, dead-lettering, and complex routing. The message is a job to be done once and then forgotten.",
+            "Choose a log (Kafka) for event streaming and replay: high-throughput ordered event histories, multiple independent consumer groups reading the same stream, the ability to reprocess from an offset, and stream processing. The message is a fact to be retained and re-read.",
+            "Use a broker when you need rich routing (topic/headers exchanges) and don't need to replay history. Use a log when ordering, retention, and replay matter more than per-message ack semantics.",
+            "Many systems use both: a Kafka topic as the durable event backbone, and queues fed from it for work that needs per-message retry and DLQ handling."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Senior heuristic: 'jobs' want a queue (ack, retry, DLQ, route once, forget); 'events' want a log (ordered, retained, replayable, fan-out to many readers). When you find yourself wanting to replay a queue, you probably wanted a log; when you find yourself bolting per-message retry onto a log, you probably wanted a queue."
+        }
+      ]
+    },
+    {
+      "id": "mistakes",
+      "heading": "Common Mistakes",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "These are the errors that cause production incidents, and the ones interviewers probe for."
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "Acking before processing (or using auto-ack). The consumer crashes after receiving but before finishing, and the message is silently lost. Always ack after the side effect is durable.",
+            "Assuming exactly-once delivery. Building a consumer that breaks if a message arrives twice. At-least-once means duplicates will happen; make the consumer idempotent.",
+            "Infinite requeue of poison messages. Nacking with requeue forever creates a redelivery loop that blocks the queue. Cap retries and dead-letter.",
+            "A DLQ nobody monitors. Messages quietly accumulate in the DLQ and the team discovers data loss days later. Alert on DLQ depth.",
+            "Visibility timeout shorter than processing time. The message reappears mid-processing and a second consumer duplicates the work. Keep the timeout above p99 latency.",
+            "Prefetch too high. One slow consumer hoards hundreds of unacked messages, starving others and inflating tail latency. Tune prefetch to the work profile.",
+            "Demanding global ordering then scaling out. Adding competing consumers silently destroys ordering. Partition by key if you need order, or make the consumer order-insensitive.",
+            "Non-atomic dedup. Checking a dedup table and then writing in separate transactions leaves a race window where two redeliveries both pass the check. Claim the key and apply the effect in one transaction."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "checklist",
+      "heading": "Senior Production Checklist",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A short list to run a messaging design against before it ships."
+        },
+        {
+          "type": "list",
+          "ordered": true,
+          "items": [
+            "Durable exchanges and queues, persistent messages, and publisher confirms so a broker restart loses nothing.",
+            "Manual ack after the effect is committed; never auto-ack for work that matters.",
+            "Idempotent consumer with an atomic dedup claim keyed by a stable id, with a bounded retention window.",
+            "Exponential backoff with jitter for transient errors; immediate dead-letter for permanent ones.",
+            "DLQ configured with a retry cap, plus alerting on DLQ depth and a documented replay procedure.",
+            "Prefetch / concurrency tuned for backpressure; queue depth and consumer lag dashboards with alerts.",
+            "Ordering requirements stated explicitly and satisfied by partitioning, not by accident.",
+            "Visibility timeout (or unacked timeout) set above worst-case processing time, with heartbeating for long jobs."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The litmus test for a robust consumer: kill it at any line, replay every in-flight message, and the system state must be identical to a clean run. If you can answer yes, your at-least-once plus idempotency design is sound."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "topic-exchange-fanout",
+      "title": "Producer to Topic Exchange to Bound Queues to Consumers",
+      "type": "mermaid",
+      "content": "flowchart LR\n    P[Producer] -->|order.eu.created| X{{Topic Exchange: orders}}\n    X -->|order.eu.*| QE[Queue: orders.eu]\n    X -->|order.#| QA[Queue: orders.audit]\n    X -->|order.us.*| QU[Queue: orders.us]\n    QE --> C1[Consumer EU-1]\n    QE --> C2[Consumer EU-2]\n    QA --> C3[Consumer Audit]\n    QU --> C4[Consumer US-1]"
+    },
+    {
+      "id": "at-least-once-redelivery",
+      "title": "At-Least-Once Delivery with Redelivery and DLQ on Max Retries",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n    participant P as Producer\n    participant B as Broker\n    participant C as Consumer\n    participant D as Dead-Letter Queue\n    P->>B: publish(msg)\n    B->>C: deliver(msg) attempt 1\n    C->>C: process fails\n    Note over B,C: ack missing, channel closes\n    B->>C: redeliver(msg) attempt 2\n    C-->>B: ack\n    Note over B,C: success path ends here\n    B->>C: (poison) redeliver up to max\n    C->>B: nack requeue=false at limit\n    B->>D: dead-letter(msg)\n    Note over D: alert on DLQ depth and replay"
+    },
+    {
+      "id": "queue-vs-log-ascii",
+      "title": "Queue (consume-and-delete) vs Log (offset-tracked)",
+      "type": "ascii",
+      "content": "QUEUE (point-to-point)                 LOG (offset based)\n[m1][m2][m3] -> consumer               [m1][m2][m3][m4][m5] (retained)\n  ack removes m1                          ^groupA offset=2\n[m2][m3]      -> consumer                ^groupB offset=4\n  one message -> one consumer            each group reads all, own offset\n  no replay after ack                    replay by resetting offset"
+    },
+    {
+      "id": "competing-consumers-ascii",
+      "title": "Competing Consumers (scale by adding workers)",
+      "type": "ascii",
+      "content": "                +-------------------+\n  producer ---> |  queue: tasks     | ---> worker 1 (ack)\n                |  [t1][t2][t3][t4] | ---> worker 2 (ack)\n                +-------------------+ ---> worker 3 (ack)\n  each task delivered to exactly ONE worker; add workers => faster drain"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-why-async",
+      "question": "What are the main reasons to introduce a message queue between two services, and what do you give up?",
+      "answer": "The three classic motivations are decoupling, load leveling, and resilience. Decoupling means producer and consumer need not run at the same time, scale together, or know about each other, so the system becomes more evolvable. Load leveling means the queue absorbs bursts, letting you size consumers for the sustained rate rather than the peak. Resilience means a consumer crash or downstream outage becomes a recoverable backlog instead of a cascading failure. In exchange you accept eventual consistency, harder debugging because no single stack trace spans the boundary, the certainty of duplicate delivery under at-least-once, ordering complications, and the operational cost of monitoring queue depth and lag.",
+      "difficulty": "mid",
+      "category": "Messaging",
+      "tricky": false,
+      "tags": ["decoupling", "load-leveling", "resilience"],
+      "followUps": ["When is synchronous request/response the better choice?", "How does load leveling trade latency for stability?"]
+    },
+    {
+      "id": "q-queue-vs-log",
+      "question": "How does a queue differ from a log, and when would you choose each?",
+      "answer": "A queue is a to-do list: a message is delivered to one of the competing consumers and removed once acknowledged, so it cannot be replayed and the broker tracks per-message ack and redelivery. A log is a ledger: messages are appended and retained for a window, never deleted on read, and each consumer group tracks its own offset, so it supports replay and strict per-partition ordering but does not track per-message acknowledgement. Choose a queue for task distribution where each message is a job done once and you want ack, retry, dead-lettering, and rich routing. Choose a log for event streaming where you need ordering, retention, replay, and fan-out to many independent consumer groups. A useful heuristic: jobs want a queue, events want a log.",
+      "difficulty": "senior",
+      "category": "Messaging",
+      "tricky": false,
+      "tags": ["queue", "log", "kafka"],
+      "followUps": ["Why can a log give strict ordering that a scaled-out queue cannot?", "How would you use both a log and a queue together?"]
+    },
+    {
+      "id": "q-exactly-once",
+      "question": "Is exactly-once delivery possible? Explain.",
+      "answer": "No, exactly-once delivery as an end-to-end network guarantee is impossible, and this is a consequence of the two-generals problem. After a consumer processes a message it must acknowledge, and that acknowledgement can be lost in transit. The broker, unable to know whether the consumer finished, must either redeliver (risking a duplicate, which is at-least-once) or not redeliver (risking loss, which is at-most-once); there is no third option because any additional confirmation message is itself unreliable. What vendors call exactly-once is really exactly-once processing: at-least-once delivery combined with deduplication or idempotency within a bounded scope. Kafka's exactly-once, for instance, is transactional within Kafka and does not extend to an external database or third-party API. The honest engineering answer is at-least-once delivery plus an idempotent consumer.",
+      "difficulty": "senior",
+      "category": "Messaging",
+      "tricky": true,
+      "tags": ["exactly-once", "delivery-guarantees", "two-generals"],
+      "followUps": ["What does Kafka's exactly-once actually cover?", "How do you achieve exactly-once effect across an external API call?"]
+    },
+    {
+      "id": "q-atleastonce-idempotency",
+      "question": "Why is 'at-least-once plus idempotency' the practical answer rather than chasing exactly-once delivery?",
+      "answer": "Because the two real choices at the transport layer are at-most-once, which can silently drop data, and at-least-once, which can duplicate but never loses. For almost any meaningful work, silent data loss is unacceptable, so you pick at-least-once. That guarantees duplicates will eventually occur, so instead of trying to eliminate them at the unreliable network layer (which is impossible), you neutralize them at the processing layer by making the consumer idempotent. Idempotency means processing the same message twice yields the same result as processing it once, typically via a dedup table keyed by a stable id, applied atomically with the side effect. The net effect is exactly-once processing without requiring exactly-once delivery, which is achievable and robust.",
+      "difficulty": "senior",
+      "category": "Messaging",
+      "tricky": true,
+      "tags": ["at-least-once", "idempotency", "dedup"],
+      "followUps": ["How do you make the dedup claim atomic with the side effect?", "How long must you retain dedup keys?"]
+    },
+    {
+      "id": "q-idempotent-consumer",
+      "question": "How do you implement an idempotent consumer correctly?",
+      "answer": "Pick a stable deduplication key: a producer-assigned message id, a business key like order id, or a hash of the payload. Before applying effects, atomically record that you have seen the key, typically by inserting it into a dedup table with a primary-key or unique constraint, and if the insert conflicts, skip the work because it was already done. The critical correctness requirement is atomicity: the dedup claim and the side effect must commit together in one transaction, otherwise a crash between them reintroduces a duplicate, and a separate check-then-act has a race where two redeliveries both pass the check. When the side effect is an external call you cannot enroll in your transaction, push idempotency downstream with an idempotency key or use the outbox/inbox pattern. Finally, bound the dedup table by evicting keys older than the maximum redelivery window.",
+      "difficulty": "senior",
+      "category": "Messaging",
+      "tricky": false,
+      "tags": ["idempotency", "dedup", "transactions"],
+      "followUps": ["What is the outbox pattern and when do you need it?", "How does SQS FIFO deduplication relate to this?"]
+    },
+    {
+      "id": "q-poison-loop",
+      "question": "What causes a poison-message loop, and how do you stop it?",
+      "answer": "A poison message is one the consumer can never process, a malformed payload, a missing referenced entity, or a handler bug. Under at-least-once with a naive nack-and-requeue on failure, the broker keeps redelivering it: the consumer fails, requeues, receives it again, fails again, forever. This loop burns CPU and, because the poison message sits at the head, can block legitimate work behind it. The fix is to cap retries and dead-letter: count redeliveries (via a header like x-death or a delivery-limit), and once the count exceeds the maximum, reject the message with requeue=false so it routes to a dead-letter queue instead of returning to the main queue. The DLQ then holds it for inspection, alerting, and later replay after the root cause is fixed.",
+      "difficulty": "senior",
+      "category": "Messaging",
+      "tricky": true,
+      "tags": ["poison-message", "dlq", "retries"],
+      "followUps": ["How do you count redeliveries in RabbitMQ?", "What should happen to messages once they reach the DLQ?"]
+    },
+    {
+      "id": "q-ack-before-after",
+      "question": "Should you acknowledge a message before or after processing it, and why?",
+      "answer": "After processing, and specifically after the side effect is durably committed. Acknowledging before processing (or using auto-ack, which acks on delivery) gives at-most-once semantics: if the consumer crashes after receiving but before finishing, the broker has already removed the message and the work is silently lost. Acknowledging after processing gives at-least-once: if the consumer crashes before acking, the broker sees the missing acknowledgement and redelivers, so no work is lost, at the cost of a possible duplicate if the crash happened after the side effect but before the ack. Because duplicates are made harmless by an idempotent consumer but lost work generally is not recoverable, ack-after-processing is almost always correct. The only place ack-before is acceptable is genuinely disposable, high-volume telemetry where loss is tolerable.",
+      "difficulty": "senior",
+      "category": "Messaging",
+      "tricky": true,
+      "tags": ["ack", "at-least-once", "auto-ack"],
+      "followUps": ["What duplicate window does ack-after-processing leave open?", "When is auto-ack acceptable?"]
+    },
+    {
+      "id": "q-ordering-parallelism",
+      "question": "Explain the trade-off between message ordering and parallelism, and how to get both where it matters.",
+      "answer": "Ordering and parallelism are in direct tension. A single queue with a single consumer preserves order but caps throughput at one worker. As soon as you add competing consumers to scale, messages are handled concurrently and global ordering is lost, one worker may finish a later message before another finishes an earlier one. You cannot have global order and unbounded parallelism simultaneously. The practical resolution is to require order only within a key rather than globally: partition the stream by a key such as customer id so all messages for one key go to one partition or message group and are processed in sequence, while different keys process in parallel. This is exactly how Kafka partitions and SQS FIFO message groups work, and a RabbitMQ consistent-hash exchange achieves the same. You preserve per-entity ordering while scaling across entities.",
+      "difficulty": "senior",
+      "category": "Messaging",
+      "tricky": true,
+      "tags": ["ordering", "partitioning", "parallelism"],
+      "followUps": ["How does SQS FIFO bound parallelism?", "When can you avoid ordering requirements entirely?"]
+    },
+    {
+      "id": "q-rabbitmq-exchanges",
+      "question": "Describe the RabbitMQ exchange types and when you would use each.",
+      "answer": "RabbitMQ producers publish to an exchange, which routes to queues via bindings. A direct exchange delivers to queues whose binding key exactly equals the message routing key, ideal for routing on a single discrete value like a severity level. A topic exchange matches the routing key against binding patterns using * for exactly one word and # for zero or more words, ideal for hierarchical routing such as order.eu.created matching order.eu.* and order.#. A fanout exchange ignores the routing key and delivers to every bound queue, which implements broadcast or pub/sub fan-out. A headers exchange routes on message header attributes instead of the routing key, using x-match all or any, useful when routing depends on several structured attributes that do not map cleanly to a single string key. Choosing the right exchange is how you express point-to-point, fan-out, or content-based routing with the same publish call.",
+      "difficulty": "mid",
+      "category": "Messaging",
+      "tricky": false,
+      "tags": ["rabbitmq", "exchanges", "routing"],
+      "followUps": ["How do topic wildcards * and # differ?", "Why publish to an exchange rather than directly to a queue?"]
+    },
+    {
+      "id": "q-prefetch-backpressure",
+      "question": "What is prefetch in RabbitMQ and how does it relate to backpressure?",
+      "answer": "Prefetch (set via basic.qos prefetch_count) limits how many unacknowledged messages the broker will push to a consumer at once. With a prefetch of 1 the broker sends one message and waits for the ack before sending the next, giving perfect load distribution but more round-trips. A higher prefetch improves throughput by keeping the consumer's pipeline full but lets a single consumer hoard messages, which worsens fair distribution and tail latency if that consumer is slow. Prefetch is the primary flow-control and backpressure lever: by bounding in-flight work per consumer, a struggling worker simply stops pulling new messages so the queue grows rather than the worker's memory. The broker itself adds another layer of backpressure by pausing producers via TCP when memory or disk alarms fire. Tune prefetch to the work profile, low for slow heterogeneous tasks, higher for fast uniform ones.",
+      "difficulty": "senior",
+      "category": "Messaging",
+      "tricky": false,
+      "tags": ["prefetch", "backpressure", "flow-control"],
+      "followUps": ["What goes wrong with a very high prefetch?", "How does the broker apply backpressure to producers?"]
+    },
+    {
+      "id": "q-visibility-timeout",
+      "question": "What is a visibility timeout in SQS and what bug arises if it is set too short?",
+      "answer": "In pull-based queues like SQS, when a consumer receives a message it becomes invisible to other consumers for the duration of the visibility timeout. If the consumer deletes the message before the timeout expires, it is gone; if the consumer crashes or runs longer than the timeout, the message becomes visible again and is redelivered to another consumer, which is how SQS provides at-least-once delivery. The classic bug is setting the visibility timeout shorter than the worst-case processing time: the message reappears while the first consumer is still working on it, and a second consumer starts processing the same message, producing duplicates and wasted work. The fix is to set the timeout safely above the p99 processing time, or to extend it mid-flight with the change-message-visibility API as a heartbeat for long-running jobs. This is also why idempotency matters even with a correctly sized timeout.",
+      "difficulty": "senior",
+      "category": "Messaging",
+      "tricky": false,
+      "tags": ["visibility-timeout", "sqs", "duplicates"],
+      "followUps": ["How do you handle a job that legitimately runs longer than any reasonable timeout?", "How does this compare to RabbitMQ's unacked-message handling?"]
+    },
+    {
+      "id": "q-sqs-standard-fifo",
+      "question": "Compare SQS standard and FIFO queues and when you would pick each.",
+      "answer": "SQS standard queues offer nearly unlimited throughput and at-least-once delivery with only best-effort ordering, so duplicates and out-of-order delivery are expected and consumers must be idempotent. SQS FIFO queues guarantee strict ordering within a message group id and provide exactly-once processing within a five-minute deduplication window keyed by a deduplication id, but at a much lower throughput per group. Pick standard for high-volume work where consumers are already idempotent and global ordering is not required, which is the majority of task-processing workloads. Pick FIFO only when you genuinely need per-key ordering or want the broker's built-in deduplication, accepting the throughput ceiling and the fact that parallelism is bounded by the number of distinct message groups. Because FIFO dedup is bounded to five minutes, it complements but does not replace an application-level idempotency strategy for longer redelivery horizons.",
+      "difficulty": "senior",
+      "category": "Messaging",
+      "tricky": false,
+      "tags": ["sqs", "fifo", "ordering"],
+      "followUps": ["How is FIFO parallelism bounded?", "Why is the five-minute dedup window sometimes insufficient?"]
+    },
+    {
+      "id": "q-dlq-design",
+      "question": "How do you design dead-letter handling so it does not become silent data loss?",
+      "answer": "Configure a dead-letter queue and route messages to it after they exceed a maximum retry count, so poison messages stop looping and move off the main queue. The trap is that a DLQ nobody watches is just a slow data-loss queue: messages pile up and the team discovers the loss days later. To avoid this, alert on DLQ depth greater than zero and treat any DLQ growth as an incident signal rather than a dumping ground. Build and document a replay path: investigate the dead-lettered messages, fix the root cause (a bug, a schema mismatch, a missing dependency), and re-publish them to the main exchange or queue once the fix is deployed. Capture enough context on each dead-lettered message (original headers, failure reason, attempt count) to diagnose without the original request. In short, a DLQ is a triage queue with monitoring and a replay runbook, not a graveyard.",
+      "difficulty": "senior",
+      "category": "Messaging",
+      "tricky": false,
+      "tags": ["dlq", "monitoring", "replay"],
+      "followUps": ["What metadata should you attach to a dead-lettered message?", "How do you safely replay from a DLQ without re-triggering the original failure?"]
+    },
+    {
+      "id": "q-consumer-lag",
+      "question": "What is consumer lag and how do you monitor and respond to it?",
+      "answer": "Consumer lag is the gap between the rate of incoming messages and the rate consumers process them, observable as growing queue depth in a broker or a widening offset gap in a log. Sustained lag means consumers cannot keep up and end-to-end latency is climbing; left unchecked it can exhaust broker storage or breach SLAs. Monitor it via queue depth and the age of the oldest unprocessed message (or offset lag per partition in a log), and alert on both absolute thresholds and rate of change. Responses include scaling out consumers up to the parallelism limit (partition or message-group count in ordered systems), optimizing the per-message work, applying backpressure to producers, and shedding or sampling non-critical messages. Because load leveling intentionally lets the queue absorb bursts, transient lag is healthy; the alarm condition is lag that grows without recovering.",
+      "difficulty": "senior",
+      "category": "Messaging",
+      "tricky": false,
+      "tags": ["consumer-lag", "monitoring", "scaling"],
+      "followUps": ["Why can you not always fix lag by adding consumers?", "How do you distinguish healthy burst-absorption lag from a real problem?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-idempotent-dlq-consumer",
+      "title": "Build an Idempotent Consumer with Dedup Store and DLQ-on-Max-Retries",
+      "difficulty": "senior",
+      "category": "Messaging",
+      "prompt": "Implement a message consumer that is safe under at-least-once delivery. It must (1) deduplicate using a stable key so processing the same message twice applies the effect once, (2) make the dedup claim atomic with the side effect, (3) retry transient failures with bounded attempts, and (4) dead-letter a message that exceeds the maximum attempts instead of looping forever. Model the dedup store and DLQ as simple in-memory abstractions so the logic is the focus.",
+      "hints": [
+        "Use a stable dedup key: prefer an explicit message id, fall back to a content hash of the body.",
+        "Claim the dedup key and apply the side effect in the same transactional unit; if the key already exists, skip the work and ack.",
+        "Track attempts per message; on transient failure retry up to a cap, and on a permanent failure or when the cap is exceeded, route to the DLQ and ack so it never returns."
+      ],
+      "solutionCode": "import hashlib\nfrom dataclasses import dataclass, field\nfrom typing import Callable\n\n\nclass TransientError(Exception):\n    pass\n\n\nclass PermanentError(Exception):\n    pass\n\n\n@dataclass\nclass Message:\n    body: bytes\n    message_id: str | None = None\n    attempts: int = 0\n\n\n@dataclass\nclass DedupStore:\n    \"\"\"Stands in for a dedup table with a unique constraint.\"\"\"\n    seen: set[str] = field(default_factory=set)\n\n    def claim(self, key: str) -> bool:\n        # Atomic claim: returns True only the first time (like INSERT .. ON CONFLICT)\n        if key in self.seen:\n            return False\n        self.seen.add(key)\n        return True\n\n    def release(self, key: str) -> None:\n        # Roll back the claim if the side effect failed (same transaction)\n        self.seen.discard(key)\n\n\n@dataclass\nclass DeadLetterQueue:\n    messages: list[tuple[Message, str]] = field(default_factory=list)\n\n    def put(self, msg: Message, reason: str) -> None:\n        self.messages.append((msg, reason))\n\n\ndef dedup_key(msg: Message) -> str:\n    return msg.message_id or hashlib.sha256(msg.body).hexdigest()\n\n\nclass IdempotentConsumer:\n    def __init__(self, dedup: DedupStore, dlq: DeadLetterQueue,\n                 handler: Callable[[Message], None], max_attempts: int = 5):\n        self.dedup = dedup\n        self.dlq = dlq\n        self.handler = handler\n        self.max_attempts = max_attempts\n\n    def consume(self, msg: Message) -> str:\n        \"\"\"Returns 'acked', 'deduped', or 'dead-lettered'. Never loops forever.\"\"\"\n        msg.attempts += 1\n        key = dedup_key(msg)\n\n        # Step 1: atomic dedup claim + side effect in one transaction\n        if not self.dedup.claim(key):\n            return \"deduped\"  # already processed: ack without re-applying\n\n        try:\n            self.handler(msg)          # the side effect\n        except TransientError as e:\n            self.dedup.release(key)    # undo claim so a retry can succeed\n            if msg.attempts >= self.max_attempts:\n                self.dlq.put(msg, f\"max attempts exceeded: {e}\")\n                return \"dead-lettered\"\n            return self.consume(msg)   # retry (in practice: requeue with backoff)\n        except PermanentError as e:\n            self.dedup.release(key)\n            self.dlq.put(msg, f\"permanent failure: {e}\")\n            return \"dead-lettered\"\n\n        # Step 2: claim + effect committed together -> safe to ack\n        return \"acked\"\n\n\n# --- demonstration ---\nif __name__ == \"__main__\":\n    applied: list[str] = []\n\n    def handler(msg: Message) -> None:\n        if b\"poison\" in msg.body:\n            raise PermanentError(\"unparseable\")\n        applied.append(msg.message_id or \"?\")\n\n    dedup, dlq = DedupStore(), DeadLetterQueue()\n    c = IdempotentConsumer(dedup, dlq, handler)\n\n    m = Message(body=b\"ok\", message_id=\"m1\")\n    assert c.consume(m) == \"acked\"\n    assert c.consume(Message(body=b\"ok\", message_id=\"m1\")) == \"deduped\"  # duplicate\n    assert c.consume(Message(body=b\"poison\", message_id=\"m2\")) == \"dead-lettered\"\n    assert applied == [\"m1\"]           # effect applied exactly once\n    assert len(dlq.messages) == 1       # poison message captured, no loop",
+      "solutionLanguage": "python",
+      "explanation": "The solution demonstrates the canonical at-least-once-plus-idempotency pattern. The dedup key is derived from a stable message id with a content-hash fallback, so the same logical message always maps to the same key regardless of how many times the broker redelivers it. The claim method models an atomic INSERT with a unique constraint: it returns True only on the first attempt, and a duplicate delivery short-circuits to 'deduped' without re-applying the effect. Crucially, the claim and the side effect are treated as one transactional unit, on failure the claim is released so the work can be retried, which avoids the race where a failed effect leaves a dangling dedup key that would wrongly skip future deliveries. Transient errors are retried up to a bounded max-attempts cap and then dead-lettered, while permanent errors are dead-lettered immediately, so a poison message is captured for inspection instead of looping forever and blocking the queue. The demonstration asserts the three invariants that matter: the effect is applied exactly once across duplicate deliveries, a poison message lands in the DLQ rather than looping, and the consumer always terminates in a definite acked, deduped, or dead-lettered state.",
+      "relatedTopic": "message-queues"
+    },
+    {
+      "id": "ch-multitenant-routing",
+      "title": "Design a Topic-Exchange Routing Scheme for Multi-Tenant Events",
+      "difficulty": "senior",
+      "category": "Messaging",
+      "prompt": "Design and implement (as a routing-key builder plus binding plan) a RabbitMQ topic-exchange scheme for a multi-tenant SaaS that emits events. Requirements: (1) a per-tenant audit consumer that sees every event for its tenant, (2) a global billing consumer that sees only 'invoice' events across all tenants, (3) a region-scoped fulfilment consumer that sees only 'order.created' events in its region, and (4) the scheme must extend to new tenants, event types, and regions without changing the producer. Provide the routing-key convention and the queue bindings, with code that builds routing keys and validates which bindings a key matches.",
+      "hints": [
+        "Choose a hierarchical routing key like tenant.region.entity.action so topic wildcards can slice any dimension.",
+        "Use * to match exactly one segment (a specific tenant or region) and # to match the rest (all events for a tenant).",
+        "Bind audit to tenant.#, billing to *.*.invoice.* , and fulfilment to *.<region>.order.created; verify a sample key matches the intended bindings only."
+      ],
+      "solutionCode": "from dataclasses import dataclass\nfrom fnmatch import fnmatchcase\n\n# Routing key convention:  tenant.region.entity.action\n# Examples:\n#   acme.eu.order.created\n#   acme.us.invoice.issued\n# Topic wildcards: '*' = exactly one segment, '#' = zero or more segments.\n\n\ndef routing_key(tenant: str, region: str, entity: str, action: str) -> str:\n    for part in (tenant, region, entity, action):\n        if not part or \".\" in part or \"*\" in part or \"#\" in part:\n            raise ValueError(f\"invalid segment: {part!r}\")\n    return f\"{tenant}.{region}.{entity}.{action}\"\n\n\ndef topic_matches(binding: str, key: str) -> bool:\n    \"\"\"Implements AMQP topic matching: '*' one word, '#' zero or more words.\"\"\"\n    b, k = binding.split(\".\"), key.split(\".\")\n\n    def rec(bi: int, ki: int) -> bool:\n        if bi == len(b):\n            return ki == len(k)\n        if b[bi] == \"#\":\n            # '#' consumes any number of remaining words\n            return any(rec(bi + 1, kj) for kj in range(ki, len(k) + 1))\n        if ki == len(k):\n            return False\n        if b[bi] == \"*\" or b[bi] == k[ki]:\n            return rec(bi + 1, ki + 1)\n        return False\n\n    return rec(0, 0)\n\n\n@dataclass(frozen=True)\nclass Binding:\n    queue: str\n    pattern: str\n\n\ndef binding_plan(tenant: str, region: str) -> list[Binding]:\n    \"\"\"Bindings needed to onboard a tenant + region. Producer is untouched.\"\"\"\n    return [\n        Binding(f\"audit.{tenant}\", f\"{tenant}.#\"),                 # all events for tenant\n        Binding(\"billing.global\", \"*.*.invoice.*\"),               # all invoices, any tenant\n        Binding(f\"fulfilment.{region}\", f\"*.{region}.order.created\"),  # regional orders\n    ]\n\n\ndef route(key: str, bindings: list[Binding]) -> set[str]:\n    return {b.queue for b in bindings if topic_matches(b.pattern, key)}\n\n\nif __name__ == \"__main__\":\n    bindings = binding_plan(\"acme\", \"eu\")\n\n    k_order = routing_key(\"acme\", \"eu\", \"order\", \"created\")\n    assert route(k_order, bindings) == {\"audit.acme\", \"fulfilment.eu\"}\n\n    k_invoice = routing_key(\"acme\", \"us\", \"invoice\", \"issued\")\n    # us order is not in the eu fulfilment binding; invoice hits audit + billing\n    assert route(k_invoice, bindings) == {\"audit.acme\", \"billing.global\"}\n\n    k_other_tenant = routing_key(\"globex\", \"eu\", \"order\", \"created\")\n    # different tenant: audit.acme must NOT match; fulfilment.eu still does\n    assert route(k_other_tenant, bindings) == {\"fulfilment.eu\"}\n\n    print(\"routing scheme verified\")",
+      "solutionLanguage": "python",
+      "explanation": "The design hinges on a hierarchical routing-key convention, tenant.region.entity.action, that encodes every dimension a consumer might want to slice on, which lets a single topic exchange satisfy all three consumer shapes without the producer knowing who is listening. The audit consumer binds tenant.# so it receives every event for its tenant regardless of region, entity, or action, demonstrating how # consumes the entire remaining tail. The billing consumer binds *.*.invoice.* so it matches invoice events across all tenants and regions while ignoring everything else, showing precise filtering on a middle segment. The fulfilment consumer binds *.region.order.created so it sees only order-creation events in its region. The included topic_matches function is a faithful implementation of AMQP topic semantics with backtracking for #, and the test assertions verify the critical isolation property: a different tenant's events never reach another tenant's audit queue, while cross-cutting bindings like billing and regional fulfilment still match correctly. Because onboarding a new tenant, region, or event type only requires adding bindings (or already-covered wildcards) and never a producer change, the scheme scales cleanly, which is exactly the decoupling a topic exchange is meant to provide.",
+      "relatedTopic": "message-queues"
+    }
+  ],
+  "references": [
+    {
+      "label": "RabbitMQ Tutorials (Work Queues, Routing, Topics)",
+      "url": "https://www.rabbitmq.com/tutorials"
+    },
+    {
+      "label": "RabbitMQ: Consumer Acknowledgements and Publisher Confirms",
+      "url": "https://www.rabbitmq.com/docs/confirms"
+    },
+    {
+      "label": "AWS SQS Developer Guide (Standard vs FIFO, Visibility Timeout, DLQ)",
+      "url": "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/welcome.html"
+    },
+    {
+      "label": "Enterprise Integration Patterns (Hohpe & Woolf): Messaging Patterns",
+      "url": "https://www.enterpriseintegrationpatterns.com/patterns/messaging/"
+    },
+    {
+      "label": "CloudAMQP: RabbitMQ Best Practices",
+      "url": "https://www.cloudamqp.com/blog/part1-rabbitmq-best-practice.html"
+    },
+    {
+      "label": "Tyler Treat: You Cannot Have Exactly-Once Delivery",
+      "url": "https://bravenewgeek.com/you-cannot-have-exactly-once-delivery/"
+    }
+  ]
+}

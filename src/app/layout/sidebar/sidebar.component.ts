@@ -34,6 +34,7 @@ export class SidebarComponent {
     { path: '/interview', label: 'Interview Mode', icon: 'interview' },
     { path: '/challenges', label: 'Challenges', icon: 'challenges' },
     { path: '/logic', label: 'Logic & Problem Solving', icon: 'target' },
+    { path: '/review', label: 'Review', icon: 'refresh' },
     { path: '/progress', label: 'Progress', icon: 'progress' },
   ];
 

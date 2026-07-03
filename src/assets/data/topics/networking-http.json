@@ -1,0 +1,679 @@
+{
+  "id": "networking-http",
+  "title": "Networking & HTTP",
+  "category": "Computer Science",
+  "subcategory": "Networking",
+  "difficulty": "senior",
+  "tags": [
+    "networking",
+    "http",
+    "tcp-ip",
+    "tls",
+    "dns",
+    "http3-quic",
+    "caching",
+    "cors"
+  ],
+  "description": "A staff-engineer tour of the network stack beneath web applications: TCP/IP versus OSI, the TCP handshake and congestion control, DNS and TLS, the evolution of HTTP/1.1 to HTTP/2 to HTTP/3 over QUIC, and the semantics of methods, caching, cookies, and CORS. The emphasis is on the trade-offs and failure modes that show up in production latency budgets and debugging sessions.",
+  "estReadMinutes": 30,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Why networking still matters to front-end engineers",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Every single-page application is a thin veneer over a stack of network protocols. When a page is slow, a request hangs, or a fetch is mysteriously blocked, the explanation almost always lives below the JavaScript: a DNS lookup that took 200ms, a TLS handshake that added a round trip, a TCP retransmission triggered by packet loss, or a CORS preflight that the server never answered correctly. Senior engineers are expected to reason about these layers fluently."
+        },
+        {
+          "type": "paragraph",
+          "text": "This topic builds the stack from the bottom up — addressing and transport, then naming and encryption, then the HTTP application protocol and its security model. The goal is not trivia but a mental model: knowing where latency comes from, why head-of-line blocking exists at two different layers, and what each protocol generation actually fixed."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A useful framing for interviews: describe what physically happens between typing a URL and seeing pixels. The strongest answers walk DNS, TCP, TLS, HTTP request/response, and rendering, naming the round trips at each step."
+        }
+      ]
+    },
+    {
+      "id": "models",
+      "heading": "TCP/IP model versus OSI",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The OSI model is a seven-layer reference model (Physical, Data Link, Network, Transport, Session, Presentation, Application). It is a teaching and discussion tool — real software rarely maps cleanly onto its session and presentation layers. The TCP/IP model is what the internet actually runs: four layers (Link, Internet, Transport, Application) that collapse OSI's upper three into a single Application layer."
+        },
+        {
+          "type": "table",
+          "headers": ["TCP/IP layer", "Rough OSI equivalent", "Examples"],
+          "rows": [
+            ["Application", "Application + Presentation + Session", "HTTP, DNS, TLS, gRPC"],
+            ["Transport", "Transport", "TCP, UDP, QUIC"],
+            ["Internet", "Network", "IP (v4/v6), ICMP"],
+            ["Link", "Data Link + Physical", "Ethernet, Wi-Fi, ARP"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The key insight is encapsulation: each layer wraps the layer above in its own header. An HTTP request becomes a TCP segment, which becomes an IP packet, which becomes an Ethernet frame. Each layer only needs to understand its own header and treats the payload as opaque. This is why you can swap Wi-Fi for Ethernet without HTTP knowing, and why QUIC could move HTTP off TCP entirely."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "TLS does not fit neatly into either model. It sits between TCP and HTTP, often described as a 'layer 6 presentation' concern in OSI terms, but in TCP/IP it is just another application-layer protocol that HTTP is layered on top of. QUIC blurs this further by integrating TLS into transport."
+        }
+      ]
+    },
+    {
+      "id": "ip-addressing",
+      "heading": "IP addressing basics",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "IP is the internet's addressing and routing layer. IPv4 addresses are 32 bits, written as four dotted octets (e.g. 93.184.216.34), giving roughly 4.3 billion addresses — long exhausted, which is why NAT and private ranges exist. IPv6 addresses are 128 bits, written in hex groups (e.g. 2606:2800:220:1:248:1893:25c8:1946), effectively unlimited."
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "CIDR notation (e.g. 10.0.0.0/8) describes a network by prefix length: /24 means the first 24 bits are the network and the last 8 identify hosts (256 addresses).",
+            "Private ranges (RFC 1918): 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 are not routable on the public internet and sit behind NAT.",
+            "Loopback is 127.0.0.0/8 (commonly 127.0.0.1) and ::1 in IPv6.",
+            "IP is connectionless and best-effort: it does not guarantee delivery, ordering, or duplicate suppression. Those guarantees come from TCP above it."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Routing happens hop by hop. Each router inspects the destination IP, consults its routing table, and forwards toward the next hop. The TTL (Time To Live) field decrements at each hop and the packet is dropped at zero, which prevents routing loops and is the mechanism traceroute exploits to map a path."
+        }
+      ]
+    },
+    {
+      "id": "tcp-vs-udp",
+      "heading": "TCP versus UDP",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "TCP and UDP are the two dominant transport protocols, and the choice between them is one of the most consequential design decisions in networked systems. TCP provides a reliable, ordered, connection-oriented byte stream. UDP provides connectionless, unreliable datagrams — fire and forget."
+        },
+        {
+          "type": "heading",
+          "level": 3,
+          "text": "TCP: the three-way handshake"
+        },
+        {
+          "type": "paragraph",
+          "text": "Before any data flows, TCP establishes a connection with a three-way handshake. The client sends a SYN (synchronize) with an initial sequence number. The server replies with SYN-ACK, acknowledging the client's sequence and supplying its own. The client sends a final ACK. This costs one full round trip before the first byte of application data, which is why connection reuse matters so much."
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "Client                          Server\n  |  ---- SYN seq=x ---------->   |\n  |  <--- SYN-ACK seq=y ack=x+1 - |\n  |  ---- ACK ack=y+1 -------->   |\n  |        (connection ESTABLISHED)\n  |  ---- HTTP request -------->   |"
+        },
+        {
+          "type": "paragraph",
+          "text": "TCP guarantees reliable ordered delivery using sequence numbers and acknowledgements: lost segments are retransmitted, and out-of-order segments are buffered and reassembled before delivery to the application. Flow control prevents a fast sender from overwhelming a slow receiver via a sliding receive window advertised in every ACK. Congestion control protects the network itself: slow-start ramps the congestion window exponentially from a small initial value, then congestion-avoidance grows it linearly; on packet loss the window is cut, backing off to relieve the network."
+        },
+        {
+          "type": "paragraph",
+          "text": "Closing is a four-way handshake (FIN, ACK, FIN, ACK) because each direction of the connection is closed independently. TCP's critical weakness for application layering is head-of-line blocking: because it delivers a single ordered stream, one lost segment stalls delivery of everything behind it, even data that has already arrived. This is the flaw HTTP/3 was designed to escape."
+        },
+        {
+          "type": "heading",
+          "level": 3,
+          "text": "UDP: connectionless and lean"
+        },
+        {
+          "type": "paragraph",
+          "text": "UDP has no handshake, no acknowledgements, no ordering, and no congestion control of its own. It is a thin wrapper over IP adding only ports and a checksum. This makes it ideal where timeliness beats reliability or where the application implements its own logic: DNS queries (small, one round trip), real-time video and voice (a late packet is useless — better to drop it than stall), gaming, and crucially QUIC, which rebuilds reliability and congestion control in user space on top of UDP."
+        },
+        {
+          "type": "table",
+          "headers": ["Property", "TCP", "UDP"],
+          "rows": [
+            ["Connection", "Connection-oriented (handshake)", "Connectionless"],
+            ["Reliability", "Guaranteed, retransmits", "None (app's job)"],
+            ["Ordering", "Strict, in-order delivery", "No ordering"],
+            ["Congestion control", "Built in (slow-start, etc.)", "None built in"],
+            ["Head-of-line blocking", "Yes (single ordered stream)", "No"],
+            ["Typical use", "HTTP/1-2, email, file transfer", "DNS, video, VoIP, QUIC/HTTP/3"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dns",
+      "heading": "DNS resolution",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "DNS translates human-readable names into IP addresses. The first time a client needs example.com, it asks a recursive resolver (often run by the ISP or a public service like 8.8.8.8 or 1.1.1.1). The resolver does the legwork: it queries a root server, which directs it to the TLD server for .com, which directs it to the authoritative name server for example.com, which returns the actual address. The resolver caches each answer for its TTL and returns the result to the client."
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "A record: maps a name to an IPv4 address.",
+            "AAAA record: maps a name to an IPv6 address.",
+            "CNAME record: an alias pointing one name at another canonical name.",
+            "MX record: mail exchanger for the domain, with priorities.",
+            "NS record: delegates a zone to authoritative name servers.",
+            "TXT record: arbitrary text, used for SPF, DKIM, domain verification."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "TTL governs caching at every layer — resolver, OS, browser. A low TTL (say 60s) lets you fail over or change infrastructure quickly but increases query volume; a high TTL (hours) reduces lookups but makes changes propagate slowly. This trade-off is central to DNS-based load balancing and failover. DNS traditionally runs over UDP for speed, falling back to TCP for large responses; DNS-over-HTTPS and DNS-over-TLS now encrypt these queries."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "DNS resolution adds latency to the very first request to a new origin. Browsers mitigate this with dns-prefetch and preconnect resource hints, which warm the DNS (and optionally TCP/TLS) before the resource is actually needed."
+        }
+      ]
+    },
+    {
+      "id": "tls",
+      "heading": "TLS handshake and what it encrypts",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "TLS provides confidentiality, integrity, and authentication on top of TCP. After the TCP handshake completes, the TLS handshake negotiates a cipher suite, authenticates the server via its certificate (a public key signed by a trusted Certificate Authority), and derives shared session keys. TLS 1.2 typically costs two round trips; TLS 1.3 streamlined this to one round trip, and with session resumption can achieve 0-RTT for repeat connections."
+        },
+        {
+          "type": "table",
+          "headers": ["Aspect", "TLS 1.2", "TLS 1.3"],
+          "rows": [
+            ["Handshake round trips", "2 RTT", "1 RTT (0-RTT on resume)"],
+            ["Cipher suites", "Many, some weak/legacy", "Pruned to AEAD-only"],
+            ["Forward secrecy", "Optional", "Mandatory (ephemeral keys)"],
+            ["Encrypted handshake", "Mostly cleartext", "More of it encrypted"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Two extensions matter for modern hosting. SNI (Server Name Indication) is sent by the client in the ClientHello to tell the server which hostname it wants, so a single IP can serve many TLS certificates (virtual hosting). ALPN (Application-Layer Protocol Negotiation) lets client and server agree on the application protocol — h2 for HTTP/2 or http/1.1 — during the handshake, avoiding an extra negotiation round trip."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "What is NOT encrypted: in TLS 1.2 and standard TLS 1.3, the SNI hostname travels in cleartext in the ClientHello, so a network observer can see which site you are connecting to even though the content is encrypted. Encrypted Client Hello (ECH) is the emerging fix. The destination IP is also always visible — encryption hides content, not metadata about who you talk to."
+        }
+      ]
+    },
+    {
+      "id": "http-versions",
+      "heading": "HTTP/1.1 vs HTTP/2 vs HTTP/3",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "HTTP/1.1 is text-based and processes one request per connection at a time. Keep-alive (persistent connections) lets multiple requests reuse one TCP connection, avoiding repeated handshakes. Pipelining — sending multiple requests without waiting for responses — was specified but never widely deployed because responses must return in order, causing application-layer head-of-line blocking. The practical workaround was opening 6 parallel connections per origin, which wastes resources and competes for bandwidth."
+        },
+        {
+          "type": "paragraph",
+          "text": "HTTP/2 introduced a binary framing layer. Requests and responses are split into frames belonging to numbered streams, all multiplexed over a single TCP connection. This eliminates the application-layer head-of-line blocking of HTTP/1.1 and removes the need for connection sharding. HPACK compresses headers, which are highly repetitive across requests. Server push (now largely deprecated and removed by browsers) allowed servers to send resources proactively."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The crucial subtlety: HTTP/2 multiplexes streams over ONE TCP connection, so a single lost packet stalls ALL streams while TCP waits for retransmission. HTTP/2 solved application-layer HOL blocking but reintroduced it at the transport layer. This is exactly the problem HTTP/3 exists to solve."
+        },
+        {
+          "type": "paragraph",
+          "text": "HTTP/3 runs over QUIC, which runs over UDP. QUIC implements its own streams with independent flow control, so a lost packet only blocks the stream it belongs to — other streams keep flowing. QUIC also integrates the TLS 1.3 handshake into transport, combining connection and encryption setup into as little as one round trip (0-RTT on resume), and supports connection migration so a connection survives a client changing networks (Wi-Fi to cellular) because it is keyed by a connection ID, not the IP/port tuple."
+        },
+        {
+          "type": "table",
+          "headers": ["Feature", "HTTP/1.1", "HTTP/2", "HTTP/3"],
+          "rows": [
+            ["Transport", "TCP", "TCP", "QUIC over UDP"],
+            ["Format", "Text", "Binary frames", "Binary frames"],
+            ["Multiplexing", "No (6 conns)", "Yes, one TCP conn", "Yes, independent streams"],
+            ["Header compression", "None", "HPACK", "QPACK"],
+            ["HOL blocking", "App-layer", "Transport-layer (TCP)", "Eliminated"],
+            ["Handshake (new)", "TCP + TLS separately", "TCP + TLS (ALPN h2)", "QUIC+TLS combined, ~1 RTT"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "http-semantics",
+      "heading": "HTTP semantics: methods, status, headers",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "HTTP methods carry two important properties. A method is safe if it has no side effects (read-only). A method is idempotent if making the request N times has the same effect on server state as making it once. These properties drive retry logic, caching, and prefetching: clients and proxies may freely retry or prefetch safe methods, and may safely retry idempotent ones after a network failure."
+        },
+        {
+          "type": "table",
+          "headers": ["Method", "Safe", "Idempotent", "Typical use"],
+          "rows": [
+            ["GET", "Yes", "Yes", "Retrieve a resource"],
+            ["HEAD", "Yes", "Yes", "Headers only, no body"],
+            ["OPTIONS", "Yes", "Yes", "Capabilities / CORS preflight"],
+            ["PUT", "No", "Yes", "Replace resource at a known URL"],
+            ["DELETE", "No", "Yes", "Remove a resource"],
+            ["POST", "No", "No", "Create / submit, non-idempotent"],
+            ["PATCH", "No", "No", "Partial update (not guaranteed idempotent)"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Status codes are grouped by leading digit. Knowing the class lets you reason about a response even when you do not recognize the exact code."
+        },
+        {
+          "type": "table",
+          "headers": ["Class", "Meaning", "Examples"],
+          "rows": [
+            ["1xx", "Informational", "100 Continue, 101 Switching Protocols"],
+            ["2xx", "Success", "200 OK, 201 Created, 204 No Content"],
+            ["3xx", "Redirection / conditional", "301 Moved, 304 Not Modified, 307 Temporary"],
+            ["4xx", "Client error", "400 Bad Request, 401, 403, 404, 429"],
+            ["5xx", "Server error", "500, 502 Bad Gateway, 503, 504 Timeout"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Key headers include Content-Type (media type of the body), Content-Length / Transfer-Encoding: chunked (body sizing), Authorization (credentials), Accept and Accept-Encoding (content negotiation), Cache-Control / ETag (caching), and Set-Cookie / Cookie (state). The raw exchange below shows a request and response with headers."
+        },
+        {
+          "type": "code",
+          "language": "http",
+          "code": "GET /api/users/42 HTTP/1.1\nHost: api.example.com\nAccept: application/json\nAuthorization: Bearer eyJhbGci...\nAccept-Encoding: gzip, br\n\nHTTP/1.1 200 OK\nContent-Type: application/json\nContent-Length: 58\nCache-Control: max-age=60\nETag: \"a1b2c3d4\"\n\n{\"id\":42,\"name\":\"Ada Lovelace\",\"role\":\"engineer\"}"
+        }
+      ]
+    },
+    {
+      "id": "caching",
+      "heading": "HTTP caching",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "HTTP caching exists at two tiers. Freshness lets a cache serve a response without contacting the origin at all, controlled by Cache-Control (max-age, s-maxage, no-cache, no-store, private, public). Validation lets a cache check whether a stale copy is still good with a conditional request, controlled by validators ETag (an opaque content fingerprint) and Last-Modified."
+        },
+        {
+          "type": "paragraph",
+          "text": "A conditional GET sends If-None-Match with the cached ETag. If the resource is unchanged, the server returns 304 Not Modified with no body, saving bandwidth; if it changed, it returns 200 with the new body and a new ETag. The curl below demonstrates the round trip."
+        },
+        {
+          "type": "code",
+          "language": "bash",
+          "code": "# First request returns the body and an ETag\ncurl -i https://api.example.com/config\n# ... HTTP/1.1 200 OK\n# ... ETag: \"v7-9f8c\"\n\n# Revalidate with the stored ETag\ncurl -i https://api.example.com/config \\\n  -H 'If-None-Match: \"v7-9f8c\"'\n# HTTP/1.1 304 Not Modified   <-- unchanged, no body sent\n# ETag: \"v7-9f8c\""
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Best practice for static assets: fingerprint the filename (app.4f3a.js) and serve with Cache-Control: max-age=31536000, immutable. The cache never revalidates; a new deploy ships a new filename. For HTML and API responses that change, use no-cache (must revalidate) plus an ETag so the common case is a cheap 304."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "no-cache does NOT mean 'do not cache' — it means 'cache but always revalidate before use'. To prevent storage entirely use no-store. Confusing the two is a classic source of either stale data or accidentally cacheable sensitive responses."
+        }
+      ]
+    },
+    {
+      "id": "cookies-cors",
+      "heading": "Cookies, SameSite, and CORS",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Cookies are server-set state echoed back on every matching request. Set-Cookie attributes control scope and safety: Domain and Path scope where the cookie is sent; Secure restricts it to HTTPS; HttpOnly hides it from JavaScript (mitigating XSS theft); Max-Age/Expires set lifetime; and SameSite controls cross-site sending."
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "SameSite=Strict: cookie is never sent on any cross-site request, even top-level navigation.",
+            "SameSite=Lax (the modern default): sent on top-level GET navigations but not on cross-site subresource requests or POSTs — a strong CSRF mitigation.",
+            "SameSite=None: sent on all cross-site requests but MUST be paired with Secure; required for third-party cookies."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "CORS (Cross-Origin Resource Sharing) governs whether browser JavaScript may READ a cross-origin response. The browser enforces the Same-Origin Policy by default; CORS is the server's way of opting specific origins back in via response headers like Access-Control-Allow-Origin. For requests that are not 'simple' (custom headers, methods like PUT/DELETE, or JSON content type), the browser first sends a preflight OPTIONS request to ask permission before sending the real request."
+        },
+        {
+          "type": "code",
+          "language": "http",
+          "code": "OPTIONS /api/orders HTTP/1.1\nHost: api.example.com\nOrigin: https://app.example.com\nAccess-Control-Request-Method: PUT\nAccess-Control-Request-Headers: content-type, authorization\n\nHTTP/1.1 204 No Content\nAccess-Control-Allow-Origin: https://app.example.com\nAccess-Control-Allow-Methods: GET, PUT, POST, DELETE\nAccess-Control-Allow-Headers: content-type, authorization\nAccess-Control-Allow-Credentials: true\nAccess-Control-Max-Age: 600"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "CORS and SameSite solve different problems and are frequently confused. CORS is about the BROWSER deciding whether JS may read a cross-origin response (a read-protection enforced client-side). SameSite is about whether the browser ATTACHES cookies to cross-site requests (a CSRF/write protection). Neither is a server-side firewall: a non-browser client ignores both entirely."
+        }
+      ]
+    },
+    {
+      "id": "why-layers",
+      "heading": "Why this layered design wins",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The internet's success comes from a narrow waist: everything runs over IP, and IP runs over everything. Below IP, link technologies (fiber, Wi-Fi, cellular) evolve independently. Above IP, transports (TCP, UDP, QUIC) and applications (HTTP, DNS) evolve independently. Because each layer hides its details behind a stable interface, innovation at one layer does not require rewriting the others."
+        },
+        {
+          "type": "paragraph",
+          "text": "This is precisely why HTTP/3 was possible. TCP is implemented in the OS kernel and is notoriously hard to evolve (middleboxes ossify it). By building QUIC in user space over UDP, browser and server vendors could deploy a new, congestion-controlled, multiplexed transport without waiting for kernels and routers worldwide to change. The layering that lets you ignore the network most of the time is the same layering that let the network reinvent its transport under everyone's feet."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Staff-level takeaway: most production latency is round trips, not bandwidth. DNS, TCP, and TLS each cost round trips before HTTP even starts. Connection reuse, TLS 1.3, HTTP/2-3 multiplexing, and resource hints (preconnect) all attack the same enemy — the number of sequential round trips on the critical path."
+        }
+      ]
+    },
+    {
+      "id": "worked-example",
+      "heading": "Worked example: anatomy of a page load",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Consider a browser loading https://shop.example.com for the first time. Walking the round trips makes the cost of a cold connection concrete and shows where each optimization applies."
+        },
+        {
+          "type": "list",
+          "ordered": true,
+          "items": [
+            "DNS: resolver lookup for shop.example.com -> IP (one round trip if uncached; zero if cached).",
+            "TCP handshake: SYN / SYN-ACK / ACK (one round trip).",
+            "TLS handshake: ClientHello with SNI and ALPN, ServerHello + certificate, key exchange (one round trip for TLS 1.3, two for 1.2).",
+            "HTTP request: GET / sent, server responds with HTML (one round trip).",
+            "Subresource fetches: CSS, JS, images — multiplexed over the same HTTP/2 or HTTP/3 connection, no new handshakes."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "On HTTP/2 over TLS 1.3 with a warm DNS cache, the first byte of HTML arrives after roughly three round trips (TCP + TLS + request). HTTP/3 over QUIC can shave one by folding TLS into the transport handshake. Every reused connection skips the TCP and TLS round trips entirely, which is why Keep-Alive and connection pooling dominate real-world performance."
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "Cold connect (HTTP/2, TLS 1.3, DNS cached):\n  RTT 1: TCP SYN/SYN-ACK/ACK\n  RTT 2: TLS 1.3 ClientHello/ServerHello\n  RTT 3: GET / -> HTML\n  -> subresources multiplexed, no further handshakes\n\nWarm connection (reused):\n  RTT 1: GET / -> HTML   (TCP+TLS already established)"
+        }
+      ]
+    },
+    {
+      "id": "mistakes",
+      "heading": "Common mistakes and misconceptions",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "Believing HTTP/2 fully eliminates head-of-line blocking. It removes it at the application layer but a single TCP packet loss still stalls every stream — only HTTP/3 over QUIC fixes this.",
+            "Treating POST as idempotent and retrying it blindly. A retried POST may create a duplicate resource; use idempotency keys or design with PUT where the URL is known.",
+            "Using no-cache to disable caching. no-cache means 'revalidate before serving'; no-store is what actually prevents storage.",
+            "Assuming CORS protects your API. CORS is a browser read-restriction; it does nothing against curl, mobile apps, or servers. Authentication and authorization protect the API.",
+            "Confusing SameSite with CORS. SameSite controls whether cookies are attached to cross-site requests (CSRF), not whether JS can read a response (CORS).",
+            "Forgetting that TLS hides content but not metadata: SNI hostname (pre-ECH) and destination IP remain observable."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "A subtle production bug: returning Access-Control-Allow-Origin: * together with Access-Control-Allow-Credentials: true. The spec forbids the wildcard with credentials; browsers reject it. You must echo the specific Origin and add Vary: Origin so caches do not serve the wrong origin's headers."
+        }
+      ]
+    },
+    {
+      "id": "note-debugging",
+      "heading": "Note: tooling for the network layer",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Strong network reasoning is backed by the right tools. dig and nslookup inspect DNS and TTLs. curl -v exposes the full request/response including TLS negotiation. openssl s_client -connect host:443 -servername host shows the certificate chain, negotiated TLS version, and ALPN protocol. The browser DevTools Network panel reveals protocol (h2/h3), timing breakdown (DNS, connect, TLS, TTFB), and cache status, while the Security tab shows the certificate."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "To confirm a site is actually serving HTTP/3, check the alt-svc response header (advertising h3) and the Protocol column in DevTools after a repeat visit — the first request typically arrives over HTTP/2 before the client upgrades."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "tcp-handshake",
+      "title": "TCP three-way handshake",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n    participant C as Client\n    participant S as Server\n    C->>S: SYN seq=x\n    S->>C: SYN-ACK seq=y ack=x+1\n    C->>S: ACK ack=y+1\n    Note over C,S: Connection ESTABLISHED\n    C->>S: HTTP request"
+    },
+    {
+      "id": "tls13-handshake",
+      "title": "TLS 1.3 handshake (1-RTT)",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n    participant C as Client\n    participant S as Server\n    C->>S: ClientHello (SNI, ALPN, key share)\n    S->>C: ServerHello (key share)\n    S->>C: Certificate + Finished (encrypted)\n    C->>S: Finished (encrypted)\n    Note over C,S: Application data flows"
+    },
+    {
+      "id": "dns-recursive",
+      "title": "DNS recursive resolution",
+      "type": "mermaid",
+      "content": "sequenceDiagram\n    participant Cl as Client\n    participant R as Recursive Resolver\n    participant Root as Root Server\n    participant TLD as TLD (.com)\n    participant Auth as Authoritative\n    Cl->>R: example.com A?\n    R->>Root: example.com A?\n    Root->>R: refer to .com TLD\n    R->>TLD: example.com A?\n    TLD->>R: refer to authoritative NS\n    R->>Auth: example.com A?\n    Auth->>R: 93.184.216.34 (TTL)\n    R->>Cl: 93.184.216.34"
+    },
+    {
+      "id": "hol-blocking-ascii",
+      "title": "Head-of-line blocking across HTTP versions",
+      "type": "ascii",
+      "content": "HTTP/1.1 : [req1]----[req2]----[req3]   one at a time per conn (app HOL)\nHTTP/2   : ==stream1==stream2==stream3==  multiplexed on ONE TCP\n           a lost TCP packet stalls ALL streams (transport HOL)\nHTTP/3   : ~~stream1~~ ~~stream2~~ ~~stream3~~  independent QUIC streams\n           a lost packet stalls only its own stream (HOL fixed)"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-tcpip-vs-osi",
+      "question": "How does the TCP/IP model differ from the OSI model, and which one does the internet actually use?",
+      "answer": "OSI is a seven-layer reference model used mostly for teaching and discussion, while TCP/IP is the four-layer model the internet actually runs on. TCP/IP collapses OSI's Application, Presentation, and Session layers into a single Application layer, and its Link layer combines OSI's Data Link and Physical layers. The middle layers map fairly cleanly: TCP/IP Transport to OSI Transport, and TCP/IP Internet to OSI Network. The practical value of either model is encapsulation — each layer wraps the one above in its own header and treats the payload as opaque. That separation is why HTTP does not care whether it runs over Wi-Fi or Ethernet, and why TLS and QUIC do not fit neatly into the rigid OSI boxes.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["tcp-ip", "osi", "layering"],
+      "followUps": ["Where does TLS sit in each model?", "Why is encapsulation important for protocol evolution?"]
+    },
+    {
+      "id": "q-tcp-handshake",
+      "question": "Walk through the TCP three-way handshake and explain why it costs latency.",
+      "answer": "The client sends a SYN carrying its initial sequence number. The server replies with a SYN-ACK that acknowledges the client's sequence and supplies the server's own initial sequence. The client sends a final ACK, after which the connection is established and data can flow. This exchange costs one full round trip before the first byte of application data leaves the client, and it must complete before TLS even begins. That fixed round-trip cost is why connection reuse via Keep-Alive, connection pooling, and protocols that fold setup steps together (like QUIC) matter so much for performance. The handshake also exchanges options like window scaling and MSS that tune the connection.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["tcp", "handshake", "latency"],
+      "followUps": ["How does the four-way close differ?", "What does SYN flooding attack and how is it mitigated?"]
+    },
+    {
+      "id": "q-flow-vs-congestion",
+      "question": "What is the difference between TCP flow control and congestion control?",
+      "answer": "Flow control protects the receiver: it prevents a fast sender from overwhelming a slow receiver's buffers. It works via the receive window the receiver advertises in every ACK, telling the sender how much unacknowledged data it can have in flight. Congestion control protects the network between the endpoints: it prevents senders from overwhelming shared links and routers. It works via the congestion window, which slow-start grows exponentially from a small initial value, then congestion-avoidance grows linearly, backing off sharply when loss signals congestion. The actual amount a sender may transmit is the minimum of the receive window and the congestion window. They are independent mechanisms solving different problems that happen to bound the same send rate.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["tcp", "congestion-control", "flow-control"],
+      "followUps": ["What is slow-start restart?", "How does BBR differ from loss-based congestion control?"]
+    },
+    {
+      "id": "q-tcp-vs-udp-realtime",
+      "question": "For a real-time video call, would you choose TCP or UDP, and why?",
+      "answer": "UDP, almost always. In real-time media, a packet that arrives late is useless — the moment it was meant to render has already passed — so retransmitting it wastes bandwidth and, worse, stalls everything behind it. TCP guarantees ordered, reliable delivery, which means a single lost packet triggers head-of-line blocking that freezes the stream while it retransmits, producing exactly the stutter you want to avoid. UDP lets the application drop late packets and keep going, concealing the loss with error correction or interpolation. This is why WebRTC, VoIP, and game traffic run over UDP, layering their own lightweight reliability only where it helps. The tricky part is that 'unreliable' is the feature, not a bug: timeliness beats completeness for live media.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["udp", "tcp", "real-time"],
+      "followUps": ["How does QUIC give UDP reliability without TCP HOL blocking?", "When would real-time still want TCP?"]
+    },
+    {
+      "id": "q-dns-resolution",
+      "question": "Describe how a recursive DNS resolution works from a cold cache.",
+      "answer": "The client asks its configured recursive resolver for a name like example.com. With nothing cached, the resolver starts at the top: it queries a root server, which does not know the answer but refers it to the TLD server for .com. The resolver queries that TLD server, which refers it to the authoritative name server for example.com. The resolver queries the authoritative server, which returns the actual A or AAAA record. The resolver caches each answer for its TTL and returns the final address to the client. Subsequent lookups for the same name are served from cache until the TTL expires, which is why DNS is fast in steady state and why TTL is the key lever for failover speed versus query volume.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["dns", "resolver", "caching"],
+      "followUps": ["What is the difference between a CNAME and an A record?", "How does TTL affect DNS-based failover?"]
+    },
+    {
+      "id": "q-tls13-vs-12",
+      "question": "What changed between TLS 1.2 and TLS 1.3, and why does it matter for latency?",
+      "answer": "TLS 1.3 cut the handshake from two round trips to one by reorganizing it so the client sends its key share in the very first message and the server can respond with everything needed to start encrypting. With session resumption it supports 0-RTT, sending application data on the first flight for repeat connections. It also pruned the cipher suite list to modern AEAD ciphers only, made forward secrecy mandatory via ephemeral keys, and encrypts more of the handshake itself. The latency win is significant because TLS sits on the critical path after the TCP handshake, so removing a round trip directly reduces time to first byte. The trade-off with 0-RTT is that early data is replayable, so it must only be used for idempotent requests.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["tls", "handshake", "latency"],
+      "followUps": ["What are the security risks of 0-RTT?", "What do SNI and ALPN negotiate?"]
+    },
+    {
+      "id": "q-tls-encrypted",
+      "question": "In a TLS connection, what is and is not visible to a network observer?",
+      "answer": "TLS encrypts the content of the HTTP exchange — the URL path, headers, body, and cookies are all protected once the handshake completes. However, encryption hides content, not all metadata. The destination IP address is always visible because routing needs it. The SNI hostname in the ClientHello travels in cleartext in standard TLS 1.2 and 1.3, so an observer can see which site you are connecting to even though they cannot read the traffic. The size and timing of packets can also leak information. Encrypted Client Hello (ECH) is the emerging mechanism to hide the SNI. So the honest answer is that TLS gives confidentiality of the conversation but not anonymity about who you are talking to.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["tls", "sni", "privacy"],
+      "followUps": ["What problem does ECH solve?", "How does SNI enable virtual hosting?"]
+    },
+    {
+      "id": "q-http2-hol",
+      "question": "HTTP/2 multiplexes many requests over one connection. Does that eliminate head-of-line blocking?",
+      "answer": "Only at the application layer, not entirely. HTTP/2 splits requests and responses into frames belonging to numbered streams and interleaves them over a single TCP connection, which removes the HTTP/1.1 problem where responses had to come back in order. But because all those streams share one ordered TCP byte stream, a single lost TCP segment forces the kernel to wait for retransmission before delivering any later bytes — stalling every multiplexed stream at once. So HTTP/2 traded application-layer head-of-line blocking for transport-layer head-of-line blocking. HTTP/3 solves it by running over QUIC, which gives each stream its own delivery so a lost packet only blocks the stream it belongs to. This is one of the most common interview traps: HTTP/2 reduced but did not eliminate HOL blocking.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["http2", "http3", "head-of-line-blocking"],
+      "followUps": ["How does QUIC achieve per-stream delivery?", "Why is QUIC built over UDP rather than a new transport?"]
+    },
+    {
+      "id": "q-put-vs-post-idempotent",
+      "question": "Is PUT idempotent but POST not? Explain the practical consequence.",
+      "answer": "Yes. PUT is defined to be idempotent: sending the same PUT to the same URL N times leaves the server in the same final state as sending it once, because PUT replaces the resource at a known URL with the supplied representation. POST is not idempotent: each POST may create a new resource or trigger a new side effect, so sending it twice can create two records or charge a card twice. The practical consequence is in retry logic. A client or proxy can safely retry a PUT after a timeout because a duplicate is harmless, but retrying a POST risks duplication. That is why robust APIs either use PUT with client-chosen URLs or add an idempotency key to POST so the server can de-duplicate retries. Note PATCH is not guaranteed idempotent either, despite being an update.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["http-methods", "idempotency", "rest"],
+      "followUps": ["How would you make a POST safe to retry?", "Is DELETE idempotent? What status does a second DELETE return?"]
+    },
+    {
+      "id": "q-200-vs-304",
+      "question": "Why might a cached resource return a 200 from cache on one request but a 304 on another?",
+      "answer": "It depends on whether the cached copy is still fresh. If the response is within its freshness lifetime (for example Cache-Control: max-age=60 and 60 seconds have not elapsed), the cache serves it directly with a 200 and never contacts the origin — this is a cache hit with no network round trip. Once the copy goes stale, or if it was marked no-cache (must revalidate), the client sends a conditional request with If-None-Match carrying the stored ETag. If the resource is unchanged the origin returns 304 Not Modified with no body, and the cache reuses the stored body — saving bandwidth but still costing a round trip. So 200-from-cache means 'fresh, served locally' while 304 means 'stale, revalidated, still good'. The distinction is the difference between zero network cost and a cheap validation round trip.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["caching", "etag", "conditional-get"],
+      "followUps": ["What is the difference between no-cache and no-store?", "When would you use immutable in Cache-Control?"]
+    },
+    {
+      "id": "q-samesite-vs-cors",
+      "question": "A teammate says 'we have CORS configured, so we are safe from CSRF.' What is wrong with that?",
+      "answer": "CORS and CSRF protection are different mechanisms aimed at different threats, and CORS does not protect against CSRF. CORS controls whether browser JavaScript may READ a cross-origin response; it is a read-restriction enforced by the browser. CSRF is about an attacker's page causing the browser to SEND an authenticated request (with the victim's cookies automatically attached) to your server — and the request can still be sent and processed even if the attacker cannot read the response. The defense against CSRF is the SameSite cookie attribute (Lax or Strict), which stops the browser from attaching cookies to cross-site requests, plus anti-CSRF tokens. Conflating the two leaves a CSRF hole. Worse, simple cross-site requests like form POSTs do not even trigger a CORS preflight, so CORS may never run for the dangerous case.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["cors", "samesite", "csrf"],
+      "followUps": ["Which requests trigger a CORS preflight?", "Why must SameSite=None be paired with Secure?"]
+    },
+    {
+      "id": "q-cors-preflight",
+      "question": "When does the browser send a CORS preflight, and what is it asking?",
+      "answer": "The browser sends a preflight OPTIONS request before the real request whenever the cross-origin request is not 'simple'. Simple requests are limited to GET, HEAD, or POST with only safe-listed headers and content types like form-encoded or text/plain. Anything else — a PUT or DELETE, a custom header like Authorization or X-Request-Id, or a JSON content type — triggers a preflight. The preflight carries Origin, Access-Control-Request-Method, and Access-Control-Request-Headers, asking the server: do you permit this method and these headers from this origin? The server must answer with matching Access-Control-Allow-Origin, Allow-Methods, and Allow-Headers (and Allow-Credentials if cookies are involved) for the browser to proceed. Access-Control-Max-Age lets the browser cache that permission to avoid repeating the preflight.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["cors", "preflight", "options"],
+      "followUps": ["Why is wildcard origin incompatible with credentials?", "How does Access-Control-Max-Age help performance?"]
+    },
+    {
+      "id": "q-keepalive-pooling",
+      "question": "Why does HTTP Keep-Alive have such a large performance impact?",
+      "answer": "Keep-Alive (persistent connections) lets multiple HTTP requests reuse a single TCP connection instead of opening a new one each time. Opening a new connection is expensive: a fresh TCP handshake costs one round trip and a fresh TLS handshake costs one or two more, all before any application data flows. By reusing an established connection, those handshake round trips are paid once and amortized over many requests. There is a second, subtler win: TCP congestion control starts in slow-start with a small window, so a new connection cannot use the available bandwidth immediately; a warm connection has already grown its congestion window. This is why connection pooling on both clients and servers, and protocols like HTTP/2 that put everything on one long-lived connection, dominate real-world latency improvements.",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["http", "keep-alive", "performance"],
+      "followUps": ["How does slow-start affect a brand-new connection?", "What is connection migration in QUIC?"]
+    },
+    {
+      "id": "q-status-classes",
+      "question": "What do the HTTP status code classes mean, and why does knowing the class matter?",
+      "answer": "Status codes are grouped by their leading digit: 1xx informational, 2xx success, 3xx redirection or conditional, 4xx client error, and 5xx server error. Knowing the class lets you reason about a response even when the exact code is unfamiliar — a 418 is clearly some kind of client error and a 511 is clearly a server-side or infrastructure error. The class also drives behavior: 4xx generally should not be retried because the request itself is wrong, whereas many 5xx and 429 responses are transient and safe to retry with backoff. The 3xx class is special because it includes both redirects (301, 307) and the conditional 304 Not Modified that underpins caching. Getting the class right in your own APIs is what lets clients, proxies, and monitoring behave correctly.",
+      "difficulty": "mid",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["http", "status-codes", "semantics"],
+      "followUps": ["Which 5xx codes are safe to retry?", "What is the difference between 301 and 307?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-etag-caching",
+      "title": "Implement ETag-based conditional GET in a Node server",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "prompt": "Build a minimal Node HTTP server that serves a JSON resource with a strong ETag derived from the content. On a request carrying If-None-Match that matches the current ETag, respond 304 Not Modified with no body; otherwise respond 200 with the body and the ETag. Set Cache-Control so the client revalidates rather than blindly caching. Demonstrate the round trip conceptually with curl.",
+      "hints": [
+        "Compute the ETag as a hash (e.g. a quoted MD5/SHA hex) of the exact bytes you will send, so it changes only when content changes.",
+        "Read the incoming If-None-Match header and compare it to the freshly computed ETag before deciding the status.",
+        "A 304 response must NOT include a body, but should still echo the ETag and Cache-Control headers."
+      ],
+      "solutionCode": "const http = require('http');\nconst crypto = require('crypto');\n\nfunction currentResource() {\n  // In a real app this comes from a DB/file. Keep bytes stable per content.\n  return JSON.stringify({ id: 42, name: 'Ada Lovelace', role: 'engineer' });\n}\n\nfunction etagFor(body) {\n  const hash = crypto.createHash('sha1').update(body).digest('hex').slice(0, 16);\n  return '\"' + hash + '\"';\n}\n\nconst server = http.createServer((req, res) => {\n  if (req.url !== '/api/user' || req.method !== 'GET') {\n    res.writeHead(404).end();\n    return;\n  }\n\n  const body = currentResource();\n  const etag = etagFor(body);\n\n  // Common headers on both the 200 and the 304.\n  res.setHeader('ETag', etag);\n  res.setHeader('Cache-Control', 'no-cache'); // store but always revalidate\n\n  const inm = req.headers['if-none-match'];\n  if (inm && inm === etag) {\n    res.writeHead(304); // Not Modified: no body\n    res.end();\n    return;\n  }\n\n  res.writeHead(200, {\n    'Content-Type': 'application/json',\n    'Content-Length': Buffer.byteLength(body)\n  });\n  res.end(body);\n});\n\nserver.listen(3000, () => console.log('listening on :3000'));\n\n// Demo:\n//   curl -i localhost:3000/api/user            -> 200 + ETag \"...\"\n//   curl -i localhost:3000/api/user \\\n//        -H 'If-None-Match: \"<that-etag>\"'      -> 304 Not Modified",
+      "solutionLanguage": "javascript",
+      "explanation": "The server derives a strong ETag from a hash of the exact response bytes, so the validator changes only when the content changes — that is the contract a conditional request relies on. On every request it computes the current ETag and sets it along with Cache-Control: no-cache, which tells clients to store the response but always revalidate before reusing it, making the common case a cheap 304 rather than a full transfer. When the incoming If-None-Match equals the current ETag, the resource is unchanged, so the server returns 304 Not Modified with no body, saving the bandwidth of resending identical content while the client reuses its stored copy. When they differ, the server sends a normal 200 with the body and the new ETag, and the client updates its cache. Critically, the 304 path still emits the ETag and Cache-Control but omits the body, which is what makes the optimization worthwhile. This pattern generalizes to any resource where revalidation is cheaper than retransfer, and it composes with CDNs that perform the same conditional check on the origin's behalf.",
+      "relatedTopic": "networking-http"
+    },
+    {
+      "id": "ch-cors-debug",
+      "title": "Debug and fix a failing CORS preflight",
+      "difficulty": "senior",
+      "category": "Computer Science",
+      "prompt": "A SPA at https://app.example.com calls https://api.example.com with fetch using a PUT, an Authorization header, and credentials (cookies). The browser console shows the request was blocked by CORS and the real PUT never reached the server, only an OPTIONS. The server currently returns Access-Control-Allow-Origin: * with no other CORS headers. Explain why it fails and produce the correct server response headers for both the preflight and the actual response.",
+      "hints": [
+        "A PUT with a custom Authorization header is NOT a simple request, so the browser sends a preflight OPTIONS first that the server must answer affirmatively.",
+        "The preflight asks via Access-Control-Request-Method and Access-Control-Request-Headers; the server must allow that method and those headers explicitly.",
+        "Credentialed requests cannot use a wildcard origin; you must echo the exact Origin and set Access-Control-Allow-Credentials: true (and add Vary: Origin)."
+      ],
+      "solutionCode": "// Why it fails:\n// 1. PUT + Authorization header => non-simple => browser preflights with OPTIONS.\n// 2. Server only sends 'Access-Control-Allow-Origin: *' and nothing else, so:\n//    - it does not allow the PUT method (no Allow-Methods)\n//    - it does not allow the Authorization header (no Allow-Headers)\n//    - with credentials, the wildcard '*' origin is rejected by the browser.\n// Result: preflight fails, real PUT is never sent.\n\n// Correct PREFLIGHT response (to the OPTIONS request):\n//   HTTP/1.1 204 No Content\n//   Access-Control-Allow-Origin: https://app.example.com\n//   Access-Control-Allow-Methods: GET, PUT, POST, DELETE\n//   Access-Control-Allow-Headers: authorization, content-type\n//   Access-Control-Allow-Credentials: true\n//   Access-Control-Max-Age: 600\n//   Vary: Origin\n\n// Correct ACTUAL response (to the PUT):\n//   HTTP/1.1 200 OK\n//   Access-Control-Allow-Origin: https://app.example.com\n//   Access-Control-Allow-Credentials: true\n//   Vary: Origin\n//   Content-Type: application/json\n\n// Example Express middleware implementing it safely:\nconst ALLOWED = new Set(['https://app.example.com']);\nfunction cors(req, res, next) {\n  const origin = req.headers.origin;\n  if (origin && ALLOWED.has(origin)) {\n    res.setHeader('Access-Control-Allow-Origin', origin); // echo, not '*'\n    res.setHeader('Access-Control-Allow-Credentials', 'true');\n    res.setHeader('Vary', 'Origin');\n  }\n  if (req.method === 'OPTIONS') {\n    res.setHeader('Access-Control-Allow-Methods', 'GET, PUT, POST, DELETE');\n    res.setHeader('Access-Control-Allow-Headers', 'authorization, content-type');\n    res.setHeader('Access-Control-Max-Age', '600');\n    return res.writeHead(204).end();\n  }\n  next();\n}",
+      "solutionLanguage": "javascript",
+      "explanation": "The request fails because it is not a simple request: a PUT method combined with an Authorization header forces the browser to send a CORS preflight OPTIONS first, and the server must explicitly approve the method and headers before the browser will send the real PUT. The original server only returned a wildcard Access-Control-Allow-Origin and none of the preflight-specific headers, so the browser had no permission for the PUT method or the Authorization header and aborted. Compounding the problem, the request is credentialed (it sends cookies), and the CORS spec forbids the wildcard origin with credentials — the browser rejects Access-Control-Allow-Origin: * outright in that mode. The fix is to echo the specific requesting Origin rather than a wildcard, set Access-Control-Allow-Credentials: true, and on the preflight enumerate the allowed methods and headers via Access-Control-Allow-Methods and Access-Control-Allow-Headers. Adding Vary: Origin is essential so shared caches do not serve one origin's CORS headers to another, and Access-Control-Max-Age lets the browser cache the preflight result to avoid repeating it on every call. The middleware validates the origin against an allowlist before echoing it, which prevents reflecting arbitrary origins — a safe pattern that satisfies the browser while keeping the policy under server control.",
+      "relatedTopic": "networking-http"
+    }
+  ],
+  "references": [
+    {
+      "label": "MDN Web Docs — HTTP",
+      "url": "https://developer.mozilla.org/en-US/docs/Web/HTTP"
+    },
+    {
+      "label": "RFC 9110 — HTTP Semantics",
+      "url": "https://www.rfc-editor.org/rfc/rfc9110.html"
+    },
+    {
+      "label": "High Performance Browser Networking — Ilya Grigorik",
+      "url": "https://hpbn.co/"
+    },
+    {
+      "label": "Cloudflare — HTTP/3 and QUIC",
+      "url": "https://www.cloudflare.com/learning/performance/what-is-http3/"
+    },
+    {
+      "label": "MDN Web Docs — Cross-Origin Resource Sharing (CORS)",
+      "url": "https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS"
+    },
+    {
+      "label": "RFC 9114 — HTTP/3",
+      "url": "https://www.rfc-editor.org/rfc/rfc9114.html"
+    }
+  ]
+}

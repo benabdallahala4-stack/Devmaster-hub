@@ -10,13 +10,14 @@ import { ContentBlocksComponent } from '../../shared/components/content-blocks.c
 import { DiagramComponent } from '../../shared/components/diagram.component';
 import { QuestionCardComponent } from '../../shared/components/question-card.component';
 import { ChallengeViewComponent } from '../../shared/components/challenge-view.component';
+import { ProgressRingComponent } from '../../shared/components/progress-ring.component';
 
 @Component({
   selector: 'app-topic-detail',
   standalone: true,
   imports: [
     RouterLink, IconComponent, DifficultyBadgeComponent, ContentBlocksComponent,
-    DiagramComponent, QuestionCardComponent, ChallengeViewComponent,
+    DiagramComponent, QuestionCardComponent, ChallengeViewComponent, ProgressRingComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './topic-detail.component.html',
@@ -35,6 +36,14 @@ export class TopicDetailComponent {
   readonly regularQuestions = computed(() => this.topic()?.questions.filter(q => !q.tricky) ?? []);
   readonly trickyQuestions = computed(() => this.topic()?.questions.filter(q => q.tricky) ?? []);
   readonly done = computed(() => this.progress.isTopicComplete(this.id()));
+
+  /** Granular completion (0–1): known questions + solved challenges over the topic total. */
+  readonly completion = computed(() => {
+    const t = this.topic();
+    if (!t) return 0;
+    return this.progress.topicCompletion(t.questions.map(q => q.id), t.challenges.map(c => c.id));
+  });
+  readonly completionPct = computed(() => Math.round(this.completion() * 100));
 
   constructor() {
     // Load the topic whenever the route id changes. Signal writes here are

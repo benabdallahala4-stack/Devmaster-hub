@@ -1,0 +1,815 @@
+{
+  "id": "concurrency-parallelism",
+  "title": "Concurrency & Parallelism",
+  "category": "Computer Science",
+  "subcategory": "Concurrency",
+  "difficulty": "senior",
+  "tags": [
+    "concurrency",
+    "parallelism",
+    "threads",
+    "race-conditions",
+    "deadlock",
+    "memory-model",
+    "event-loop",
+    "async"
+  ],
+  "description": "A staff-level, language-agnostic treatment of concurrency and parallelism: process/thread/coroutine models, race conditions and memory visibility, deadlock and the Coffman conditions, and the async runtimes (event loops, CSP channels, actors, thread pools) that power Java, Go, Node.js, and Python. It shows when each model wins and where the classic bugs hide.",
+  "estReadMinutes": 31,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Two Words People Use Interchangeably (And Shouldn't)",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Concurrency and parallelism are related but distinct ideas, and conflating them is the source of endless confusion in system design interviews. Rob Pike's framing is the cleanest one to memorize: concurrency is about dealing with many things at once; parallelism is about doing many things at once. Concurrency is a way of structuring a program as independently executing tasks; parallelism is an execution property that requires multiple physical execution units."
+        },
+        {
+          "type": "paragraph",
+          "text": "A single-core machine can be highly concurrent (it interleaves thousands of tasks by time-slicing) but never truly parallel. A concurrent design becomes parallel only when the runtime maps those logical tasks onto multiple cores at the same instant. This is why a well-written concurrent program scales up automatically when you give it more cores, whereas a sequential program does not, no matter how many cores you throw at it."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Concurrency is a property of the code (its structure); parallelism is a property of the execution (its hardware mapping). You can have concurrency without parallelism (an async event loop on one core) and parallelism without meaningful concurrency (a SIMD vector add). They are orthogonal."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Concurrency: composition of independently executing tasks; a structuring tool that lets progress be made on more than one task in overlapping time windows.",
+            "Parallelism: simultaneous execution of computations on multiple cores/machines to reduce wall-clock time.",
+            "The runtime and the hardware decide whether your concurrency actually runs in parallel; your job is to expose enough independent work."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why Every Senior Engineer Must Own This",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Modern hardware stopped getting faster per-core around 2005; clock speeds plateaued and vendors added cores instead. Since then, the only way to make a CPU-bound program faster is to parallelize it. Simultaneously, servers spend most of their time waiting on I/O (network, disk, other services), so the ability to keep thousands of in-flight requests progressing concurrently is what separates a system that handles 100 requests per second from one that handles 100,000."
+        },
+        {
+          "type": "paragraph",
+          "text": "The workload dictates the model. A CPU-bound task (image resizing, hashing, matrix math) is limited by compute and benefits from parallelism across cores. An I/O-bound task (calling a database, an HTTP API, reading a file) spends its time blocked, so it benefits from concurrency: overlap the waiting so one thread or one event loop can shepherd many outstanding operations. Choosing the wrong model, for instance spinning up a thread per request for an I/O-heavy service, wastes memory and context-switch cycles."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Workload",
+            "Bottleneck",
+            "Best model",
+            "Example"
+          ],
+          "rows": [
+            [
+              "CPU-bound",
+              "Compute cycles",
+              "Parallelism across cores (thread/process pool, fork-join)",
+              "Video encoding, ML training, sorting huge arrays"
+            ],
+            [
+              "I/O-bound",
+              "Waiting on external systems",
+              "Concurrency (event loop, async/await, lightweight threads)",
+              "API gateway, web server, database proxy"
+            ],
+            [
+              "Mixed",
+              "Both",
+              "Async I/O + a bounded worker pool for CPU chunks",
+              "Web app that also resizes uploads"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Adding threads to an I/O-bound Python or Node service to make it 'faster' usually backfires. If the work is waiting, not computing, you want concurrency, not more OS threads competing for the same GIL or the same event loop."
+        }
+      ]
+    },
+    {
+      "id": "units-of-execution",
+      "heading": "Processes, Threads, and Coroutines",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The three fundamental units of execution differ in what they share and who schedules them. A process owns an isolated address space; threads within a process share that address space (heap, globals, file descriptors) but each has its own stack and registers. Coroutines (also called green threads, fibers, or user-space threads) are scheduled cooperatively by a runtime rather than pre-emptively by the OS kernel, so switching between them is cheap and does not require a kernel trap."
+        },
+        {
+          "type": "paragraph",
+          "text": "Isolation is the key trade-off. Processes are safe (a crash or corruption is contained) but expensive to create and to communicate between (you need IPC: pipes, sockets, shared memory). Threads are cheap to communicate through shared memory but dangerous, because that shared memory is exactly where race conditions live. Coroutines give you thread-like concurrency with far lower memory overhead (kilobytes of stack instead of megabytes) and no kernel context switches, which is why Go goroutines and virtual threads can number in the millions."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Property",
+            "Process",
+            "Thread",
+            "Coroutine / Green thread"
+          ],
+          "rows": [
+            [
+              "Address space",
+              "Isolated (own)",
+              "Shared with peers",
+              "Shared with peers"
+            ],
+            [
+              "Scheduled by",
+              "OS kernel (pre-emptive)",
+              "OS kernel (pre-emptive)",
+              "Language runtime (cooperative)"
+            ],
+            [
+              "Creation cost",
+              "High (fork, page tables)",
+              "Medium (~1 MB stack)",
+              "Very low (KB stack, no syscall)"
+            ],
+            [
+              "Context switch",
+              "Expensive (TLB flush)",
+              "Moderate (kernel trap)",
+              "Cheap (user-space jump)"
+            ],
+            [
+              "Communication",
+              "IPC / message passing",
+              "Shared memory (needs locks)",
+              "Channels or shared memory"
+            ],
+            [
+              "Failure blast radius",
+              "Contained",
+              "Whole process",
+              "Whole process"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Go multiplexes many goroutines onto a small pool of OS threads (M:N scheduling). Java 21 virtual threads do the same, mounting a virtual thread onto a platform (carrier) thread only while it runs, and unmounting it when it blocks on I/O. The result is millions of cheap concurrent tasks over a handful of kernel threads."
+        }
+      ]
+    },
+    {
+      "id": "races",
+      "heading": "Race Conditions and Data Races",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A data race occurs when two or more threads access the same memory location concurrently, at least one access is a write, and there is no synchronization ordering the accesses. A race condition is the broader phenomenon where correctness depends on the relative timing of events. Every data race is a bug; not every race condition involves a data race (some are logic-level, like a check-then-act on a database row)."
+        },
+        {
+          "type": "paragraph",
+          "text": "The canonical example is a shared counter. The statement counter++ looks atomic in source code but compiles to read-modify-write: load the value, increment it, store it back. If two threads interleave those three steps, one increment is silently lost. Under load, a counter incremented a million times by ten threads will report a number well below ten million, and the exact deficit is non-deterministic, which is what makes these bugs so painful."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// DATA RACE: unsynchronized shared mutable state.\n// counter++ is a read-modify-write, not atomic.\npublic class Counter {\n    private int count = 0;\n\n    public void increment() {\n        count++;              // load, add, store -- interleaves badly\n    }\n\n    public int get() {\n        return count;         // may also read a stale value (visibility)\n    }\n}\n\n// If 10 threads each call increment() 1_000_000 times,\n// the final count is almost never 10_000_000."
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// FIX 1: a mutex (intrinsic lock) makes the section atomic AND visible.\npublic class SafeCounter {\n    private int count = 0;\n    private final Object lock = new Object();\n\n    public void increment() {\n        synchronized (lock) { // mutual exclusion + happens-before edge\n            count++;\n        }\n    }\n\n    public int get() {\n        synchronized (lock) {\n            return count;\n        }\n    }\n}\n\n// FIX 2: a lock-free atomic using compare-and-swap under the hood.\nimport java.util.concurrent.atomic.AtomicInteger;\n\npublic class AtomicCounter {\n    private final AtomicInteger count = new AtomicInteger(0);\n    public void increment() { count.incrementAndGet(); } // CAS loop\n    public int get() { return count.get(); }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "A missing lock does not just risk a lost update; it also risks a visibility failure. Without a happens-before edge, one thread may never observe another thread's write at all, because the value can sit in a CPU register or store buffer indefinitely. Correctness needs both mutual exclusion and visibility."
+        }
+      ]
+    },
+    {
+      "id": "mutual-exclusion",
+      "heading": "Critical Sections and the Primitives That Guard Them",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A critical section is a region of code that accesses shared state and must not be executed by more than one thread at a time. Mutual exclusion is the guarantee that only one thread is inside at once. The synchronization primitives differ in their semantics and cost; choosing the right one matters for both correctness and throughput."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Mutex (lock): binary ownership. Exactly one thread holds it; others block until it is released. Usually has an owner, so it can be released only by the locker.",
+            "Semaphore: a counter permitting up to N concurrent holders. A binary semaphore (N=1) resembles a mutex but has no ownership, so any thread can signal it, which is why semaphores are used for signaling and bounded resource pools.",
+            "Monitor: a higher-level construct pairing a mutex with condition variables (wait/notify), letting a thread atomically release the lock and sleep until a predicate becomes true. Java's synchronized + wait/notify is a monitor.",
+            "Spinlock: instead of blocking, the thread busy-waits in a tight loop until the lock frees. Cheap for very short critical sections on multicore (no context switch) but wasteful if held for long or on a single core.",
+            "Read-write lock: allows many concurrent readers or one exclusive writer, optimizing read-heavy workloads."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Locks do not compose freely. Acquiring lock A then lock B in one code path and B then A in another is the recipe for deadlock. Establish a global lock ordering, keep critical sections short, and never call unknown/user code while holding a lock."
+        },
+        {
+          "type": "paragraph",
+          "text": "Atomicity can also be achieved without locks. A compare-and-swap (CAS) instruction atomically checks that a memory location still holds an expected value and, if so, writes a new one, all in one uninterruptible step. Lock-free algorithms loop on CAS: read the current value, compute the new value, and swap only if nothing changed in between; retry otherwise. CAS is the foundation of atomic counters, lock-free queues, and optimistic concurrency."
+        }
+      ]
+    },
+    {
+      "id": "deadlock",
+      "heading": "Deadlock, Livelock, and Starvation",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Deadlock is a state in which a set of threads are each waiting for a resource held by another thread in the set, so none can proceed. Coffman's four conditions must all hold simultaneously for deadlock to be possible; break any one and deadlock becomes impossible."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Mutual exclusion: at least one resource is held in a non-shareable mode.",
+            "Hold and wait: a thread holds at least one resource while waiting to acquire others.",
+            "No pre-emption: a resource cannot be forcibly taken; it is released only voluntarily.",
+            "Circular wait: a closed chain of threads exists, each waiting for a resource held by the next."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// DEADLOCK: two threads acquire two locks in opposite orders.\nObject lockA = new Object();\nObject lockB = new Object();\n\n// Thread 1\nsynchronized (lockA) {\n    // ... work ...\n    synchronized (lockB) { /* never reached if T2 holds lockB */ }\n}\n\n// Thread 2\nsynchronized (lockB) {\n    // ... work ...\n    synchronized (lockA) { /* never reached if T1 holds lockA */ }\n}\n\n// FIX: impose a global lock ordering -- everyone takes lockA then lockB.\n// This breaks the 'circular wait' Coffman condition."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Strategy",
+            "How it works",
+            "Breaks which condition"
+          ],
+          "rows": [
+            [
+              "Prevention",
+              "Structurally forbid a condition (e.g. global lock order, take-all-or-none)",
+              "Any one of the four"
+            ],
+            [
+              "Avoidance",
+              "Grant a resource only if the system stays in a safe state (Banker's algorithm)",
+              "Circular wait dynamically"
+            ],
+            [
+              "Detection & recovery",
+              "Let deadlocks happen, detect cycles in the wait-for graph, then kill/rollback a victim",
+              "None (reactive)"
+            ]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Livelock and starvation are the near cousins. In livelock, threads are not blocked but keep reacting to each other and make no progress (two people stepping aside in a hallway, forever). Starvation is when a thread is perpetually denied a resource because others keep winning the race, common with unfair locks or priority scheduling. Backoff with randomized jitter cures most livelock; fair locks and aging cure starvation."
+        }
+      ]
+    },
+    {
+      "id": "memory-model",
+      "heading": "Memory Models, Visibility, and Happens-Before",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "On modern hardware, a single-threaded mental model of memory is a lie. Compilers reorder instructions, CPUs execute out of order, and each core has its own caches and store buffers. A write by one thread may become visible to another thread late, out of order, or (without synchronization) never. A memory model is the contract that specifies which reorderings are allowed and which writes are guaranteed visible."
+        },
+        {
+          "type": "paragraph",
+          "text": "The unifying concept is happens-before: a partial ordering of memory operations such that if action A happens-before action B, then A's effects are visible to B. Synchronization actions establish these edges. Unlocking a monitor happens-before any subsequent lock of the same monitor; a write to a volatile/atomic variable happens-before every subsequent read of it; a thread's start happens-before everything the started thread does. Without a happens-before edge between a write and a read, there is no visibility guarantee at all."
+        },
+        {
+          "type": "list",
+          "items": [
+            "volatile (Java) / atomic (C++, Go's sync/atomic): guarantees visibility and prevents reordering across the access, but does NOT make compound operations like x++ atomic.",
+            "Memory barriers (fences): CPU instructions that prevent reordering across them and flush/invalidate buffers; the primitives languages compile volatile and locks down to.",
+            "Cache coherence (MESI): the hardware protocol keeping per-core caches consistent, so a write eventually propagates -- but coherence alone does not give you ordering; that is the memory model's job.",
+            "Sequential consistency is the strong, intuitive model (a single global order); most real hardware is weaker and requires explicit fences to recover the guarantees you want."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The single most common visibility bug: a boolean 'running' flag set by one thread and read in another thread's loop, with no volatile/synchronization. The reader may cache the flag in a register and loop forever even after it is set to false. Mark such flags volatile or use an atomic."
+        }
+      ]
+    },
+    {
+      "id": "async-models",
+      "heading": "Async Models: Event Loops, Futures, Actors, and CSP",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "There is more than one way to structure concurrency, and different ecosystems bet on different models. The main families are thread pools, single-threaded event loops, message-passing actors, and Communicating Sequential Processes (CSP). Each makes a different trade between raw performance, safety, and mental overhead."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Thread pool: a fixed set of worker threads pulls tasks from a queue. Great for CPU-bound parallelism; you cap threads near the core count to avoid context-switch thrash.",
+            "Event loop: a single thread runs a loop that dequeues ready events/callbacks and never blocks; slow work is offloaded (Node's libuv thread pool, OS async I/O). This is how Node handles tens of thousands of connections on one JS thread.",
+            "Futures/Promises + async/await: a syntactic sugar that lets you write sequential-looking code that actually suspends at each await, yielding the thread/event-loop until the awaited result is ready.",
+            "Actors (Erlang, Akka): isolated entities with private state that communicate only by asynchronous messages; no shared memory, so no data races -- state is serialized behind each actor's mailbox.",
+            "CSP (Go, Clojure core.async): lightweight processes that communicate by passing values over channels; 'do not communicate by sharing memory; share memory by communicating.'"
+          ]
+        },
+        {
+          "type": "code",
+          "language": "javascript",
+          "code": "// JS event loop: single-threaded but concurrent.\n// Nothing here runs in parallel; the loop interleaves them.\nconsole.log('1: sync start');\n\nsetTimeout(() => console.log('4: macrotask (timer)'), 0);\n\nPromise.resolve().then(() => console.log('3: microtask (promise)'));\n\nconsole.log('2: sync end');\n\n// Output order: 1, 2, 3, 4\n// All synchronous code runs first, THEN the microtask queue\n// is drained completely, THEN one macrotask (timer callback).\n\n// async/await is promises in disguise: this function yields the\n// event loop at each await, letting other work run meanwhile.\nasync function fetchUser(id) {\n  const res = await fetch(`/users/${id}`); // suspends here\n  const user = await res.json();           // and here\n  return user;\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Rule of thumb for picking a model: shared-memory + locks for raw multicore throughput when you can prove correctness; actors/CSP when you want isolation and want races to be structurally impossible; event loops for massive I/O concurrency on limited threads."
+        }
+      ]
+    },
+    {
+      "id": "go-csp-example",
+      "heading": "Worked Example: CSP with Goroutines and Channels",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Go's concurrency is CSP made practical. A goroutine is a function launched with the go keyword onto the runtime's M:N scheduler; a channel is a typed, synchronized conduit for passing values between goroutines. Because ownership of data is transferred over the channel rather than shared, you avoid most locks entirely. Here is a fan-out/fan-in worker pool: one producer, several workers, one collector."
+        },
+        {
+          "type": "code",
+          "language": "go",
+          "code": "package main\n\nimport (\n\t\"fmt\"\n\t\"sync\"\n)\n\n// Workers read jobs from `jobs` and write to `results`.\nfunc worker(id int, jobs <-chan int, results chan<- int, wg *sync.WaitGroup) {\n\tdefer wg.Done()\n\tfor j := range jobs { // ranges until the channel is closed\n\t\tresults <- j * j  // do the work; send result\n\t}\n}\n\nfunc main() {\n\tconst numJobs = 9\n\tjobs := make(chan int, numJobs)\n\tresults := make(chan int, numJobs)\n\n\tvar wg sync.WaitGroup\n\tfor w := 1; w <= 3; w++ { // fan-out to 3 workers\n\t\twg.Add(1)\n\t\tgo worker(w, jobs, results, &wg)\n\t}\n\n\tfor j := 1; j <= numJobs; j++ {\n\t\tjobs <- j\n\t}\n\tclose(jobs) // signal 'no more work'; workers' range loops end\n\n\twg.Wait()      // wait for all workers to finish\n\tclose(results) // now safe to close results\n\n\tsum := 0\n\tfor r := range results { // fan-in\n\t\tsum += r\n\t}\n\tfmt.Println(\"sum of squares:\", sum) // 285\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Notice what is absent: no mutex, no shared counter, no visibility worries. The channel provides both synchronization (a send happens-before the corresponding receive) and safe hand-off of data. Closing the jobs channel is the idiomatic 'done' signal, and the WaitGroup coordinates termination so we do not close results while a worker might still write to it."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Sending on a closed channel panics, and a receive from a closed channel returns the zero value immediately. Always let the sender close the channel, never the receiver, and never close a channel twice. These rules prevent a whole class of Go concurrency crashes."
+        }
+      ]
+    },
+    {
+      "id": "python-gil",
+      "heading": "The Python GIL and Its Implications",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "CPython, the reference Python implementation, has a Global Interpreter Lock (GIL): a single mutex that ensures only one thread executes Python bytecode at a time. It exists because CPython's memory management (reference counting) is not thread-safe, and a single coarse lock was historically simpler and faster for single-threaded code than fine-grained locking everywhere."
+        },
+        {
+          "type": "paragraph",
+          "text": "The consequence is stark: Python threads give you concurrency but not CPU parallelism. Ten threads doing pure-Python number crunching run no faster than one, because they serialize on the GIL; you may even go slower due to lock contention. Threads still help for I/O-bound work, because a thread releases the GIL while blocked on a socket or file, letting another thread run. For CPU-bound parallelism you must sidestep the GIL: use multiprocessing (separate processes, separate interpreters, separate GILs), a C extension that releases the GIL (NumPy does this), or free-threaded CPython (the experimental no-GIL build introduced in 3.13)."
+        },
+        {
+          "type": "code",
+          "language": "python",
+          "code": "import threading, time\nfrom multiprocessing import Pool\n\ndef cpu_bound(n):\n    total = 0\n    for i in range(n):\n        total += i * i\n    return total\n\n# THREADS: no speedup for CPU work -- the GIL serializes bytecode.\ndef with_threads():\n    ts = [threading.Thread(target=cpu_bound, args=(10_000_000,)) for _ in range(4)]\n    for t in ts: t.start()\n    for t in ts: t.join()   # ~ same wall time as running them sequentially\n\n# PROCESSES: real parallelism -- 4 interpreters, 4 GILs, 4 cores.\ndef with_processes():\n    with Pool(4) as p:\n        p.map(cpu_bound, [10_000_000] * 4)  # ~4x faster on 4 cores\n\n# I/O-bound work DOES benefit from threads (GIL is released while waiting):\ndef fetch(url):\n    time.sleep(1)   # simulate a network call; GIL is released during sleep\n    return url"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "For I/O-bound Python, asyncio (a single-threaded event loop with async/await) is often better than threads: no GIL contention, no thread overhead, and thousands of concurrent coroutines on one thread. Reach for threads for blocking-library I/O, asyncio for native async I/O, and processes for CPU parallelism."
+        }
+      ]
+    },
+    {
+      "id": "parallel-patterns",
+      "heading": "Parallelism Patterns, Backpressure, and Amdahl's Law",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Once you commit to parallelism, a handful of structural patterns recur. Fork-join splits a task into subtasks, runs them in parallel, and merges the results (Java's ForkJoinPool, recursive divide-and-conquer). Map-reduce maps a function over a partitioned dataset in parallel and reduces the partial results (the backbone of big-data processing). Pipeline breaks work into stages connected by queues so each stage runs concurrently on a different item (like a CPU or an assembly line). Work stealing keeps cores busy: idle workers steal tasks from the tail of busy workers' deques, which is how ForkJoinPool and Go's scheduler stay balanced."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Fork-join: recursively split until subtasks are small, solve in parallel, combine. Best for divisible CPU-bound problems.",
+            "Map-reduce: embarrassingly parallel map phase, then an associative reduce. Scales horizontally across machines.",
+            "Pipeline: stage1 -> queue -> stage2 -> queue -> stage3; throughput is limited by the slowest stage.",
+            "Work stealing: per-worker task deques; idle workers steal, minimizing idle cores and central-queue contention."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Backpressure is the mechanism that keeps a fast producer from overwhelming a slow consumer. Without it, unbounded queues grow until memory is exhausted. Bounded channels/queues provide natural backpressure: when the buffer is full, the producer blocks (or the protocol signals 'slow down'), coupling the producer's rate to the consumer's. Reactive Streams formalizes this as demand signaling, where the consumer requests N items and the producer never sends more than requested."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Amdahl's Law caps your reward. If a fraction p of a program is parallelizable and (1-p) is inherently serial, the maximum speedup on N cores is 1 / ((1-p) + p/N). Even with infinite cores, speedup is bounded by 1/(1-p). If 10% of the work is serial, you can never exceed a 10x speedup, no matter how many cores you buy. Attack the serial fraction first."
+        }
+      ]
+    },
+    {
+      "id": "mistakes",
+      "heading": "Classic Mistakes and Anti-Patterns",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Concurrency bugs are notorious because they are non-deterministic, load-dependent, and often vanish under a debugger. A few anti-patterns account for the majority of production incidents."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Double-checked locking without volatile: the classic broken singleton, where the half-constructed object is published because there is no happens-before edge on the field.",
+            "Assuming a read or a check-then-act is atomic: `if (map.get(k) == null) map.put(k, v)` is a race; use putIfAbsent or a lock.",
+            "Blocking the event loop: doing synchronous CPU work or a blocking call on Node's main thread freezes every connection. Offload to a worker.",
+            "Sharing mutable state across threads 'just for performance' then adding locks reactively, producing lock ordering that deadlocks under load.",
+            "Catching InterruptedException and swallowing it, breaking cancellation and shutdown.",
+            "Unbounded thread pools or unbounded queues: they turn a load spike into an out-of-memory crash instead of graceful backpressure."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "java",
+          "code": "// BROKEN double-checked locking (pre-fix): instance may be seen\n// non-null but not fully constructed by another thread.\npublic class Broken {\n    private static Broken instance;                 // NOT volatile -- bug\n    public static Broken get() {\n        if (instance == null) {\n            synchronized (Broken.class) {\n                if (instance == null) instance = new Broken();\n            }\n        }\n        return instance;\n    }\n}\n\n// FIXED: 'volatile' establishes the happens-before edge so a reader\n// that sees a non-null reference also sees a fully built object.\npublic class Fixed {\n    private static volatile Fixed instance;\n    public static Fixed get() {\n        if (instance == null) {\n            synchronized (Fixed.class) {\n                if (instance == null) instance = new Fixed();\n            }\n        }\n        return instance;\n    }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Never test concurrency correctness by 'running it a few times and it worked.' Absence of a visible race proves nothing; the interleaving that breaks may occur once in a million runs, in production, at 3 a.m. Use tools: Go's -race detector, Java's jcstress, ThreadSanitizer, and reason about happens-before explicitly."
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices for Correct Concurrent Code",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The most reliable strategy is to minimize shared mutable state. State that is immutable, thread-confined, or owned by a single actor cannot race. Everything below flows from that principle."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Prefer immutability: immutable objects are inherently thread-safe and need no synchronization to share.",
+            "Prefer higher-level constructs over raw locks: concurrent collections, executors, channels, and atomics are tested and correct; hand-rolled locking rarely is.",
+            "Confine state: give each task its own copy, or serialize access behind a single owner (an actor, a single-threaded executor, a channel).",
+            "Keep critical sections tiny and never call foreign code while holding a lock.",
+            "Establish and document a global lock ordering to make deadlock structurally impossible.",
+            "Make thread pools and queues bounded so overload degrades gracefully via backpressure instead of exhausting memory.",
+            "Always support cancellation and timeouts; propagate interruption/cancellation rather than swallowing it.",
+            "Match the model to the workload: parallelism for CPU-bound, concurrency (async/event loop) for I/O-bound."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The best concurrent code often looks sequential. If a reviewer cannot follow the flow, they cannot verify its correctness. Favor channels and immutable messages over a web of shared locks; the goal is code whose correctness you can reason about, not merely code that happens to pass today."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "deadlock-cycle",
+      "title": "Deadlock: Circular Wait Between Two Threads",
+      "type": "mermaid",
+      "content": "graph LR\n    T1[Thread 1] -->|holds| A[Lock A]\n    T2[Thread 2] -->|holds| B[Lock B]\n    T1 -->|waits for| B\n    T2 -->|waits for| A\n    A -.circular wait.-> B\n    B -.circular wait.-> A"
+    },
+    {
+      "id": "node-event-loop",
+      "title": "Node.js Event Loop Phases (libuv)",
+      "type": "mermaid",
+      "content": "graph TD\n    Timers[Timers: setTimeout/setInterval] --> Pending[Pending callbacks]\n    Pending --> Poll[Poll: retrieve I/O events]\n    Poll --> Check[Check: setImmediate]\n    Check --> Close[Close callbacks]\n    Close --> Micro[Drain microtasks: promises/nextTick]\n    Micro --> Timers"
+    },
+    {
+      "id": "concurrency-vs-parallelism",
+      "title": "Concurrency vs Parallelism (ASCII)",
+      "type": "ascii",
+      "content": "CONCURRENCY (1 core, interleaved -- dealing with many)\n  time -->\n  core0: [A][B][A][C][B][A][C][B]   tasks take turns\n\nPARALLELISM (2 cores, simultaneous -- doing many)\n  core0: [A A A A A A A A]\n  core1: [B B B B B B B B]          A and B run at once\n\nCONCURRENT + PARALLEL (2 cores, many tasks, interleaved)\n  core0: [A][C][A][C][A][C]\n  core1: [B][D][B][D][B][D]"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q1",
+      "question": "What is the difference between concurrency and parallelism?",
+      "answer": "Concurrency is about dealing with many things at once; parallelism is about doing many things at once. Concurrency is a way of structuring a program as independently executing tasks that make progress in overlapping time windows, while parallelism is an execution property that requires multiple physical cores running simultaneously. A single-core machine can be highly concurrent by time-slicing but is never truly parallel. Concurrency is a property of the code's structure; parallelism is a property of how that structure maps onto hardware. You can have concurrency without parallelism (an async event loop on one core) and parallelism without meaningful concurrency (a SIMD vector operation). Well-structured concurrent code scales to parallelism automatically when more cores are available.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": [
+        "concurrency",
+        "parallelism",
+        "fundamentals"
+      ],
+      "followUps": [
+        "Give an example of concurrency without parallelism.",
+        "How does the runtime decide whether concurrency becomes parallel?"
+      ]
+    },
+    {
+      "id": "q2",
+      "question": "State the four Coffman conditions for deadlock and explain how breaking one prevents it.",
+      "answer": "Deadlock requires all four conditions to hold simultaneously: mutual exclusion (a resource is held non-shareably), hold-and-wait (a thread holds resources while requesting more), no pre-emption (resources are released only voluntarily), and circular wait (a closed chain of threads each waits on the next). Because all four are necessary, breaking any single one makes deadlock impossible. The most practical to break is circular wait: impose a global ordering on lock acquisition so every thread grabs locks in the same order, which cannot form a cycle. You can also break hold-and-wait by requiring a thread to acquire all resources atomically up front, or enable pre-emption by using tryLock with timeout and backoff. Prevention forbids a condition structurally, avoidance keeps the system in a safe state dynamically, and detection lets deadlocks happen then recovers.",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": [
+        "deadlock",
+        "coffman-conditions"
+      ],
+      "followUps": [
+        "Which condition is easiest to break in practice and why?",
+        "What is the difference between deadlock prevention and avoidance?"
+      ]
+    },
+    {
+      "id": "q3",
+      "question": "Why is Node.js described as single-threaded yet able to handle thousands of concurrent connections?",
+      "answer": "Node runs your JavaScript on a single thread driven by an event loop, but it never blocks that thread on I/O. When you start an I/O operation (a network read, a file read, a DB query), Node hands it off to the OS async facilities or to libuv's internal thread pool and immediately continues processing other events. When the I/O completes, a callback is queued and the loop picks it up. So one thread can shepherd tens of thousands of in-flight operations because it spends its time dispatching completed events rather than waiting. This is concurrency without parallelism at the JavaScript level. The catch is that CPU-bound work on the main thread blocks everything, since there is only one thread to run JS; heavy computation must be offloaded to worker threads or a separate process. The event loop gives excellent I/O concurrency precisely because I/O is the workload it was designed for.",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": [
+        "event-loop",
+        "nodejs",
+        "async"
+      ],
+      "followUps": [
+        "What happens if you run a heavy CPU loop on the main thread?",
+        "What is the difference between the microtask and macrotask queues?"
+      ]
+    },
+    {
+      "id": "q4",
+      "question": "What is Python's GIL and what are its practical implications?",
+      "answer": "The Global Interpreter Lock is a mutex in CPython that allows only one thread to execute Python bytecode at a time, added because reference-counting memory management is not thread-safe and a single coarse lock was simpler and fast for single-threaded code. The practical implication is that Python threads provide concurrency but not CPU parallelism: multiple threads doing pure-Python computation serialize on the GIL and see no speedup, sometimes even a slowdown from contention. Threads still help I/O-bound work because the GIL is released while a thread blocks on a socket or file, letting others run. For CPU parallelism you must use multiprocessing (separate processes each with their own GIL), C extensions that release the GIL like NumPy, or the experimental free-threaded build in CPython 3.13+. The GIL is a CPython implementation detail, not a language requirement; Jython and other implementations lack it.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": [
+        "python",
+        "gil",
+        "parallelism"
+      ],
+      "followUps": [
+        "How would you achieve true CPU parallelism in Python?",
+        "Does asyncio bypass the GIL?"
+      ]
+    },
+    {
+      "id": "q5",
+      "question": "Explain the happens-before relationship and why it is essential for visibility.",
+      "answer": "Happens-before is a partial ordering over memory operations: if action A happens-before action B, then A's effects (including writes) are guaranteed visible to B. It matters because modern compilers reorder instructions and CPUs have per-core caches and store buffers, so a write by one thread is not automatically visible to another. Synchronization actions create happens-before edges: releasing a lock happens-before any subsequent acquisition of the same lock, a write to a volatile/atomic happens-before every later read of it, and a thread's start happens-before all actions in the started thread. Without such an edge between a write and a read, the memory model gives no visibility guarantee at all, so the reader may see a stale value indefinitely or observe writes out of order. This is why correctness requires more than mutual exclusion; you need the ordering edges that make one thread's writes observable to another. It is a logical ordering, not a wall-clock one.",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": [
+        "memory-model",
+        "happens-before",
+        "visibility"
+      ],
+      "followUps": [
+        "Why isn't cache coherence alone enough to guarantee ordering?",
+        "What does volatile guarantee and what does it not?"
+      ]
+    },
+    {
+      "id": "q6",
+      "question": "What is compare-and-swap, and what is the ABA problem?",
+      "answer": "Compare-and-swap (CAS) is an atomic hardware instruction that checks whether a memory location still holds an expected value and, if so, writes a new value, all in a single uninterruptible step. It is the foundation of lock-free algorithms: read the current value, compute a new one, then CAS; if the location changed in between, the CAS fails and you retry. The ABA problem is a subtle CAS pitfall: a location holds value A, another thread changes it to B and back to A, and your CAS succeeds because it only compares values, unaware that the underlying state changed and possibly freed and reused memory in between. This can corrupt lock-free stacks and queues. The standard fix is a versioned or tagged pointer: pair the value with a monotonically increasing counter so A-with-tag-1 differs from A-with-tag-3, making the intervening change detectable. Hazard pointers and epoch-based reclamation address the related memory-reuse hazard.",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": [
+        "cas",
+        "aba-problem",
+        "lock-free"
+      ],
+      "followUps": [
+        "How does a versioned pointer solve ABA?",
+        "Why is CAS said to be lock-free but not wait-free?"
+      ]
+    },
+    {
+      "id": "q7",
+      "question": "When does adding more cores NOT make a program faster? Explain with Amdahl's Law.",
+      "answer": "Amdahl's Law states that if a fraction p of a program can be parallelized and (1-p) is inherently serial, the maximum speedup on N cores is 1 / ((1-p) + p/N). As N grows, speedup approaches 1/(1-p), a hard ceiling set entirely by the serial fraction. So if 10% of the work is serial, you can never exceed a 10x speedup regardless of core count. Parallelism also does not help when the work is I/O-bound rather than compute-bound, when tasks are too fine-grained so coordination and context-switch overhead dominate, when there is heavy lock contention serializing the threads anyway, or when the problem is not divisible. It can even hurt: more threads than cores cause context-switch thrash, and shared-memory contention creates cache-line ping-pong. The lesson is to attack the serial fraction and reduce coordination before adding cores, and to remember that Gustafson's Law offers a more optimistic view when problem size scales with cores.",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": [
+        "amdahls-law",
+        "parallelism",
+        "scalability"
+      ],
+      "followUps": [
+        "How does Gustafson's Law differ from Amdahl's?",
+        "What is false sharing and how does it limit scaling?"
+      ]
+    },
+    {
+      "id": "q8",
+      "question": "What is the difference between a data race and a race condition?",
+      "answer": "A data race is a specific, well-defined condition: two or more threads access the same memory location concurrently, at least one access is a write, and there is no synchronization ordering them. A race condition is broader: any situation where the correctness of the result depends on the relative timing or interleaving of events. Every data race is a bug, and languages like Go and C++ declare data races undefined behavior. But not every race condition is a data race; you can have a timing bug entirely through properly synchronized operations, such as a check-then-act on a database row where two transactions both read 'no row exists' and both insert. Fixing data races (with locks, atomics, or channels) does not automatically fix higher-level race conditions, which may need transactions, compare-and-set, or redesign. The distinction matters because tools like ThreadSanitizer detect data races but cannot detect logic-level race conditions.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": [
+        "race-conditions",
+        "data-race",
+        "synchronization"
+      ],
+      "followUps": [
+        "Give a race condition that is not a data race.",
+        "Why do languages declare data races undefined behavior?"
+      ]
+    },
+    {
+      "id": "q9",
+      "question": "Compare processes, threads, and coroutines as units of execution.",
+      "answer": "A process has its own isolated address space, is scheduled pre-emptively by the OS kernel, and is expensive to create and to communicate with (needing IPC). Threads live inside a process and share its address space, are also scheduled by the kernel, are cheaper than processes, and communicate through shared memory, which is convenient but is exactly where data races arise. Coroutines (green threads, fibers) are scheduled cooperatively by a language runtime rather than the kernel, so switching between them is a cheap user-space jump with no syscall, and their stacks are kilobytes rather than megabytes. The trade-off is isolation versus cost: processes are safe but heavy, threads are light but dangerous, coroutines are lightest and can number in the millions but share a fate (one crash can take down the process). Go goroutines and Java virtual threads multiplex many coroutines onto a few OS threads (M:N scheduling), unmounting a coroutine when it blocks so the carrier thread stays busy.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": [
+        "processes",
+        "threads",
+        "coroutines"
+      ],
+      "followUps": [
+        "What is M:N scheduling?",
+        "Why can you have millions of goroutines but not millions of OS threads?"
+      ]
+    },
+    {
+      "id": "q10",
+      "question": "Contrast a mutex, a semaphore, and a monitor.",
+      "answer": "A mutex enforces mutual exclusion with ownership: exactly one thread holds it, others block, and typically only the owner can release it. A semaphore is a counter allowing up to N concurrent holders and has no ownership, so any thread can signal it; a binary semaphore (N=1) resembles a mutex but its lack of ownership makes it suitable for signaling between threads and for bounding a resource pool. A monitor is a higher-level abstraction that bundles a mutex with one or more condition variables, letting a thread atomically release the lock and wait until a predicate holds, then reacquire the lock on wakeup; Java's synchronized combined with wait/notify is a monitor. In short, use a mutex to protect a critical section, a semaphore to limit concurrency or signal availability, and a monitor when threads must wait for a state condition before proceeding, such as a bounded buffer that blocks producers when full and consumers when empty.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": [
+        "mutex",
+        "semaphore",
+        "monitor"
+      ],
+      "followUps": [
+        "When would you choose a semaphore over a mutex?",
+        "What is the lost-wakeup problem and how do condition variables address it?"
+      ]
+    },
+    {
+      "id": "q11",
+      "question": "How does CSP (Go channels) differ from the actor model (Erlang/Akka)?",
+      "answer": "Both are message-passing concurrency models that avoid shared mutable state, but they differ in addressing and coupling. In CSP, communication happens over named channels that are first-class values; senders and receivers are anonymous to each other and rendezvous on the channel, and an unbuffered channel synchronizes sender and receiver directly. In the actor model, each actor has a unique identity and a private mailbox; you send a message to a specific actor address, and delivery is asynchronous and buffered by the mailbox. CSP tends to couple communication to the channel (you think about the pipe), while actors couple it to the recipient (you think about who). Actors also typically include supervision hierarchies for fault tolerance, as in Erlang's 'let it crash' philosophy. Go embodies CSP with goroutines and channels; Erlang and Akka embody actors. Both eliminate data races by transferring data ownership through messages rather than sharing memory.",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": [
+        "csp",
+        "actors",
+        "message-passing"
+      ],
+      "followUps": [
+        "What does 'share memory by communicating' mean?",
+        "How do actor supervision hierarchies improve fault tolerance?"
+      ]
+    },
+    {
+      "id": "q12",
+      "question": "What is backpressure and why is it critical in concurrent pipelines?",
+      "answer": "Backpressure is the mechanism by which a slow consumer signals a fast producer to slow down, coupling the producer's rate to the consumer's capacity. Without it, an unbounded queue between them grows without limit until the process runs out of memory and crashes, often long after the real overload began, making the failure hard to diagnose. Bounded queues and channels provide natural backpressure: when the buffer is full, a blocking send stalls the producer until space frees up, so the producer literally cannot outrun the consumer. Reactive Streams formalizes this as explicit demand signaling, where the consumer requests N items and the producer promises never to send more than requested. Backpressure turns a load spike into graceful slowdown or shedding instead of a memory-exhaustion crash. It is essential in any streaming, event-driven, or pipeline architecture where production and consumption rates can diverge.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": [
+        "backpressure",
+        "pipelines",
+        "reactive-streams"
+      ],
+      "followUps": [
+        "How does a bounded channel implement backpressure?",
+        "What are alternatives to blocking when a buffer fills, such as dropping or shedding?"
+      ]
+    },
+    {
+      "id": "q13",
+      "question": "Why does volatile (or an atomic) not make count++ thread-safe?",
+      "answer": "Marking a variable volatile guarantees two things: visibility (a write is immediately visible to other threads) and ordering (no reordering across the access). What it does not provide is atomicity of compound operations. The statement count++ is really three operations: read count, add one, write it back. Even if each individual read and write is visible, two threads can both read the same value, both increment it, and both write back the same result, losing one update. Volatile fixes visibility, not the read-modify-write interleaving. To make the increment atomic you need either a lock around the whole operation, or an atomic type whose incrementAndGet uses a CAS loop to perform the read-modify-write as one indivisible unit. This is a very common misconception: volatile is for flags and single reads/writes where you need visibility, not for counters or any state that is read and then conditionally updated.",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": [
+        "volatile",
+        "atomicity",
+        "memory-model"
+      ],
+      "followUps": [
+        "What is the correct way to implement a thread-safe counter?",
+        "Give a case where volatile alone is sufficient."
+      ]
+    },
+    {
+      "id": "q14",
+      "question": "What is work stealing and why do modern schedulers use it?",
+      "answer": "Work stealing is a scheduling strategy where each worker thread maintains its own double-ended queue (deque) of tasks. A worker pushes and pops new tasks from one end of its own deque (cheap, no contention), and when a worker runs out of work it steals a task from the opposite end of another, busy worker's deque. Stealing from the opposite end reduces contention (the owner and the thief touch different ends) and tends to steal older, larger tasks that generate more subtasks, improving load balance. This keeps all cores busy without a single central queue that would become a contention bottleneck, and it adapts automatically to uneven task sizes. Java's ForkJoinPool and Go's goroutine scheduler both use work stealing, which is why recursive fork-join workloads spread evenly across cores. It provides good locality (a worker mostly runs its own recently created tasks) while still balancing load when workers go idle.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": [
+        "work-stealing",
+        "scheduler",
+        "fork-join"
+      ],
+      "followUps": [
+        "Why steal from the opposite end of the deque?",
+        "How does work stealing differ from a shared global task queue?"
+      ]
+    },
+    {
+      "id": "q15",
+      "question": "How do you decide between a thread pool, an event loop, and multiprocessing for a given workload?",
+      "answer": "Start by classifying the workload. For CPU-bound work you need real parallelism across cores: use a thread pool sized near the core count in languages without a GIL, or multiprocessing in Python to escape the GIL. For I/O-bound work you need concurrency, not raw threads: an event loop with async/await lets one or a few threads shepherd tens of thousands of in-flight operations with minimal memory and no context-switch thrash, which is why Node and Python asyncio excel at high-connection servers. For mixed workloads, combine them: run an async I/O layer and offload CPU chunks to a bounded worker pool or process pool so heavy computation does not block the loop. Also consider the runtime: Go and Java virtual threads let you write blocking-style code that scales like async because the runtime multiplexes lightweight tasks onto few OS threads. The failure mode to avoid is a thread-per-request model for an I/O-bound service, which wastes memory, and running CPU work on a single event-loop thread, which freezes everything.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": [
+        "thread-pool",
+        "event-loop",
+        "multiprocessing"
+      ],
+      "followUps": [
+        "Why is thread-per-request wasteful for I/O-bound services?",
+        "How do Java virtual threads change this calculus?"
+      ]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch1",
+      "title": "Fix the Race Condition in a Shared Counter",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "prompt": "You are given a counter shared by many threads. The naive implementation uses a plain int and count++, and under load the final total is wrong (below the expected value) and non-deterministic. Explain why, then provide two correct thread-safe implementations: one using a mutex (lock) and one using a lock-free atomic. Discuss the trade-offs between them.",
+      "hints": [
+        "count++ is not atomic; it compiles to load, increment, store, and those steps can interleave across threads, losing updates.",
+        "A lock provides both mutual exclusion (only one thread in the critical section) and a happens-before edge (visibility). Keep the critical section minimal.",
+        "An atomic uses a compare-and-swap loop under the hood: read, compute, swap-if-unchanged, retry. It avoids blocking but can spin under high contention."
+      ],
+      "solutionCode": "import java.util.concurrent.atomic.AtomicLong;\n\npublic class Counters {\n\n    // --- Version A: mutex / intrinsic lock ---\n    static final class LockedCounter {\n        private long count = 0;\n        private final Object lock = new Object();\n\n        void increment() {\n            synchronized (lock) {   // mutual exclusion + happens-before\n                count++;\n            }\n        }\n        long get() {\n            synchronized (lock) {   // read under lock for visibility too\n                return count;\n            }\n        }\n    }\n\n    // --- Version B: lock-free atomic (CAS) ---\n    static final class AtomicCounter {\n        private final AtomicLong count = new AtomicLong(0);\n        void increment() { count.incrementAndGet(); } // internal CAS loop\n        long get()       { return count.get(); }\n    }\n\n    public static void main(String[] args) throws InterruptedException {\n        LockedCounter locked = new LockedCounter();\n        AtomicCounter atomic = new AtomicCounter();\n\n        final int threads = 10, perThread = 1_000_000;\n        Runnable jobLocked = () -> { for (int i = 0; i < perThread; i++) locked.increment(); };\n        Runnable jobAtomic = () -> { for (int i = 0; i < perThread; i++) atomic.increment(); };\n\n        Thread[] ts = new Thread[threads * 2];\n        for (int i = 0; i < threads; i++)      ts[i] = new Thread(jobLocked);\n        for (int i = 0; i < threads; i++)      ts[threads + i] = new Thread(jobAtomic);\n        for (Thread t : ts) t.start();\n        for (Thread t : ts) t.join();\n\n        long expected = (long) threads * perThread;\n        System.out.println(\"locked = \" + locked.get() + \" (expected \" + expected + \")\");\n        System.out.println(\"atomic = \" + atomic.get() + \" (expected \" + expected + \")\");\n    }\n}",
+      "solutionLanguage": "java",
+      "explanation": "The naive count++ is a read-modify-write sequence, not a single atomic operation, so two threads can both read the same value, both increment, and both store the same result, silently losing an update; the deficit is non-deterministic because it depends on the exact interleaving. Version A wraps the increment in a synchronized block, which provides mutual exclusion so only one thread executes the read-modify-write at a time, and it also establishes a happens-before edge so every thread sees the latest value; the read is also done under the lock to guarantee visibility. Version B uses AtomicLong, whose incrementAndGet performs the update as a lock-free compare-and-swap loop: it reads the current value, computes the successor, and swaps only if the value is unchanged, retrying otherwise, so the whole read-modify-write is effectively atomic without blocking. The trade-off is that the lock blocks contending threads (context switches, but simple and fair with the right lock) while the atomic never blocks but may spin and waste CPU under very high contention. For a single counter the atomic is usually faster and preferred; when you must update several related fields together, a lock is clearer and correct whereas independent atomics would not be consistent as a group. Both correctly produce exactly ten million, whereas the plain int does not.",
+      "relatedTopic": "concurrency-parallelism"
+    },
+    {
+      "id": "ch2",
+      "title": "Bounded Producer-Consumer with a Channel",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "prompt": "Implement a bounded producer-consumer system where producers must not overwhelm consumers. Use a buffered channel to provide backpressure: when the buffer is full, producers should block until a consumer makes room. Fan out to multiple consumers, ensure clean shutdown with no lost items and no goroutine leaks, and explain how the bounded channel enforces backpressure.",
+      "hints": [
+        "A buffered channel of capacity N is your bounded queue; sending on a full channel blocks the producer, which is exactly the backpressure you want.",
+        "Use a sync.WaitGroup to know when all producers are done so you can safely close the channel; the sender, never the receiver, closes it.",
+        "Consumers use `for v := range ch` which exits automatically when the channel is closed and drained, giving clean shutdown with no leaked goroutines."
+      ],
+      "solutionCode": "package main\n\nimport (\n\t\"fmt\"\n\t\"sync\"\n\t\"sync/atomic\"\n)\n\nfunc main() {\n\tconst (\n\t\tbufferSize   = 4  // bounded buffer -> backpressure\n\t\tnumProducers = 3\n\t\tnumConsumers = 2\n\t\titemsEach    = 5\n\t)\n\n\titems := make(chan int, bufferSize) // full channel blocks producers\n\tvar produced, consumed int64\n\n\t// --- Producers ---\n\tvar pwg sync.WaitGroup\n\tfor p := 0; p < numProducers; p++ {\n\t\tpwg.Add(1)\n\t\tgo func(id int) {\n\t\t\tdefer pwg.Done()\n\t\t\tfor i := 0; i < itemsEach; i++ {\n\t\t\t\titems <- id*100 + i // blocks here when buffer is full\n\t\t\t\tatomic.AddInt64(&produced, 1)\n\t\t\t}\n\t\t}(p)\n\t}\n\n\t// Close the channel once all producers finish (sender closes, once).\n\tgo func() {\n\t\tpwg.Wait()\n\t\tclose(items)\n\t}()\n\n\t// --- Consumers (fan-out) ---\n\tvar cwg sync.WaitGroup\n\tfor c := 0; c < numConsumers; c++ {\n\t\tcwg.Add(1)\n\t\tgo func(id int) {\n\t\t\tdefer cwg.Done()\n\t\t\tfor v := range items { // exits when closed AND drained\n\t\t\t\t_ = v // process the item\n\t\t\t\tatomic.AddInt64(&consumed, 1)\n\t\t\t}\n\t\t}(c)\n\t}\n\n\tcwg.Wait() // all items consumed, all consumers returned\n\n\tfmt.Printf(\"produced=%d consumed=%d (expected %d)\\n\",\n\t\tproduced, consumed, numProducers*itemsEach)\n}",
+      "solutionLanguage": "go",
+      "explanation": "The buffered channel of capacity four is the bounded queue at the heart of the design; a send on a full channel blocks the producer goroutine until a consumer receives an item and frees a slot, so producers can never run arbitrarily far ahead of consumers and the queue can never grow without bound. That blocking is precisely backpressure: the producers' effective rate is throttled to the consumers' throughput, and memory usage stays bounded regardless of how eager the producers are. Multiple consumers range over the same channel, giving fan-out where the Go runtime hands each received value to whichever consumer is ready, balancing load automatically. Clean shutdown is the subtle part: a separate goroutine waits on the producer WaitGroup and then closes the channel exactly once, following the rule that the sender, never a receiver, closes a channel, which avoids the panic from sending on a closed channel or closing twice. Once the channel is closed and drained, every consumer's for-range loop terminates on its own, so no consumer goroutine leaks and every produced item is consumed, which the final counts confirm. Using atomic increments for the counters avoids a data race on the shared totals. The overall pattern, bounded channel plus WaitGroup-coordinated close, is the idiomatic Go solution to producer-consumer with backpressure and graceful termination.",
+      "relatedTopic": "concurrency-parallelism"
+    }
+  ],
+  "references": [
+    {
+      "label": "Java Concurrency in Practice (Goetz et al.)",
+      "url": "https://jcip.net/"
+    },
+    {
+      "label": "Rob Pike - Concurrency Is Not Parallelism (talk)",
+      "url": "https://go.dev/blog/waza-talk"
+    },
+    {
+      "label": "Go Blog - Go Concurrency Patterns / Pipelines",
+      "url": "https://go.dev/blog/pipelines"
+    },
+    {
+      "label": "MDN - The JavaScript Event Loop",
+      "url": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Event_loop"
+    },
+    {
+      "label": "Python Docs - Threading and the Global Interpreter Lock",
+      "url": "https://docs.python.org/3/library/threading.html"
+    },
+    {
+      "label": "The Little Book of Semaphores (Allen B. Downey)",
+      "url": "https://greenteapress.com/wp/semaphores/"
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-validate:
+    name: Build & validate content
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+
+      - name: Validate topic content
+        run: npm run content:validate
+
+      - name: Verify exercise runner (all exemplars green)
+        run: npm run content:verify-runner
+
+      - name: Check runner-core.ts is in sync with its source
+        run: |
+          npm run content:gen-runner
+          git diff --exit-code src/app/features/challenges/runner-core.ts
+
+      - name: Check index.json is in sync with topic files
+        run: |
+          npm run content:index
+          git diff --exit-code src/assets/data/index.json
+
+      - name: Production build
+        run: npm run build
+
+  unit-tests:
+    name: Unit tests (headless)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: browser-actions/setup-chrome@v1
+        id: setup-chrome
+      - run: npm ci
+      - name: Run unit tests
+        env:
+          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
+        run: npm run test:ci

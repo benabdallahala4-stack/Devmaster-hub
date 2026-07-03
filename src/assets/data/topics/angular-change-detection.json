@@ -1,0 +1,620 @@
+{
+  "id": "angular-change-detection",
+  "title": "Angular Change Detection & Zoneless",
+  "category": "Frontend",
+  "subcategory": "Performance",
+  "difficulty": "senior",
+  "tags": [
+    "angular",
+    "change-detection",
+    "zoneless",
+    "onpush",
+    "signals",
+    "zone-js",
+    "performance",
+    "reactivity"
+  ],
+  "description": "A staff-level deep dive into how Angular's change detection actually works, why Zone.js exists and what it costs, and how OnPush, signals, and zoneless change detection let you build applications that update precisely and cheaply. Covers the mental models, the trigger rules, and the production patterns that separate a fast Angular app from a slow one.",
+  "estReadMinutes": 29,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "What Change Detection Is",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Change detection (CD) is the process by which Angular synchronizes your component state with the DOM. Whenever data that is bound into a template changes, Angular must find the affected bindings and update the rendered output. The framework does not use dirty-flagging on individual properties out of the box; instead it re-evaluates template expressions and compares the produced values against the last rendered values, updating the DOM only where they differ."
+        },
+        {
+          "type": "paragraph",
+          "text": "The unit of change detection is the component. Angular keeps a tree of components (the logical view tree) rooted at the application's bootstrap component. A change detection cycle walks this tree from the top down, and for each view it checks the bindings declared in that view's template. Understanding this tree walk, and how strategies like OnPush and mechanisms like Zone.js or signals decide which parts of the tree get walked, is the core of writing performant Angular."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Two eras coexist in modern Angular. The classic model uses Zone.js to detect that something asynchronous happened and then runs CD from the root. The new model is zoneless: nothing is monkey-patched, and reactivity (signals plus a handful of explicit notifications) tells Angular exactly which components are dirty. This topic covers both because real senior work spans migrating from one to the other."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "CD reads template expressions and writes only the DOM that changed.",
+            "The component tree is checked top-down in a single synchronous pass.",
+            "Something must schedule that pass: Zone.js, a signal notification, or an explicit API call.",
+            "OnPush and zoneless are both about checking fewer components, less often."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "why-it-matters",
+      "heading": "Why Change Detection Dominates Angular Performance",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "In a default Angular app, a single click, HTTP response, or setTimeout callback triggers a full top-down change detection pass over the entire component tree. For a small app this is invisible. For a dashboard with thousands of bindings, or a component whose template calls functions on every check, this pass can run for tens of milliseconds and repeat many times per user interaction, producing jank, dropped frames, and battery drain."
+        },
+        {
+          "type": "paragraph",
+          "text": "The cost is not the DOM updates themselves; Angular only touches the DOM when a value actually changed. The cost is the checking: evaluating every binding expression on every component on every event. If your templates call getters, pipes that are not pure, or methods, that work multiplies. Senior engineers optimize by (a) reducing how many components are checked (OnPush, detach), (b) reducing how often the whole tree is checked (zoneless, coalescing), and (c) reducing the cost per check (pure pipes, no function calls, trackBy)."
+        },
+        {
+          "type": "table",
+          "columns": ["Lever", "Reduces", "Primary Tool"],
+          "rows": [
+            ["Fewer components checked", "Tree width per pass", "OnPush, detach()"],
+            ["Fewer passes triggered", "Number of passes", "Zoneless, runOutsideAngular"],
+            ["Cheaper checks", "Cost per binding", "Pure pipes, no template functions, trackBy"],
+            ["Precise invalidation", "Wasted checking", "Signals + zoneless"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "A profiler flame chart dominated by detectChangesInternal, checkAndUpdateView, or Zone.runTask is the classic signature of a change-detection performance problem. If your CPU time is there and not in your own logic, the fix is almost always OnPush, trackBy, removing template function calls, or going zoneless."
+        }
+      ]
+    },
+    {
+      "id": "the-tree-pass",
+      "heading": "The Top-Down Unidirectional Pass",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "When a change detection cycle runs, Angular starts at the root view and walks down the component tree in depth-first order. For each view it: (1) updates the bound inputs of child components, (2) calls lifecycle hooks such as ngDoCheck and ngOnChanges where relevant, (3) evaluates the template's binding expressions and updates any DOM whose value changed, and then (4) recurses into that view's children. This is a single pass: a parent is always checked before its children, and data flows in one direction, top to bottom."
+        },
+        {
+          "type": "paragraph",
+          "text": "This unidirectional rule is why Angular expects your parent-to-child data to be settled before children are checked. If a child, during its own check, changes a value that a parent already read and rendered in this same pass, the parent's rendered value is now stale for this frame. In development mode Angular runs a second verification pass and, if it finds such a discrepancy, throws ExpressionChangedAfterItHasBeenCheckedError to warn you that your data flow violated the one-way contract."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// Each view has a change-detection mode that gates whether the pass descends into it.\n// Conceptually (simplified from Angular's internals):\nenum ChangeDetectionMode {\n  CheckAlways, // Default strategy: always checked when the pass reaches it\n  CheckOnce,   // Will be checked this pass, then flips to Checked (OnPush after markForCheck)\n  Checked,     // OnPush and not dirty: the pass skips this subtree\n  Detached     // detach() was called: the pass never descends here until reattach()\n}\n\n// The walker (pseudo-code):\nfunction refreshView(view: View) {\n  if (view.mode === ChangeDetectionMode.Checked ||\n      view.mode === ChangeDetectionMode.Detached) {\n    return; // skip this component AND its entire subtree\n  }\n  updateInputBindings(view);\n  runDoCheckAndOnChanges(view);\n  evaluateTemplateAndPatchDom(view);\n  for (const child of view.children) {\n    refreshView(child);\n  }\n  if (view.strategy === 'OnPush') {\n    view.mode = ChangeDetectionMode.Checked; // clean until marked again\n  }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Key consequence: if an OnPush component is Checked (clean), the pass does not descend into it, so none of its descendants are checked either, even if a descendant is Default strategy. Marking a child dirty walks markForCheck UP to the root so the pass can reach it."
+        }
+      ]
+    },
+    {
+      "id": "zonejs",
+      "heading": "Zone.js: How the Pass Gets Scheduled",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Angular itself does not know when your data changes. In the classic model, Zone.js provides that knowledge indirectly. At startup, Zone.js monkey-patches the browser's asynchronous APIs: addEventListener, setTimeout, setInterval, Promise.then, XMLHttpRequest, requestAnimationFrame, and many more. Angular runs your application inside a special NgZone. Whenever one of those patched async tasks completes inside that zone, NgZone emits an onMicrotaskEmpty signal, and Angular's ApplicationRef.tick() runs a top-down change detection pass from the root."
+        },
+        {
+          "type": "paragraph",
+          "text": "The elegance is that you never call anything: click a button, the patched event handler runs, the microtask queue drains, NgZone notices, and Angular checks the tree. The cost is threefold. First, monkey-patching every async API adds overhead to every timer, promise, and event in your app, including third-party libraries. Second, Angular has no idea WHAT changed, so it must check the entire tree every time (unless OnPush prunes it). Third, unrelated async activity, like a polling library's setInterval, triggers full CD passes even when nothing visible changed."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Component, NgZone, inject } from '@angular/core';\n\n@Component({ selector: 'app-ticker', template: '{{ frames }}' })\nexport class TickerComponent {\n  frames = 0;\n  private zone = inject(NgZone);\n\n  // A 60fps loop that must NOT trigger a CD pass every frame.\n  startExpensiveLoop() {\n    // Run outside Angular's zone so requestAnimationFrame does not schedule tick().\n    this.zone.runOutsideAngular(() => {\n      const loop = () => {\n        this.frames++;                 // mutate freely, no CD triggered\n        if (this.frames % 30 === 0) {\n          // Re-enter the zone only when we actually want the DOM updated.\n          this.zone.run(() => {});     // schedules exactly one CD pass\n        }\n        requestAnimationFrame(loop);\n      };\n      requestAnimationFrame(loop);\n    });\n  }\n}"
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "NgZone.runOutsideAngular runs code whose async tasks will NOT schedule CD.",
+            "NgZone.run re-enters the zone, so the next microtask-empty triggers a pass.",
+            "ngZoneEventCoalescing and ngZoneRunCoalescing batch bursty events into fewer passes.",
+            "Zone.js is a global side effect: it slows every async API, not just Angular's."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "default-vs-onpush",
+      "heading": "Default vs OnPush Strategy",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Every component has a change detection strategy. With the Default strategy (CheckAlways), the component is checked on every CD pass that reaches it. With OnPush, the component is checked only when Angular considers it dirty; otherwise the top-down pass skips it and its entire subtree. OnPush is the single most impactful architectural decision for CD performance because a skipped subtree costs nothing."
+        },
+        {
+          "type": "paragraph",
+          "text": "An OnPush component is marked dirty (scheduled to be checked on the next pass) by a specific, finite set of triggers. Memorize these, because reasoning about why an OnPush component did or did not update is entirely about which of these fired. Anything outside this list will NOT update an OnPush view, which is exactly why mutating an object in place fails to refresh it."
+        },
+        {
+          "type": "table",
+          "columns": ["OnPush Trigger", "Fires When", "Notes"],
+          "rows": [
+            ["Input reference change", "An @Input()/input() receives a NEW reference (!== old)", "Reference identity, not deep equality"],
+            ["Component event", "A DOM event handler bound in THIS component's template runs", "e.g. (click) on an element in the template"],
+            ["Async pipe emission", "An observable/promise piped with | async emits", "The pipe calls markForCheck internally"],
+            ["Signal read + write", "A signal read in the template is later written", "Angular marks the view dirty on the write"],
+            ["Explicit markForCheck", "Code calls ChangeDetectorRef.markForCheck()", "The manual escape hatch"],
+            ["host listener output", "An @Output() fires up to a parent, or host listener runs", "Same mechanism as component event"]
+          ]
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { ChangeDetectionStrategy, Component, Input, input } from '@angular/core';\n\n@Component({\n  selector: 'app-user-card',\n  changeDetection: ChangeDetectionStrategy.OnPush,\n  template: `\n    <h3>{{ user().name }}</h3>\n    <p>{{ user().email }}</p>\n    <button (click)=\"expanded = !expanded\">Toggle</button>\n    @if (expanded) { <pre>{{ user() | json }}</pre> }\n  `\n})\nexport class UserCardComponent {\n  // Signal input: reading user() in the template ties this view to the signal.\n  user = input.required<{ name: string; email: string }>();\n  expanded = false; // toggled via (click), which marks THIS OnPush view dirty\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Practical rule: make OnPush the default for every component and feed data as immutable inputs, observables through async pipe, or signals. Then reference changes, emissions, and signal writes handle almost all updates automatically, and you rarely reach for markForCheck."
+        }
+      ]
+    },
+    {
+      "id": "cdr-api",
+      "heading": "ChangeDetectorRef: markForCheck, detectChanges, detach/reattach",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "ChangeDetectorRef is the manual control surface for a view's participation in change detection. The three operations engineers confuse most are markForCheck, detectChanges, and detach/reattach. They operate on different axes: markForCheck schedules future checking, detectChanges performs immediate checking, and detach/reattach control whether the view participates at all."
+        },
+        {
+          "type": "table",
+          "columns": ["Method", "What it does", "When it runs", "Direction"],
+          "rows": [
+            ["markForCheck()", "Marks this view and all ancestors dirty", "On the NEXT CD pass", "Upward (to root)"],
+            ["detectChanges()", "Runs CD on this view and its children NOW", "Synchronously, immediately", "Downward (subtree)"],
+            ["detach()", "Removes view from the CD tree", "Until reattach()", "This view + subtree"],
+            ["reattach()", "Restores view to the CD tree", "Next pass onward", "This view + subtree"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "markForCheck does not run change detection; it only flags the view so the next pass will check it. It also walks up to the root so an OnPush ancestor cannot block the pass from reaching this view. Use it when data changed outside the normal triggers, for example a callback from a non-observable third-party SDK. detectChanges runs a synchronous CD pass on this view and its subtree right away, ignoring the OnPush dirty flag; it is useful for detached views or precisely controlled rendering, but calling it during an existing pass can cause ExpressionChanged errors."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { ChangeDetectionStrategy, ChangeDetectorRef, Component, NgZone, inject, OnInit, OnDestroy } from '@angular/core';\n\n@Component({\n  selector: 'app-live-price',\n  changeDetection: ChangeDetectionStrategy.OnPush,\n  template: '<span>{{ price }}</span>'\n})\nexport class LivePriceComponent implements OnInit, OnDestroy {\n  price = 0;\n  private cdr = inject(ChangeDetectorRef);\n  private zone = inject(NgZone);\n  private socket?: WebSocket;\n\n  ngOnInit() {\n    this.socket = new WebSocket('wss://feed.example.com/prices');\n    // A raw WebSocket message is NOT a template event, an input change,\n    // an async pipe, or a signal write -> OnPush will NOT refresh on its own.\n    this.socket.onmessage = (evt) => {\n      this.price = JSON.parse(evt.data).price;\n      this.cdr.markForCheck(); // schedule this view for the next pass\n    };\n  }\n\n  ngOnDestroy() { this.socket?.close(); }\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "detach() is powerful but dangerous: a detached view is completely skipped, including its inputs. Pair it with periodic detectChanges() or a reattach() when you want an update. Forgetting to reattach is a classic cause of a component that mysteriously stops updating."
+        }
+      ]
+    },
+    {
+      "id": "mutation-breaks-onpush",
+      "heading": "Why Mutating an Object Breaks OnPush",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "OnPush's input trigger fires on REFERENCE change: the new input value must be !== (strictly not equal to) the previous value. When you push to an existing array or set a property on an existing object, the reference is unchanged, so Angular sees the same input it saw last time and does not mark the child dirty. The child's template still holds a live reference to the mutated data, but the pass never re-evaluates it, so the DOM goes stale. This is the number-one OnPush bug in code review."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// PARENT passing a list to an OnPush child\n@Component({\n  selector: 'app-todo-page',\n  template: '<app-todo-list [items]=\"todos\"></app-todo-list>\\n<button (click)=\"addBroken()\">Add (broken)</button>'\n})\nexport class TodoPageComponent {\n  todos: string[] = ['buy milk'];\n\n  // BUG: push mutates the SAME array reference. OnPush child never updates.\n  addBroken() {\n    this.todos.push('walk dog'); // todos === todos (same reference) -> no input change\n  }\n}\n\n@Component({\n  selector: 'app-todo-list',\n  changeDetection: ChangeDetectionStrategy.OnPush,\n  template: '@for (t of items; track t) { <li>{{ t }}</li> }'\n})\nexport class TodoListComponent {\n  @Input() items: string[] = [];\n}"
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// FIX A: create a NEW reference so OnPush sees an input change.\naddFixedImmutable() {\n  this.todos = [...this.todos, 'walk dog']; // new array reference -> input change fires\n}\n\n// FIX B: model the list as a signal; writing it marks readers dirty.\nimport { signal } from '@angular/core';\ntodos = signal<string[]>(['buy milk']);\naddFixedSignal() {\n  this.todos.update(list => [...list, 'walk dog']); // signal write -> view marked dirty\n}\n\n// FIX C (last resort): keep mutating, but tell Angular explicitly.\n// Requires injecting ChangeDetectorRef in the component that owns `todos`\n// and does not help a child that received it by reference unless the child\n// itself calls markForCheck. Prefer FIX A or B."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Never rely on mutation with OnPush. Treat inputs as immutable. Prefer spreads/new objects or signals. If you truly must mutate (e.g. huge arrays where copying is costly), that component owns the responsibility of calling markForCheck, and you must document it."
+        },
+        {
+          "type": "paragraph",
+          "text": "The same reference rule applies to object inputs: this.config.theme = 'dark' will not update an OnPush child bound to [config]. You must assign this.config = { ...this.config, theme: 'dark' } (or use a signal). Immutability is not a style preference under OnPush; it is a correctness requirement."
+        }
+      ]
+    },
+    {
+      "id": "zoneless",
+      "heading": "Zoneless Change Detection",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Zoneless change detection removes Zone.js entirely. Instead of a global monkey-patch noticing async activity and running a full tick, Angular relies on explicit reactive notifications to know which views are dirty. When a view is marked dirty (by a signal write it depends on, an async pipe emission, a component event/output, or an explicit markForCheck), Angular schedules a change detection pass. That pass still walks top-down, but only dirty views and their ancestors are refreshed, and unrelated async activity no longer triggers anything."
+        },
+        {
+          "type": "paragraph",
+          "text": "Signals and the async pipe are what make zoneless practical. A signal read in a template creates a dependency; writing that signal notifies Angular precisely which views need checking. The async pipe already calls markForCheck on every emission. Because both integrate with Angular's scheduler directly, they do not need Zone.js to detect that something changed. The result is fewer, smaller passes, no patched globals, faster startup, and cleaner stack traces."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// main.ts - bootstrap zoneless (Angular 18: experimental; Angular 20+: stable)\nimport { bootstrapApplication } from '@angular/platform-browser';\nimport { provideZonelessChangeDetection } from '@angular/core';\nimport { AppComponent } from './app/app.component';\n\nbootstrapApplication(AppComponent, {\n  providers: [\n    // Angular 18/19 experimental name:\n    //   provideExperimentalZonelessChangeDetection()\n    // Angular 20+ stable name:\n    provideZonelessChangeDetection()\n  ]\n});\n\n// Also delete the Zone.js import from polyfills (or the 'zone.js' entry in angular.json).\n// Without Zone.js loaded, nothing else schedules CD; you MUST use signals,\n// async pipe, or markForCheck for every dynamic value."
+        },
+        {
+          "type": "table",
+          "columns": ["Dimension", "Zone.js (classic)", "Zoneless"],
+          "rows": [
+            ["What schedules CD", "Any patched async task completing", "Signal write, async pipe, event, markForCheck"],
+            ["Scope of a pass", "Whole tree from root (pruned by OnPush)", "Only dirty views + ancestors"],
+            ["Global patching", "Yes (timers, promises, XHR, events)", "None"],
+            ["Third-party async", "Triggers CD even if irrelevant", "Ignored unless it notifies Angular"],
+            ["Startup cost", "Zone.js parse + patch overhead", "Lower, no Zone.js payload"],
+            ["setTimeout updates a field", "Refreshes automatically", "Does NOT refresh unless signal/markForCheck"],
+            ["Debugging", "Zone frames in stack traces", "Clean, direct stack traces"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Zoneless is compatible with OnPush and Default components. Under zoneless, a Default component simply behaves like it must be notified to be checked; in practice you drive everything with signals and async pipe, so the strategy distinction matters less than in the Zone.js world."
+        }
+      ]
+    },
+    {
+      "id": "performance-patterns",
+      "heading": "Performance Patterns for Fast CD",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Beyond OnPush and zoneless, the cost per check is controlled by what your templates do. The expensive anti-patterns are: calling methods or getters in bindings (re-run on every check), impure pipes, and lists that re-render entirely because Angular cannot track identity. Fix these and each CD pass gets dramatically cheaper."
+        },
+        {
+          "type": "code",
+          "language": "html",
+          "code": "<!-- SLOW: total() runs on EVERY change detection pass, for every row. -->\n@for (row of rows; track $index) {\n  <tr><td>{{ format(row) }}</td><td>{{ total(row) }}</td></tr>\n}\n\n<!-- FAST: track by stable id so Angular reuses DOM nodes; -->\n<!-- precompute values or use a pure pipe instead of method calls. -->\n@for (row of rows; track row.id) {\n  <tr><td>{{ row.label }}</td><td>{{ row.total }}</td></tr>\n}"
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Pipe, PipeTransform } from '@angular/core';\n\n// Pure pipe (default): recomputed ONLY when its input reference changes,\n// not on every CD pass. This is why a pipe beats a method call in a template.\n@Pipe({ name: 'currencyFmt' })\nexport class CurrencyFmtPipe implements PipeTransform {\n  transform(value: number, code = 'USD'): string {\n    return new Intl.NumberFormat('en-US', { style: 'currency', currency: code }).format(value);\n  }\n}\n// In template: {{ row.total | currencyFmt }}  -- cached until row.total changes."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Always provide a stable track expression for @for (track item.id); $index is a fallback that defeats DOM reuse when the list reorders.",
+            "Never call methods or non-trivial getters in template bindings; precompute or use pure pipes.",
+            "Prefer pure pipes over impure ones; impure pipes run on every pass like a method.",
+            "Use OnPush everywhere and immutable inputs so subtrees are skipped.",
+            "detach() a high-frequency component (charts, tickers) and detectChanges() it on your own schedule (e.g. throttled to 10fps).",
+            "runOutsideAngular for animation loops, then re-enter only to paint."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Combine strategies: OnPush prunes the tree, trackBy/@for track reuses DOM, pure pipes cache computation, and zoneless removes wasted passes. Each is multiplicative, not additive, on a large app."
+        }
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: Taming a Real-Time Trading Grid",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Consider a trading grid rendering 500 rows, each updating several times per second from a WebSocket. The naive Default-strategy version ran a full-tree CD pass on every message and every unrelated timer, spending 40+ ms per pass and dropping frames. The optimized version below combines OnPush, a detached high-frequency subtree with a throttled repaint, trackBy, and a pure pipe. It reduced main-thread CD time by roughly 90 percent."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import {\n  ChangeDetectionStrategy, ChangeDetectorRef, Component,\n  NgZone, OnDestroy, OnInit, inject, signal\n} from '@angular/core';\n\ninterface Quote { id: string; symbol: string; price: number; }\n\n@Component({\n  selector: 'app-trading-grid',\n  changeDetection: ChangeDetectionStrategy.OnPush,\n  template: `\n    <table>\n      <tbody>\n        @for (q of quotes(); track q.id) {\n          <tr>\n            <td>{{ q.symbol }}</td>\n            <td>{{ q.price | currencyFmt }}</td>\n          </tr>\n        }\n      </tbody>\n    </table>\n  `\n})\nexport class TradingGridComponent implements OnInit, OnDestroy {\n  // Signal holds the row snapshot; we replace the array (new reference) on paint.\n  quotes = signal<Quote[]>([]);\n\n  private cdr = inject(ChangeDetectorRef);\n  private zone = inject(NgZone);\n  private socket?: WebSocket;\n  private buffer = new Map<string, Quote>();\n  private raf = 0;\n\n  ngOnInit() {\n    // Detach: high-frequency messages must NOT each trigger a CD pass.\n    this.cdr.detach();\n\n    this.zone.runOutsideAngular(() => {\n      this.socket = new WebSocket('wss://feed.example.com/quotes');\n      this.socket.onmessage = (evt) => {\n        const q: Quote = JSON.parse(evt.data);\n        this.buffer.set(q.id, q); // coalesce bursts in a buffer, no CD yet\n      };\n\n      // Repaint at most ~10 times per second regardless of message rate.\n      const paint = () => {\n        if (this.buffer.size) {\n          // New array reference -> signal write -> view is dirty.\n          this.quotes.set([...this.buffer.values()]);\n          this.cdr.detectChanges(); // run CD for THIS subtree only, on our schedule\n          this.buffer.clear();\n        }\n        this.raf = window.setTimeout(paint, 100);\n      };\n      paint();\n    });\n  }\n\n  ngOnDestroy() {\n    clearTimeout(this.raf);\n    this.socket?.close();\n  }\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "The critical moves: (1) OnPush so the grid is skipped by unrelated passes; (2) detach so incoming messages never trigger CD directly; (3) runOutsideAngular so the WebSocket and the setTimeout loop do not schedule Zone.js ticks; (4) a Map buffer coalescing many messages into one repaint; (5) detectChanges on a throttled 100 ms cadence to render at most 10fps; (6) trackBy on q.id so only changed rows touch the DOM; (7) a pure pipe caching the price formatting. Each layer removes a distinct source of wasted work."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Under zoneless, steps 3 (runOutsideAngular) becomes unnecessary because nothing is patched; you keep detach + throttled detectChanges (or a signal write plus scheduler) for the high-frequency subtree. The rest of the app updates precisely via signals."
+        }
+      ]
+    },
+    {
+      "id": "expression-changed-error",
+      "heading": "ExpressionChangedAfterItHasBeenCheckedError",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "In development mode, after each change detection pass Angular runs a second, read-only verification pass. If any binding produces a different value the second time, Angular throws ExpressionChangedAfterItHasBeenCheckedError. It means a value your template rendered was changed AFTER it had already been checked in the same tick, violating the unidirectional data-flow contract. It never throws in production builds, but it is a real bug: your UI is one frame out of sync and depends on a second pass to settle."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// TRIGGERS the error: a child's ngAfterViewInit mutates a value the parent\n// already rendered this pass, or a parent reads a getter that changes each read.\n@Component({\n  selector: 'app-clock',\n  template: '<span>{{ now }}</span>'\n})\nexport class ClockComponent {\n  // BUG: new value every read -> differs between the two dev passes.\n  get now() { return Date.now(); }\n}\n\n// Another classic: setting a bound property in ngAfterViewInit.\nngAfterViewInit() {\n  this.title = 'loaded'; // parent already checked title this pass -> error\n}"
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// FIXES\n// 1) Do not compute changing values in getters; snapshot them.\nnow = Date.now(); // set once (or update via interval + markForCheck), stable per pass\n\n// 2) Defer the mutation to the NEXT tick so it belongs to a fresh pass.\nimport { ChangeDetectorRef, inject } from '@angular/core';\nprivate cdr = inject(ChangeDetectorRef);\nngAfterViewInit() {\n  Promise.resolve().then(() => {\n    this.title = 'loaded';\n    this.cdr.markForCheck();\n  });\n}\n\n// 3) Best modern fix: use a signal; signal reads are stable within a pass\n//    and the write schedules a clean subsequent pass.\ntitle = signal('loading');\nngAfterViewInit() { this.title.set('loaded'); }"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Do not silence the error by forcing an extra detectChanges in ngAfterViewInit; that hides the symptom and doubles your CD work. Fix the data flow: compute values before the pass reaches them, or defer changes to the next tick, or model the value as a signal."
+        }
+      ]
+    },
+    {
+      "id": "signals-note",
+      "heading": "Note: Signals as the CD Primitive",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Signals are the direction Angular's change detection is heading. A signal read inside a template registers that view as a consumer; writing the signal notifies exactly those consumers to be checked. This is fine-grained by design and is the bridge to fully zoneless, and eventually to signal-based components where only the specific bindings that read a changed signal are re-evaluated rather than the whole template."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "computed() memoizes derived state and only recomputes when a dependency changes.",
+            "effect() runs side effects when its read signals change, outside the render path.",
+            "Signal inputs (input()) replace @Input and integrate with OnPush/zoneless natively.",
+            "model() gives two-way bound signals for component authors."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "If you start a new component today, use signals for state, input()/output() for I/O, OnPush (or zoneless), and the async pipe for streams. That combination gives you correct, minimal change detection with almost no manual markForCheck."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "top-down-pass",
+      "title": "Top-Down Change Detection Pass Over the Component Tree",
+      "type": "mermaid",
+      "content": "flowchart TD\n  A[Trigger fires: event, signal write, async, or tick] --> B[Start at Root View]\n  B --> C{View mode?}\n  C -->|Checked / Detached| D[Skip this view AND its subtree]\n  C -->|CheckAlways / dirty| E[Update inputs, run hooks]\n  E --> F[Evaluate bindings, patch changed DOM]\n  F --> G[Recurse into child views]\n  G --> C\n  F --> H{OnPush?}\n  H -->|Yes| I[Flip view to Checked]\n  H -->|No| J[Stays CheckAlways]"
+    },
+    {
+      "id": "what-triggers-cd",
+      "title": "What Triggers Checking: Default vs OnPush vs Zoneless",
+      "type": "mermaid",
+      "content": "flowchart TD\n  S[Something happens] --> D{Change detection model}\n  D -->|Default + Zone.js| Z[Any patched async task -> full tick from root]\n  D -->|OnPush + Zone.js| O[Tick runs, but only dirty views checked]\n  D -->|Zoneless| N[Only explicit notifications schedule a pass]\n  O --> T[Dirty when: input ref change, event, async pipe, signal write, markForCheck]\n  N --> T\n  Z --> W[Whole tree checked every time unless OnPush prunes]"
+    },
+    {
+      "id": "cdr-methods-ascii",
+      "title": "ChangeDetectorRef Methods on Two Axes",
+      "type": "ascii",
+      "content": "                 WHEN it runs\n              now (sync)        next pass\n           +---------------+---------------+\n  scope:   | detectChanges |  markForCheck |\n  subtree  | (this + kids) | (marks up to  |\n           | ignores dirty |    the root)  |\n           +---------------+---------------+\n\n  participation axis:\n    detach()   -> view + subtree removed from CD tree\n    reattach() -> view + subtree restored to CD tree\n\n  Rule of thumb:\n    - data changed off the beaten path  -> markForCheck()\n    - detached / manual render cadence   -> detectChanges()\n    - high-frequency, self-scheduled     -> detach() + throttled detectChanges()"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q1",
+      "question": "Walk through what happens, step by step, when a user clicks a button in a default Zone.js Angular app.",
+      "answer": "The click hits an event listener that Zone.js has monkey-patched, so the handler runs inside Angular's NgZone. Your handler executes and may mutate component state. When the microtask queue drains, NgZone detects that async work finished and emits onMicrotaskEmpty. Angular responds by calling ApplicationRef.tick(), which runs a single top-down change detection pass starting at the root view. The pass walks the component tree depth-first, updating inputs, running hooks, evaluating bindings, and patching any DOM whose value changed. OnPush components that are not dirty (and their subtrees) are skipped. In development mode a second verification pass then checks for ExpressionChanged errors.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["zone-js", "change-detection", "tick"],
+      "followUps": ["What if the click handler runs code inside runOutsideAngular?", "How would this differ under zoneless?"]
+    },
+    {
+      "id": "q2",
+      "question": "Why does calling array.push() on an @Input array fail to update an OnPush child component?",
+      "answer": "OnPush marks a component dirty on an input change only when the input's reference changes, using strict !== comparison. push() mutates the existing array in place, so the array reference the child received is identical to the one it already has. Angular therefore concludes the input did not change and does not mark the child dirty, so the top-down pass skips it and the rendered list stays stale. The template still holds a live reference to the mutated array, but nothing re-evaluates the bindings. The fix is to assign a new reference, for example this.items = [...this.items, next], or to model the collection as a signal whose write notifies readers. This reference-equality rule applies equally to object inputs mutated in place.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["onpush", "immutability", "reference-equality"],
+      "followUps": ["Show two idiomatic fixes.", "Does the same apply to object properties?"]
+    },
+    {
+      "id": "q3",
+      "question": "What is the difference between markForCheck() and detectChanges()?",
+      "answer": "markForCheck does not run change detection; it flags the current view and all of its ancestors as dirty so that the NEXT change detection pass will check them. It walks upward to the root so that an OnPush ancestor cannot block the pass from reaching the marked view. detectChanges, by contrast, runs change detection synchronously and immediately on the current view and its children (downward), ignoring the OnPush dirty flag entirely. Use markForCheck when data changed outside the normal triggers and you want it picked up on the next scheduled pass. Use detectChanges when you need an immediate, controlled render, typically for a detached view or a self-scheduled repaint. Calling detectChanges while a pass is already running risks ExpressionChanged errors.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["change-detector-ref", "markforcheck", "detectchanges"],
+      "followUps": ["Which direction does each traverse?", "Why does markForCheck go up but detectChanges go down?"]
+    },
+    {
+      "id": "q4",
+      "question": "Under zoneless change detection, what actually triggers a change detection pass?",
+      "answer": "With Zone.js removed, nothing global notices async activity, so a pass is scheduled only by explicit reactive notifications. The triggers are: writing a signal that a template reads, an async pipe emitting a new value (it calls markForCheck internally), a component event or output firing, and an explicit ChangeDetectorRef.markForCheck call. When any of these marks a view dirty, Angular schedules a pass that refreshes the dirty views and their ancestors. Crucially, a plain setTimeout that mutates a field will NOT update the DOM under zoneless unless it also writes a signal or calls markForCheck. This precision is the entire point: unrelated async work no longer forces a full-tree tick.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["zoneless", "signals", "async-pipe"],
+      "followUps": ["What breaks when you first remove Zone.js from an existing app?", "Why do signals and async pipe work without Zone.js?"]
+    },
+    {
+      "id": "q5",
+      "question": "Explain the cause of ExpressionChangedAfterItHasBeenCheckedError.",
+      "answer": "In development mode Angular runs a second verification pass immediately after each change detection pass. If a binding evaluates to a different value on the second pass than it did on the first, Angular throws this error. It means a value was changed AFTER Angular already checked and rendered it in the same tick, which violates the unidirectional top-down data-flow contract. Common causes are getters that compute a fresh value on every read (like Date.now()), mutating a bound property in ngAfterViewInit, or a child changing a value a parent already rendered. It does not throw in production, but it signals your UI is momentarily inconsistent. Fix it by snapshotting stable values, deferring the mutation to the next tick with Promise.resolve().then, or modeling the value as a signal.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["expressionchanged", "data-flow", "dev-mode"],
+      "followUps": ["Why does it only appear in dev mode?", "Why is forcing an extra detectChanges a bad fix?"]
+    },
+    {
+      "id": "q6",
+      "question": "Does the async pipe need any help (like markForCheck) to update an OnPush component?",
+      "answer": "No. The async pipe is designed to work with OnPush out of the box. Internally, when its subscribed observable or promise emits, the pipe calls ChangeDetectorRef.markForCheck on the host view, marking it and its ancestors dirty so the next pass renders the new value. That is precisely why using the async pipe is the recommended way to feed streams into OnPush components: you never manually subscribe, never manually mark for check, and you avoid subscription leaks because the pipe unsubscribes on destroy. If instead you subscribe manually in the component and assign to a field, you lose that automatic markForCheck and must call it yourself. So the async pipe is not just convenient; it is the mechanism that keeps OnPush correct with reactive data.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["async-pipe", "onpush", "rxjs"],
+      "followUps": ["What happens if you subscribe manually instead?", "How does the pipe avoid leaks?"]
+    },
+    {
+      "id": "q7",
+      "question": "How exactly does Zone.js know that it should trigger change detection?",
+      "answer": "Zone.js monkey-patches the browser's asynchronous APIs at load time: setTimeout, setInterval, Promise.then, addEventListener, XMLHttpRequest, requestAnimationFrame, and many more. Angular runs the application inside a forked zone called NgZone. Every patched async task started within that zone is tracked, and when the last pending microtask completes, NgZone emits an onMicrotaskEmpty event. Angular subscribes to that event and calls ApplicationRef.tick(), which runs the top-down change detection pass. So Zone.js never inspects your data; it only detects that some async operation finished inside the zone and infers that state may have changed. This is both its convenience and its cost, since it must patch and track every async API globally and cannot know which component, if any, actually changed.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["zone-js", "monkey-patch", "ngzone"],
+      "followUps": ["What is the runtime cost of this patching?", "How does coalescing reduce the number of ticks?"]
+    },
+    {
+      "id": "q8",
+      "question": "When and why would you use ChangeDetectorRef.detach()?",
+      "answer": "detach removes a view and its entire subtree from the change detection tree, so the top-down pass never descends into it until you call reattach. You use it for components that update at very high frequency where letting each update trigger a full or partial pass would be wasteful, such as real-time charts, tickers, or animation-heavy widgets. After detaching, you take manual control of rendering, typically calling detectChanges on your own throttled schedule (for example 10 times per second) so the DOM updates at a controlled cadence rather than on every data event. The danger is that a detached view is completely inert, including its inputs, so forgetting to reattach or to call detectChanges yields a component that silently stops updating. It is a scalpel, appropriate for isolated hot spots, not a default.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["detach", "reattach", "high-frequency"],
+      "followUps": ["What must you remember to do after detaching?", "How does this compare to runOutsideAngular?"]
+    },
+    {
+      "id": "q9",
+      "question": "Why is calling a method in a template binding a performance problem?",
+      "answer": "A method call in a binding, like {{ computeTotal() }}, has no memoization: Angular re-invokes it on every single change detection pass because it cannot know whether the result changed. In a Zone.js app, passes happen frequently and for unrelated reasons, so a moderately expensive method inside an @for loop can run thousands of times per second. The same applies to non-trivial getters. The fixes are to precompute the value when the underlying data changes and bind the field, or to move the computation into a pure pipe, which caches its result and only recomputes when its input reference changes. Signals and computed() also solve this because a computed only recalculates when a dependency changes. The template should read stable values, not perform work.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["template-functions", "pure-pipe", "performance"],
+      "followUps": ["How does a pure pipe avoid this?", "How does computed() help?"]
+    },
+    {
+      "id": "q10",
+      "question": "What does the track expression in @for (or trackBy) actually do for performance?",
+      "answer": "The track expression tells Angular how to identify each item across renders. When the list changes, Angular compares the new items to the old by their track key rather than by array position. If an item with the same key still exists, Angular reuses its existing DOM node and embedded view instead of destroying and recreating it. Without a stable track (or with track $index), reordering or replacing the array forces Angular to tear down and rebuild DOM nodes, which is expensive and also loses element state like focus, scroll position, and running animations. Using a stable identity, such as track item.id, means only genuinely added, removed, or moved rows touch the DOM. On large lists this is often the difference between a smooth update and a visible stutter.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["for", "trackby", "list-performance"],
+      "followUps": ["When is track $index acceptable?", "What state is lost without a stable track?"]
+    },
+    {
+      "id": "q11",
+      "question": "How do signals integrate with change detection, and why do they enable zoneless?",
+      "answer": "When a template reads a signal, Angular records that view as a consumer of that signal. When the signal is later written to a new value, Angular notifies precisely those consumer views to be marked dirty and scheduled for a pass. This dependency tracking is fine-grained and explicit, so Angular knows exactly which views need checking without any global async detection. That is exactly what zoneless needs: instead of Zone.js inferring that something might have changed, the signal write directly tells Angular what changed. computed() extends this with memoized derived state, and effect() runs side effects when dependencies change. Because signals notify the scheduler themselves, they remove the need for Zone.js entirely and pave the way toward signal-based components where only the specific bindings reading a changed signal are re-evaluated.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["signals", "zoneless", "reactivity"],
+      "followUps": ["What is the difference between computed and effect?", "How is this more precise than OnPush?"]
+    },
+    {
+      "id": "q12",
+      "question": "List every way an OnPush component can be marked dirty.",
+      "answer": "An OnPush component is marked dirty by a finite set of triggers: (1) one of its inputs receives a new reference, evaluated with strict inequality; (2) a DOM event handler bound in the component's own template fires, such as a (click); (3) an observable or promise used with the async pipe in its template emits; (4) a signal that the template reads is written; and (5) code explicitly calls ChangeDetectorRef.markForCheck on the view. Outputs firing and host listeners running fall under the event category. Anything outside this list, such as a mutation of an existing object, a raw WebSocket message assigned to a field, or a manual subscription assignment, will NOT refresh the view on its own. Knowing this list turns 'why didn't my OnPush component update' from guesswork into a checklist.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["onpush", "triggers", "checklist"],
+      "followUps": ["Which of these is easiest to accidentally miss?", "How does markForCheck reach an OnPush view whose ancestor is clean?"]
+    },
+    {
+      "id": "q13",
+      "question": "You migrate an app to zoneless and a component that updates via setTimeout stops refreshing. Why, and how do you fix it?",
+      "answer": "Under Zone.js, setTimeout was patched, so when its callback ran and mutated a field, NgZone detected the completed task and triggered a tick that refreshed the DOM. Once you remove Zone.js for zoneless, setTimeout is a plain, unpatched timer: its callback runs and mutates the field, but nothing notifies Angular, so no pass is scheduled and the DOM stays stale. The fix is to make the state reactive or to notify Angular explicitly: convert the field to a signal and call .set inside the callback, or keep the field but call ChangeDetectorRef.markForCheck after mutating it. The signal approach is preferred because it is declarative and integrates cleanly with the scheduler. This is the single most common surprise when first going zoneless.",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["zoneless", "settimeout", "migration"],
+      "followUps": ["Why did it work before?", "Which fix is idiomatic in modern Angular?"]
+    },
+    {
+      "id": "q14",
+      "question": "What is the difference between a pure and an impure pipe with respect to change detection?",
+      "answer": "A pure pipe (the default) is evaluated by change detection only when its input value reference changes; between such changes Angular reuses the cached result, so it does not run on every pass. This makes pure pipes cheap and a good replacement for method calls in templates. An impure pipe (pure: false) is re-evaluated on every change detection pass, exactly like a method call, because Angular assumes its output can change even when inputs look the same. Impure pipes are sometimes necessary for stateful transforms, but they reintroduce the per-pass cost you were trying to avoid. As a rule, keep pipes pure and derive changing state as new references so the pure-pipe cache invalidates correctly. If you find yourself needing an impure pipe, reconsider whether a signal or precomputation would be cheaper.",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["pipes", "pure-impure", "performance"],
+      "followUps": ["Give an example where impure is unavoidable.", "How does a pure pipe compare to computed()?"]
+    },
+    {
+      "id": "q15",
+      "question": "Why does markForCheck walk up to the root instead of only marking the current view?",
+      "answer": "Under OnPush, the top-down pass skips any clean view and, critically, its entire subtree. So if a deeply nested view becomes dirty but one of its OnPush ancestors is still clean, the pass would stop at that clean ancestor and never reach the dirty descendant. To prevent this, markForCheck marks not just the target view but every ancestor up to the root as needing to be traversed. This guarantees the next pass has an unbroken path from the root down to the dirty view. Note it does not mark the ancestors as needing their own bindings re-rendered in the full sense; it clears the skip so traversal can pass through. This upward marking is the mechanism that makes OnPush both efficient (skips clean subtrees) and correct (a dirty leaf still gets checked).",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["markforcheck", "onpush", "tree-traversal"],
+      "followUps": ["What would happen if it only marked the local view?", "How is this different from detectChanges?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "c1",
+      "title": "Fix an OnPush Component That Won't Update After a Mutation",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "prompt": "A parent passes a filters object to an OnPush child: <app-filter-summary [filters]=\"filters\"></app-filter-summary>. When the user toggles a filter, the parent does this.filters.active = true and calls nothing else. The child never re-renders. Fix the parent so the OnPush child updates correctly, using an idiomatic approach. Show both a plain-immutable fix and a signal-based fix.",
+      "hints": [
+        "OnPush inputs fire on reference change (strict !==), and mutating a property keeps the same object reference.",
+        "Create a new object instead of mutating, or model filters as a signal whose write notifies readers.",
+        "Avoid the temptation to inject ChangeDetectorRef into the child just to force it; fix the data flow at the source."
+      ],
+      "solutionCode": "import { ChangeDetectionStrategy, Component, Input, signal } from '@angular/core';\n\ninterface Filters { active: boolean; query: string; }\n\n// FIX A: immutable update -> new object reference -> OnPush input change fires.\n@Component({\n  selector: 'app-filter-page',\n  template: '<app-filter-summary [filters]=\"filters\"></app-filter-summary>\\n<button (click)=\"toggle()\">Toggle</button>'\n})\nexport class FilterPageComponent {\n  filters: Filters = { active: false, query: '' };\n  toggle() {\n    // Was: this.filters.active = true;  (same reference -> child never updates)\n    this.filters = { ...this.filters, active: !this.filters.active };\n  }\n}\n\n// FIX B: signal-based. Writing the signal marks reader views dirty; works under zoneless too.\n@Component({\n  selector: 'app-filter-page-signal',\n  template: '<app-filter-summary [filters]=\"filters()\"></app-filter-summary>\\n<button (click)=\"toggle()\">Toggle</button>'\n})\nexport class FilterPageSignalComponent {\n  filters = signal<Filters>({ active: false, query: '' });\n  toggle() {\n    this.filters.update(f => ({ ...f, active: !f.active }));\n  }\n}\n\n@Component({\n  selector: 'app-filter-summary',\n  changeDetection: ChangeDetectionStrategy.OnPush,\n  template: '<span>Active: {{ filters.active }}</span>'\n})\nexport class FilterSummaryComponent {\n  @Input({ required: true }) filters!: Filters;\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "The child is OnPush, so it is only re-checked when one of the OnPush triggers fires. The original code mutated a property on the existing filters object, leaving the object reference identical, so Angular's strict-inequality input comparison saw no change and skipped the child's subtree. Fix A assigns a brand-new object via spread, so the reference changes and the input-change trigger marks the child dirty for the next pass. Fix B models filters as a signal; calling update produces a new value and notifies every view that reads filters(), which also works under zoneless where there is no Zone.js tick to fall back on. Both fixes address the root cause, immutability of inputs, rather than papering over it with a manual markForCheck in the child. Injecting ChangeDetectorRef into the child would be a code smell here because it hides a broken data-flow contract and spreads responsibility for correctness away from the owner of the state.",
+      "relatedTopic": "angular-change-detection"
+    },
+    {
+      "id": "c2",
+      "title": "Optimize a Slow List with track and OnPush",
+      "difficulty": "medium",
+      "category": "Frontend",
+      "prompt": "A product list of 2,000 rows re-renders sluggishly on every keystroke in a search box. The template uses @for (p of products; track $index) and calls {{ discountedPrice(p) }} and {{ p.name | uppercase | slugify }} where slugify is an impure pipe. The component is Default strategy. Refactor for fast change detection.",
+      "hints": [
+        "Give @for a stable identity so DOM nodes are reused instead of rebuilt when the filtered list changes.",
+        "Method calls and impure pipes run on every pass; precompute values or use pure pipes.",
+        "Switch to OnPush and drive the filtered list as a new array reference (or a signal/computed)."
+      ],
+      "solutionCode": "import { ChangeDetectionStrategy, Component, Pipe, PipeTransform, computed, signal } from '@angular/core';\n\ninterface Product { id: string; name: string; price: number; }\ninterface Row { id: string; name: string; slug: string; discounted: number; }\n\n// Pure pipe replaces the impure slugify; recomputes only when input changes.\n@Pipe({ name: 'slugify' })\nexport class SlugifyPipe implements PipeTransform {\n  transform(v: string): string { return v.toLowerCase().replace(/\\s+/g, '-'); }\n}\n\n@Component({\n  selector: 'app-product-list',\n  changeDetection: ChangeDetectionStrategy.OnPush,\n  template: `\n    <input (input)=\"onSearch($any($event.target).value)\" placeholder=\"Search\" />\n    <ul>\n      @for (r of rows(); track r.id) {\n        <li>{{ r.name }} - {{ r.slug }} - {{ r.discounted }}</li>\n      }\n    </ul>\n  `\n})\nexport class ProductListComponent {\n  private all = signal<Product[]>([]);\n  private query = signal('');\n\n  // Derived, memoized rows: recompute only when all or query changes.\n  rows = computed<Row[]>(() => {\n    const q = this.query().toLowerCase();\n    return this.all()\n      .filter(p => p.name.toLowerCase().includes(q))\n      .map(p => ({\n        id: p.id,\n        name: p.name,\n        slug: p.name.toLowerCase().replace(/\\s+/g, '-'),\n        discounted: Math.round(p.price * 0.9 * 100) / 100 // precomputed, no template method\n      }));\n  });\n\n  setProducts(list: Product[]) { this.all.set(list); }\n  onSearch(value: string) { this.query.set(value); }\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "Three separate costs made the list slow, and each is addressed. First, track $index meant that filtering the array (which changes positions) forced Angular to destroy and rebuild DOM nodes; switching to track r.id lets Angular match rows by identity and reuse nodes, so only added or removed rows touch the DOM. Second, discountedPrice(p) was a method call re-evaluated on every change detection pass for every row, and slugify was an impure pipe with the same per-pass cost; both are eliminated by precomputing the values once inside a memoized computed and by making the pipe pure. Third, the component was Default strategy, so unrelated ticks re-checked it; OnPush plus a signal-driven rows() computed means the view is only re-evaluated when all or query actually changes. The computed recalculates lazily and memoizes, so a keystroke recomputes the filtered rows exactly once rather than on every pass. Together these turn an O(passes * rows * work) template into a cheap render that reuses DOM and computes derived data only when inputs change.",
+      "relatedTopic": "angular-change-detection"
+    },
+    {
+      "id": "c3",
+      "title": "Convert an App to Zoneless and Fix a Broken CD Trigger",
+      "difficulty": "hard",
+      "category": "Frontend",
+      "prompt": "You are removing Zone.js from an app. After adding the zoneless provider and deleting the zone.js polyfill, a NotificationBanner component that shows a message via setTimeout(() => this.message = text, 0) inside a service callback stops updating. Bootstrap the app zoneless and fix the banner so it updates without reintroducing Zone.js.",
+      "hints": [
+        "Zoneless means no patched async APIs; a raw setTimeout no longer schedules a change detection pass.",
+        "Make the state reactive with a signal, or notify Angular explicitly with markForCheck.",
+        "Prefer signals so the update is declarative and integrates with the zoneless scheduler."
+      ],
+      "solutionCode": "// main.ts\nimport { bootstrapApplication } from '@angular/platform-browser';\nimport { provideZonelessChangeDetection } from '@angular/core';\nimport { AppComponent } from './app/app.component';\n\nbootstrapApplication(AppComponent, {\n  providers: [\n    // Angular 20+ stable; on 18/19 use provideExperimentalZonelessChangeDetection()\n    provideZonelessChangeDetection()\n  ]\n}).catch(err => console.error(err));\n\n// notification-banner.component.ts\nimport { ChangeDetectionStrategy, Component, signal } from '@angular/core';\n\n@Component({\n  selector: 'app-notification-banner',\n  changeDetection: ChangeDetectionStrategy.OnPush,\n  template: '@if (message()) { <div class=\"banner\">{{ message() }}</div> }'\n})\nexport class NotificationBannerComponent {\n  // FIX: signal instead of a plain field. Writing it schedules a pass\n  // under zoneless with no Zone.js required.\n  message = signal<string>('');\n\n  show(text: string) {\n    // Even inside a raw setTimeout, setting the signal notifies Angular.\n    setTimeout(() => this.message.set(text), 0);\n  }\n}\n\n// Alternative fix without signals (kept for reference):\n//   private cdr = inject(ChangeDetectorRef);\n//   show(text: string) {\n//     setTimeout(() => { this.message = text; this.cdr.markForCheck(); }, 0);\n//   }",
+      "solutionLanguage": "typescript",
+      "explanation": "Under Zone.js the banner worked by accident: setTimeout was monkey-patched, so when its callback ran and set the plain message field, NgZone detected the finished task and ran a tick that refreshed the DOM. Removing Zone.js unpatches setTimeout, so the callback still assigns the field but nothing notifies Angular, no pass is scheduled, and the banner stays blank. The idiomatic fix is to convert message to a signal: writing it with set() notifies Angular precisely that the views reading message() are dirty, and the zoneless scheduler runs a pass. This works no matter where the write happens, including inside an unpatched setTimeout, because the reactivity, not the async API, drives change detection. The commented alternative keeps a plain field but calls markForCheck after the assignment, which also works but is more imperative and easier to forget. Choosing signals makes the state self-notifying and future-proofs the component for signal-based rendering, which is why it is the preferred solution when migrating to zoneless.",
+      "relatedTopic": "angular-change-detection"
+    }
+  ],
+  "references": [
+    { "label": "Angular - Zoneless (angular.dev)", "url": "https://angular.dev/guide/zoneless" },
+    { "label": "Angular - Skipping component subtrees (OnPush)", "url": "https://angular.dev/best-practices/skipping-subtrees" },
+    { "label": "Angular - Control flow and @for (control-flow)", "url": "https://angular.dev/guide/templates/control-flow" },
+    { "label": "Angular - Signals overview", "url": "https://angular.dev/guide/signals" },
+    { "label": "Angular In Depth - The mechanics of change detection", "url": "https://angularindepth.com/posts/1053/everything-you-need-to-know-about-change-detection-in-angular" }
+  ]
+}

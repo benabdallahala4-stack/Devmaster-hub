@@ -1,0 +1,682 @@
+{
+  "id": "angular-signals",
+  "title": "Angular Signals",
+  "category": "Frontend",
+  "subcategory": "Reactivity",
+  "difficulty": "senior",
+  "tags": [
+    "angular",
+    "signals",
+    "reactivity",
+    "change-detection",
+    "zoneless",
+    "rxjs-interop",
+    "computed",
+    "effects"
+  ],
+  "description": "A staff-level treatment of Angular Signals: the synchronous, always-current reactive primitive that powers fine-grained change detection, glue-free RxJS interop, and the road to zoneless Angular. Covers signal/computed/effect, signal-based inputs and outputs, migration from BehaviorSubject, and the pitfalls that separate senior engineers from the rest.",
+  "estReadMinutes": 29,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "What Signals Actually Are",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A signal is a wrapper around a value that notifies interested consumers when that value changes. Unlike an Observable, a signal is synchronous and always holds a current value: reading it never means waiting for an emission, it returns the value that exists right now. This single property, that a signal is a pull-based container with a known current state rather than a push-based stream of future events, is the conceptual key to everything Angular built on top of it."
+        },
+        {
+          "type": "paragraph",
+          "text": "Introduced as developer preview in Angular 16 and stabilized progressively through Angular 17, 18, and 19, signals are Angular's answer to fine-grained reactivity. They let the framework know exactly which pieces of the DOM depend on which pieces of state, so that a change to one signal can, in principle, update only the bindings that read it, without dirty-checking an entire component tree. That precision is what makes zoneless change detection viable."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { signal, computed, effect } from '@angular/core';\n\n// A writable signal: always holds a current value.\nconst count = signal(0);\n\n// Read: call it like a function. Returns the current value synchronously.\nconsole.log(count()); // 0\n\n// Write: set replaces, update derives from previous.\ncount.set(1);\ncount.update((c) => c + 1); // now 2\n\n// A computed signal: derived, memoized, read-only.\nconst doubled = computed(() => count() * 2);\nconsole.log(doubled()); // 4\n\n// An effect: runs side effects when its dependencies change.\neffect(() => console.log('count is', count()));"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Mental model: a signal is a spreadsheet cell. computed() is a formula cell that recalculates when its inputs change. effect() is the chart that redraws when the numbers move. The dependency graph is tracked automatically by simply reading signals inside the reactive function."
+        }
+      ]
+    },
+    {
+      "id": "why-signals",
+      "heading": "Why Signals Exist",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "For a decade Angular relied on Zone.js to know when to run change detection. Zone.js monkey-patches every async API, and any patched event triggers a full check of the component tree (or, with OnPush, of the dirty subtree). This is coarse: Angular knew that something might have changed, but not what, so it re-evaluated every template expression to find out. On large apps this dirty-checking dominates the frame budget."
+        },
+        {
+          "type": "paragraph",
+          "text": "Signals invert the model. Because reading a signal in a template registers a dependency, Angular knows precisely which bindings consume which state. A signal write can mark exactly the affected views as needing refresh. This unlocks three things senior engineers care about: removing Zone.js entirely (smaller bundles, no monkey-patching, better third-party interop), predictable and cheaper change detection, and a unified reactive primitive that composes cleanly with both templates and RxJS."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Fine-grained updates: only the bindings that read a changed signal need refreshing, not the whole component.",
+            "Zoneless-ready: signals give the framework the notification hooks that Zone.js used to provide via patching.",
+            "Synchronous and glitch-free: computed values are always consistent with their sources when read; no intermediate 'glitch' states.",
+            "Simpler mental model for derived state: computed() replaces sprawling combineLatest chains for pure synchronous derivations.",
+            "Better DevX with inputs/outputs: input(), model(), and output() are typed, reactive, and require no decorators."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "The strategic reason to adopt signals is not micro-performance on a single component. It is that signals are the migration path to zoneless Angular, where change detection cost scales with what changed, not with how big your tree is."
+        }
+      ]
+    },
+    {
+      "id": "signal-vs-observable",
+      "heading": "Signals Versus Observables",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Signals and Observables are both reactive, but they answer different questions. A signal answers 'what is the value now?' An Observable answers 'what values happen over time, and when?' Signals are synchronous, always have a value, and are pull-based when read but push-based when they notify consumers. Observables are push-based streams that may be async, may have zero or many emissions, and may never emit at all."
+        },
+        {
+          "type": "table",
+          "headers": ["Aspect", "Signal", "Observable"],
+          "rows": [
+            ["Current value", "Always present; read synchronously via signal()", "No inherent current value (BehaviorSubject is the exception)"],
+            ["Cardinality", "Exactly one current value at any time", "Zero, one, or many emissions over time"],
+            ["Timing", "Synchronous read; glitch-free", "Often asynchronous; supports scheduling"],
+            ["Subscription", "No subscription; dependency tracked automatically", "Explicit subscribe/unsubscribe or async pipe"],
+            ["Operators", "computed(), effect(); no operator library", "Rich operator set (map, switchMap, debounceTime, etc.)"],
+            ["Cleanup", "Automatic via injection context / destroy", "Manual (takeUntilDestroyed, unsubscribe, async pipe)"],
+            ["Best for", "State, derived state, template bindings", "Events, streams, async I/O, time-based logic"],
+            ["Backpressure/cancellation", "Not applicable", "First-class (switchMap cancels in-flight work)"]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "The senior heuristic: use signals for state that a template renders and that other state derives from; use Observables for event streams, coordination over time, and anything involving cancellation, debouncing, retries, or backpressure. They interoperate cleanly, so you rarely choose one exclusively; you convert at the boundary."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "A signal is not a replacement for RxJS. Trying to model a debounced HTTP search with pure signals and effects leads to manual cancellation logic that switchMap gives you for free. Convert to an Observable for the time-based part, then back to a signal for the template."
+        }
+      ]
+    },
+    {
+      "id": "computed",
+      "heading": "Computed Signals: Pure And Memoized",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "computed() creates a read-only signal whose value is derived from other signals. It is lazy and memoized: the derivation function does not run until the computed is first read, and it re-runs only when one of the signals it read during the last computation changes. If nothing it depends on changed, reading it returns the cached value with no recomputation."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { signal, computed } from '@angular/core';\n\nconst price = signal(100);\nconst quantity = signal(2);\nconst taxRate = signal(0.2);\n\n// Dependencies are discovered by reading signals inside the function.\nconst subtotal = computed(() => price() * quantity());\nconst total = computed(() => subtotal() * (1 + taxRate()));\n\nconsole.log(total()); // 240\n\nquantity.set(3);\nconsole.log(total()); // 360 -- subtotal and total both recomputed\n\n// Reading total() again without any change returns the cached value.\nconsole.log(total()); // 360 (no recomputation)"
+        },
+        {
+          "type": "paragraph",
+          "text": "Dependency tracking is dynamic. If a computed reads signal A on one run and, due to a branch, reads signal B on the next, its dependency set updates accordingly. This means conditional dependencies are handled correctly, but it also means a computed must be pure: it must not perform side effects, must not write signals, and must return a value that depends only on the signals it reads."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Never put side effects in a computed. Because computed is lazy and memoized, the side effect will run at unpredictable times, or not at all if nothing reads the computed. Side effects belong in effect(); derivations belong in computed()."
+        }
+      ]
+    },
+    {
+      "id": "effects",
+      "heading": "Effects And Injection Context",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "effect() registers a side effect that runs whenever any signal it reads changes. Effects run once initially to establish their dependency set, then re-run on change. They are for synchronizing signal state with the outside world: logging, analytics, manual DOM manipulation, syncing to localStorage, or driving imperative third-party libraries."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Component, signal, effect, inject, Injector, runInInjectionContext } from '@angular/core';\n\n@Component({ selector: 'app-theme', standalone: true, template: '' })\nexport class ThemeComponent {\n  readonly theme = signal<'light' | 'dark'>('light');\n\n  constructor() {\n    // Created in an injection context (constructor). Cleaned up on destroy.\n    effect(() => {\n      document.body.dataset['theme'] = this.theme();\n      localStorage.setItem('theme', this.theme());\n    });\n\n    // Effects can register cleanup that runs before the next execution\n    // and on destroy.\n    effect((onCleanup) => {\n      const id = setInterval(() => console.log(this.theme()), 1000);\n      onCleanup(() => clearInterval(id));\n    });\n  }\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Effects must be created in an injection context (a constructor, a field initializer, or a factory) so Angular can tie their lifecycle to the owning injector and clean them up automatically. If you need to create one later, pass an explicit Injector or wrap the call in runInInjectionContext. Effects run as part of change detection, are batched, and are guaranteed not to run synchronously in the middle of the code that triggered them."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Writing to a signal inside an effect is a code smell. It creates feedback loops and forces you to reach for allowSignalWrites, which exists mostly for edge cases and legacy interop. If you find yourself writing a signal from an effect, the value you are computing is almost certainly a computed()."
+        }
+      ]
+    },
+    {
+      "id": "signal-inputs-outputs",
+      "heading": "Signal Inputs, Model, And Output",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Angular 17.1+ replaced decorator-based @Input/@Output with signal-based equivalents. input() returns a read-only signal for the input value, integrating component inputs directly into the reactive graph. model() creates a two-way bindable signal (input plus matching output for banana-in-a-box syntax). output() creates an emitter with a clean, RxJS-free API."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Component, input, model, output, computed } from '@angular/core';\n\n@Component({\n  selector: 'app-user-card',\n  standalone: true,\n  changeDetection: ChangeDetectionStrategy.OnPush,\n  template: `\n    <h3>{{ displayName() }}</h3>\n    <button (click)=\"toggle()\">{{ expanded() ? 'Collapse' : 'Expand' }}</button>\n    <button (click)=\"remove.emit(userId())\">Remove</button>\n  `\n})\nexport class UserCardComponent {\n  // Optional input with a default.\n  readonly firstName = input('');\n  // Required input: consumer must provide it or the template fails to compile.\n  readonly userId = input.required<string>();\n  // Transform input at the boundary.\n  readonly lastName = input('', { transform: (v: string) => v.trim() });\n\n  // Two-way bindable: <app-user-card [(expanded)]=\"isOpen\" />\n  readonly expanded = model(false);\n\n  // Typed output, no @Output decorator.\n  readonly remove = output<string>();\n\n  // Inputs are signals, so they compose in computed().\n  readonly displayName = computed(() => `${this.firstName()} ${this.lastName()}`.trim());\n\n  toggle(): void {\n    this.expanded.update((v) => !v);\n  }\n}"
+        },
+        {
+          "type": "list",
+          "items": [
+            "input() is read-only inside the component; the parent owns the value.",
+            "input.required<T>() removes the need for the non-null assertion and a NG_DEV mode runtime guard for undefined.",
+            "model() is writable inside the component and emits a modelChange output automatically for [()] binding.",
+            "output() returns an OutputEmitterRef with emit(); it is not an EventEmitter and does not carry RxJS baggage.",
+            "Because inputs are signals, they participate in computed() and effect() with zero extra wiring, unlike ngOnChanges."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Signal inputs eliminate the classic ngOnChanges boilerplate for derived input state. A computed() that reads two input signals stays correct automatically as either input changes."
+        }
+      ]
+    },
+    {
+      "id": "rxjs-interop",
+      "heading": "RxJS Interop: toSignal And toObservable",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The bridge lives in @angular/core/rxjs-interop. toSignal() subscribes to an Observable and exposes its latest value as a read-only signal, unsubscribing automatically when the injection context is destroyed. toObservable() turns a signal into an Observable that emits on change, built on effect() under the hood. Together they let you keep RxJS where it shines (async, time, cancellation) and use signals where they shine (templates, derived state)."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Component, signal, inject } from '@angular/core';\nimport { toSignal, toObservable } from '@angular/core/rxjs-interop';\nimport { HttpClient } from '@angular/common/http';\nimport { debounceTime, distinctUntilChanged, switchMap, startWith } from 'rxjs';\n\n@Component({ selector: 'app-search', standalone: true, template: '' })\nexport class SearchComponent {\n  private http = inject(HttpClient);\n\n  // A signal drives the query.\n  readonly query = signal('');\n\n  // Convert the signal to a stream to use time-based operators + cancellation.\n  private results$ = toObservable(this.query).pipe(\n    debounceTime(300),\n    distinctUntilChanged(),\n    switchMap((q) =>\n      this.http.get<string[]>(`/api/search?q=${encodeURIComponent(q)}`)\n    )\n  );\n\n  // Convert the stream back to a signal for the template.\n  // requireSync:false so we can supply an initialValue safely.\n  readonly results = toSignal(this.results$, { initialValue: [] as string[] });\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "toSignal() takes options that matter at staff level: initialValue sets the value before the source emits; requireSync: true asserts the source emits synchronously (as a BehaviorSubject does) and lets the signal be non-nullable without an initial value; manualCleanup opts out of automatic teardown when you manage lifetime yourself. Without initialValue or requireSync, the signal type is T | undefined until the first emission."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { toSignal } from '@angular/core/rxjs-interop';\nimport { BehaviorSubject } from 'rxjs';\n\nconst source$ = new BehaviorSubject(0);\n\n// Because BehaviorSubject emits synchronously, requireSync gives a\n// non-nullable Signal<number> with no initialValue needed.\nconst value = toSignal(source$, { requireSync: true }); // Signal<number>\n\n// Without requireSync/initialValue the type is Signal<number | undefined>.\nconst maybe = toSignal(source$); // Signal<number | undefined>"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "toObservable is built on effect, so it needs an injection context and emits asynchronously (batched with change detection). Do not expect it to emit synchronously the moment you write the source signal."
+        }
+      ]
+    },
+    {
+      "id": "onpush-zoneless",
+      "heading": "Signals, OnPush, And Zoneless Change Detection",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "With ChangeDetectionStrategy.OnPush, Angular only re-checks a component when an input reference changes, an event fires in its template, or you explicitly mark it. Signals add a fourth trigger: when a signal read in a component's template changes, Angular marks that component for check automatically. This means signals give you the ergonomics of OnPush without manual markForCheck calls or async pipe gymnastics."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Component, ChangeDetectionStrategy, signal, computed } from '@angular/core';\n\n@Component({\n  selector: 'app-counter',\n  standalone: true,\n  changeDetection: ChangeDetectionStrategy.OnPush,\n  template: `\n    <p>Count: {{ count() }}</p>\n    <p>Doubled: {{ doubled() }}</p>\n    <button (click)=\"increment()\">+1</button>\n  `\n})\nexport class CounterComponent {\n  readonly count = signal(0);\n  readonly doubled = computed(() => this.count() * 2);\n\n  increment(): void {\n    // No markForCheck needed. Reading count() in the template registered\n    // a dependency; this write marks the view for refresh.\n    this.count.update((c) => c + 1);\n  }\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Zoneless change detection (provideZonelessChangeDetection, stable in Angular 20 and available experimentally earlier as provideExperimentalZonelessChangeDetection) removes Zone.js entirely. Without Zone.js, Angular no longer gets a blanket 'something happened' notification. Instead it relies on explicit notifications: signal writes, template event bindings, markForCheck, async pipe, and a handful of framework APIs. Signals are the primary, ergonomic source of those notifications, which is why 'go zoneless' and 'adopt signals' are the same project in practice."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { bootstrapApplication } from '@angular/platform-browser';\nimport { provideZonelessChangeDetection } from '@angular/core';\nimport { AppComponent } from './app/app.component';\n\nbootstrapApplication(AppComponent, {\n  providers: [\n    provideZonelessChangeDetection(),\n    // ...other providers\n  ]\n});\n// Then remove zone.js from angular.json polyfills."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "In a zoneless app, mutating a plain object field that a template reads will NOT trigger change detection. State the template depends on must be expressed as signals (or flow through the other notification paths). This is the discipline zoneless enforces."
+        }
+      ]
+    },
+    {
+      "id": "equality-semantics",
+      "heading": "Equality And Change Semantics",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A signal only notifies consumers when its value actually changes. By default the change check uses Object.is. For primitives this is intuitive. For objects and arrays it means that mutating in place and setting the same reference back does NOT notify, because Object.is sees the same reference. Signals favor immutability: produce a new reference to signal a change."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { signal } from '@angular/core';\n\nconst items = signal<string[]>(['a']);\n\n// WRONG: mutates in place, same reference, no notification.\nitems().push('b');\nitems.set(items()); // Object.is(prev, next) === true -> no update\n\n// RIGHT: new reference each time.\nitems.update((list) => [...list, 'b']);\n\n// Custom equality when reference changes but you want value equality.\nconst point = signal(\n  { x: 0, y: 0 },\n  { equal: (a, b) => a.x === b.x && a.y === b.y }\n);\npoint.set({ x: 0, y: 0 }); // custom equal returns true -> no notification"
+        },
+        {
+          "type": "paragraph",
+          "text": "computed() also accepts a custom equal. This is a powerful optimization: if an expensive downstream computed only cares about a derived shape, a custom equality on the intermediate computed can short-circuit recomputation of everything below it. Use it deliberately; incorrect equality functions cause missed updates that are hard to debug."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Angular 19 added the linkedSignal() API for writable state that resets based on a source computation, filling the gap where you want a signal that is both derived and locally editable."
+        }
+      ]
+    },
+    {
+      "id": "production-example",
+      "heading": "Production Example: A Signal-Based Cart Store",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Here is a realistic providedIn root store for a shopping cart, written entirely with signals. Note how the public API exposes read-only signals and computed derivations, keeping writes encapsulated behind intent-revealing methods, the signal equivalent of a well-designed BehaviorSubject facade but without subscription management."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Injectable, computed, signal } from '@angular/core';\n\nexport interface CartLine {\n  readonly productId: string;\n  readonly name: string;\n  readonly unitPrice: number;\n  readonly qty: number;\n}\n\n@Injectable({ providedIn: 'root' })\nexport class CartStore {\n  // Private writable state.\n  private readonly _lines = signal<ReadonlyArray<CartLine>>([]);\n  private readonly _taxRate = signal(0.2);\n\n  // Public read-only surface.\n  readonly lines = this._lines.asReadonly();\n  readonly itemCount = computed(() =>\n    this._lines().reduce((n, l) => n + l.qty, 0)\n  );\n  readonly subtotal = computed(() =>\n    this._lines().reduce((sum, l) => sum + l.unitPrice * l.qty, 0)\n  );\n  readonly tax = computed(() => this.subtotal() * this._taxRate());\n  readonly total = computed(() => this.subtotal() + this.tax());\n  readonly isEmpty = computed(() => this._lines().length === 0);\n\n  add(line: Omit<CartLine, 'qty'>, qty = 1): void {\n    this._lines.update((lines) => {\n      const existing = lines.find((l) => l.productId === line.productId);\n      if (existing) {\n        return lines.map((l) =>\n          l.productId === line.productId ? { ...l, qty: l.qty + qty } : l\n        );\n      }\n      return [...lines, { ...line, qty }];\n    });\n  }\n\n  setQty(productId: string, qty: number): void {\n    if (qty <= 0) return this.remove(productId);\n    this._lines.update((lines) =>\n      lines.map((l) => (l.productId === productId ? { ...l, qty } : l))\n    );\n  }\n\n  remove(productId: string): void {\n    this._lines.update((lines) => lines.filter((l) => l.productId !== productId));\n  }\n\n  clear(): void {\n    this._lines.set([]);\n  }\n}"
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "import { Component, ChangeDetectionStrategy, inject } from '@angular/core';\nimport { CurrencyPipe } from '@angular/common';\nimport { CartStore } from './cart.store';\n\n@Component({\n  selector: 'app-cart-summary',\n  standalone: true,\n  imports: [CurrencyPipe],\n  changeDetection: ChangeDetectionStrategy.OnPush,\n  template: `\n    @if (cart.isEmpty()) {\n      <p>Your cart is empty.</p>\n    } @else {\n      <ul>\n        @for (line of cart.lines(); track line.productId) {\n          <li>{{ line.name }} x{{ line.qty }} = {{ line.unitPrice * line.qty | currency }}</li>\n        }\n      </ul>\n      <p>Subtotal: {{ cart.subtotal() | currency }}</p>\n      <p>Tax: {{ cart.tax() | currency }}</p>\n      <p><strong>Total: {{ cart.total() | currency }}</strong></p>\n    }\n  `\n})\nexport class CartSummaryComponent {\n  readonly cart = inject(CartStore);\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "No subscriptions, no async pipe, no takeUntilDestroyed, no manual markForCheck. The template reads signals; Angular refreshes exactly what changed. This is the day-to-day payoff of signals in a real store."
+        }
+      ]
+    },
+    {
+      "id": "migration-behaviorsubject",
+      "heading": "Migrating From BehaviorSubject To Signals",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The most common real-world migration is a service whose state is a BehaviorSubject exposed as an Observable. Because a BehaviorSubject always holds a current value and emits synchronously, it maps almost one-to-one onto a signal. Here is the before, and a clean signal-based after."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// BEFORE: classic BehaviorSubject facade.\nimport { Injectable } from '@angular/core';\nimport { BehaviorSubject, map, Observable } from 'rxjs';\n\ninterface Filters { search: string; page: number; }\n\n@Injectable({ providedIn: 'root' })\nexport class FiltersServiceRx {\n  private readonly state$ = new BehaviorSubject<Filters>({ search: '', page: 1 });\n\n  readonly filters$: Observable<Filters> = this.state$.asObservable();\n  readonly search$ = this.state$.pipe(map((s) => s.search));\n\n  setSearch(search: string): void {\n    this.state$.next({ ...this.state$.value, search, page: 1 });\n  }\n\n  nextPage(): void {\n    const s = this.state$.value;\n    this.state$.next({ ...s, page: s.page + 1 });\n  }\n}"
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// AFTER: signal-based. Note the near-mechanical mapping.\nimport { Injectable, computed, signal } from '@angular/core';\n\ninterface Filters { search: string; page: number; }\n\n@Injectable({ providedIn: 'root' })\nexport class FiltersService {\n  // BehaviorSubject(initial)  ->  signal(initial)\n  private readonly _state = signal<Filters>({ search: '', page: 1 });\n\n  // asObservable()  ->  asReadonly()\n  readonly filters = this._state.asReadonly();\n  // pipe(map(...))  ->  computed(...)\n  readonly search = computed(() => this._state().search);\n\n  // .next({ ...value, ... })  ->  .update((s) => ({ ...s, ... }))\n  setSearch(search: string): void {\n    this._state.update((s) => ({ ...s, search, page: 1 }));\n  }\n\n  nextPage(): void {\n    this._state.update((s) => ({ ...s, page: s.page + 1 }));\n  }\n}"
+        },
+        {
+          "type": "list",
+          "items": [
+            "new BehaviorSubject(x) becomes signal(x).",
+            "subject.value becomes mySignal() (both synchronous reads).",
+            "subject.next(v) becomes mySignal.set(v); the ...value spread pattern becomes mySignal.update(fn).",
+            "asObservable() becomes asReadonly() to expose an immutable handle.",
+            "pipe(map(...)) becomes computed(...).",
+            "Template usage changes from search$ | async to search().",
+            "If some consumer still needs an Observable (e.g. a switchMap chain), wrap with toObservable(this.search) at that boundary."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Migrate incrementally. Keep the boundary Observable via toObservable where downstream RxJS pipelines exist, and let toSignal feed templates. You do not have to convert an entire feature in one commit."
+        }
+      ]
+    },
+    {
+      "id": "pitfalls",
+      "heading": "Common Pitfalls",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "heading",
+          "text": "Side effects in computed"
+        },
+        {
+          "type": "paragraph",
+          "text": "A computed must be pure. Doing HTTP calls, logging analytics, or mutating external state inside a computed is a bug: computeds are lazy and memoized, so the side effect runs at unpredictable times or never. Angular's dev mode will warn if you try to write a signal inside a computed."
+        },
+        {
+          "type": "heading",
+          "text": "Writing signals inside effects"
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "code": "// ANTI-PATTERN: effect that writes a signal it (transitively) reads.\nconst a = signal(0);\nconst b = signal(0);\neffect(() => {\n  // If b is derived from a, this belongs in a computed, not an effect.\n  b.set(a() * 2); // requires allowSignalWrites; creates feedback risk\n});\n\n// CORRECT: derive with computed.\nconst bDerived = computed(() => a() * 2);"
+        },
+        {
+          "type": "heading",
+          "text": "Assuming template signal calls are expensive"
+        },
+        {
+          "type": "paragraph",
+          "text": "Calling a signal in a template, {{ user() }}, does re-read on every change detection pass of that view, just like any template expression. For a plain signal or a memoized computed this is cheap: it returns a cached value. The pitfall is calling a signal-returning FUNCTION that does real work (filtering, sorting) directly in the template; that work re-runs each CD. Wrap such derivations in computed() so the expensive part is memoized and only the cheap read happens per CD."
+        },
+        {
+          "type": "code",
+          "language": "html",
+          "code": "<!-- BAD: filterExpensive() runs its full computation every CD pass. -->\n<div>{{ filterExpensive(rawItems()) }}</div>\n\n<!-- GOOD: expose a computed; the template just reads a memoized value. -->\n<div>{{ filteredItems() }}</div>"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Mutating arrays/objects in place then set-ing the same reference: no update fires. Return new references.",
+            "Reading a signal outside any reactive context expecting to be notified: only computed/effect/templates track dependencies.",
+            "Creating an effect outside an injection context without an Injector: runtime error about missing injection context.",
+            "Overusing effect() to bridge signals to other signals: prefer computed(); reserve effect() for true side effects.",
+            "Forgetting that toObservable emits asynchronously; do not rely on synchronous emission after a signal write."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "allowSignalWrites is a smell, not a feature. Its presence in a code review should prompt the question: why is this effect producing state instead of a computed producing it?"
+        }
+      ]
+    },
+    {
+      "id": "best-practices",
+      "heading": "Best Practices",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Expose state as read-only: keep the writable signal private and publish _state.asReadonly() plus computed() derivations.",
+            "Derive, don't duplicate: any value that is a function of other signals should be a computed, never a separately maintained signal kept in sync by an effect.",
+            "Reserve effects for the outside world: DOM, storage, analytics, third-party imperative libraries. If the output is app state, it is a computed.",
+            "Favor immutability: update with spreads/new references so Object.is detects the change; add a custom equal only when you have a measured reason.",
+            "Convert at the boundary: use toObservable for time/cancellation-heavy pipelines, toSignal to feed templates; do not reimplement debounce/switchMap with effects.",
+            "Type your inputs precisely: use input.required<T>() to make missing inputs a compile-time error and drop non-null assertions.",
+            "Pair signals with OnPush now, and design as if zoneless: never depend on plain-object mutation to trigger a view refresh.",
+            "Keep computeds cheap and pure; if a derivation is genuinely expensive, memoize it as a computed and consider custom equality to short-circuit downstream work."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "A well-designed signal store reads like a set of facts (signals) and formulas (computeds) with a small number of intent-named mutators. If you see effects mutating state, that is the refactor target."
+        }
+      ]
+    },
+    {
+      "id": "when-to-use",
+      "heading": "When To Use Signals Versus Observables",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Reach for signals when modeling state that the UI renders and that other state derives from: form field values, selected entities, UI toggles, computed totals, feature flags resolved to a current value. Reach for Observables when time, cancellation, or multiplicity is central: HTTP with retry/cancel, WebSocket streams, debounced search input, event coordination, and anything that is naturally 'a sequence of events'."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Signals: component/UI state, derived state, template bindings, store facades, inputs/outputs.",
+            "Observables: async I/O, debounce/throttle, switchMap cancellation, retry/backoff, event buses, streaming data.",
+            "Bridge with toSignal at the template edge and toObservable at the pipeline edge.",
+            "Do not force everything into one paradigm; the boundary conversions are cheap and idiomatic."
+          ]
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "dependency-graph",
+      "title": "Signal Dependency Graph: signal -> computed -> effect",
+      "type": "mermaid",
+      "content": "flowchart LR\n  A[signal price] --> C[computed subtotal]\n  B[signal quantity] --> C\n  C --> D[computed total]\n  E[signal taxRate] --> D\n  D --> F[effect log total]\n  D --> G[template binding total]\n  classDef sig fill:#dbeafe,stroke:#2563eb;\n  classDef comp fill:#dcfce7,stroke:#16a34a;\n  classDef eff fill:#fee2e2,stroke:#dc2626;\n  class A,B,E sig;\n  class C,D comp;\n  class F,G eff;"
+    },
+    {
+      "id": "cd-on-write",
+      "title": "Change Detection Triggered By A Signal Write",
+      "type": "mermaid",
+      "content": "flowchart TD\n  W[User calls count.set or update] --> N[Signal marks dependents dirty]\n  N --> V[Consumer views marked for check]\n  V --> S{Zoneless or Zone}\n  S -->|Zoneless| Q[Angular schedules a CD tick]\n  S -->|Zone.js| Q\n  Q --> R[Refresh only marked views]\n  R --> T[Re-evaluate bindings that read the signal]\n  T --> E[Run scheduled effects]"
+    },
+    {
+      "id": "interop-flow",
+      "title": "RxJS Interop Boundaries",
+      "type": "ascii",
+      "content": "  signal(query)\n      |\n      |  toObservable()\n      v\n  Observable<string> --debounceTime--> distinctUntilChanged --switchMap--> HTTP\n                                                                        |\n                                                                        v\n                                                             Observable<Result[]>\n                                                                        |\n                                                                        | toSignal({ initialValue: [] })\n                                                                        v\n                                                              signal(results)  --> template"
+    },
+    {
+      "id": "migration-map",
+      "title": "BehaviorSubject To Signal Mapping",
+      "type": "ascii",
+      "content": "  BehaviorSubject(x)      ->   signal(x)\n  subject.value           ->   mySignal()\n  subject.next(v)         ->   mySignal.set(v)\n  next({...value, ...})   ->   mySignal.update(fn)\n  asObservable()          ->   asReadonly()\n  pipe(map(...))          ->   computed(...)\n  value$ | async          ->   value()\n  (needs Observable)      ->   toObservable(mySignal)"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-what-is-signal",
+      "question": "What is a signal and how does it differ conceptually from an Observable?",
+      "answer": "A signal is a reactive container that always holds a current value and notifies its consumers synchronously when that value changes. You read it by calling it, count(), and it returns the value that exists right now, with no waiting and no subscription. An Observable, by contrast, is a push-based stream of values over time that may be asynchronous and may emit zero, one, or many times. A signal answers 'what is the value now?' while an Observable answers 'what values happen over time?'. Signals track their consumers automatically through dependency tracking, so there is no subscribe or unsubscribe. Observables require explicit subscription management or the async pipe. In practice you use signals for state and derived state, and Observables for events, async I/O, and time-based coordination.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["signals", "observables", "fundamentals"],
+      "followUps": ["Where does BehaviorSubject sit between the two?", "How do you convert between signals and Observables?"]
+    },
+    {
+      "id": "q-computed-lazy",
+      "question": "Explain how computed() memoization and laziness work, and when the derivation function actually runs.",
+      "answer": "computed() creates a read-only derived signal whose function is not executed until the computed is first read. On that first read it runs, records which signals it read as dependencies, and caches the result. Subsequent reads return the cached value with no recomputation as long as none of the tracked dependencies have changed. When a dependency changes, the computed is marked stale but still does not recompute until the next read, which is the laziness. Dependency tracking is dynamic, so if a branch causes it to read a different signal on a later run, the dependency set updates. This is why a computed must be pure: it may run zero times or many times at unpredictable moments, so side effects inside it are unsafe.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["computed", "memoization", "laziness"],
+      "followUps": ["What happens if you put a console.log or HTTP call in a computed?", "How does custom equality affect recomputation of downstream computeds?"]
+    },
+    {
+      "id": "q-effect-injection-context",
+      "question": "Why must effect() be created in an injection context, and what are the options if you need one later?",
+      "answer": "Effects need an owner so Angular can tie their lifecycle to a DI scope and tear them down automatically when that scope is destroyed. Creating an effect in a constructor, a field initializer, or a factory places it in an injection context where Angular can associate it with the component or service injector. If you create one outside such a context, Angular throws an error about a missing injection context. To create one later, you either pass an explicit Injector via the effect options, or wrap the call in runInInjectionContext with a captured Injector. Effects also support a cleanup callback that runs before each re-execution and on destroy, which is essential for things like clearing intervals or removing listeners. This automatic cleanup is a major ergonomic win over manual RxJS subscription teardown.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["effect", "injection-context", "lifecycle"],
+      "followUps": ["How do you register cleanup logic in an effect?", "When would you use manualCleanup with toSignal?"]
+    },
+    {
+      "id": "q-computed-side-effect",
+      "question": "A teammate performs an HTTP call inside a computed() to load data when inputs change. Why is this wrong, and what should they do?",
+      "answer": "This is a classic anti-pattern because computed() is lazy and memoized, so the HTTP call only fires when something reads the computed, and it will not re-fire predictably; if the value is cached, the derivation, including the HTTP call, does not run at all. computed() is meant for pure synchronous derivations, not side effects, and Angular treats writes and effects inside a computed as a bug. The correct approach depends on intent: if they want to react to input changes with a side effect, that belongs in an effect(). If they want to load data as a stream reacting to a signal, they should bridge to RxJS with toObservable(input) piped through switchMap to the HTTP call, then toSignal back for the template, which also gives them cancellation of stale requests. Putting async or side-effecting work in a computed leads to requests firing at unpredictable times, duplicate or missing calls, and untestable code. The rule is simple: computed derives, effect side-effects, RxJS handles async streams.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["computed", "anti-pattern", "rxjs-interop"],
+      "followUps": ["How would you cancel a stale in-flight request in the corrected version?", "Would an effect that calls set on a results signal be acceptable here?"]
+    },
+    {
+      "id": "q-write-signal-in-effect",
+      "question": "Why is writing to a signal inside an effect() considered a smell, and when might allowSignalWrites be legitimate?",
+      "answer": "Writing a signal from an effect couples side-effect execution with state production, which is exactly what computed() is for. If the written signal is derived from signals the effect reads, you have reinvented computed() but with worse semantics: you risk feedback loops, you run eagerly instead of lazily, and Angular requires you to opt in via allowSignalWrites, which exists precisely because the pattern is dangerous. The default guard prevents accidental cycles where an effect writes a signal that re-triggers the same effect. Legitimate uses are narrow: bridging to legacy systems, or synchronizing a signal from a genuinely external, non-reactive source inside an effect where no pure derivation exists. Even then, prefer toSignal for external sources when possible. In code review, allowSignalWrites should trigger the question of whether a computed would express the intent more safely.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["effect", "allowSignalWrites", "anti-pattern"],
+      "followUps": ["Give an example where a computed cleanly replaces the effect-write.", "What guards does Angular provide against effect write loops?"]
+    },
+    {
+      "id": "q-signals-zoneless",
+      "question": "Why do signals help make zoneless change detection possible?",
+      "answer": "Zone.js worked by monkey-patching async APIs so that any async activity produced a blanket notification telling Angular that something, somewhere, might have changed, prompting a dirty check of the tree. Remove Zone.js and Angular loses that global notification, so it needs another way to learn what changed. Signals provide exactly that: when a signal read by a component's template changes, the framework marks that specific view for check, giving a precise, targeted notification without any patching. Because dependency tracking tells Angular which views depend on which signals, a signal write can schedule change detection for only the affected views. Combined with the other explicit notification paths, template events, markForCheck, and the async pipe, signals become the primary ergonomic mechanism that lets an app run correctly with Zone.js removed. That is why adopting signals and going zoneless are effectively the same initiative.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["zoneless", "change-detection", "signals"],
+      "followUps": ["What breaks if a zoneless app mutates a plain object field a template reads?", "Which non-signal APIs still notify a zoneless app to run CD?"]
+    },
+    {
+      "id": "q-template-call-cost",
+      "question": "Is calling a signal in a template on every change detection pass expensive? What is the real pitfall?",
+      "answer": "Calling a plain signal or a computed in a template is cheap: it is just a memoized read that returns the current cached value, and it runs whenever that view is checked, exactly like any other template expression. So {{ count() }} or {{ total() }} is not a performance concern. The real pitfall is calling a function in the template that performs actual computation, such as filtering or sorting an array inline, because that work re-runs on every change detection pass of the view rather than being cached. The fix is to move the computation into a computed() and read the memoized result in the template. This way only the trivial signal read happens per CD, and the expensive derivation runs only when its dependencies change. The mistake people make is over-worrying about the read cost of signals while ignoring the genuinely expensive inline function calls next to them.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["template", "performance", "computed"],
+      "followUps": ["Show the computed refactor for an inline filter in a template.", "Does the number of times a signal is called in a template matter?"]
+    },
+    {
+      "id": "q-signals-vs-observables-choice",
+      "question": "How do you decide between a signal and an Observable for a given piece of reactivity?",
+      "answer": "Ask whether you are modeling a current value or a sequence of events. If it is state that the UI renders and that other state derives from, such as a selected item, a toggle, or a computed total, use a signal. If it is inherently about time, multiplicity, or cancellation, such as debounced search, HTTP with retry and cancel, WebSocket streams, or event coordination, use an Observable, because RxJS operators like debounceTime and switchMap solve those problems directly. The tricky part is that many developers reach for one paradigm exclusively; the senior answer is that you use both and convert at the boundary. Bridge with toSignal at the template edge and toObservable at the pipeline edge. A BehaviorSubject-style always-has-a-value state is the clearest candidate to become a signal, while a genuine stream of async events should stay an Observable. Choosing wrong shows up as either manual cancellation logic in signal-land or unnecessary subscription plumbing for simple state.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["signals", "observables", "architecture"],
+      "followUps": ["Where exactly do you place the toObservable/toSignal conversions in a search feature?", "Which is better for a store facade and why?"]
+    },
+    {
+      "id": "q-tosignal-options",
+      "question": "What do the initialValue, requireSync, and manualCleanup options of toSignal do?",
+      "answer": "toSignal subscribes to an Observable and exposes its latest emission as a read-only signal. By default, before the source emits, the signal value is undefined, so the type is T | undefined. initialValue lets you supply a starting value so the signal is defined immediately and typed as T. requireSync: true asserts that the source emits synchronously on subscription, as a BehaviorSubject or a startWith-prefixed stream does, which lets Angular give you a non-nullable Signal<T> without an initialValue; if the source does not emit synchronously, it throws. manualCleanup opts out of the automatic unsubscription tied to the injection context, meaning you take responsibility for the source's lifetime, which is useful for long-lived global sources. Choosing the right combination is important for both type safety and correct teardown, and getting requireSync wrong on an async source is a runtime error.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["toSignal", "rxjs-interop", "typing"],
+      "followUps": ["Why can you use requireSync with a BehaviorSubject?", "What is the resulting type without initialValue or requireSync?"]
+    },
+    {
+      "id": "q-equality-mutation",
+      "question": "Why does mutating an array inside a signal and setting the same reference back fail to update consumers?",
+      "answer": "Signals decide whether to notify by comparing the new value with the old one, using Object.is by default. When you mutate an array in place with push and then call set with that same array, the previous and next references are identical, so Object.is returns true and the signal concludes nothing changed. As a result no consumers are notified and no view refreshes. The correct approach is to produce a new reference, for example update(list => [...list, item]), so the identity comparison sees a change. This immutability requirement is intentional and aligns signals with predictable change detection. When reference identity is not the semantics you want, you can pass a custom equal function to signal() or computed(), but you should do so deliberately because an incorrect equality function causes silently missed updates.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["equality", "immutability", "change-detection"],
+      "followUps": ["When would you provide a custom equal function?", "How can custom equality on a computed short-circuit downstream work?"]
+    },
+    {
+      "id": "q-input-required",
+      "question": "What advantages do signal inputs input() and input.required() have over the @Input decorator?",
+      "answer": "Signal inputs return a read-only signal for the input value, which means the input participates directly in the reactive graph: you can consume it in computed() and effect() with no extra wiring, replacing the classic ngOnChanges boilerplate for derived input state. input.required<T>() makes a missing input a compile-time error in the template and removes the need for the non-null assertion operator, adding a dev-mode runtime guard as well. You can attach a transform function to normalize or coerce the value at the boundary. Because the value is a signal, derived state stays automatically correct as the input changes, whereas with the decorator you had to manually recompute in ngOnChanges. There are no decorators, which fits the standalone, signal-first direction of modern Angular. Overall signal inputs are more type-safe, more composable, and less error-prone than the decorator approach.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["input", "signal-inputs", "components"],
+      "followUps": ["How does model() differ from input()?", "How do you apply a transform to a signal input?"]
+    },
+    {
+      "id": "q-model-two-way",
+      "question": "What is model() and how does it enable two-way binding without ngModel?",
+      "answer": "model() creates a writable signal that is simultaneously an input and an output, enabling the banana-in-a-box [()] binding syntax on custom components. When you declare expanded = model(false), Angular exposes an expanded input and automatically generates an expandedChange output, so a parent can write [(expanded)]=\"isOpen\". Inside the component the model is a full writable signal: you can read it with expanded() and write it with expanded.set or expanded.update, and any write emits the change output back to the parent. This gives you clean two-way binding for component state without relying on the ngModel/ControlValueAccessor machinery, which is heavier and form-oriented. It is ideal for reusable UI components like toggles, expanders, and custom pickers where the parent wants to both provide and observe a value. model.required() exists for cases where the two-way value must be supplied.",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["model", "two-way-binding", "components"],
+      "followUps": ["What output does model() generate for the [()] syntax?", "When would you still prefer ControlValueAccessor?"]
+    },
+    {
+      "id": "q-migrate-behaviorsubject",
+      "question": "Walk through migrating a BehaviorSubject-backed service to signals. What maps to what?",
+      "answer": "The mapping is nearly mechanical because a BehaviorSubject always holds a current value and emits synchronously, just like a signal. new BehaviorSubject(initial) becomes signal(initial). Reading subject.value becomes calling the signal, mySignal(). subject.next(v) becomes mySignal.set(v), and the common next({ ...value, patch }) pattern becomes mySignal.update(s => ({ ...s, patch })). The public asObservable() facade becomes asReadonly() to expose an immutable handle, and derived pipe(map(...)) selectors become computed(...). In templates, value$ | async becomes value(). If some downstream consumer still needs an Observable, for example a switchMap pipeline, you wrap the signal at that boundary with toObservable. The migration can be incremental: keep boundary Observables where RxJS pipelines exist and let toSignal feed templates, so you do not have to convert an entire feature at once. The payoff is the elimination of subscriptions, async pipes, and manual teardown.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["migration", "behaviorsubject", "refactoring"],
+      "followUps": ["How do you keep a downstream switchMap working during migration?", "What does asReadonly() protect against?"]
+    },
+    {
+      "id": "q-onpush-signals",
+      "question": "How do signals interact with ChangeDetectionStrategy.OnPush, and do you still need markForCheck?",
+      "answer": "With OnPush, Angular re-checks a component only on input reference changes, template events, or explicit marking. Signals add an automatic trigger: when a signal that a component's template reads changes, Angular marks that component for check by itself. This means with signals you generally do not call markForCheck manually and you do not need the async pipe purely to trigger change detection. The framework knows the template depends on the signal because reading it during rendering registered the dependency. This is a major ergonomic improvement over the old OnPush workflow where you juggled markForCheck, async pipe, and immutable inputs to get views to update. It also sets you up for zoneless, since the same signal-based notification mechanism is what a zoneless app relies on. The practical guidance is to use OnPush plus signals as the default and treat manual markForCheck as a rare exception.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["onpush", "change-detection", "signals"],
+      "followUps": ["What still requires markForCheck when using signals?", "How does this differ under zoneless?"]
+    },
+    {
+      "id": "q-toobservable-timing",
+      "question": "toObservable is built on effect(). What practical consequences does that have?",
+      "answer": "Because toObservable uses an effect under the hood, it requires an injection context to be created, and it emits asynchronously rather than synchronously the instant you write the source signal. Effects are batched and run as part of change detection, so the derived Observable emits on that schedule, coalescing multiple synchronous signal writes into fewer emissions. This means you cannot rely on a synchronous emission immediately after calling set on the source, which occasionally surprises people writing tests or expecting glitch-free synchronous chains. It also means toObservable participates in the same cleanup lifecycle as effects, unsubscribing when the context is destroyed. In practice this is exactly what you want for feeding a debounced or switchMap pipeline, but you should be aware of the async, batched nature when reasoning about timing or writing precise unit tests.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": true,
+      "tags": ["toObservable", "timing", "rxjs-interop"],
+      "followUps": ["Why does batching matter for multiple synchronous writes?", "How do you test code that relies on toObservable timing?"]
+    },
+    {
+      "id": "q-linked-signal",
+      "question": "What problem does linkedSignal() solve that plain signal() and computed() do not?",
+      "answer": "computed() gives you a derived value but it is strictly read-only; you cannot locally override it. A plain signal() is writable but does not automatically reset when some source changes. linkedSignal(), introduced in Angular 19, fills the gap: it produces a writable signal whose value is derived from a source computation but can also be set locally, and it re-derives (resets) when the source changes. A common use case is a selected option in a list where the list can change: you want the selection to default to a computed choice, allow the user to override it, but reset sensibly when the underlying list changes. Before linkedSignal you emulated this with an effect that wrote a signal, which is the very anti-pattern effects discourage. linkedSignal expresses the intent declaratively and safely, without allowSignalWrites.",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "tricky": false,
+      "tags": ["linkedSignal", "state", "angular-19"],
+      "followUps": ["How did people emulate this before linkedSignal?", "What is a good real-world use case for linkedSignal?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-cart-total",
+      "title": "Shopping Cart Total With Signals And Computed",
+      "difficulty": "junior",
+      "category": "Frontend",
+      "prompt": "Build a CartStore that holds cart lines in a signal and exposes computed itemCount, subtotal, tax (20 percent), and total. Provide add, setQty, remove, and clear methods. State must be immutable and the public surface read-only. Then show an OnPush component that renders the totals with no subscriptions.",
+      "hints": [
+        "Keep the writable signal private and expose asReadonly() plus computed() derivations.",
+        "Use update() with array spreads so Object.is detects the change; never mutate in place.",
+        "In the template, read signals by calling them, e.g. cart.total(), and use @for with track."
+      ],
+      "solutionCode": "import { Injectable, computed, signal } from '@angular/core';\n\nexport interface CartLine {\n  readonly productId: string;\n  readonly name: string;\n  readonly unitPrice: number;\n  readonly qty: number;\n}\n\n@Injectable({ providedIn: 'root' })\nexport class CartStore {\n  private readonly _lines = signal<ReadonlyArray<CartLine>>([]);\n  private readonly _taxRate = signal(0.2);\n\n  readonly lines = this._lines.asReadonly();\n  readonly itemCount = computed(() => this._lines().reduce((n, l) => n + l.qty, 0));\n  readonly subtotal = computed(() =>\n    this._lines().reduce((sum, l) => sum + l.unitPrice * l.qty, 0)\n  );\n  readonly tax = computed(() => this.subtotal() * this._taxRate());\n  readonly total = computed(() => this.subtotal() + this.tax());\n\n  add(line: Omit<CartLine, 'qty'>, qty = 1): void {\n    this._lines.update((lines) => {\n      const existing = lines.find((l) => l.productId === line.productId);\n      return existing\n        ? lines.map((l) =>\n            l.productId === line.productId ? { ...l, qty: l.qty + qty } : l\n          )\n        : [...lines, { ...line, qty }];\n    });\n  }\n\n  setQty(productId: string, qty: number): void {\n    if (qty <= 0) return this.remove(productId);\n    this._lines.update((lines) =>\n      lines.map((l) => (l.productId === productId ? { ...l, qty } : l))\n    );\n  }\n\n  remove(productId: string): void {\n    this._lines.update((lines) => lines.filter((l) => l.productId !== productId));\n  }\n\n  clear(): void {\n    this._lines.set([]);\n  }\n}\n\nimport { ChangeDetectionStrategy, Component, inject } from '@angular/core';\nimport { CurrencyPipe } from '@angular/common';\n\n@Component({\n  selector: 'app-cart-summary',\n  standalone: true,\n  imports: [CurrencyPipe],\n  changeDetection: ChangeDetectionStrategy.OnPush,\n  template: `\n    <ul>\n      @for (line of cart.lines(); track line.productId) {\n        <li>{{ line.name }} x{{ line.qty }} = {{ line.unitPrice * line.qty | currency }}</li>\n      }\n    </ul>\n    <p>Items: {{ cart.itemCount() }}</p>\n    <p>Subtotal: {{ cart.subtotal() | currency }}</p>\n    <p>Tax: {{ cart.tax() | currency }}</p>\n    <p><strong>Total: {{ cart.total() | currency }}</strong></p>\n  `\n})\nexport class CartSummaryComponent {\n  readonly cart = inject(CartStore);\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "The store keeps its writable state private in _lines and only publishes _lines.asReadonly() plus computed derivations, so consumers cannot bypass the intent-revealing mutators. itemCount, subtotal, tax, and total are all computed, meaning they memoize and recompute only when their dependencies change, and they compose (total reads tax which reads subtotal). Every mutator uses update() with array spreads or map/filter to produce a new reference, satisfying the Object.is equality check so consumers are correctly notified; mutating in place would silently fail to update. The component is OnPush and reads the signals directly in the template, which registers dependencies so Angular refreshes exactly the affected bindings when the cart changes, with no markForCheck and no subscriptions. The @for track expression keeps DOM updates efficient across list changes. This structure is the canonical signal store pattern: facts as signals, formulas as computeds, and a small set of mutators, and it generalizes directly to more complex domains.",
+      "relatedTopic": "angular-signals"
+    },
+    {
+      "id": "ch-refactor-behaviorsubject",
+      "title": "Refactor A BehaviorSubject Service To Signals",
+      "difficulty": "mid",
+      "category": "Frontend",
+      "prompt": "You inherit a FiltersService backed by a BehaviorSubject<Filters> exposing filters$, a search$ selector, setSearch, and nextPage. Refactor it to signals while keeping a toObservable-based bridge so an existing switchMap-based results pipeline elsewhere still compiles. Preserve the public method behavior.",
+      "hints": [
+        "Map BehaviorSubject(initial) to signal(initial) and .value to calling the signal.",
+        "Turn pipe(map(...)) selectors into computed(...) and asObservable() into asReadonly().",
+        "Expose a filters Observable via toObservable(this.filters) so downstream switchMap keeps working."
+      ],
+      "solutionCode": "import { Injectable, computed, signal } from '@angular/core';\nimport { toObservable } from '@angular/core/rxjs-interop';\nimport { Observable } from 'rxjs';\n\nexport interface Filters {\n  readonly search: string;\n  readonly page: number;\n}\n\n@Injectable({ providedIn: 'root' })\nexport class FiltersService {\n  // BehaviorSubject(initial) -> signal(initial)\n  private readonly _state = signal<Filters>({ search: '', page: 1 });\n\n  // asObservable() -> asReadonly(); pipe(map(...)) -> computed(...)\n  readonly filters = this._state.asReadonly();\n  readonly search = computed(() => this._state().search);\n  readonly page = computed(() => this._state().page);\n\n  // Bridge for legacy RxJS pipelines that still need an Observable.\n  readonly filters$: Observable<Filters> = toObservable(this.filters);\n\n  // .next({ ...value, ... }) -> .update((s) => ({ ...s, ... }))\n  setSearch(search: string): void {\n    this._state.update((s) => ({ ...s, search, page: 1 }));\n  }\n\n  nextPage(): void {\n    this._state.update((s) => ({ ...s, page: s.page + 1 }));\n  }\n}\n\n// Downstream pipeline keeps compiling unchanged:\n// this.filters.filters$.pipe(\n//   debounceTime(200),\n//   switchMap((f) => this.api.query(f))\n// );",
+      "solutionLanguage": "typescript",
+      "explanation": "The refactor is nearly mechanical because a BehaviorSubject and a signal share the always-has-a-current-value semantics. The BehaviorSubject becomes a private _state signal, reads of .value become calls to the signal, and the next({ ...value, patch }) update pattern becomes _state.update(s => ({ ...s, patch })), which produces a new object reference so the Object.is check notifies consumers. The asObservable() facade becomes asReadonly(), and the map-based search$ selector becomes a computed, which is memoized and only recomputes when the search field actually changes. Crucially, we keep backward compatibility by exposing filters$ via toObservable(this.filters), so any existing switchMap or debounceTime pipeline downstream continues to compile and run without edits, letting the migration happen incrementally. Because toObservable is built on an effect, filters$ emits asynchronously and batched, which is fine for a debounced query pipeline. Templates can now use filters() and search() directly instead of the async pipe, removing subscription management. This demonstrates the recommended strategy of converting state to signals while preserving Observable boundaries where RxJS operators are genuinely needed.",
+      "relatedTopic": "angular-signals"
+    },
+    {
+      "id": "ch-debounced-search",
+      "title": "Debounced Search With toObservable, switchMap, And toSignal",
+      "difficulty": "senior",
+      "category": "Frontend",
+      "prompt": "Build a type-ahead search component. A query signal is bound to an input. Convert it to an Observable, debounce 300ms, drop duplicates, switchMap to an HTTP call so stale requests cancel, and expose the results as a signal for the template. Also expose a loading signal. Keep the component OnPush with no manual subscriptions.",
+      "hints": [
+        "Use toObservable(this.query) as the source and pipe debounceTime + distinctUntilChanged.",
+        "switchMap cancels in-flight requests automatically when the query changes.",
+        "Wrap results with toSignal({ initialValue: [] }); derive loading with a startWith/tap or a separate signal set in tap."
+      ],
+      "solutionCode": "import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';\nimport { toObservable, toSignal } from '@angular/core/rxjs-interop';\nimport { HttpClient } from '@angular/common/http';\nimport {\n  catchError,\n  debounceTime,\n  distinctUntilChanged,\n  filter,\n  of,\n  switchMap,\n  tap,\n} from 'rxjs';\n\ninterface SearchResult {\n  readonly id: string;\n  readonly label: string;\n}\n\n@Component({\n  selector: 'app-typeahead',\n  standalone: true,\n  changeDetection: ChangeDetectionStrategy.OnPush,\n  template: `\n    <input\n      type=\"search\"\n      [value]=\"query()\"\n      (input)=\"query.set($any($event.target).value)\"\n      placeholder=\"Search...\"\n    />\n    @if (loading()) {\n      <p>Loading...</p>\n    } @else {\n      <ul>\n        @for (r of results(); track r.id) {\n          <li>{{ r.label }}</li>\n        }\n      </ul>\n    }\n  `\n})\nexport class TypeaheadComponent {\n  private readonly http = inject(HttpClient);\n\n  readonly query = signal('');\n  readonly loading = signal(false);\n\n  private readonly results$ = toObservable(this.query).pipe(\n    debounceTime(300),\n    distinctUntilChanged(),\n    filter((q) => q.trim().length >= 2),\n    tap(() => this.loading.set(true)),\n    switchMap((q) =>\n      this.http\n        .get<SearchResult[]>(`/api/search?q=${encodeURIComponent(q)}`)\n        .pipe(catchError(() => of([] as SearchResult[])))\n    ),\n    tap(() => this.loading.set(false))\n  );\n\n  readonly results = toSignal(this.results$, {\n    initialValue: [] as SearchResult[],\n  });\n}",
+      "solutionLanguage": "typescript",
+      "explanation": "This challenge showcases the correct division of labor between signals and RxJS. The query is a signal because it is UI state bound to an input, but the time-based and cancellation-heavy pipeline is expressed in RxJS, where it belongs. toObservable(this.query) bridges the signal into a stream; debounceTime and distinctUntilChanged prevent a request per keystroke and drop redundant queries; the filter enforces a minimum length. switchMap is the key operator: when a new query arrives, it unsubscribes from the previous HTTP request, cancelling stale in-flight work so late responses can never overwrite fresh results, something that is painful to reproduce with pure signals and effects. catchError keeps the stream alive on failure by mapping errors to an empty list. toSignal converts the results back into a signal with an initialValue so the template has a defined, non-nullable value and no async pipe is needed. The loading flag is a plain signal toggled in tap operators around the request. The whole component is OnPush with no manual subscribe or teardown, because toObservable and toSignal manage lifecycle via the injection context. This is the canonical, production-grade pattern for reactive search in modern Angular.",
+      "relatedTopic": "angular-signals"
+    }
+  ],
+  "references": [
+    { "label": "Angular Signals guide (angular.dev)", "url": "https://angular.dev/guide/signals" },
+    { "label": "RxJS Interop with Signals (angular.dev)", "url": "https://angular.dev/ecosystem/rxjs-interop" },
+    { "label": "Zoneless change detection (angular.dev)", "url": "https://angular.dev/guide/zoneless" },
+    { "label": "Signal inputs (angular.dev)", "url": "https://angular.dev/guide/components/inputs" },
+    { "label": "linkedSignal API (angular.dev)", "url": "https://angular.dev/guide/signals/linked-signal" }
+  ]
+}

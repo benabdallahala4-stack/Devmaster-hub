@@ -1,0 +1,844 @@
+{
+  "id": "rate-limiting",
+  "title": "API Rate Limiting & Throttling",
+  "category": "Backend",
+  "subcategory": "API Design",
+  "difficulty": "senior",
+  "tags": [
+    "rate-limiting",
+    "throttling",
+    "token-bucket",
+    "sliding-window",
+    "redis",
+    "api-gateway",
+    "load-shedding",
+    "distributed-systems"
+  ],
+  "description": "A staff-level treatment of protecting an API with rate limiting and throttling: the classic algorithms (fixed window, sliding window log, sliding window counter, token bucket, leaky bucket) and their trade-offs, distributed enforcement with an atomic Redis counter, correct 429/Retry-After/RateLimit-* response semantics, and where in the stack to enforce limits. It treats rate limiting as a capacity, fairness, and abuse-control mechanism, not a bolt-on afterthought.",
+  "estReadMinutes": 29,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "What Rate Limiting Actually Is",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Rate limiting is the contract by which a service caps how many requests a given client may make in a window of time, and rejects or delays the excess. It is one of the few controls that lets a finite backend survive an effectively infinite population of callers. Without it, a single misbehaving client, a retry storm, or a scraper can consume all of your capacity and starve every well-behaved user."
+        },
+        {
+          "type": "paragraph",
+          "text": "The core question is deceptively simple — \"is this caller allowed to make one more request right now?\" — but answering it correctly at scale forces you to reason about bursts versus steady rate, shared state across many servers, atomicity under concurrency, and how to tell the client what just happened. A rate limiter that answers slightly wrong under load can itself become the outage it was meant to prevent."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Precise vocabulary matters in interviews: rate limiting caps the number of requests over time, throttling deliberately slows or queues excess work rather than rejecting it, and load shedding drops requests to protect the system when it is already overloaded. They overlap but are not synonyms."
+        }
+      ]
+    },
+    {
+      "id": "why-rate-limit",
+      "heading": "Why Rate Limit at All",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Rate limiting exists because capacity is finite and demand is not. Four distinct pressures push you toward it, and a senior answer names all four rather than only the obvious one."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Capacity protection: keep aggregate load under the point where p99 latency degrades or the service falls over. A limiter is a backpressure mechanism that turns unbounded demand into bounded, survivable load.",
+            "Fairness: one tenant or user must not monopolize a shared resource. Per-key limits guarantee that a noisy neighbor cannot starve everyone else on a multi-tenant platform.",
+            "Cost control: downstream calls to paid APIs, LLM tokens, or metered databases cost real money. A limit is a spending cap that prevents a runaway loop from generating a surprise bill.",
+            "Abuse and DoS mitigation: credential-stuffing, scraping, and volumetric attacks are all defeated or blunted by aggressive per-IP and per-key limits at the edge."
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "There is also a subtler reason: rate limits make client behavior legible. When you publish a limit and a 429 contract, clients can be built to back off predictably instead of hammering blindly, which improves stability for everyone in the system."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "A limiter that is itself expensive or that fails closed under load defeats its own purpose. If the limiter cannot reach Redis, decide deliberately whether to fail open (allow, risking overload) or fail closed (reject, risking a self-inflicted outage) — do not leave it accidental."
+        }
+      ]
+    },
+    {
+      "id": "fixed-window",
+      "heading": "Algorithm: Fixed Window Counter",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The fixed window counter is the simplest algorithm: divide time into fixed buckets (say 60-second windows), keep a counter per key per bucket, increment on each request, and reject once the counter exceeds the limit. The key is a composite of the client identifier and the current window start, so INCR on that key with a TTL equal to the window length is the entire implementation."
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "text": "key = user:123:1719849600   (window start epoch, aligned to 60s)\nlimit = 100 per 60s\non request: n = INCR(key); if first time EXPIRE(key, 60)\n            allow if n <= 100 else 429"
+        },
+        {
+          "type": "paragraph",
+          "text": "Its fatal weakness is the boundary burst. Because the counter resets sharply at the window edge, a client can send the full limit in the last second of one window and the full limit again in the first second of the next — twice the intended rate concentrated across the boundary. With a limit of 100/minute a client can legitimately land 200 requests in a two-second span straddling the reset."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The boundary burst is the single most common thing interviewers probe about fixed windows. If you cannot draw the 2x-at-the-edge attack you have not understood the algorithm's failure mode. It also uses almost no memory and is trivially correct under concurrency, which is why it survives despite the flaw."
+        }
+      ]
+    },
+    {
+      "id": "sliding-log",
+      "heading": "Algorithm: Sliding Window Log",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The sliding window log fixes the boundary problem by storing the timestamp of every request in a per-key set and, on each new request, evicting timestamps older than the window and counting what remains. If the count is below the limit, admit and append; otherwise reject. Because the window slides continuously with real time, there is no artificial reset edge to exploit."
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "text": "on request at time now:\n  ZREMRANGEBYSCORE key -inf (now - window)   # drop old entries\n  count = ZCARD key\n  if count < limit:\n     ZADD key now now; allow\n  else: reject (429)"
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Accuracy: perfect — it is the exact number of requests in the trailing window with no approximation.",
+            "Memory: expensive — O(limit) timestamps stored per key. A limit of 10000/hour means up to 10000 stored entries per active key, which does not scale to millions of keys.",
+            "Complexity: moderate — needs a sorted set and range eviction, naturally implemented in Redis with a ZSET but heavier than a single counter."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Use the sliding window log only when perfect accuracy is required and the number of tracked keys times the limit is small. For most high-cardinality APIs its memory footprint rules it out in favor of the counter approximation."
+        }
+      ]
+    },
+    {
+      "id": "sliding-counter",
+      "heading": "Algorithm: Sliding Window Counter",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The sliding window counter is the pragmatic middle ground and the algorithm most large gateways actually run. It keeps just two fixed-window counters — the current window and the previous one — and estimates the rolling count by weighting the previous window by the fraction of it still overlapped by the sliding window."
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "text": "elapsed = (now - current_window_start) / window_size   # 0..1\nestimate = current_count + previous_count * (1 - elapsed)\nallow if estimate < limit else 429\n\n# example: limit 100/min, 75% into the current minute\n# prev window had 80, current has 30\n# estimate = 30 + 80 * (1 - 0.75) = 30 + 20 = 50  -> allow"
+        },
+        {
+          "type": "paragraph",
+          "text": "This smooths the boundary burst without storing per-request timestamps: memory is O(1) per key (two integers), accuracy is very close to exact for smooth traffic, and it is cheap enough for edge deployment. Its only inaccuracy is a bounded approximation error under highly non-uniform bursts within a window, which is acceptable for almost all APIs."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Property",
+            "Fixed Window",
+            "Sliding Window Log",
+            "Sliding Window Counter"
+          ],
+          "rows": [
+            [
+              "Boundary burst",
+              "Vulnerable (up to 2x)",
+              "None (exact)",
+              "Smoothed (small error)"
+            ],
+            [
+              "Memory per key",
+              "O(1)",
+              "O(limit)",
+              "O(1)"
+            ],
+            [
+              "Accuracy",
+              "Coarse",
+              "Exact",
+              "Near-exact"
+            ],
+            [
+              "Complexity",
+              "Trivial",
+              "Moderate",
+              "Low"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "token-bucket",
+      "heading": "Algorithm: Token Bucket",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The token bucket models a bucket that holds up to B tokens and refills at a steady rate R tokens per second. Each request consumes one token; if the bucket is empty the request is rejected (or must wait). The bucket capacity B controls how large a burst is allowed, while R controls the sustained long-run rate. This decoupling of burst from steady rate is exactly what most real APIs want: allow a short spike, but hold the average down."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "text": "class TokenBucket {\n  private tokens: number;\n  private lastRefill: number;\n  constructor(\n    private readonly capacity: number,   // max burst B\n    private readonly refillPerSec: number // steady rate R\n  ) {\n    this.tokens = capacity;\n    this.lastRefill = Date.now();\n  }\n\n  tryConsume(cost = 1): boolean {\n    this.refill();\n    if (this.tokens >= cost) {\n      this.tokens -= cost;\n      return true;\n    }\n    return false;\n  }\n\n  private refill(): void {\n    const now = Date.now();\n    const elapsedSec = (now - this.lastRefill) / 1000;\n    // lazy refill: add tokens for time elapsed, capped at capacity\n    this.tokens = Math.min(\n      this.capacity,\n      this.tokens + elapsedSec * this.refillPerSec\n    );\n    this.lastRefill = now;\n  }\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "The refill is done lazily on read rather than by a background timer: you compute how many tokens should have accrued since the last touch. This makes it O(1) and stateless between requests apart from two numbers (token count and last-refill timestamp), which is what makes it cheap to store in Redis per key."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Token bucket is the default choice for public APIs (Stripe, GitHub, AWS all use variants) because burst-plus-steady-rate matches how real clients behave: mostly quiet with occasional legitimate spikes."
+        }
+      ]
+    },
+    {
+      "id": "leaky-bucket",
+      "heading": "Algorithm: Leaky Bucket",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The leaky bucket models requests as water poured into a bucket that leaks out at a constant rate. Requests queue in the bucket and are processed (leak) at a fixed rate; if the bucket overflows, new requests are dropped. Where token bucket permits bursts up to capacity, leaky bucket enforces a strictly smooth output rate regardless of how bursty the input is — it is a traffic shaper, not just an admission gate."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Token bucket: bursty output allowed (spend accumulated tokens at once); good for admission control where downstream can absorb spikes.",
+            "Leaky bucket: perfectly smooth output; good when the downstream is fragile and must never see a spike (e.g. a legacy system, a hardware device, or a strict SLA on a dependency).",
+            "The mirror image: token bucket adds tokens at rate R and removes on request; leaky bucket adds on request and removes at rate R. They converge in steady state but differ sharply on burst handling."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "If the interviewer asks \"token bucket vs leaky bucket\", the crisp differentiator is burst behavior: token bucket permits a burst up to its capacity, leaky bucket smooths bursts into a constant drip. Choose based on whether the thing you protect can tolerate spikes."
+        }
+      ]
+    },
+    {
+      "id": "distributed",
+      "heading": "Distributed Rate Limiting with Redis",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The moment you run more than one API server, an in-process counter is wrong: each instance sees only its own slice of traffic, so a limit of 100/min across a fleet of ten servers effectively becomes 1000/min. Enforcing a global limit requires shared state, and the standard answer is a centralized store — usually Redis — that every instance atomically reads and updates."
+        },
+        {
+          "type": "paragraph",
+          "text": "The correctness trap is the read-modify-write race. If two servers do GET, compare, then INCR as separate commands, both can read 99, both decide they are under the limit of 100, and both increment to land at 101 — the limit is breached. The fix is atomicity: either use a single atomic command (INCR returns the post-increment value, so the decision and the mutation are one operation) or wrap multi-step logic in a Lua script, which Redis executes atomically as one unit with no interleaving."
+        },
+        {
+          "type": "code",
+          "language": "lua",
+          "text": "-- sliding_window_counter.lua : atomic admit/deny for one key\n-- KEYS[1] = rate-limit key (e.g. \"rl:user:123\")\n-- ARGV[1] = now (ms)   ARGV[2] = window (ms)\n-- ARGV[3] = limit      ARGV[4] = unique member id (e.g. request uuid)\nlocal key    = KEYS[1]\nlocal now    = tonumber(ARGV[1])\nlocal window = tonumber(ARGV[2])\nlocal limit  = tonumber(ARGV[3])\nlocal member = ARGV[4]\n\n-- drop entries older than the sliding window\nredis.call('ZREMRANGEBYSCORE', key, 0, now - window)\nlocal count = redis.call('ZCARD', key)\n\nif count < limit then\n  redis.call('ZADD', key, now, member)\n  redis.call('PEXPIRE', key, window)\n  -- return: allowed=1, remaining\n  return {1, limit - count - 1}\nelse\n  redis.call('PEXPIRE', key, window)\n  return {0, 0}\nend"
+        },
+        {
+          "type": "paragraph",
+          "text": "Because the whole script runs atomically on the Redis node, the eviction, the count, and the conditional insert cannot interleave with another caller — the race disappears. Two further hazards remain in a distributed setting: clock skew and the store as a single point of failure. Clock skew matters because app servers pass their own \"now\" into the script; if you compute time on each app node, two nodes with drifting clocks disagree on window boundaries. Prefer using the Redis server's own time (via TIME) as the single clock source, or accept a bounded skew tolerance."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Redis becomes a hot dependency on the request path. Mitigate with connection pooling, a short timeout, a local fallback limiter if Redis is unreachable, and sharding keys across a cluster so one hot tenant does not overload a single node. Decide fail-open vs fail-closed explicitly."
+        }
+      ]
+    },
+    {
+      "id": "enforcement-point",
+      "heading": "Where to Enforce and at What Granularity",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Rate limiting is layered. The earlier you reject, the cheaper the rejection, so coarse volumetric and abuse limits belong at the edge (CDN / API gateway / load balancer) where a dropped request never touches your application. Fine-grained, business-aware limits (per-tenant quotas, per-endpoint cost weighting) belong closer to the application where the identity and cost of the operation are known."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Dimension",
+            "Enforce where",
+            "Guards against"
+          ],
+          "rows": [
+            [
+              "Per-IP",
+              "Edge / gateway",
+              "Volumetric abuse, scraping, DoS from anonymous clients"
+            ],
+            [
+              "Per-API-key",
+              "Gateway / app",
+              "Fair use of an authenticated integration; plan tiers"
+            ],
+            [
+              "Per-user",
+              "Application",
+              "Abuse by an authenticated human; account-level fairness"
+            ],
+            [
+              "Per-tenant",
+              "Application",
+              "Noisy-neighbor isolation on a multi-tenant platform"
+            ],
+            [
+              "Global / per-route",
+              "Gateway + app",
+              "Total capacity protection; expensive endpoint shielding"
+            ]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "Global versus per-route limits are complementary, not either/or. A per-route limit protects one expensive endpoint (a report generator, a search) from a caller who stays under their overall key limit by hammering only that route. A global limit backstops total capacity so the sum of all routes cannot exceed what the fleet can serve. Real systems compose several limiters and reject on the first that trips."
+        }
+      ]
+    },
+    {
+      "id": "response-semantics",
+      "heading": "Response Semantics: 429, Retry-After, and RateLimit Headers",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A rate limiter is only useful if the client can react correctly, and that requires a well-defined response contract. The status code for a throttled request is HTTP 429 Too Many Requests. Alongside it you return machine-readable headers so a well-behaved client knows both when to retry and how much budget it has left, turning blind retries into cooperative backoff."
+        },
+        {
+          "type": "code",
+          "language": "http",
+          "text": "HTTP/1.1 429 Too Many Requests\nContent-Type: application/json\nRetry-After: 30\nRateLimit-Limit: 100\nRateLimit-Remaining: 0\nRateLimit-Reset: 30\n\n{\n  \"error\": \"rate_limited\",\n  \"message\": \"Rate limit exceeded. Retry after 30 seconds.\"\n}"
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Retry-After: seconds (or an HTTP-date) the client should wait before retrying. Respecting it is the single most important client-side behavior; ignoring it turns a throttle into a retry storm.",
+            "RateLimit-Limit / RateLimit-Remaining / RateLimit-Reset: the IETF draft standard trio letting a client self-pace before it ever hits a 429 — proactively slowing as Remaining approaches zero.",
+            "Return 429 (not 403): 403 implies a permanent authorization failure; 429 signals a transient condition that will clear, which is the correct semantic for a client's retry logic."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "A subtle correctness point: also send RateLimit-* headers on successful 200 responses, not just on 429s. That is what lets a good client stay under the limit rather than discovering it only by being rejected."
+        }
+      ]
+    },
+    {
+      "id": "example",
+      "heading": "Worked Example: A Token-Bucket Gateway Middleware",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The following Express middleware ties the pieces together: it keys the limiter by API key, calls a Redis-backed token bucket, and emits the correct headers on both allow and deny paths. The bucket math lives in a Lua script for atomicity; the middleware only orchestrates."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "text": "// tokenBucket.lua returns { allowed, remaining, retryAfterSec }\nimport { createClient } from 'redis';\nimport { Request, Response, NextFunction } from 'express';\n\nconst redis = createClient();\nconst LIMIT = 100;          // burst capacity B\nconst REFILL_PER_SEC = 10;  // steady rate R\n\nexport async function rateLimit(req: Request, res: Response, next: NextFunction) {\n  const key = `rl:tb:${req.header('x-api-key') ?? req.ip}`;\n  const now = Date.now();\n\n  const [allowed, remaining, retryAfter] = (await redis.eval(\n    TOKEN_BUCKET_LUA,\n    { keys: [key], arguments: [String(now), String(LIMIT), String(REFILL_PER_SEC)] }\n  )) as [number, number, number];\n\n  res.setHeader('RateLimit-Limit', LIMIT);\n  res.setHeader('RateLimit-Remaining', Math.max(0, remaining));\n\n  if (allowed === 1) return next();\n\n  res.setHeader('Retry-After', retryAfter);\n  res.setHeader('RateLimit-Reset', retryAfter);\n  return res.status(429).json({ error: 'rate_limited', message: `Retry after ${retryAfter}s` });\n}"
+        },
+        {
+          "type": "paragraph",
+          "text": "Notice that every branch sets the informational headers, that the deny branch produces a Retry-After derived from how long until one token refills, and that all mutation happens inside the Lua call so concurrent requests from the same key cannot both slip through when only one token remains."
+        }
+      ]
+    },
+    {
+      "id": "client-behavior",
+      "heading": "Client Behavior: Backoff and Cooperation",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A rate-limited API and a well-behaved client are two halves of one contract. The server's job is to reject cheaply and inform clearly; the client's job is to respect what it is told. The dominant failure mode in the wild is a client that retries immediately and in lockstep, converting a soft throttle into a self-amplifying storm."
+        },
+        {
+          "type": "code",
+          "language": "typescript",
+          "text": "async function callWithBackoff(fn: () => Promise<Response>, maxRetries = 5) {\n  for (let attempt = 0; attempt <= maxRetries; attempt++) {\n    const res = await fn();\n    if (res.status !== 429) return res;\n    // honor Retry-After if present, else exponential backoff with jitter\n    const ra = res.headers.get('Retry-After');\n    const waitMs = ra\n      ? Number(ra) * 1000\n      : Math.min(30000, 2 ** attempt * 1000) * (0.5 + Math.random());\n    await new Promise(r => setTimeout(r, waitMs));\n  }\n  throw new Error('rate limited: retries exhausted');\n}"
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Always honor Retry-After when the server sends it — it encodes information the client cannot compute for itself.",
+            "Add jitter to any backoff. Without it, thousands of clients throttled at the same instant retry at the same instant, re-creating the spike (the thundering-herd / synchronized-retry problem).",
+            "Cap total attempts and surface a clear error rather than retrying forever; infinite retries hide a real capacity problem and prolong the outage."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Proactive clients read RateLimit-Remaining on every response and slow down before hitting zero, so they rarely see a 429 at all. That cooperative pacing is the mark of a mature integration."
+        }
+      ]
+    },
+    {
+      "id": "throttling-vs-shedding",
+      "heading": "Throttling vs Rate Limiting vs Load Shedding",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "These three controls sit on a spectrum from proactive fairness to reactive survival, and conflating them is a common mistake. Rate limiting is a fixed, per-caller policy applied regardless of current system health. Throttling deliberately delays or queues excess work — the request is not rejected, just slowed — which suits background or asynchronous work that can tolerate latency. Load shedding is reactive triage: when the system is already overloaded, it drops requests (often prioritizing cheap or high-value traffic) to keep the rest of the system alive."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Rate limiting: policy-driven, per-key, health-independent. \"You get 100/min.\"",
+            "Throttling: delay/queue instead of reject; smooth the flow. \"You may proceed, but slower.\"",
+            "Load shedding: health-driven, global, last resort. \"We are overloaded, so we drop the lowest-priority requests right now.\"",
+            "Graceful degradation: pair shedding with reduced-fidelity responses (cached data, fewer results, disabled non-essential features) so users get a degraded but working service instead of errors."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Load shedding must consider priority. Dropping requests uniformly can kill your health checks and control plane along with everything else; shed by priority so critical traffic survives. This is what separates a controlled degradation from a cascading failure."
+        }
+      ]
+    },
+    {
+      "id": "system-design",
+      "heading": "System-Design Discussion: A Global Rate Limiter",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Asked to design a rate limiter for a large API, structure the answer around requirements, then the enforcement topology, then the algorithm and store, then failure modes. Requirements: global limits across a fleet, low added latency (single-digit milliseconds), configurable per-key/per-route rules, and correct behavior under partial failure."
+        },
+        {
+          "type": "list",
+          "style": "ordered",
+          "items": [
+            "Topology: a limiter component in the API gateway consults a shared store; coarse per-IP limits sit further out at the CDN. Rules are pushed to gateways from a control plane so limits can change without redeploying.",
+            "Algorithm: sliding window counter or token bucket in Redis for O(1) memory per key and smooth boundaries; the admit/deny decision runs as a Lua script for atomicity.",
+            "Store: Redis Cluster sharded by rate-limit key so load spreads and one hot tenant is isolated to a shard; short timeouts on the request path.",
+            "Latency optimization: optionally allow a bounded local token cache per gateway (each node draws a small batch of tokens from the central bucket) to cut Redis round-trips, trading a little accuracy for speed — the approach used by high-throughput gateways.",
+            "Failure handling: if Redis is unreachable, fall back to a conservative local limiter and decide fail-open vs fail-closed by risk; alert on fallback so it is never silent."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The senior signal in this question is not naming an algorithm — it is reasoning about the store as a hot dependency, the atomicity requirement, the accuracy-vs-latency trade of local token caching, and what happens when the store is down."
+        }
+      ]
+    },
+    {
+      "id": "mistakes",
+      "heading": "Common Mistakes",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Most rate-limiting incidents come from a small set of recurring errors, and interviewers probe for whether you have hit them in production."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "In-process counters behind a load balancer: each instance limits independently, multiplying the effective limit by the instance count. The limit silently loosens as you scale out.",
+            "Non-atomic read-then-write against a shared store: the classic race where concurrent requests both read an under-limit value and both admit, breaching the cap.",
+            "Fixed window with no awareness of the boundary burst, allowing up to 2x the intended rate across the reset edge.",
+            "Returning 403 instead of 429, or omitting Retry-After, so clients cannot distinguish a permanent denial from a transient throttle and cannot back off intelligently.",
+            "No jitter in server or client backoff, so throttled clients retry in synchronized waves and re-create the very spike that triggered the throttle.",
+            "Rate limiting on a mutable identifier a client controls (a spoofable header) rather than an authenticated key, letting an attacker rotate identities to bypass the limit."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "The most dangerous mistake is a limiter that fails closed on an unrelated dependency outage: if a Redis blip causes every request to be rejected, your rate limiter has become a full outage. Test the failure path deliberately, not just the happy path."
+        }
+      ]
+    },
+    {
+      "id": "bestpractices",
+      "heading": "Best Practices Checklist",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A production-grade rate-limiting posture is a short, opinionated checklist."
+        },
+        {
+          "type": "list",
+          "style": "unordered",
+          "items": [
+            "Enforce coarse abuse limits at the edge and fine business limits in the app; layer rather than choose.",
+            "Use a token bucket or sliding window counter in a shared store with an atomic (single-command or Lua) admit/deny decision.",
+            "Key limits on an authenticated, non-spoofable identity (API key / user id / tenant), falling back to IP only for anonymous traffic.",
+            "Return 429 with Retry-After and RateLimit-* headers on both throttled and successful responses.",
+            "Add jitter to all backoff, cap retries, and make clients honor Retry-After.",
+            "Decide fail-open vs fail-closed explicitly, add a local fallback limiter, and alert whenever the fallback engages.",
+            "Make limits configurable at runtime via a control plane, and emit metrics (allow/deny counts per key and route) so you can see abuse and tune thresholds."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "If you can articulate the algorithm trade-offs, the distributed atomicity requirement, the 429/Retry-After contract, and the failure behavior, you have covered everything a staff interview will ask about rate limiting."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "token-bucket-fill-drain",
+      "title": "Token Bucket Fill and Drain",
+      "type": "ascii",
+      "content": "Refill R tokens/sec\n        |\n        v\n   +-----------+\n   | * * * * * |  capacity B (max burst)\n   | * * * * * |\n   | * * * *   |  <- current tokens\n   +-----------+\n        |\n        v  each request removes 1 token\n   request --> [tokens > 0 ?] --yes--> ALLOW (tokens -= 1)\n                    |\n                    no\n                    v\n                  429 (bucket empty)\n\nBurst: spend up to B at once.  Steady: long-run rate capped at R."
+    },
+    {
+      "id": "distributed-limiter-flow",
+      "title": "Request Through a Distributed Limiter",
+      "type": "mermaid",
+      "content": "flowchart TD\n    C[Client] --> G[API Gateway]\n    G --> K{Build key\\nuser/ip/api-key}\n    K --> L[[Redis Lua:\\natomic admit/deny]]\n    L -->|allowed| A[Forward to service]\n    L -->|denied| R[429 + Retry-After]\n    A --> S[Backend service]\n    R --> C\n    S --> C"
+    },
+    {
+      "id": "fixed-window-boundary-burst",
+      "title": "Fixed Window Boundary Burst (2x)",
+      "type": "ascii",
+      "content": "limit = 100 per 60s\n\nwindow 1                 | window 2\n... [ 100 in last sec ]  | [ 100 in first sec ] ...\n              ^ reset boundary ^\n\n=> 200 requests within ~2 seconds straddling the edge,\n   even though each window individually stayed at 100."
+    },
+    {
+      "id": "algorithm-decision",
+      "title": "Choosing an Algorithm",
+      "type": "mermaid",
+      "content": "flowchart TD\n    Q{Need perfect\\naccuracy?} -->|yes, low cardinality| LOG[Sliding Window Log]\n    Q -->|no| B{Allow bursts?}\n    B -->|yes, burst+steady| TB[Token Bucket]\n    B -->|no, smooth output| LB[Leaky Bucket]\n    B -->|cheap approx ok| SWC[Sliding Window Counter]"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-why-rate-limit",
+      "question": "Why do we rate limit an API? Give more than one reason.",
+      "answer": "The primary reason is capacity protection: a finite backend must survive an unbounded population of callers, and a limiter turns unbounded demand into bounded, survivable load by applying backpressure. The second is fairness — per-key limits stop one tenant or user from monopolizing a shared resource and starving well-behaved clients. The third is cost control, since downstream calls to paid APIs, LLM tokens, or metered databases cost real money and a limit acts as a spending cap. The fourth is abuse and DoS mitigation: credential stuffing, scraping, and volumetric attacks are blunted by aggressive per-IP and per-key limits at the edge. A senior answer names all four rather than only capacity. It also notes that publishing a limit makes client behavior legible so integrations can be built to back off predictably.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [
+        "rate-limiting",
+        "capacity",
+        "fairness"
+      ],
+      "followUps": [
+        "Which of these reasons applies to an internal service-to-service API?",
+        "How does a limit differ from an autoscaling policy?"
+      ]
+    },
+    {
+      "id": "q-fixed-window-burst",
+      "question": "What is the boundary burst problem with a fixed window counter, and how bad can it get?",
+      "answer": "A fixed window counter divides time into aligned buckets and resets the counter sharply at each boundary, which creates an exploitable edge. A client can send the full limit in the last instant of one window and the full limit again in the first instant of the next, concentrating up to twice the intended rate across the boundary. With a limit of 100 per minute, a client can legitimately land 200 requests in a roughly two-second span straddling the reset. This happens because the algorithm has no memory of the previous window — it only counts within the current one. The fix is either a sliding window log (exact but memory-heavy) or a sliding window counter that weights the previous window by its remaining overlap. Fixed window is still used because it is O(1) memory and trivially correct under concurrency, so the 2x burst is a deliberate trade for simplicity.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": [
+        "fixed-window",
+        "boundary-burst",
+        "sliding-window"
+      ],
+      "followUps": [
+        "How does the sliding window counter estimate the rolling count?",
+        "When is the 2x burst acceptable in practice?"
+      ]
+    },
+    {
+      "id": "q-token-vs-leaky",
+      "question": "Token bucket versus leaky bucket — what is the key difference and when do you pick each?",
+      "answer": "The decisive difference is burst behavior. A token bucket holds up to B tokens refilled at rate R and lets a client spend accumulated tokens all at once, so it permits bursts up to its capacity while capping the long-run average — burst plus steady rate. A leaky bucket queues requests and drains them at a constant rate, so its output is perfectly smooth no matter how bursty the input is; it is a traffic shaper. You choose token bucket when the thing you protect can absorb a spike and you want to reward well-behaved clients with occasional bursts, which is why most public APIs use it. You choose leaky bucket when the downstream is fragile and must never see a spike — a legacy system, a hardware device, or a dependency with a strict per-second SLA. They are mirror images: token bucket adds tokens on a timer and removes on request, leaky bucket adds on request and removes on a timer, converging in steady state but differing sharply on bursts.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": [
+        "token-bucket",
+        "leaky-bucket",
+        "burst"
+      ],
+      "followUps": [
+        "How do you implement token bucket refill without a background timer?",
+        "Can a token bucket be configured to behave like a leaky bucket?"
+      ]
+    },
+    {
+      "id": "q-distributed-race",
+      "question": "Two servers behind a load balancer both check a shared counter and both admit a request that should have been rejected. What went wrong and how do you fix it?",
+      "answer": "This is a read-modify-write race. Each server did a separate GET, compared against the limit, then INCR, and because those are three independent commands they interleaved: both read 99, both decided they were under the limit of 100, and both incremented to land at 101 — the cap is breached. The root cause is that the check and the mutation are not atomic. The fix is to make the admit/deny decision a single atomic operation: use INCR, which returns the post-increment value so the decision uses the mutated state, or wrap multi-step logic (evict, count, conditionally add) in a Lua script, which Redis runs atomically as one unit with no interleaving. With atomicity the two callers are serialized on the store and exactly one is admitted. This is the single most important correctness property of a distributed limiter and a very common interview probe.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": [
+        "distributed",
+        "race-condition",
+        "redis",
+        "lua"
+      ],
+      "followUps": [
+        "Why is a Redis Lua script atomic?",
+        "How would a Redis transaction (MULTI/EXEC) compare to a Lua script here?"
+      ]
+    },
+    {
+      "id": "q-lua-atomicity",
+      "question": "Why is wrapping the limiter logic in a Redis Lua script enough to guarantee atomicity?",
+      "answer": "Redis executes commands on a single thread and runs a Lua script as one indivisible unit: from the moment the script starts until it returns, no other command from any client is processed. That means the eviction of old entries, the count, and the conditional insert all observe a consistent snapshot and cannot interleave with another caller's script. So the classic read-then-write race is impossible — there is no window between the decision and the mutation for another request to slip in. This is stronger than issuing the same commands separately, which could interleave, and it also cuts network round-trips since the whole decision happens in one call. The trade-off is that a long-running script blocks the entire Redis instance, so limiter scripts must be short and O(1) or O(log n), never scanning large structures.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [
+        "redis",
+        "lua",
+        "atomicity"
+      ],
+      "followUps": [
+        "What happens if the Lua script is slow?",
+        "How does this interact with Redis Cluster and key slotting?"
+      ]
+    },
+    {
+      "id": "q-clock-skew",
+      "question": "Your distributed limiter computes 'now' on each app server. Why is that a problem and what is the fix?",
+      "answer": "If each app server passes its own wall-clock time into the limiter logic, the servers can disagree about where window boundaries fall because their clocks drift relative to each other. One node may think a request lands in the current window while another places the same-instant request in the previous one, so the shared counters are updated against inconsistent notions of time and the limit becomes fuzzy or exploitable near boundaries. The clean fix is to use a single clock source: have the limiter read the store's own time — Redis TIME inside the Lua script — so every decision is timestamped by one clock regardless of app-node drift. If you must pass time from the app, at least bound acceptable skew and keep clocks disciplined with NTP. Sliding-window and token-bucket math are both sensitive to this because they scale by elapsed time. This is a subtle staff-level point that distinguishes a careful design from a naive one.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": [
+        "clock-skew",
+        "distributed",
+        "redis"
+      ],
+      "followUps": [
+        "How does token-bucket refill depend on the clock source?",
+        "What accuracy do you lose if you tolerate a few hundred ms of skew?"
+      ]
+    },
+    {
+      "id": "q-429-retry-after",
+      "question": "Which status code do you return for a throttled request, and what is the role of Retry-After?",
+      "answer": "You return HTTP 429 Too Many Requests, not 403. The distinction matters: 403 implies a permanent authorization failure, while 429 signals a transient condition that will clear, which is exactly the semantic a client's retry logic needs. Retry-After tells the client how long to wait before retrying, expressed as a number of seconds or an HTTP-date, and honoring it is the single most important client-side behavior because ignoring it converts a soft throttle into a retry storm. You should also send the RateLimit-Limit, RateLimit-Remaining, and RateLimit-Reset headers so a client can self-pace before it ever hits a 429. Critically, those informational headers should appear on successful 200 responses too, not only on rejections, so a good client slows down as it approaches the limit rather than discovering it by being rejected. Returning 429 without Retry-After is a common mistake that leaves clients guessing.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": true,
+      "tags": [
+        "http-429",
+        "retry-after",
+        "ratelimit-headers"
+      ],
+      "followUps": [
+        "Why send RateLimit headers on 200 responses?",
+        "How should a client combine Retry-After with exponential backoff?"
+      ]
+    },
+    {
+      "id": "q-per-key-vs-global",
+      "question": "Do you need per-key limits, global limits, or both? Explain why one alone is insufficient.",
+      "answer": "You generally need both, because they protect against different failures. Per-key limits enforce fairness — they stop any single tenant, user, or API key from monopolizing capacity and guarantee a noisy neighbor cannot starve others. Global (and per-route) limits backstop total capacity so the sum of all callers cannot exceed what the fleet can serve, and a per-route limit specifically shields one expensive endpoint from a caller who stays under their overall key limit by hammering only that route. Per-key alone is insufficient because the sum of many keys each at their limit can still overwhelm the system; global alone is insufficient because one caller could consume the entire global budget and starve everyone. Real limiters therefore compose several checks and reject on the first that trips. The composition also lets you price different routes by cost, charging more tokens for heavy operations.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": true,
+      "tags": [
+        "per-key",
+        "global",
+        "per-route"
+      ],
+      "followUps": [
+        "How do you weight limits by endpoint cost?",
+        "Where do you enforce each of these layers?"
+      ]
+    },
+    {
+      "id": "q-where-enforce",
+      "question": "Where in the stack should rate limiting be enforced?",
+      "answer": "It should be layered, because the earlier you reject the cheaper the rejection is. Coarse volumetric and abuse limits belong at the edge — the CDN, load balancer, or API gateway — where a dropped request never touches your application code or database. Fine-grained, business-aware limits such as per-tenant quotas or per-endpoint cost weighting belong closer to the application, where the authenticated identity and the true cost of the operation are known. Per-IP limits guard anonymous volumetric abuse and sit furthest out; per-API-key and per-user limits enforce fair use and account-level fairness and sit at the gateway or app. The point is not to pick one location but to compose several so that anonymous floods die cheaply at the edge while nuanced fairness rules run where the context exists. Pushing everything into the app wastes capacity on requests you could have dropped upstream.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [
+        "api-gateway",
+        "edge",
+        "enforcement"
+      ],
+      "followUps": [
+        "What can the edge not know that the app can?",
+        "How do rule updates propagate to gateways?"
+      ]
+    },
+    {
+      "id": "q-sliding-counter-math",
+      "question": "How does the sliding window counter estimate the rolling request count without storing every timestamp?",
+      "answer": "It keeps only two counters, the current fixed window and the previous one, and interpolates. It computes how far into the current window you are as a fraction (elapsed divided by window size), then estimates the rolling count as the current window's count plus the previous window's count weighted by the fraction of the previous window still overlapped by the sliding window. For example with a limit of 100 per minute, if you are 75% into the current minute, the previous window had 80 requests and the current has 30, the estimate is 30 + 80 * (1 - 0.75) = 50, which is under the limit so the request is admitted. This gives O(1) memory per key — two integers — and smooths the boundary burst that plagues a plain fixed window. Its only inaccuracy is a bounded approximation error when traffic within a window is highly non-uniform, which is acceptable for nearly all APIs. That balance of cheap memory and near-exact accuracy is why large gateways favor it.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [
+        "sliding-window",
+        "approximation",
+        "memory"
+      ],
+      "followUps": [
+        "When does the approximation error matter?",
+        "How does it compare to a token bucket for the same limit?"
+      ]
+    },
+    {
+      "id": "q-fail-open-closed",
+      "question": "If Redis becomes unreachable, should your rate limiter fail open or fail closed?",
+      "answer": "There is no universally correct answer; the point is to decide deliberately rather than accidentally. Failing open (admitting requests when the store is down) preserves availability but removes protection, so a Redis outage during a traffic spike could let the backend be overwhelmed. Failing closed (rejecting requests) preserves protection but means a Redis blip becomes a full self-inflicted outage — arguably the most dangerous rate-limiting mistake. Most systems choose a middle path: fall back to a conservative in-process local limiter so some protection remains without depending on the store, and choose the fail direction by risk — a payment endpoint might fail closed while a read-only feed fails open. Whatever you pick, emit a metric and alert when the fallback engages so it is never silent, and test the failure path explicitly. The key senior signal is treating store failure as a first-class design case.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [
+        "failure-handling",
+        "redis",
+        "resilience"
+      ],
+      "followUps": [
+        "What does the local fallback limiter look like?",
+        "How do you avoid the fallback itself becoming the new limit?"
+      ]
+    },
+    {
+      "id": "q-throttle-vs-shed",
+      "question": "Distinguish rate limiting, throttling, and load shedding.",
+      "answer": "They sit on a spectrum from proactive fairness to reactive survival. Rate limiting is a fixed, per-caller policy applied regardless of current system health — \"you get 100 per minute.\" Throttling deliberately delays or queues excess work rather than rejecting it, so the request still succeeds but slower, which suits background or asynchronous work that can tolerate latency. Load shedding is reactive triage: when the system is already overloaded, it drops requests — ideally prioritizing cheap or high-value traffic — to keep the rest of the system alive. Rate limiting and throttling are health-independent policies; load shedding is a health-driven last resort. A mature system pairs shedding with graceful degradation, serving reduced-fidelity responses like cached data or fewer results so users get a working if diminished service. Conflating these three is a common mistake, and shedding uniformly (rather than by priority) can kill health checks and the control plane along with everything else.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [
+        "throttling",
+        "load-shedding",
+        "degradation"
+      ],
+      "followUps": [
+        "How does load shedding decide what to drop?",
+        "Where does a circuit breaker fit relative to these?"
+      ]
+    },
+    {
+      "id": "q-key-choice",
+      "question": "What should you key a rate limit on, and what is the risk of keying on the wrong thing?",
+      "answer": "Key on a stable, authenticated, non-spoofable identity: an API key, user id, or tenant id, falling back to client IP only for anonymous traffic. The risk of keying on something the client controls — a spoofable header, a self-reported user id, or a value in the request body — is that an attacker simply rotates the identifier to get a fresh bucket for each value and bypasses the limit entirely. IP is imperfect too: many users can share one IP behind NAT (unfairly penalizing them) while a determined attacker can rotate across many IPs, so IP is a blunt edge control rather than a fair per-user limit. The general principle is that the key must be both meaningful (it identifies the entity you want to be fair to) and hard to forge (the client cannot cheaply mint new ones). Choosing the key well is as important as choosing the algorithm.",
+      "difficulty": "mid",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [
+        "keying",
+        "api-key",
+        "security"
+      ],
+      "followUps": [
+        "How do you handle anonymous traffic fairly?",
+        "How do you combine IP and API-key limits?"
+      ]
+    },
+    {
+      "id": "q-thundering-herd",
+      "question": "After a spike triggers throttling, all clients retry a moment later and cause another spike. What is happening and how do you prevent it?",
+      "answer": "This is the synchronized-retry or thundering-herd problem. When many clients are throttled at nearly the same instant — or told to wait the same Retry-After — they all become eligible to retry at the same moment and hit the server in a synchronized wave, re-creating the very spike that caused the throttle and potentially oscillating indefinitely. The fix is jitter: add randomness to every backoff interval so retries spread out over time instead of clustering. Exponential backoff with jitter (for example a random fraction of an exponentially growing delay) is the standard pattern, and it should be applied on the client and reflected in any server-suggested wait. You should also cap total attempts and surface a clear error rather than retrying forever, since infinite retries hide a real capacity problem and prolong the outage. Jitter is cheap and is the single most effective defense against retry storms.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [
+        "backoff",
+        "jitter",
+        "thundering-herd"
+      ],
+      "followUps": [
+        "What jitter distribution works best?",
+        "How does this interact with a fixed Retry-After value?"
+      ]
+    },
+    {
+      "id": "q-local-token-cache",
+      "question": "A gateway needs single-digit-millisecond limiter latency but must enforce a global limit. How do you reconcile the Redis round-trip with the latency budget?",
+      "answer": "Let each gateway node draw tokens from the central bucket in small batches rather than consulting Redis on every request. A node atomically claims, say, ten tokens at once, serves the next ten requests from its local cache without a network hop, then refills from the store. This amortizes the Redis round-trip across many requests, cutting p99 latency dramatically while still enforcing a global limit because the central bucket is the source of truth for how many tokens exist. The trade-off is a bounded accuracy loss: at the margins a node may hold uncommitted tokens, so the global limit can be slightly over- or under-shot by up to the batch size times the node count, which you tune by choosing the batch size. This is the technique high-throughput gateways use, and naming the accuracy-versus-latency trade is exactly the staff-level signal. It is the distributed analogue of buffering, and you size the batch to keep the error acceptable.",
+      "difficulty": "senior",
+      "category": "Backend",
+      "tricky": false,
+      "tags": [
+        "latency",
+        "token-bucket",
+        "distributed"
+      ],
+      "followUps": [
+        "How do you bound the worst-case overshoot?",
+        "What happens to cached tokens when a node crashes?"
+      ]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-token-bucket",
+      "title": "Implement a Token-Bucket Rate Limiter",
+      "difficulty": "senior",
+      "category": "Backend",
+      "prompt": "Implement an in-memory token-bucket rate limiter with a lazy (timer-free) refill. It should take a capacity B (max burst) and a refill rate R (tokens per second). Expose tryConsume(cost) that returns whether the request is admitted, and expose enough state to compute a Retry-After when denied. Explain how burst and steady rate are decoupled.",
+      "hints": [
+        "Do not use a background timer; compute accrued tokens from elapsed time on each call and cap at capacity.",
+        "Store only two pieces of state per bucket: the current (fractional) token count and the last-refill timestamp.",
+        "For Retry-After, compute how long until enough tokens accrue: (cost - tokens) / refillPerSec seconds."
+      ],
+      "solutionCode": "type Decision = { allowed: boolean; remaining: number; retryAfterSec: number };\n\nclass TokenBucket {\n  private tokens: number;\n  private lastRefill: number; // ms\n\n  constructor(\n    private readonly capacity: number,    // burst B\n    private readonly refillPerSec: number // steady rate R\n  ) {\n    this.tokens = capacity;\n    this.lastRefill = Date.now();\n  }\n\n  private refill(now: number): void {\n    const elapsedSec = (now - this.lastRefill) / 1000;\n    if (elapsedSec <= 0) return;\n    this.tokens = Math.min(this.capacity, this.tokens + elapsedSec * this.refillPerSec);\n    this.lastRefill = now;\n  }\n\n  tryConsume(cost = 1, now = Date.now()): Decision {\n    this.refill(now);\n    if (this.tokens >= cost) {\n      this.tokens -= cost;\n      return { allowed: true, remaining: Math.floor(this.tokens), retryAfterSec: 0 };\n    }\n    const deficit = cost - this.tokens;\n    const retryAfterSec = Math.ceil(deficit / this.refillPerSec);\n    return { allowed: false, remaining: 0, retryAfterSec };\n  }\n}\n\n// usage: 10 burst, 2/sec sustained\nconst bucket = new TokenBucket(10, 2);\nconsole.log(bucket.tryConsume());       // allowed, remaining 9\n// spend the burst, then throttle until tokens refill at 2/sec",
+      "solutionLanguage": "typescript",
+      "explanation": "The bucket starts full at capacity B and each admitted request removes cost tokens. Rather than running a timer to add tokens, the refill is computed lazily: on every call we measure the seconds elapsed since the last touch and add elapsedSec * refillPerSec tokens, capped at capacity so the bucket never overflows. This makes the limiter O(1) and stateless apart from two numbers, which is exactly why it ports cleanly to a Redis hash per key in a distributed setting. Capacity B controls how large a burst is permitted — a client that has been idle can spend up to B tokens at once — while the refill rate R controls the sustained long-run rate, so burst and steady rate are decoupled independently. When the bucket lacks enough tokens we deny and compute Retry-After as the time for the deficit to accrue at rate R, giving the client a precise, honest wait rather than a guess. In production you would move the token count and last-refill timestamp into Redis and mutate them inside a Lua script so concurrent requests from the same key cannot both consume the last token.",
+      "relatedTopic": "rate-limiting"
+    },
+    {
+      "id": "ch-redis-sliding-window",
+      "title": "Atomic Redis Sliding-Window-Counter Limiter",
+      "difficulty": "senior",
+      "category": "Backend",
+      "prompt": "Write a Redis Lua script that implements a sliding-window-counter (or log) rate limiter that is correct under concurrency. It receives the key, current time, window length, limit, and a unique member id, and must atomically evict expired entries, count what remains, and admit or deny. Return whether the request was allowed and how many slots remain. Explain why it is race-free.",
+      "hints": [
+        "Use a sorted set keyed by timestamp; ZREMRANGEBYSCORE evicts everything older than now - window.",
+        "The whole decision must be one Lua script so eviction, count, and conditional insert cannot interleave.",
+        "Set PEXPIRE to the window length so idle keys are reclaimed automatically and memory stays bounded."
+      ],
+      "solutionCode": "-- KEYS[1] = rate-limit key         ARGV[1] = now (ms)\n-- ARGV[2] = window (ms)            ARGV[3] = limit\n-- ARGV[4] = unique member id (e.g. request uuid)\n-- returns { allowed(1/0), remaining }\nlocal key    = KEYS[1]\nlocal now    = tonumber(ARGV[1])\nlocal window = tonumber(ARGV[2])\nlocal limit  = tonumber(ARGV[3])\nlocal member = ARGV[4]\n\n-- 1. evict entries outside the sliding window\nredis.call('ZREMRANGEBYSCORE', key, 0, now - window)\n\n-- 2. how many requests remain in the window\nlocal count = redis.call('ZCARD', key)\n\nif count < limit then\n  -- 3. admit: record this request and refresh TTL\n  redis.call('ZADD', key, now, member)\n  redis.call('PEXPIRE', key, window)\n  return {1, limit - count - 1}\nelse\n  -- deny but still refresh TTL so the key is reclaimed after the window\n  redis.call('PEXPIRE', key, window)\n  return {0, 0}\nend",
+      "solutionLanguage": "lua",
+      "explanation": "The limiter stores each admitted request as a member of a Redis sorted set scored by its millisecond timestamp, which turns \"how many requests happened in the trailing window\" into a range operation. On each call it first evicts every entry older than now minus the window with ZREMRANGEBYSCORE, then counts the survivors with ZCARD, and only if that count is below the limit does it insert the new request with ZADD and admit. The reason it is race-free is that Redis runs a Lua script as a single indivisible unit on its single execution thread: from the first command to the return value, no other client's command can interleave, so two concurrent callers cannot both read an under-limit count and both admit — exactly the read-modify-write race that breaks a naive GET-then-INCR. Passing a unique member id per request keeps entries from colliding at the same timestamp so the count stays exact. The PEXPIRE on every branch bounds memory by letting idle keys expire after one window rather than accumulating forever. To use the Redis server clock instead of the app clock and avoid skew, you would replace the passed-in now with redis.call('TIME') inside the script.",
+      "relatedTopic": "rate-limiting"
+    }
+  ],
+  "references": [
+    {
+      "label": "Cloudflare: How we built rate limiting capable of scaling to millions of domains",
+      "url": "https://blog.cloudflare.com/counting-things-a-lot-of-different-things/"
+    },
+    {
+      "label": "Stripe Engineering: Scaling your API with rate limiters",
+      "url": "https://stripe.com/blog/rate-limiters"
+    },
+    {
+      "label": "Redis: Rate limiting patterns (INCR and sliding window)",
+      "url": "https://redis.io/docs/latest/develop/use-cases/rate-limiting/"
+    },
+    {
+      "label": "IETF draft: RateLimit header fields for HTTP",
+      "url": "https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/"
+    },
+    {
+      "label": "System Design Interview (Alex Xu): Design a rate limiter",
+      "url": "https://bytebytego.com/courses/system-design-interview/design-a-rate-limiter"
+    },
+    {
+      "label": "NGINX: Rate limiting with limit_req",
+      "url": "https://www.nginx.com/blog/rate-limiting-nginx/"
+    }
+  ]
+}

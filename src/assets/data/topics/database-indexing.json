@@ -1,0 +1,662 @@
+{
+  "id": "database-indexing",
+  "title": "Database Indexing & Query Optimization",
+  "category": "Computer Science",
+  "subcategory": "Performance",
+  "difficulty": "senior",
+  "tags": [
+    "database-indexing",
+    "query-optimization",
+    "b-tree",
+    "explain-analyze",
+    "covering-index",
+    "sargability",
+    "keyset-pagination",
+    "postgresql"
+  ],
+  "description": "A staff-level deep dive into how relational indexes physically work, how the cost-based optimizer decides between sequential, index, and bitmap scans, and how to design composite, covering, partial, and expression indexes that survive write amplification. Covers reading EXPLAIN ANALYZE, sargability, the N+1 problem, and replacing OFFSET pagination with keyset seeks.",
+  "estReadMinutes": 30,
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "Indexing Is the Difference Between O(log n) and O(n)",
+      "kind": "intro",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "An index is a redundant, ordered data structure that the database maintains alongside a table so it can locate rows without scanning every page. The table itself is just an unordered (or only physically-clustered) collection of rows; the index turns the question 'where are the rows matching this predicate?' from a linear walk over millions of pages into a logarithmic descent down a balanced tree. Getting indexing right is frequently the single highest-leverage performance decision a backend engineer makes, because it changes the asymptotic class of your hot queries."
+        },
+        {
+          "type": "paragraph",
+          "text": "But an index is not free magic. Every index is a second copy of part of your data that must be kept transactionally consistent on every INSERT, UPDATE, and DELETE. A table with eight indexes pays eight times the write amplification on the indexed columns. The senior skill is not 'add an index'; it is reasoning about selectivity, the access path the planner will actually choose, and the read/write trade-off across the whole workload."
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Mental model: a B-tree index is a sorted phone book. It answers equality and range lookups, ORDER BY, and MIN/MAX cheaply. It cannot help with predicates that are not a prefix of its sort order, and it cannot help if you wrap the indexed column in a function the database cannot see through."
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "Index internals: B-tree / B+tree and why descent is O(log n).",
+            "Clustered vs non-clustered indexes and the heap.",
+            "Composite indexes, leftmost-prefix, covering / index-only scans.",
+            "Selectivity, cardinality, statistics, and the cost model.",
+            "Reading EXPLAIN ANALYZE: seq scan vs index scan vs bitmap heap scan.",
+            "When indexes hurt, partial / expression indexes, sargability, and keyset pagination."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "why-indexes",
+      "heading": "Why a Full Scan Eventually Falls Over",
+      "kind": "why",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Consider a 50-million-row orders table on disk in 8 KB pages. Finding all orders for one customer with no index means a sequential scan: read every page, evaluate the predicate on every row, discard 99.99% of them. The cost grows linearly with table size, so the query that ran in 40 ms during development becomes a 12-second table scan in production. Worse, every concurrent execution competes for the same I/O and buffer cache, so latency degrades super-linearly under load."
+        },
+        {
+          "type": "paragraph",
+          "text": "A B-tree index on customer_id changes the math. The tree has a fanout in the hundreds, so even a billion-row table is only four or five levels deep. The database reads a handful of index pages to find the matching key range, then follows pointers to exactly the rows it needs. The work is proportional to the number of matching rows plus the tree height, not the table size. That is the entire economic argument for indexing."
+        },
+        {
+          "type": "table",
+          "headers": ["Rows", "Seq scan pages read", "B-tree levels (descent)", "Index-scan pages (1 match)"],
+          "rows": [
+            ["10,000", "~125", "2", "~3"],
+            ["1,000,000", "~12,500", "3", "~4"],
+            ["100,000,000", "~1,250,000", "4", "~5"],
+            ["10,000,000,000", "~125,000,000", "5", "~6"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "An index only wins when it is selective. If your predicate matches 60% of the table, the index scan with its random I/O and heap fetches is slower than a sequential scan, and the planner will (correctly) ignore the index. Selectivity, not the mere existence of an index, drives the access path."
+        }
+      ]
+    },
+    {
+      "id": "btree-internals",
+      "heading": "B-tree and B+tree Internals",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Relational databases almost universally use a B+tree, a balanced n-ary search tree tuned for block storage. Internal (branch) nodes store only separator keys and child pointers; all actual keys and row pointers live in the leaf level. Leaves are linked into a doubly-linked list, which is what makes range scans and ORDER BY cheap: find the start key, then walk the leaf chain sequentially. Because every leaf is at the same depth, lookups have uniform, bounded cost."
+        },
+        {
+          "type": "paragraph",
+          "text": "The O(log n) descent comes from fanout. Each 8 KB index page can hold hundreds of separator keys, so the branching factor b is large and the tree height is log_b(n). With b around 300, three levels already address ~27 million keys and four levels ~8 billion. A point lookup therefore touches only the height of the tree (a few page reads, usually cached at the upper levels) plus one leaf. The tree stays balanced through node splits on insert and merges on delete, so performance does not degrade as data grows."
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "Logical B+tree (separator keys in branches, data in linked leaves):\n\n                 [ * | 50 | * | 100 | * ]          <- root (branch)\n                /        |          \\\n        [*|20|*|35|*]  [*|70|*|85|*]  [*|130|*|...]  <- branch level\n        /   |    \\        ...              ...\n   [10..19][20..34]...  leaves hold keys + heap pointers (TIDs)\n      |       |\n      +------>+------>+------>  doubly-linked leaf chain (range scans)"
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "Equality (=) lookup: descend to the leaf, return matching TID(s).",
+            "Range (BETWEEN, >, <): descend to lower bound, walk the leaf chain.",
+            "ORDER BY on the indexed column: read leaves in order, no sort needed.",
+            "MIN/MAX: jump to the leftmost / rightmost leaf, O(log n)."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "B-tree indexes support =, <, <=, >, >=, BETWEEN, IN, IS NULL, and prefix LIKE 'abc%'. They cannot accelerate LIKE '%abc' (leading wildcard) because that is not a prefix of the sort order."
+        }
+      ]
+    },
+    {
+      "id": "clustered-vs-secondary",
+      "heading": "Clustered vs Non-Clustered Indexes and the Heap",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "There are two physical storage models. In an index-organized / clustered table (the default for InnoDB primary keys and SQL Server clustered indexes), the table rows ARE the leaf level of the primary-key B+tree, stored in primary-key order. There is no separate heap. In a heap-organized table (PostgreSQL, Oracle by default), rows live in an unordered heap and every index, including the primary key, is a separate structure that points back to the heap via a physical row identifier (CTID in Postgres, ROWID in Oracle)."
+        },
+        {
+          "type": "paragraph",
+          "text": "This distinction has sharp consequences. With a clustered table, a secondary index stores the primary-key value (not a physical pointer) in its leaves, so a secondary-index lookup performs a second B-tree descent into the clustered index to fetch the row. That is two logarithmic lookups, which is why a fat clustered key (e.g. a UUID) bloats every secondary index. With a heap table, a secondary index points directly at the heap page, but the planner may need to re-check visibility, and HOT updates / VACUUM behavior become relevant."
+        },
+        {
+          "type": "table",
+          "headers": ["Aspect", "Clustered / index-organized", "Heap-organized (non-clustered)"],
+          "rows": [
+            ["Row storage", "In PK B+tree leaf, sorted by PK", "Unordered heap pages"],
+            ["Secondary index leaf points to", "PK value (then re-descends)", "Physical CTID/ROWID"],
+            ["Secondary lookup cost", "Two B-tree descents", "One descent + heap fetch"],
+            ["Range scan on PK", "Sequential, very cheap", "Random unless heap is clustered"],
+            ["Examples", "MySQL InnoDB, SQL Server", "PostgreSQL, Oracle (heap)"]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Choose a narrow, monotonic primary key for clustered tables (e.g. BIGINT identity, not random UUIDv4). A random clustered key causes page splits on every insert and inflates every secondary index, since each secondary leaf must store the full PK."
+        }
+      ]
+    },
+    {
+      "id": "composite-covering",
+      "heading": "Composite Indexes, Leftmost-Prefix, and Covering Indexes",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A composite (multi-column) index is sorted by its columns left to right, like a dictionary sorted first by last name, then first name. This is the leftmost-prefix rule: an index on (a, b, c) can serve predicates on a, on (a, b), and on (a, b, c). It can also serve a range on the last used column. But it cannot efficiently serve a query that filters only on b or only on c, because those are not a leftmost prefix of the sort order. Column order is therefore a design decision, not an afterthought."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- Single-column index\nCREATE INDEX idx_orders_customer ON orders (customer_id);\n\n-- Composite index: order matters!\n-- Serves: (customer_id), (customer_id, status),\n--         (customer_id, status, created_at range)\nCREATE INDEX idx_orders_cust_status_date\n  ON orders (customer_id, status, created_at);\n\n-- This query uses the full index (equality, equality, range):\nSELECT * FROM orders\nWHERE customer_id = 42\n  AND status = 'PAID'\n  AND created_at >= DATE '2026-01-01';\n\n-- This query CANNOT use the index efficiently:\n-- it filters on status only, which is not a leftmost prefix.\nSELECT * FROM orders WHERE status = 'PAID';"
+        },
+        {
+          "type": "paragraph",
+          "text": "A covering index is one that contains every column the query needs, so the database can answer entirely from the index without visiting the table (an index-only scan). This eliminates the heap fetch, often the dominant cost. Two ways to cover: put extra columns in the key, or attach them as non-key payload via INCLUDE. INCLUDE columns are stored only in the leaf, are not part of the sort order, and do not bloat branch nodes, so they are the right tool when a column is needed for output but never for filtering or ordering."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- Covering with INCLUDE: total_amount is returned but never\n-- used in WHERE/ORDER BY, so it is payload, not a key column.\nCREATE INDEX idx_orders_cover\n  ON orders (customer_id, status)\n  INCLUDE (total_amount, created_at);\n\n-- This is an INDEX-ONLY SCAN: no heap access needed.\nSELECT total_amount, created_at\nFROM orders\nWHERE customer_id = 42 AND status = 'PAID';"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Rule of thumb for composite column order: equality columns first, then the single range/sort column, then INCLUDE the projected-but-unfiltered columns. This maximizes both the usable prefix and the chance of an index-only scan."
+        }
+      ]
+    },
+    {
+      "id": "selectivity-stats",
+      "heading": "Selectivity, Cardinality, and the Cost-Based Optimizer",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Cardinality is the number of distinct values in a column; selectivity is the fraction of rows a predicate is estimated to return. A predicate is highly selective when it returns few rows (high cardinality column like email), and poorly selective when it returns many (low cardinality like a boolean is_active). The optimizer is cost-based: it estimates rows from statistics, assigns a cost to each candidate plan (sequential scan, index scan, bitmap scan, nested loop, hash join), and picks the cheapest. It does not blindly use an index just because one exists."
+        },
+        {
+          "type": "paragraph",
+          "text": "Statistics drive everything. The database keeps a histogram of value distribution, a count of distinct values, the fraction of NULLs, and most-common-value lists, refreshed by ANALYZE / auto-analyze. If statistics are stale (e.g. after a bulk load), the planner mis-estimates row counts and may choose a catastrophic plan, such as a nested loop over millions of rows. Running ANALYZE is often the cheapest fix for a query that 'suddenly got slow' after a data change."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- Refresh planner statistics for one table\nANALYZE orders;\n\n-- Inspect estimated distinct values / correlation\nSELECT attname, n_distinct, correlation\nFROM pg_stats\nWHERE tablename = 'orders';\n\n-- Raise the statistics target (more histogram buckets) for a\n-- skewed column, then re-analyze.\nALTER TABLE orders ALTER COLUMN status SET STATISTICS 500;\nANALYZE orders;"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "A B-tree index on a low-cardinality column (e.g. status with 3 values, or a boolean) is usually ignored because reading ~33% of the rows via random index I/O costs more than a sequential scan. The exception is a partial index that targets the rare value, e.g. WHERE status = 'FAILED'."
+        }
+      ]
+    },
+    {
+      "id": "explain-reading",
+      "heading": "Reading EXPLAIN and EXPLAIN ANALYZE",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "EXPLAIN shows the planner's chosen plan with estimated cost and rows. EXPLAIN ANALYZE actually executes the query and shows real time and real row counts, which is what you need to catch mis-estimates. The single most useful diagnostic is comparing the estimated rows to the actual rows on each node: a large divergence means the statistics lied to the planner, and that is the root cause of most bad plans."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "EXPLAIN (ANALYZE, BUFFERS)\nSELECT * FROM orders\nWHERE customer_id = 42 AND status = 'PAID';"
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "-- Good plan: selective index scan\nIndex Scan using idx_orders_cust_status_date on orders\n  (cost=0.43..38.21 rows=12 width=84)\n  (actual time=0.028..0.061 rows=11 loops=1)\n  Index Cond: ((customer_id = 42) AND (status = 'PAID'))\n  Buffers: shared hit=5\nPlanning Time: 0.142 ms\nExecution Time: 0.092 ms"
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "-- Bad plan: no usable index, full table read\nSeq Scan on orders\n  (cost=0.00..1043210.00 rows=11 width=84)\n  (actual time=812.4..9120.7 rows=11 loops=1)\n  Filter: ((customer_id = 42) AND (status = 'PAID'))\n  Rows Removed by Filter: 49999989\n  Buffers: shared read=1041210\nPlanning Time: 0.090 ms\nExecution Time: 9121.3 ms"
+        },
+        {
+          "type": "paragraph",
+          "text": "A Bitmap Heap Scan is the planner's middle path. When a predicate is moderately selective, scanning the index and chasing each row with random heap I/O would thrash the disk, so the database first builds an in-memory bitmap of all matching heap page locations from the index (Bitmap Index Scan), then visits those pages once in physical order (Bitmap Heap Scan). It also lets the planner combine multiple indexes with BitmapAnd / BitmapOr before touching the heap."
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "Bitmap Heap Scan on orders\n  (cost=215.3..18420.1 rows=24500 width=84)\n  (actual time=4.1..58.7 rows=24317 loops=1)\n  Recheck Cond: (status = 'PAID')\n  Heap Blocks: exact=8123\n  ->  Bitmap Index Scan on idx_orders_status\n        (cost=0.00..209.2 rows=24500 width=0)\n        (actual time=2.9..2.9 rows=24317 loops=1)\n        Index Cond: (status = 'PAID')"
+        },
+        {
+          "type": "table",
+          "headers": ["Node", "When chosen", "Cost signature"],
+          "rows": [
+            ["Seq Scan", "Low selectivity, small table, or no index", "Reads all pages; high 'Rows Removed by Filter'"],
+            ["Index Scan", "High selectivity, few matching rows", "Few buffers, follows index then heap"],
+            ["Index Only Scan", "Index covers all needed columns", "No heap access (visibility map permitting)"],
+            ["Bitmap Heap Scan", "Moderate selectivity, scattered rows", "Builds bitmap, visits heap pages once in order"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sargability",
+      "heading": "Sargability: Don't Hide the Column From the Index",
+      "kind": "example",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A predicate is sargable (Search ARGument ABLE) if the database can use an index to satisfy it. The cardinal rule: do not wrap the indexed column in a function or expression, because the index stores the raw column values, not the transformed ones. The moment you write WHERE lower(email) = '...', the index on email is useless, because the index has no idea what lower(email) sorts as. The fix is either to not transform the column, or to build an expression index on exactly that transformation."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- NON-SARGABLE: function on the indexed column. Index on email\n-- is skipped; planner falls back to a sequential scan.\nSELECT * FROM users WHERE lower(email) = 'ada@x.io';\n\n-- NON-SARGABLE: arithmetic / casting on the column\nSELECT * FROM orders WHERE created_at::date = '2026-06-30';\nSELECT * FROM orders WHERE total_amount * 1.1 > 100;\n\n-- SARGABLE rewrites: move the transform to the constant side,\n-- or use a range so the raw column is compared directly.\nSELECT * FROM orders\nWHERE created_at >= '2026-06-30' AND created_at < '2026-07-01';\n\nSELECT * FROM orders WHERE total_amount > 100 / 1.1;"
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- If you truly need case-insensitive lookup, index the EXPRESSION\n-- so the stored index keys match the predicate.\nCREATE INDEX idx_users_lower_email ON users (lower(email));\n\n-- Now this is sargable and uses idx_users_lower_email:\nSELECT * FROM users WHERE lower(email) = 'ada@x.io';\n\n-- Leading-wildcard LIKE is also non-sargable for a B-tree:\nSELECT * FROM products WHERE name LIKE '%shoe%';   -- seq scan\nSELECT * FROM products WHERE name LIKE 'shoe%';     -- can use B-tree"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Implicit type coercion is a silent sargability killer. WHERE varchar_col = 12345 may force the database to cast the column to integer for every row, disabling the index. Always match the literal's type to the column's type."
+        }
+      ]
+    },
+    {
+      "id": "hash-gin-brin",
+      "heading": "Beyond B-tree: Hash, GIN, and BRIN Indexes",
+      "kind": "concept",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "B-tree is the default and the right answer most of the time, but specialized index types win specific workloads. A hash index supports only equality (=) and offers O(1) average lookups with a smaller footprint than B-tree, but it cannot do ranges, ordering, or prefix matching. A GIN (Generalized Inverted Index) is an inverted index: it maps each contained element (a word, a JSONB key, an array member) to the list of rows containing it, which is exactly what full-text search and containment queries need. BRIN (Block Range INdex) stores only the min/max of each block range, making it tiny and ideal for huge, naturally-ordered append-only tables like time-series logs."
+        },
+        {
+          "type": "table",
+          "headers": ["Index type", "Structure", "Supports", "Best use case", "Avoid when"],
+          "rows": [
+            ["B-tree", "Balanced search tree", "=, <, >, BETWEEN, ORDER BY, prefix LIKE", "General-purpose: PKs, FKs, ranges, sorting", "Full-text / array containment"],
+            ["Hash", "Hash table", "= only", "Pure equality on large keys", "Ranges, ordering, or sorting needed"],
+            ["GIN", "Inverted index", "@@, @>, ?, array/JSONB/tsvector containment", "Full-text search, JSONB, arrays, trigrams", "Write-heavy (slower, larger updates)"],
+            ["BRIN", "Block min/max summaries", "Range on correlated columns", "Huge append-only / time-series tables", "Low physical correlation (random order)"]
+          ]
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- Hash index: equality-only lookups\nCREATE INDEX idx_sessions_token ON sessions USING hash (token);\n\n-- GIN for full-text search over a generated tsvector\nALTER TABLE articles\n  ADD COLUMN body_tsv tsvector\n  GENERATED ALWAYS AS (to_tsvector('english', body)) STORED;\nCREATE INDEX idx_articles_fts ON articles USING gin (body_tsv);\nSELECT id, title FROM articles\nWHERE body_tsv @@ websearch_to_tsquery('english', 'query planner');\n\n-- GIN over JSONB for containment queries\nCREATE INDEX idx_events_payload ON events USING gin (payload jsonb_path_ops);\nSELECT * FROM events WHERE payload @> '{\"type\":\"login\"}';\n\n-- BRIN on a time-ordered append-only table: tiny and fast for ranges\nCREATE INDEX idx_logs_ts_brin ON logs USING brin (created_at);"
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "Inverted index intuition: where a B-tree answers 'where is value X in sorted order?', a GIN answers 'which rows contain element X?'. That inversion is why it serves search (a document contains many words) but is more expensive to update."
+        }
+      ]
+    },
+    {
+      "id": "partial-expression",
+      "heading": "Partial and Expression Indexes",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "A partial index covers only the rows matching a WHERE clause, so it is smaller, cheaper to maintain, and more likely to fit in cache. The classic use is indexing a rare-but-hot subset: most rows are status = 'DONE', but you query for the small set of status = 'PENDING'. A full index on status is useless (low cardinality), but a partial index on just the pending rows is tiny and highly selective for the query that matters."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- Partial index: only the rows we actually query for hot paths\nCREATE INDEX idx_jobs_pending\n  ON jobs (created_at)\n  WHERE status = 'PENDING';\n\n-- Enforce a conditional uniqueness rule (one active row per user)\nCREATE UNIQUE INDEX uq_one_active_subscription\n  ON subscriptions (user_id)\n  WHERE active;\n\n-- Expression / functional index: index a computed value\nCREATE INDEX idx_users_lower_email ON users (lower(email));\nCREATE INDEX idx_orders_year\n  ON orders (date_trunc('year', created_at));"
+        },
+        {
+          "type": "paragraph",
+          "text": "An expression (functional) index stores the result of an expression, so a predicate using that exact expression becomes sargable. This is the right answer for case-insensitive lookups, computed buckets, and JSON extractions. The trade-off is that the planner must see the identical expression in the query, and the expression must be IMMUTABLE; you cannot index something like now() or a non-deterministic function."
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Partial unique indexes are an elegant way to express business rules the schema cannot otherwise enforce, such as 'a user may have at most one active subscription' or 'only one default address per customer'."
+        }
+      ]
+    },
+    {
+      "id": "n-plus-one",
+      "heading": "The N+1 Query Problem",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The N+1 problem is the most common application-level performance bug, and no index can fully save you from it. It occurs when code runs one query to fetch N parent rows, then issues one additional query per parent to fetch its children, producing N+1 round trips. Each query may be individually indexed and fast, but the cumulative network latency and per-statement overhead dominate. ORMs make this trivially easy to cause through lazy-loaded relations inside a loop."
+        },
+        {
+          "type": "code",
+          "language": "text",
+          "code": "// N+1 in an ORM (pseudocode):\nconst orders = await Order.findAll({ limit: 100 });   // 1 query\nfor (const o of orders) {\n  o.customer = await Customer.findByPk(o.customerId);  // +100 queries\n}\n// Total: 101 round trips for 100 rows."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- The fix: one set-based query with a JOIN (or an IN batch).\nSELECT o.*, c.name, c.email\nFROM orders o\nJOIN customers c ON c.id = o.customer_id\nORDER BY o.created_at DESC\nLIMIT 100;\n\n-- Or batch the children with a single IN list:\nSELECT * FROM customers WHERE id IN (1,2,3, ... );"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Indexes make each individual N+1 query fast, which is exactly why the problem hides in development and explodes in production: 100 sub-millisecond queries plus network round trips still cost far more than one 2 ms JOIN. Detect it with query logging or an APM, and fix it with eager loading / JOINs, not more indexes."
+        }
+      ]
+    },
+    {
+      "id": "when-indexes-hurt",
+      "heading": "When Indexes Hurt: Write Amplification and Bloat",
+      "kind": "mistake",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Every index is pure overhead on writes. An INSERT must add an entry to every index on the table; an UPDATE to an indexed column must delete and re-insert the index entry, possibly triggering page splits; a DELETE must remove entries from each index. A table with a dozen indexes can spend the majority of its write time maintaining indexes rather than writing the row. On a write-heavy table, redundant indexes are a tax paid on every transaction."
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            "Write amplification: N indexes mean roughly N+1 structures updated per modified indexed column.",
+            "Index bloat: MVCC databases leave dead tuples; index pages fragment and must be VACUUMed or REINDEXed.",
+            "Buffer cache pressure: unused indexes still consume RAM and I/O bandwidth.",
+            "Planner overhead: more candidate indexes slightly increases planning time.",
+            "Redundant indexes: an index on (a) is fully covered by an existing index on (a, b)."
+          ]
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- Find unused indexes (Postgres) to drop them safely\nSELECT relname AS table, indexrelname AS index,\n       idx_scan AS times_used, pg_size_pretty(pg_relation_size(indexrelid)) AS size\nFROM pg_stat_user_indexes\nWHERE idx_scan = 0\nORDER BY pg_relation_size(indexrelid) DESC;\n\n-- Rebuild a bloated index without long locks\nREINDEX INDEX CONCURRENTLY idx_orders_cust_status_date;"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Audit for redundant and unused indexes regularly. An index on (a) is subsumed by (a, b); an index never read in months is dead weight. Drop deliberately, ideally with DROP INDEX CONCURRENTLY to avoid blocking writes."
+        }
+      ]
+    },
+    {
+      "id": "pagination",
+      "heading": "Pagination: Keyset Beats OFFSET",
+      "kind": "bestpractice",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "OFFSET pagination is O(n) in the offset: to return page 10,000 the database must generate, sort, and then discard all preceding rows. The query gets linearly slower as users page deeper, and it can return inconsistent results when rows are inserted between page loads. Keyset (a.k.a. seek / cursor) pagination instead remembers the last row's sort key and asks for the next rows after it, which is a single indexed range seek with constant cost regardless of depth."
+        },
+        {
+          "type": "code",
+          "language": "sql",
+          "code": "-- OFFSET: must scan and throw away 200000 rows. Slow and unstable.\nSELECT id, created_at, title\nFROM posts\nORDER BY created_at DESC, id DESC\nLIMIT 20 OFFSET 200000;\n\n-- KEYSET: seek directly past the last seen row using a composite\n-- comparison. Constant time with the right index.\nSELECT id, created_at, title\nFROM posts\nWHERE (created_at, id) < (:last_created_at, :last_id)\nORDER BY created_at DESC, id DESC\nLIMIT 20;\n\n-- Supporting index makes the WHERE a pure index range seek:\nCREATE INDEX idx_posts_created_id ON posts (created_at DESC, id DESC);"
+        },
+        {
+          "type": "callout",
+          "variant": "success",
+          "text": "Keyset pagination requires a stable, unique sort key (append the primary key as a tiebreaker). It powers infinite-scroll and API cursors with consistent latency, but cannot jump to an arbitrary page number, which is the trade-off versus OFFSET."
+        }
+      ]
+    },
+    {
+      "id": "design-checklist",
+      "heading": "An Index Design Checklist",
+      "kind": "note",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Indexing is an iterative, workload-driven discipline. Start from the slow queries (from pg_stat_statements or your APM), read their EXPLAIN ANALYZE, and design the minimal set of indexes that turns sequential scans into selective index or index-only scans, while keeping write amplification in check."
+        },
+        {
+          "type": "list",
+          "ordered": true,
+          "items": [
+            "Identify the actual hot/slow queries; do not index speculatively.",
+            "Order composite columns: equality first, then one range/sort column.",
+            "INCLUDE projected-but-unfiltered columns to enable index-only scans.",
+            "Keep predicates sargable; never wrap the indexed column in a function.",
+            "Use partial indexes for rare hot subsets and conditional uniqueness.",
+            "Match literal types to column types to avoid implicit-cast scans.",
+            "Keep statistics fresh with ANALYZE; raise STATISTICS for skewed columns.",
+            "Audit and drop unused/redundant indexes; REINDEX CONCURRENTLY when bloated."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "info",
+          "text": "The senior summary: indexes trade write cost and storage for read speed, and only pay off when the predicate is selective, sargable, and matched by a leftmost prefix. Verify with EXPLAIN ANALYZE, never by assumption."
+        }
+      ]
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "diagram-bplustree",
+      "title": "B+tree Structure With Linked Leaves",
+      "type": "ascii",
+      "content": "                          ROOT (branch node)\n                  +----------------------------+\n                  |   * | 50 | * | 100 | *      |\n                  +----------------------------+\n                   /          |            \\\n           +---------+   +-----------+   +-----------+\n  BRANCH   | *|20|35 |   | *|70|85   |   | *|130|160 |\n           +---------+   +-----------+   +-----------+\n            /   |   \\        ...              ...\n  +--------+ +-------+ +--------+\n  |10..19  | |20..34 | |35..49  |  ... LEAVES hold (key -> heap TID)\n  +--------+ +-------+ +--------+\n      |          |         |\n      v          v         v\n  [leaf]<------>[leaf]<--->[leaf]<--->[leaf] ...  doubly-linked chain\n                                                  (range scans / ORDER BY)\n\n  Lookup(42): root -> branch(*|20|35) -> leaf[35..49] -> TID. O(log n)."
+    },
+    {
+      "id": "diagram-planner-choice",
+      "title": "Planner: Seq Scan vs Index Scan vs Bitmap Heap Scan",
+      "type": "mermaid",
+      "content": "flowchart TD\n  A[Query with WHERE predicate] --> B{Usable index exists\\nand predicate sargable?}\n  B -- No --> S[Sequential Scan]\n  B -- Yes --> C{Estimate selectivity\\nfrom statistics}\n  C -- Very selective\\nfew rows --> D[Index Scan]\n  D --> E{Index covers all\\nneeded columns?}\n  E -- Yes --> F[Index-Only Scan]\n  E -- No --> G[Index Scan + heap fetch]\n  C -- Moderately selective\\nscattered rows --> H[Bitmap Index Scan]\n  H --> I[Bitmap Heap Scan\\nvisit pages in order]\n  C -- Low selectivity\\nmany rows --> S\n  S --> Z[Return rows]\n  F --> Z\n  G --> Z\n  I --> Z"
+    },
+    {
+      "id": "diagram-clustered-vs-heap",
+      "title": "Secondary Index Lookup: Clustered vs Heap",
+      "type": "ascii",
+      "content": "CLUSTERED (InnoDB)            HEAP-ORGANIZED (PostgreSQL)\n-------------------           ---------------------------\nSecondary idx leaf            Secondary idx leaf\n   key -> PK value               key -> CTID (page,offset)\n        |                              |\n        v  (re-descend)                v  (direct fetch)\n  PK B+tree leaf = ROW           Heap page -> ROW\n  (two B-tree descents)          (one descent + heap read,\n                                  then visibility re-check)\n\nFat PK (UUID) bloats every     Random PK is fine for storage but\nsecondary index leaf.          hurts range scans (no clustering)."
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-why-ologn",
+      "question": "Why is a B-tree index lookup O(log n) rather than O(n), and what physical property keeps it that way as the table grows?",
+      "answer": "The cost is O(log_b n) because each node has a large fanout b (hundreds of keys per page), so the tree height grows only logarithmically with row count. A point lookup descends from root to leaf, touching one page per level, which is just a handful of reads even for billions of rows. The tree stays balanced through node splits on insert and merges on delete, so every leaf is always at the same depth. This means lookup cost does not degrade as data grows; it only increases when the tree gains an entire new level, which happens rarely. Upper levels are almost always cached, so most of the descent is in-memory. The base b being large (not 2) is exactly why real B-trees are shallow despite huge tables.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["b-tree", "complexity", "internals"],
+      "followUps": ["What is the difference between a B-tree and a B+tree?", "Why are leaf nodes linked together?"]
+    },
+    {
+      "id": "q-leftmost-prefix",
+      "question": "You have an index on (customer_id, status, created_at). A query filters only on status and created_at. Will it use the index, and why?",
+      "answer": "No, it will not use the index efficiently, because of the leftmost-prefix rule. A composite index is sorted left to right, so the data is ordered by customer_id first; status is only sorted within each customer_id group, and created_at only within each (customer_id, status) group. Filtering on status without constraining customer_id means the matching entries are scattered across the entire index, so there is no contiguous range to seek. The planner cannot turn that predicate into an index range scan and will typically fall back to a sequential scan or a different index. To serve a status + created_at query, you need an index that begins with status, such as (status, created_at). This is the single most common composite-index mistake.",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["composite-index", "leftmost-prefix", "gotcha"],
+      "followUps": ["Could the planner still do an index skip scan?", "How would you redesign the indexes for both access patterns?"]
+    },
+    {
+      "id": "q-low-cardinality-boolean",
+      "question": "Why does the planner often ignore a plain B-tree index on a low-cardinality boolean column like is_active?",
+      "answer": "Because the index is not selective: a boolean has at most two or three distinct values, so each value matches a large fraction of the table. Using the index would mean reading roughly half the rows through random index-then-heap I/O, which is far more expensive than reading all pages sequentially. The cost-based optimizer estimates this from statistics and correctly prefers a sequential scan. Random I/O per matching row is the killer; a seq scan reads pages in physical order and the OS prefetches them. The fix when you genuinely query a rare subset is a partial index, e.g. CREATE INDEX ... WHERE is_active, which is tiny and only contains the hot rows. So the issue is selectivity, not the column being boolean per se.",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["selectivity", "cardinality", "partial-index", "gotcha"],
+      "followUps": ["When would a partial index fix this?", "How does the planner estimate the fraction of matching rows?"]
+    },
+    {
+      "id": "q-sargable-lower",
+      "question": "Why does WHERE lower(email) = 'x@y.com' skip an index on email, and how do you fix it?",
+      "answer": "The index on email stores the raw column values in their natural sort order; it has no knowledge of what lower(email) evaluates to for each row. Because the predicate compares a transformed value against the constant, the database cannot perform a range seek over the raw-value index, so the predicate is non-sargable and the optimizer falls back to a sequential scan that computes lower() per row. The fix is an expression (functional) index that stores exactly the transformed value: CREATE INDEX idx_users_lower_email ON users (lower(email)). After that, the identical expression in the predicate becomes sargable and seeks the index directly. Alternatively, store a normalized email column and index it. The general principle: never wrap the indexed column in a function; transform the constant side or index the expression.",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["sargability", "expression-index", "gotcha"],
+      "followUps": ["What requirement must the indexed expression satisfy?", "How would you make a case-insensitive unique constraint?"]
+    },
+    {
+      "id": "q-covering-include",
+      "question": "What is a covering index, and what is the difference between adding a column to the key versus using INCLUDE?",
+      "answer": "A covering index contains every column a query needs, so the database answers entirely from the index via an index-only scan, skipping the heap fetch that often dominates cost. You can cover a column either by adding it to the key columns or by attaching it as INCLUDE payload. Key columns participate in the index sort order, so they widen branch nodes and can be used for filtering and ordering; INCLUDE columns are stored only in the leaf level, are not sorted, and cannot be searched on, but they do not bloat the branch nodes. The rule of thumb is: put a column in the key if you filter, range, or order by it; put it in INCLUDE if you only need to return it in the SELECT list. INCLUDE keeps the index lean while still enabling index-only scans. In databases without INCLUDE you simulate it by appending the column to the key, accepting the extra sort overhead.",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["covering-index", "index-only-scan", "include"],
+      "followUps": ["Why might an index-only scan still hit the heap in Postgres?", "What is the visibility map's role?"]
+    },
+    {
+      "id": "q-ab-vs-ba",
+      "question": "Is an index on (a, b) interchangeable with one on (b, a)? When does the order matter?",
+      "answer": "No, they are not interchangeable, because a composite index is sorted by its first column, then the second within ties. (a, b) supports predicates on a alone, and on a combined with b, plus ranges/ordering anchored on a. (b, a) supports b alone, and b combined with a. They overlap only for the full equality on both columns. The order should be driven by your access patterns: put the column you most often filter by equality first, and prefer the higher-selectivity equality column earlier. A common refinement is to lead with the equality column and end with the single range/sort column, since a range on an earlier column stops the index from using later columns for seeking. So column order is a deliberate design choice, not a symmetry.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": true,
+      "tags": ["composite-index", "column-order", "gotcha"],
+      "followUps": ["How does a range predicate on the first column affect later columns?", "When would you create both indexes?"]
+    },
+    {
+      "id": "q-clustered-heap",
+      "question": "Explain the difference between a clustered (index-organized) table and a heap table, and how it changes secondary index lookups.",
+      "answer": "In a clustered/index-organized table the rows physically live in the leaf level of the primary-key B+tree, sorted by primary key, so there is no separate heap. In a heap table the rows live in an unordered heap and every index, including the primary key, is a separate structure that points back to the heap by a physical row identifier. The consequence is that a secondary index in a clustered table stores the primary-key value in its leaves, so a secondary lookup performs two B-tree descents: one into the secondary index, then one into the clustered index to fetch the row. In a heap table the secondary index points directly at the heap location, so it is one descent plus a heap read, though the engine may re-check tuple visibility. This also explains why a fat clustered primary key (like a random UUID) bloats every secondary index and slows lookups. InnoDB and SQL Server are clustered; PostgreSQL and Oracle default to heaps.",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["clustered-index", "heap", "secondary-index"],
+      "followUps": ["Why prefer a monotonic PK for a clustered table?", "What does CLUSTER do in PostgreSQL?"]
+    },
+    {
+      "id": "q-bitmap-heap-scan",
+      "question": "When does the planner choose a Bitmap Heap Scan instead of a plain Index Scan, and how does it work?",
+      "answer": "The planner picks a bitmap scan when a predicate is moderately selective: too many rows to make per-row random heap fetches cheap, but few enough that a full sequential scan is wasteful. It first does a Bitmap Index Scan to build an in-memory bitmap of all heap page locations matching the predicate, then performs a Bitmap Heap Scan that visits those pages once in physical order, converting scattered random I/O into a mostly sequential pass. Because it collects page locations before touching the heap, it can also combine multiple indexes with BitmapAnd or BitmapOr. The Recheck Cond in the plan exists because a lossy bitmap may track pages rather than exact rows, so the predicate is re-evaluated on the fetched rows. It is essentially the optimizer's compromise between an index scan and a sequential scan.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["explain", "bitmap-heap-scan", "access-path"],
+      "followUps": ["What does 'Recheck Cond' mean in the plan?", "How are two indexes combined with BitmapAnd?"]
+    },
+    {
+      "id": "q-explain-analyze",
+      "question": "What is the most important thing to look for when reading EXPLAIN ANALYZE output?",
+      "answer": "The single most diagnostic signal is the divergence between estimated rows and actual rows on each node. The planner chooses plans based on its row estimates, so when estimated says 10 and actual says 2,000,000, the statistics misled it and the plan is likely wrong, which surfaces as bad join strategies like a nested loop over millions of rows. You also watch for Seq Scan with a high 'Rows Removed by Filter', which means a missing or unused index, and you read the BUFFERS line to see actual I/O. EXPLAIN ANALYZE actually executes the query, so the timings are real, unlike plain EXPLAIN which only shows estimates. When you see large estimate errors, the fix is usually to run ANALYZE or raise the statistics target on a skewed column. Reading bottom-up shows where time and rows accumulate through the plan.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["explain-analyze", "statistics", "diagnostics"],
+      "followUps": ["How do you fix a large estimate vs actual gap?", "What does the BUFFERS option add?"]
+    },
+    {
+      "id": "q-when-indexes-hurt",
+      "question": "Give concrete reasons why adding more indexes can degrade overall system performance.",
+      "answer": "Every index is a separate structure that must be kept transactionally consistent, so each INSERT updates all indexes, each UPDATE of an indexed column deletes and re-inserts an index entry, and each DELETE removes entries from every index, multiplying write cost. This write amplification can dominate on write-heavy tables. In MVCC databases, dead tuples cause index bloat and fragmentation that require VACUUM or REINDEX to reclaim. Unused indexes still consume RAM in the buffer cache and I/O bandwidth, evicting hot data. More candidate indexes also slightly increase planning time. Finally, redundant indexes (an index on (a) already covered by (a, b)) pay all this cost for zero benefit. The discipline is to index for the actual read workload and periodically drop indexes that pg_stat_user_indexes shows as never scanned.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["write-amplification", "bloat", "maintenance"],
+      "followUps": ["How do you find unused indexes safely?", "Why use DROP INDEX CONCURRENTLY?"]
+    },
+    {
+      "id": "q-keyset-pagination",
+      "question": "Why is OFFSET pagination slow at depth, and how does keyset pagination fix it?",
+      "answer": "OFFSET must produce, order, and then discard all rows before the requested page, so fetching page N costs work proportional to N times the page size; deep pages get linearly slower, and concurrent inserts can shift rows causing duplicates or skips between pages. Keyset (seek) pagination instead remembers the sort key of the last row on the previous page and asks for rows after it with a composite comparison like WHERE (created_at, id) < (:last_created_at, :last_id). With a matching composite index this is a single index range seek of constant cost regardless of depth, and it is stable against concurrent inserts. The trade-off is that keyset cannot jump to an arbitrary page number; it only supports next/previous, which suits infinite scroll and API cursors. You must include a unique tiebreaker (the primary key) in the sort to guarantee a total order.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["pagination", "keyset", "offset"],
+      "followUps": ["Why include the primary key in the sort?", "How do you paginate backwards with keyset?"]
+    },
+    {
+      "id": "q-n-plus-one",
+      "question": "What is the N+1 query problem, why can't indexes fix it, and how do you detect and resolve it?",
+      "answer": "The N+1 problem is issuing one query to fetch N parent rows and then one additional query per parent to fetch related data, for N+1 total round trips, typically caused by lazy-loaded ORM relations accessed in a loop. Indexes cannot fix it because each individual query is already fast; the cost is the cumulative per-statement overhead and network latency of hundreds of round trips, which dwarfs a single set-based query. It hides in development because small data and a local database make each query sub-millisecond, then it explodes in production. You detect it with query logging, an APM, or ORM query counters that flag many similar statements per request. The fix is to replace the loop with a single JOIN or a batched IN query (eager loading), turning N+1 statements into one. The lesson is that round-trip count, not per-query speed, is the bottleneck.",
+      "difficulty": "easy",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["n-plus-one", "orm", "joins"],
+      "followUps": ["How do you eager-load in your ORM?", "When is a batched IN better than a JOIN?"]
+    },
+    {
+      "id": "q-hash-vs-btree",
+      "question": "When would you choose a hash index over a B-tree, and what are its limitations?",
+      "answer": "A hash index is appropriate only when you exclusively perform equality lookups on a column, such as a session token or a lookup by exact key. It offers O(1) average lookup and can be smaller than a B-tree for large keys. Its limitations are severe: it supports only equality, so no ranges, no BETWEEN, no ORDER BY, no prefix matching, and no MIN/MAX. Because B-trees handle equality almost as well and also support all those other operations, hash indexes are rarely worth it in practice; a B-tree is the safer default. Historically in PostgreSQL hash indexes were also not WAL-logged and thus not crash-safe, though that was fixed in version 10. So you reach for hash only in narrow, equality-only hot paths where the gain is measured and real.",
+      "difficulty": "medium",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["hash-index", "b-tree", "index-types"],
+      "followUps": ["Why are hash indexes rarely used in practice?", "What index type would you use for full-text search?"]
+    },
+    {
+      "id": "q-gin-fulltext",
+      "question": "What kind of index powers full-text search and JSONB containment, and why is a B-tree unsuitable?",
+      "answer": "Full-text search, array membership, and JSONB containment are served by GIN, a Generalized Inverted Index. A B-tree is unsuitable because it maps a single ordered key to rows, whereas a document contains many searchable tokens; you need the inverse mapping from each token (word, array element, JSON key) to the list of rows that contain it. GIN builds exactly that inverted structure, so a query like body_tsv @@ to_tsquery('planner') or payload @> '{\"type\":\"login\"}' can look up the posting lists for the matching elements and intersect them. The trade-off is that GIN is more expensive to update, because inserting one row may touch many posting lists, so it suits read-heavy search workloads. For very large tables, fastupdate batches index maintenance to amortize that cost. BRIN is a different specialized type for huge naturally-ordered tables.",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "tricky": false,
+      "tags": ["gin", "full-text-search", "jsonb", "inverted-index"],
+      "followUps": ["Why is GIN slower to update than B-tree?", "When would BRIN be a better fit than GIN or B-tree?"]
+    }
+  ],
+  "challenges": [
+    {
+      "id": "ch-design-covering-index",
+      "title": "Fix a Slow Dashboard Query With the Right Composite/Covering Index",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "prompt": "A reporting dashboard runs the query below against a 40M-row orders table. EXPLAIN ANALYZE shows a Seq Scan removing ~39.9M rows and a 9-second runtime. Design the correct index so the planner uses an index-only scan, and explain your column ordering.\n\nSELECT order_id, total_amount, created_at\nFROM orders\nWHERE customer_id = 9123\n  AND status = 'PAID'\nORDER BY created_at DESC\nLIMIT 50;",
+      "hints": [
+        "Equality predicates should lead the composite key; which two columns are equality here?",
+        "The ORDER BY column should follow the equality columns so the index returns rows already sorted, avoiding a separate sort.",
+        "The SELECT projects total_amount and order_id but never filters on them; how can you cover them without bloating the key?"
+      ],
+      "solutionCode": "-- Lead with the two equality columns, then the sort column\n-- (DESC to match ORDER BY), and INCLUDE the projected columns\n-- so the query is satisfied entirely from the index.\nCREATE INDEX idx_orders_cust_status_created\n  ON orders (customer_id, status, created_at DESC)\n  INCLUDE (total_amount, order_id);\n\n-- Refresh statistics so the planner estimates correctly.\nANALYZE orders;\n\n-- Verify: expect an Index Only Scan, no Sort node, tiny buffers.\nEXPLAIN (ANALYZE, BUFFERS)\nSELECT order_id, total_amount, created_at\nFROM orders\nWHERE customer_id = 9123\n  AND status = 'PAID'\nORDER BY created_at DESC\nLIMIT 50;\n\n-- Expected plan shape:\n-- Limit\n--   ->  Index Only Scan using idx_orders_cust_status_created on orders\n--         Index Cond: ((customer_id = 9123) AND (status = 'PAID'))\n--         Heap Fetches: 0",
+      "solutionLanguage": "sql",
+      "explanation": "The query has two equality predicates (customer_id, status) and one ordering column (created_at), so the optimal composite key is (customer_id, status, created_at). Leading with the equality columns lets the index seek straight to the matching range, and placing created_at last means the index already returns those rows in created_at order, so the planner can drop the explicit Sort node and stop after LIMIT 50 rows. Declaring created_at DESC aligns the physical index order with the ORDER BY direction, allowing a forward read instead of a backward scan. The columns total_amount and order_id are only projected, never filtered or sorted, so they belong in INCLUDE: this makes the index covering (an Index Only Scan with Heap Fetches: 0) without widening the branch nodes or the sort key. Running ANALYZE ensures the planner has fresh statistics to favor this index. The result is a constant-time seek of 50 rows instead of a 40M-row sequential scan, cutting the query from ~9 seconds to sub-millisecond.",
+      "relatedTopic": "database-indexing"
+    },
+    {
+      "id": "ch-sargable-keyset",
+      "title": "Make a Query Sargable and Convert OFFSET to Keyset Pagination",
+      "difficulty": "hard",
+      "category": "Computer Science",
+      "prompt": "An API endpoint lists a user's recent events. It is slow on deep pages and ignores the index on events(created_at). Rewrite it to (1) be sargable so the index on created_at is used, and (2) replace OFFSET with keyset pagination so deep pages stay fast.\n\nSELECT id, type, created_at\nFROM events\nWHERE user_id = 5\n  AND date_trunc('day', created_at) = DATE '2026-06-30'\nORDER BY created_at DESC\nLIMIT 20 OFFSET 5000;",
+      "hints": [
+        "date_trunc('day', created_at) wraps the indexed column; rewrite the day filter as a half-open range on the raw column instead.",
+        "Build a composite index that supports the equality on user_id plus an ordered seek on (created_at, id).",
+        "Replace OFFSET with a WHERE comparison against the last row of the previous page using a tuple/row comparison."
+      ],
+      "solutionCode": "-- 1) Supporting composite index: equality column first, then the\n--    ordered seek columns (id as a unique tiebreaker).\nCREATE INDEX idx_events_user_created_id\n  ON events (user_id, created_at DESC, id DESC);\n\n-- 2) Sargable + keyset version. The day filter is now a half-open\n--    range on the RAW column, and OFFSET is replaced by a seek\n--    past the last (created_at, id) the client already received.\nSELECT id, type, created_at\nFROM events\nWHERE user_id = 5\n  AND created_at >= TIMESTAMP '2026-06-30 00:00:00'\n  AND created_at <  TIMESTAMP '2026-07-01 00:00:00'\n  AND (created_at, id) < (:last_created_at, :last_id)\nORDER BY created_at DESC, id DESC\nLIMIT 20;\n\n-- First page omits the keyset predicate:\nSELECT id, type, created_at\nFROM events\nWHERE user_id = 5\n  AND created_at >= TIMESTAMP '2026-06-30 00:00:00'\n  AND created_at <  TIMESTAMP '2026-07-01 00:00:00'\nORDER BY created_at DESC, id DESC\nLIMIT 20;",
+      "solutionLanguage": "sql",
+      "explanation": "The original predicate wraps created_at in date_trunc(), which makes it non-sargable: the B-tree stores raw timestamps, not truncated days, so the planner cannot seek and falls back to a scan. Rewriting the day filter as a half-open range (created_at >= start AND created_at < next_day) compares the raw indexed column directly, restoring sargability while returning exactly the same rows and correctly handling the day boundary. The composite index (user_id, created_at DESC, id DESC) puts the equality column first and then the ordered columns, so the planner can both seek to user 5's rows and read them already sorted, avoiding a Sort node. Replacing OFFSET 5000 with the tuple comparison (created_at, id) < (:last_created_at, :last_id) turns deep pagination from an O(offset) scan-and-discard into a single constant-time index range seek that starts exactly where the previous page ended. Including id as a tiebreaker guarantees a total order so no rows are duplicated or skipped when timestamps collide. Together these changes make every page, shallow or deep, cost the same and let the query ride the index end to end.",
+      "relatedTopic": "database-indexing"
+    }
+  ],
+  "references": [
+    {
+      "label": "Use The Index, Luke! - Markus Winand",
+      "url": "https://use-the-index-luke.com/"
+    },
+    {
+      "label": "PostgreSQL Documentation: Indexes",
+      "url": "https://www.postgresql.org/docs/current/indexes.html"
+    },
+    {
+      "label": "PostgreSQL Documentation: Using EXPLAIN",
+      "url": "https://www.postgresql.org/docs/current/using-explain.html"
+    },
+    {
+      "label": "MySQL Reference Manual: Optimization and Indexes",
+      "url": "https://dev.mysql.com/doc/refman/8.0/en/optimization.html"
+    },
+    {
+      "label": "B-tree - Wikipedia",
+      "url": "https://en.wikipedia.org/wiki/B-tree"
+    },
+    {
+      "label": "PostgreSQL Documentation: Index Types (B-tree, Hash, GIN, BRIN)",
+      "url": "https://www.postgresql.org/docs/current/indexes-types.html"
+    }
+  ]
+}
