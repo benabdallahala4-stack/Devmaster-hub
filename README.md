@@ -86,6 +86,13 @@ Interview Mode reads the `category`, `level`, and `autostart` query params — c
 matched case-insensitively against the real question set, with graceful fallback on unknown
 values. See [`interview.component.ts`](src/app/features/interview/interview.component.ts).
 
+## Incubated project — Tabibi (طبيبي)
+
+The [`tabibi/`](tabibi/) folder hosts **Tabibi**, a Doctolib-style medical appointment
+booking platform for Tunisia (Next.js + Tailwind), incubated here until it moves to its
+own repository. See [`tabibi/README.md`](tabibi/README.md) and
+[`tabibi/docs/FEATURES.md`](tabibi/docs/FEATURES.md) for the feature analysis and roadmap.
+
 ## Content pipeline
 
 Topic content lives in `src/assets/data/topics/<id>.json` and follows the `TopicContent`
