@@ -86,12 +86,12 @@ Interview Mode reads the `category`, `level`, and `autostart` query params — c
 matched case-insensitively against the real question set, with graceful fallback on unknown
 values. See [`interview.component.ts`](src/app/features/interview/interview.component.ts).
 
-## Incubated project — Tabibi (طبيبي)
+## Sister project — Tabibi (طبيبي)
 
-The [`tabibi/`](tabibi/) folder hosts **Tabibi**, a Doctolib-style medical appointment
-booking platform for Tunisia (Next.js + Tailwind), incubated here until it moves to its
-own repository. See [`tabibi/README.md`](tabibi/README.md) and
-[`tabibi/docs/FEATURES.md`](tabibi/docs/FEATURES.md) for the feature analysis and roadmap.
+**[Tabibi](https://github.com/benabdallahala4-stack/Tabibi)** is a Doctolib-style medical
+appointment booking platform for Tunisia (Next.js + Tailwind), incubated in this repo and
+now living in its own repository. See its README and `docs/FEATURES.md` there for the
+feature analysis and roadmap.
 
 ## Content pipeline
 
